@@ -9,6 +9,7 @@ import sys
 import tempfile
 import time
 import unittest
+from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -82,13 +83,26 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
     def _request(cookies=None) -> SimpleNamespace:
         return SimpleNamespace(cookies=cookies or {})
 
-    def _screen(self, config: Config, *, mock_enrichment: bool = True, **kwargs):
+    def _screen(
+        self,
+        config: Config,
+        *,
+        mock_enrichment: bool = True,
+        mock_screen_cache: bool = True,
+        **kwargs,
+    ):
+        cache_patch = (
+            patch("src.services.alphasift_service._write_alphasift_screen_cache")
+            if mock_screen_cache
+            else nullcontext()
+        )
         if not mock_enrichment:
-            return alphasift_endpoint.alphasift_screen(
-                alphasift_endpoint.AlphaSiftScreenRequest(**kwargs),
-                http_request=self._request(),
-                config=config,
-            )
+            with cache_patch:
+                return alphasift_endpoint.alphasift_screen(
+                    alphasift_endpoint.AlphaSiftScreenRequest(**kwargs),
+                    http_request=self._request(),
+                    config=config,
+                )
         with patch(
             "src.services.alphasift_service._enrich_candidates_with_dsa",
             side_effect=lambda candidates: (
@@ -101,7 +115,7 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
                     "warnings": [],
                 },
             ),
-        ):
+        ), cache_patch:
             return alphasift_endpoint.alphasift_screen(
                 alphasift_endpoint.AlphaSiftScreenRequest(**kwargs),
                 http_request=self._request(),
@@ -1869,6 +1883,9 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
                     "llm_coverage": 1.0,
                     "warnings": "fallback",
                     "source_errors": "sina timeout",
+                    "quality_status": "partial",
+                    "fallback_used": True,
+                    "stale": False,
                     "llm_parse_errors": "retry parsed partial JSON",
                     "deep_analysis_requested": False,
                     "post_analyzers": ["scorecard"],
@@ -1914,6 +1931,9 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
         self.assertEqual(payload["llm_coverage"], 1.0)
         self.assertEqual(payload["warnings"], ["fallback"])
         self.assertEqual(payload["source_errors"], ["sina timeout"])
+        self.assertEqual(payload["quality_status"], "partial")
+        self.assertTrue(payload["fallback_used"])
+        self.assertFalse(payload["stale"])
         self.assertEqual(payload["llm_parse_errors"], ["retry parsed partial JSON"])
         self.assertEqual(payload["candidate_count"], 1)
         self.assertEqual(payload["post_analyzers"], ["scorecard"])
@@ -1926,6 +1946,185 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
         self.assertEqual(payload["candidates"][0]["risk_level"], "medium")
         self.assertEqual(payload["candidates"][0]["price"], 1688.0)
         self.assertEqual(payload["candidates"][0]["industry"], "Baijiu")
+
+    def test_screen_marks_candidate_data_quality_and_missing_fields(self) -> None:
+        config = self._config(enabled=True)
+        fake_module = _make_adapter_module(
+            screen=MagicMock(
+                return_value={
+                    "quality_status": "ok",
+                    "candidates": [
+                        {
+                            "code": "600519",
+                            "name": "Kweichow Moutai",
+                            "score": 88.5,
+                            "price": 1688.0,
+                            "source": "em_datacenter",
+                        }
+                    ],
+                }
+            ),
+        )
+
+        with patch("src.services.alphasift_service._import_alphasift", return_value=fake_module):
+            payload = self._screen(config, market="cn", strategy="dual_low", max_results=5)
+
+        candidate = payload["candidates"][0]
+        self.assertEqual(candidate["data_quality"], "partial")
+        self.assertEqual(candidate["data_sources"], ["em_datacenter"])
+        self.assertIn("amount", candidate["missing_fields"])
+        self.assertIn("industry", candidate["missing_fields"])
+        self.assertIn("trading_status", candidate["missing_fields"])
+        self.assertNotIn("code", candidate["missing_fields"])
+        self.assertNotIn("price", candidate["missing_fields"])
+
+    def test_screen_uses_last_good_cache_when_adapter_runtime_fails(self) -> None:
+        config = self._config(enabled=True)
+        screen_mock = MagicMock(side_effect=RuntimeError("snapshot timeout"))
+        fake_module = _make_adapter_module(screen=screen_mock)
+
+        with tempfile.TemporaryDirectory() as tmpdir, patch.dict(
+            os.environ,
+            {"ALPHASIFT_DATA_DIR": tmpdir},
+            clear=False,
+        ), patch("src.services.alphasift_service._import_alphasift", return_value=fake_module):
+            cache_path = alphasift_service._alphasift_screen_cache_path(strategy="dual_low", market="cn")
+            cache_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "cached_at": "2026-07-03T00:00:00Z",
+                        "payload": {
+                            "strategy": "dual_low",
+                            "market": "cn",
+                            "quality_status": "ok",
+                            "candidates": [
+                                {"code": "600519", "name": "Kweichow Moutai", "score": 88.5, "price": 1688.0},
+                            ],
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            cached = self._screen(
+                config,
+                market="cn",
+                strategy="dual_low",
+                max_results=5,
+                mock_screen_cache=False,
+            )
+
+        self.assertEqual(cached["candidate_count"], 1)
+        self.assertEqual(cached["candidates"][0]["code"], "600519")
+        self.assertTrue(cached["candidates"][0]["cache_used"])
+        self.assertTrue(cached["candidates"][0]["stale"])
+        self.assertEqual(cached["candidates"][0]["data_quality"], "stale")
+        self.assertIn("screen_last_good_cache", cached["candidates"][0]["data_sources"])
+        self.assertTrue(cached["cache_used"])
+        self.assertTrue(cached["fallback_used"])
+        self.assertTrue(cached["stale"])
+        self.assertEqual(cached["quality_status"], "stale")
+        self.assertIn("alphasift_screen_failed: snapshot timeout", cached["source_errors"])
+        self.assertTrue(cached["cached_at"])
+        self.assertEqual(screen_mock.call_count, 1)
+
+    def test_screen_uses_last_good_cache_when_adapter_returns_empty_with_errors(self) -> None:
+        config = self._config(enabled=True)
+        screen_mock = MagicMock(
+            return_value={
+                "run_id": "empty-run",
+                "strategy": "dual_low",
+                "market": "cn",
+                "quality_status": "unavailable",
+                "source_errors": ["all snapshot providers failed"],
+                "candidates": [],
+            }
+        )
+        fake_module = _make_adapter_module(screen=screen_mock)
+
+        with tempfile.TemporaryDirectory() as tmpdir, patch.dict(
+            os.environ,
+            {"ALPHASIFT_DATA_DIR": tmpdir},
+            clear=False,
+        ), patch("src.services.alphasift_service._import_alphasift", return_value=fake_module):
+            cache_path = alphasift_service._alphasift_screen_cache_path(strategy="dual_low", market="cn")
+            cache_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "cached_at": "2026-07-03T00:00:00Z",
+                        "payload": {
+                            "strategy": "dual_low",
+                            "market": "cn",
+                            "quality_status": "ok",
+                            "candidates": [
+                                {"code": "300750", "name": "CATL", "score": 83.0, "price": 190.0},
+                            ],
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            cached = self._screen(
+                config,
+                market="cn",
+                strategy="dual_low",
+                max_results=5,
+                mock_screen_cache=False,
+            )
+
+        self.assertEqual(cached["candidate_count"], 1)
+        self.assertEqual(cached["candidates"][0]["code"], "300750")
+        self.assertTrue(cached["candidates"][0]["cache_used"])
+        self.assertEqual(cached["candidates"][0]["data_quality"], "stale")
+        self.assertIn("screen_last_good_cache", cached["candidates"][0]["data_sources"])
+        self.assertTrue(cached["cache_used"])
+        self.assertTrue(cached["fallback_used"])
+        self.assertTrue(cached["stale"])
+        self.assertEqual(cached["quality_status"], "stale")
+        self.assertIn("all snapshot providers failed", cached["source_errors"])
+
+    def test_screen_ignores_expired_last_good_cache(self) -> None:
+        config = self._config(enabled=True)
+        fake_module = _make_adapter_module(screen=MagicMock(side_effect=RuntimeError("snapshot timeout")))
+
+        with tempfile.TemporaryDirectory() as tmpdir, patch.dict(
+            os.environ,
+            {"ALPHASIFT_DATA_DIR": tmpdir},
+            clear=False,
+        ), patch("src.services.alphasift_service._import_alphasift", return_value=fake_module):
+            cache_path = alphasift_service._alphasift_screen_cache_path(strategy="dual_low", market="cn")
+            cache_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "cached_at": "2000-01-01T00:00:00Z",
+                        "payload": {
+                            "strategy": "dual_low",
+                            "market": "cn",
+                            "quality_status": "ok",
+                            "candidates": [
+                                {"code": "600519", "name": "Kweichow Moutai", "score": 88.5, "price": 1688.0},
+                            ],
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaises(HTTPException) as caught:
+                self._screen(
+                    config,
+                    market="cn",
+                    strategy="dual_low",
+                    max_results=5,
+                    mock_screen_cache=False,
+                )
+
+        self.assertEqual(caught.exception.status_code, 424)
+        self.assertEqual(caught.exception.detail["error"], "alphasift_screen_failed")
 
     def test_screen_prefers_dsa_daily_history_for_alphasift_enrichment(self) -> None:
         config = self._config(enabled=True)
@@ -2836,6 +3035,66 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
             env = alphasift_service._build_alphasift_runtime_env(config)
 
         self.assertEqual(env["SNAPSHOT_SOURCE_PRIORITY"], "tushare,sina,efinance,akshare_em,em_datacenter")
+
+    def test_screen_injects_alphasift_llm_timeout_and_token_defaults(self) -> None:
+        config = self._config(enabled=True)
+        captured: dict[str, object] = {}
+
+        def screen_impl(_strategy: str, **kwargs):
+            captured["timeout"] = alphasift_service.os.environ.get("LLM_TIMEOUT_SEC")
+            captured["max_tokens"] = alphasift_service.os.environ.get("LLM_MAX_TOKENS")
+            captured["context"] = kwargs.get("context")
+            return {"candidates": []}
+
+        fake_module = _make_adapter_module(screen=MagicMock(side_effect=screen_impl))
+
+        with (
+            patch.dict(
+                alphasift_service.os.environ,
+                {"LLM_TIMEOUT_SEC": "", "LLM_MAX_TOKENS": ""},
+                clear=False,
+            ),
+            patch("src.services.alphasift_service._import_alphasift", return_value=fake_module),
+        ):
+            payload = self._screen(config, market="cn", strategy="dual_low", max_results=5)
+
+        self.assertEqual(captured["timeout"], "180")
+        self.assertEqual(captured["max_tokens"], "1024")
+        context = captured["context"]
+        self.assertIsInstance(context, dict)
+        self.assertEqual(context["llm"]["timeout_sec"], 180)
+        self.assertEqual(context["llm"]["max_tokens"], 1024)
+        self.assertEqual(payload["candidate_count"], 0)
+
+    def test_screen_preserves_explicit_alphasift_llm_timeout_and_token_limits(self) -> None:
+        config = self._config(enabled=True)
+        captured: dict[str, object] = {}
+
+        def screen_impl(_strategy: str, **kwargs):
+            captured["timeout"] = alphasift_service.os.environ.get("LLM_TIMEOUT_SEC")
+            captured["max_tokens"] = alphasift_service.os.environ.get("LLM_MAX_TOKENS")
+            captured["context"] = kwargs.get("context")
+            return {"candidates": []}
+
+        fake_module = _make_adapter_module(screen=MagicMock(side_effect=screen_impl))
+
+        with (
+            patch.dict(
+                alphasift_service.os.environ,
+                {"LLM_TIMEOUT_SEC": "240", "LLM_MAX_TOKENS": "768"},
+                clear=False,
+            ),
+            patch("src.services.alphasift_service._import_alphasift", return_value=fake_module),
+        ):
+            payload = self._screen(config, market="cn", strategy="dual_low", max_results=5)
+
+        self.assertEqual(captured["timeout"], "240")
+        self.assertEqual(captured["max_tokens"], "768")
+        context = captured["context"]
+        self.assertIsInstance(context, dict)
+        self.assertEqual(context["llm"]["timeout_sec"], 240)
+        self.assertEqual(context["llm"]["max_tokens"], 768)
+        self.assertEqual(payload["candidate_count"], 0)
 
     def test_screen_preserves_explicit_candidate_context_provider_override(self) -> None:
         config = self._config(enabled=True)

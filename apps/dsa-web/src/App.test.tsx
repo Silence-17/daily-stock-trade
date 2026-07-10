@@ -44,6 +44,18 @@ vi.mock('./pages/PortfolioPage', () => ({
   default: () => <div data-testid="portfolio-page">Portfolio</div>,
 }));
 
+vi.mock('./pages/IndustryBoardsPage', () => ({
+  default: () => <div data-testid="industry-boards-page">Industry boards</div>,
+}));
+
+vi.mock('./pages/VnpyPaperTradingPage', () => ({
+  default: () => <div data-testid="paper-trading-page">Paper trading</div>,
+}));
+
+vi.mock('./pages/AgentConsolePage', () => ({
+  default: () => <div data-testid="agent-console-page">Agent console</div>,
+}));
+
 vi.mock('./pages/DecisionSignalsPage', () => ({
   default: () => <div data-testid="decision-signals-page">Decision signals</div>,
 }));
@@ -150,6 +162,46 @@ describe('App routing behavior', () => {
     expect(await screen.findByTestId('decision-signals-page')).toBeInTheDocument();
     expect(setCurrentRoute).toHaveBeenCalledWith('/decision-signals');
     expect(screen.queryByTestId('home-page')).not.toBeInTheDocument();
+  });
+
+  it('routes /industry-boards to the industry boards page after auth is ready', async () => {
+    window.history.pushState({}, '', '/industry-boards');
+
+    render(<App />);
+
+    expect(await screen.findByTestId('industry-boards-page')).toBeInTheDocument();
+    expect(setCurrentRoute).toHaveBeenCalledWith('/industry-boards');
+    expect(screen.queryByTestId('home-page')).not.toBeInTheDocument();
+  });
+
+  it('routes /paper-trading to the vn.py paper trading page after auth is ready', async () => {
+    window.history.pushState({}, '', '/paper-trading');
+
+    render(<App />);
+
+    expect(await screen.findByTestId('paper-trading-page')).toBeInTheDocument();
+    expect(setCurrentRoute).toHaveBeenCalledWith('/paper-trading');
+    expect(screen.queryByTestId('home-page')).not.toBeInTheDocument();
+  });
+
+  it('routes /agent-console to the Agent console page after auth is ready', async () => {
+    window.history.pushState({}, '', '/agent-console');
+
+    render(<App />);
+
+    expect(await screen.findByTestId('agent-console-page')).toBeInTheDocument();
+    expect(setCurrentRoute).toHaveBeenCalledWith('/agent-console');
+    expect(screen.queryByTestId('home-page')).not.toBeInTheDocument();
+  });
+
+  it('routes /agent-console/:runUid to the Agent console page after auth is ready', async () => {
+    window.history.pushState({}, '', '/agent-console/ss-agent-test');
+
+    render(<App />);
+
+    expect(await screen.findByTestId('agent-console-page')).toBeInTheDocument();
+    expect(setCurrentRoute).toHaveBeenCalledWith('/agent-console/ss-agent-test');
+    expect(screen.queryByTestId('not-found-page')).not.toBeInTheDocument();
   });
 
   it('redirects authenticated login visits back to the home page', async () => {

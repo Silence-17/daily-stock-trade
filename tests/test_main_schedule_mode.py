@@ -780,7 +780,7 @@ class MainScheduleModeTestCase(unittest.TestCase):
         self.assertEqual(run_immediately_seen_by_server, ["false"])
         run_with_schedule.assert_not_called()
 
-    def test_serve_only_suppresses_startup_scheduler_without_disabling_runtime_owner(self) -> None:
+    def test_serve_only_keeps_runtime_scheduler_owner_without_cli_daily_job(self) -> None:
         from src.services.runtime_scheduler import (
             CLI_SCHEDULER_OWNER_ENV,
             RUNTIME_SCHEDULER_RUN_IMMEDIATELY_ENV,
@@ -814,7 +814,7 @@ class MainScheduleModeTestCase(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertEqual(marker_seen_by_server, [None])
-        self.assertEqual(suppress_seen_by_server, ["true"])
+        self.assertEqual(suppress_seen_by_server, [None])
         self.assertEqual(run_immediately_seen_by_server, [None])
         start_bots.assert_called_once_with(config)
         run_with_schedule.assert_not_called()

@@ -40,6 +40,8 @@ DSA_ENRICHMENT_MAX_CANDIDATES = 3
 DSA_PRE_RANK_CONTEXT_MAX_CANDIDATES = 3
 DSA_ALPHASIFT_LLM_CANDIDATE_MULTIPLIER = 2
 DSA_ALPHASIFT_LLM_MAX_CANDIDATES = 12
+DSA_ALPHASIFT_LLM_TIMEOUT_SECONDS = 180
+DSA_ALPHASIFT_LLM_MAX_TOKENS = 1024
 DSA_ALPHASIFT_DAILY_FETCH_RETRIES = 3
 DSA_ALPHASIFT_SNAPSHOT_SOURCE_PRIORITY = "sina,efinance,akshare_em,em_datacenter"
 DSA_ALPHASIFT_SNAPSHOT_SOURCE_PRIORITY_WITH_TUSHARE = "tushare,sina,efinance,akshare_em,em_datacenter"
@@ -47,6 +49,8 @@ DSA_ALPHASIFT_CANDIDATE_CONTEXT_PROVIDERS = "news,fund_flow,announcement,quote"
 DSA_ALPHASIFT_DATA_DIR = Path("data") / "alphasift"
 DSA_ALPHASIFT_HOTSPOT_CACHE_PATH = DSA_ALPHASIFT_DATA_DIR / "hotspots.json"
 DSA_ALPHASIFT_HOTSPOT_HISTORY_PATH = DSA_ALPHASIFT_DATA_DIR / "hotspot.history.jsonl"
+DSA_ALPHASIFT_SCREEN_CACHE_SCHEMA_VERSION = 1
+DSA_ALPHASIFT_SCREEN_CACHE_TTL_SECONDS = 24 * 60 * 60
 DSA_ALPHASIFT_MIN_HOTSPOT_CACHE_COUNT = 3
 DSA_ALPHASIFT_HOTSPOT_DETAIL_CACHE_TTL_SECONDS = 30 * 60
 DSA_ALPHASIFT_HOTSPOT_EVENT_SUMMARY_MAX_CHARS = 90
@@ -122,6 +126,12 @@ def _alphasift_hotspot_detail_cache_path(*, provider: str, topic: str) -> Path:
     provider_text = re.sub(r"[^A-Za-z0-9_.-]+", "_", _env_text(provider) or "akshare")
     digest = hashlib.sha1(f"{provider_text}\0{_env_text(topic)}".encode("utf-8")).hexdigest()
     return _alphasift_hotspot_detail_cache_dir() / f"{provider_text}.{digest}.json"
+
+
+def _alphasift_screen_cache_path(*, strategy: str, market: str) -> Path:
+    strategy_text = re.sub(r"[^A-Za-z0-9_.-]+", "_", _env_text(strategy) or "default")
+    market_text = re.sub(r"[^A-Za-z0-9_.-]+", "_", _env_text(market) or "default")
+    return _resolve_alphasift_data_dir() / f"screen.{market_text}.{strategy_text}.last_good.json"
 
 
 def _parse_cache_datetime(value: Any) -> Optional[datetime]:
@@ -681,6 +691,140 @@ def _write_alphasift_hotspot_cache(payload: Dict[str, Any]) -> None:
         logger.warning("Failed to write AlphaSift hotspot cache to %s: %s", cache_path, exc)
 
 
+def _load_alphasift_screen_cache(
+    *,
+    strategy: str,
+    market: str,
+    max_results: int,
+    source_error: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    cache_path = _alphasift_screen_cache_path(strategy=strategy, market=market)
+    try:
+        raw = json.loads(cache_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except Exception as exc:
+        logger.warning("Failed to read AlphaSift screen cache from %s: %s", cache_path, exc)
+        return None
+
+    payload = raw.get("payload") if isinstance(raw, dict) else None
+    if not isinstance(payload, dict):
+        return None
+    candidates = _normalize_candidates(payload)
+    if not candidates:
+        return None
+
+    top_count = max(1, min(int(max_results or 5), 50))
+    selected = candidates[:top_count]
+    cached_at = raw.get("cached_at") or payload.get("cached_at")
+    cached_dt = _parse_cache_datetime(cached_at)
+    if cached_dt is None:
+        return None
+    age_seconds = max(0.0, (datetime.now(timezone.utc) - cached_dt).total_seconds())
+    if age_seconds > DSA_ALPHASIFT_SCREEN_CACHE_TTL_SECONDS:
+        logger.info(
+            "Ignoring expired AlphaSift screen cache %s: age %.0fs > %ss",
+            cache_path,
+            age_seconds,
+            DSA_ALPHASIFT_SCREEN_CACHE_TTL_SECONDS,
+        )
+        return None
+    stale_age_hours = round(age_seconds / 3600.0, 2)
+    errors = _list_text_values(payload.get("source_errors"))
+    if source_error:
+        errors.append(source_error)
+
+    selected = _mark_alphasift_screen_cached_candidates(
+        selected,
+        cached_at=cached_at,
+        stale_age_hours=stale_age_hours,
+    )
+    cached = dict(payload)
+    cached.update(
+        {
+            "enabled": True,
+            "strategy": _env_text(payload.get("strategy")) or strategy,
+            "market": _env_text(payload.get("market")) or market,
+            "candidates": selected,
+            "candidate_count": len(selected),
+            "cache_used": True,
+            "cached_at": cached_at,
+            "fallback_used": True,
+            "stale": True,
+            "stale_age_hours": stale_age_hours,
+            "quality_status": "stale",
+            "source_errors": errors,
+        }
+    )
+    return _remove_non_finite_json_values(cached)
+
+
+def _mark_alphasift_screen_cached_candidates(
+    candidates: List[Dict[str, Any]],
+    *,
+    cached_at: Any,
+    stale_age_hours: float,
+) -> List[Dict[str, Any]]:
+    marked: List[Dict[str, Any]] = []
+    for candidate in candidates:
+        item = dict(candidate)
+        sources = _dedupe_strings([*_list_text_values(item.get("data_sources")), "screen_last_good_cache"])
+        notes = _dedupe_strings([*_list_text_values(item.get("quality_notes")), "screen_cache: last_good"])
+        item.update(
+            {
+                "cache_used": True,
+                "cached_at": cached_at,
+                "stale": True,
+                "stale_age_hours": stale_age_hours,
+                "data_quality": "stale",
+                "data_sources": sources,
+                "quality_notes": notes,
+            }
+        )
+        marked.append(item)
+    return marked
+
+
+def _write_alphasift_screen_cache(
+    *,
+    strategy: str,
+    market: str,
+    payload: Dict[str, Any],
+) -> None:
+    candidates = payload.get("candidates")
+    if not isinstance(candidates, list) or not candidates:
+        return
+    quality_status = _env_text(payload.get("quality_status")).lower()
+    if bool(payload.get("stale")) or quality_status in {"stale", "unavailable"}:
+        return
+
+    cache_path = _alphasift_screen_cache_path(strategy=strategy, market=market)
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cached_at = _utc_now_iso()
+        cache_payload = _remove_non_finite_json_values(dict(payload))
+        cache_payload["cache_used"] = False
+        cache_payload["cached_at"] = cached_at
+        cache_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": DSA_ALPHASIFT_SCREEN_CACHE_SCHEMA_VERSION,
+                    "asset_type": "screen_last_good",
+                    "strategy": strategy,
+                    "market": market,
+                    "cached_at": cached_at,
+                    "candidate_count": len(candidates),
+                    "payload": cache_payload,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+    except Exception as exc:
+        logger.warning("Failed to write AlphaSift screen cache to %s: %s", cache_path, exc)
+
+
 def _hotspot_topic_from_row(row: Any) -> str:
     if not isinstance(row, dict):
         return ""
@@ -1110,6 +1254,14 @@ class AlphaSiftService:
         except HTTPException:
             raise
         except Exception as exc:
+            cached = _load_alphasift_screen_cache(
+                strategy=strategy,
+                market=market,
+                max_results=max_results,
+                source_error=f"alphasift_screen_failed: {exc}",
+            )
+            if cached is not None:
+                return cached
             raise HTTPException(
                 status_code=424,
                 detail={"error": "alphasift_screen_failed", "message": f"AlphaSift 选股运行失败：{exc}"},
@@ -1123,7 +1275,7 @@ class AlphaSiftService:
         candidates = _normalize_candidates(raw_data)
         selected = candidates[:max_results]
         selected, dsa_enrichment = _enrich_candidates_with_dsa(selected)
-        return {
+        payload = {
             "enabled": True,
             "candidates": selected,
             "candidate_count": len(selected),
@@ -1141,6 +1293,10 @@ class AlphaSiftService:
             "llm_parse_errors": _list_text_values(raw_data.get("llm_parse_errors")),
             "warnings": _list_text_values(raw_data.get("warnings")),
             "source_errors": _list_text_values(raw_data.get("source_errors")),
+            "quality_status": raw_data.get("quality_status") or raw_data.get("data_quality") or "",
+            "fallback_used": bool(raw_data.get("fallback_used") or False),
+            "stale": bool(raw_data.get("stale") or False),
+            "stale_age_hours": raw_data.get("stale_age_hours"),
             "dsa_enrichment": dsa_enrichment,
             "deep_analysis_requested": raw_data.get("deep_analysis_requested"),
             "post_analyzers": raw_data.get("post_analyzers") or [],
@@ -1150,6 +1306,18 @@ class AlphaSiftService:
             "portfolio_diversity_enabled": raw_data.get("portfolio_diversity_enabled"),
             "portfolio_concentration_notes": raw_data.get("portfolio_concentration_notes") or [],
         }
+        if not selected and payload["source_errors"]:
+            cached = _load_alphasift_screen_cache(
+                strategy=strategy,
+                market=market,
+                max_results=max_results,
+                source_error="; ".join(payload["source_errors"]),
+            )
+            if cached is not None:
+                return cached
+
+        _write_alphasift_screen_cache(strategy=strategy, market=market, payload=payload)
+        return payload
 
 
 def _normalize_alphasift_hotspot_detail(detail: Any, *, provider: str, requested_topic: str) -> Dict[str, Any]:
@@ -1916,6 +2084,8 @@ def _build_alphasift_runtime_env(config: Config, *, max_results: Optional[int] =
     put("LITELLM_CONFIG", config.litellm_config_path)
     if os.getenv("LLM_TEMPERATURE") not in (None, ""):
         put("LLM_TEMPERATURE", config.llm_temperature)
+    put_default("LLM_TIMEOUT_SEC", str(DSA_ALPHASIFT_LLM_TIMEOUT_SECONDS))
+    put_default("LLM_MAX_TOKENS", str(DSA_ALPHASIFT_LLM_MAX_TOKENS))
 
     channels = _normalize_dsa_llm_channels(config)
     if channels:
@@ -2854,6 +3024,8 @@ def _build_alphasift_context(config: Config, *, max_results: Optional[int] = Non
             "model": litellm_model,
             "fallback_models": fallback_models,
             "temperature": config.llm_temperature,
+            "timeout_sec": _resolve_alphasift_llm_timeout_seconds(),
+            "max_tokens": _resolve_alphasift_llm_max_tokens(),
             "channels": channels,
             "model_list": _build_alphasift_litellm_model_list(config, channels),
             "litellm_config_path": config.litellm_config_path or "",
@@ -3037,6 +3209,20 @@ def _resolve_dsa_llm_max_candidates(max_results: Optional[int]) -> int:
         DSA_ALPHASIFT_LLM_MAX_CANDIDATES,
         max(requested, requested * DSA_ALPHASIFT_LLM_CANDIDATE_MULTIPLIER),
     )
+
+
+def _resolve_alphasift_llm_timeout_seconds() -> int:
+    configured = _safe_float(os.getenv("LLM_TIMEOUT_SEC"))
+    if configured is not None and configured > 0:
+        return int(configured)
+    return DSA_ALPHASIFT_LLM_TIMEOUT_SECONDS
+
+
+def _resolve_alphasift_llm_max_tokens() -> int:
+    configured = _safe_float(os.getenv("LLM_MAX_TOKENS"))
+    if configured is not None and configured > 0:
+        return int(configured)
+    return DSA_ALPHASIFT_LLM_MAX_TOKENS
 
 
 def _resolve_alphasift_llm_models(config: Config) -> Tuple[str, List[str]]:
@@ -3584,6 +3770,7 @@ def _normalize_candidate(raw: Any, rank: int) -> Dict[str, Any]:
         or source.get("dsa_analysis_summary")
         or _extract_dsa_analysis_summary_from_context(dsa_context)
     )
+    quality = _candidate_quality_snapshot(item, source, dsa_context)
     return {
         "rank": item.get("rank") or source.get("rank") or rank,
         "code": item.get("code") or source.get("code") or item.get("symbol") or source.get("symbol") or item.get("stock_code") or source.get("stock_code") or "",
@@ -3614,8 +3801,137 @@ def _normalize_candidate(raw: Any, rank: int) -> Dict[str, Any]:
         "dsa_analysis_summary": dsa_analysis_summary,
         "post_analysis_summaries": item.get("post_analysis_summaries") or source.get("post_analysis_summaries") or {},
         "post_analysis_tags": item.get("post_analysis_tags") or source.get("post_analysis_tags") or [],
+        "data_quality": quality["status"],
+        "missing_fields": quality["missing_fields"],
+        "data_sources": quality["data_sources"],
+        "quality_notes": quality["quality_notes"],
         "raw": source,
     }
+
+
+_CANDIDATE_QUALITY_FIELD_GROUPS: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
+    ("code", ("code", "symbol", "stock_code")),
+    ("name", ("name", "stock_name")),
+    ("price", ("price", "last_price", "latest_price", "close", "最新价")),
+    ("amount", ("amount", "turnover_amount", "turnover", "成交额")),
+    ("industry", ("industry", "sector", "board", "concept", "belong_boards", "belongBoards", "boards")),
+    (
+        "trading_status",
+        (
+            "is_st",
+            "st",
+            "is_suspended",
+            "suspended",
+            "limit_status",
+            "price_limit_status",
+            "is_limit_up",
+            "is_limit_down",
+        ),
+    ),
+)
+_CANDIDATE_SOURCE_KEYS: Tuple[str, ...] = (
+    "source",
+    "provider",
+    "data_source",
+    "snapshot_source",
+    "price_source",
+    "price_provider",
+    "quote_source",
+    "quote_provider",
+)
+
+
+def _candidate_quality_snapshot(
+    item: Dict[str, Any],
+    source: Dict[str, Any],
+    dsa_context: Any,
+) -> Dict[str, Any]:
+    containers = _candidate_quality_containers(item, source, dsa_context)
+    missing_fields = [
+        field_name
+        for field_name, keys in _CANDIDATE_QUALITY_FIELD_GROUPS
+        if not _candidate_has_any_field(containers, keys)
+    ]
+    explicit = _env_text(_first_present(item, source, "data_quality", "quality_status", "quality")).lower()
+    if explicit == "available":
+        explicit = "ok"
+    if "code" in missing_fields:
+        status = "unavailable"
+    elif explicit in {"failed", "unavailable", "stale"}:
+        status = explicit
+    elif missing_fields:
+        status = "partial"
+    elif explicit in {"partial", "degraded"}:
+        status = "partial"
+    else:
+        status = explicit or "ok"
+
+    quality_notes: List[str] = []
+    if missing_fields:
+        quality_notes.append(f"missing_fields: {', '.join(missing_fields)}")
+    data_sources = _candidate_data_sources(containers, dsa_context)
+    if not data_sources:
+        quality_notes.append("data_sources: unavailable")
+
+    return {
+        "status": status,
+        "missing_fields": missing_fields,
+        "data_sources": data_sources,
+        "quality_notes": quality_notes,
+    }
+
+
+def _candidate_quality_containers(
+    item: Dict[str, Any],
+    source: Dict[str, Any],
+    dsa_context: Any,
+) -> List[Dict[str, Any]]:
+    containers: List[Dict[str, Any]] = []
+
+    def add(value: Any) -> None:
+        if isinstance(value, dict) and not any(value is existing for existing in containers):
+            containers.append(value)
+
+    add(item)
+    add(source)
+    raw = source.get("raw") if isinstance(source.get("raw"), dict) else None
+    add(raw)
+    add(dsa_context)
+    if isinstance(dsa_context, dict):
+        add(dsa_context.get("quote"))
+        add(dsa_context.get("fundamentals"))
+        add(dsa_context.get("news"))
+    return containers
+
+
+def _candidate_has_any_field(containers: List[Dict[str, Any]], keys: Tuple[str, ...]) -> bool:
+    for container in containers:
+        for key in keys:
+            value = container.get(key)
+            if value is None:
+                continue
+            if isinstance(value, str) and not value.strip():
+                continue
+            if isinstance(value, (list, dict)) and not value:
+                continue
+            return True
+    return False
+
+
+def _candidate_data_sources(containers: List[Dict[str, Any]], dsa_context: Any) -> List[str]:
+    values: List[str] = []
+    for container in containers:
+        for key in _CANDIDATE_SOURCE_KEYS:
+            values.extend(_list_text_values(container.get(key)))
+    if isinstance(dsa_context, dict):
+        if dsa_context.get("enriched"):
+            values.append("dsa_context")
+        news = dsa_context.get("news")
+        if isinstance(news, dict):
+            provider = _env_text(news.get("provider"))
+            if provider:
+                values.append(f"news:{provider}")
+    return _dedupe_strings(values)[:8]
 
 
 def _extract_dsa_news_from_context(context: Any) -> List[Dict[str, Any]]:

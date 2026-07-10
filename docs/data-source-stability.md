@@ -10,6 +10,7 @@
 
 - A 股个股与 AlphaSift：优先配置 `TUSHARE_TOKEN`，并保留 AkShare / Efinance / Tencent / Baostock / YFinance 兜底。
 - A 股大盘复盘：配置 `TICKFLOW_API_KEY` 后，指数和市场宽度会优先尝试 TickFlow，失败后回退现有免费源。
+- A 股行业 / 所属板块：行业板块列表走 AStockDataFetcher（EastMoney 直连，a-stock-data 风格实现），实时端点失败时回退 EastMoney reportapi 行业目录和离线行业种子；个股所属板块优先 Efinance，缺失或失败时回退到该直连源。
 - 港股 / 美股：配置 `LONGBRIDGE_*` 后优先使用 Longbridge，YFinance、Finnhub、AlphaVantage 继续兜底。
 - 热点题材：AlphaSift 热点默认走 DSA EastMoney provider，并使用本地 last-good cache 降低实时接口失败影响。
 
@@ -20,10 +21,15 @@
 | A 股日线 / 技术面 | Efinance、Tencent、AkShare、Tushare、Pytdx、Baostock、YFinance | `DataFetcherManager` 按优先级尝试；配置 `TUSHARE_TOKEN` 后 Tushare 自动进入候选源 | 单源失败后尝试下一个源；连续失败会短期熔断该源 |
 | A 股实时行情 | Tencent、AkShare Sina、Efinance、AkShare EM、Tushare | `REALTIME_SOURCE_PRIORITY` 控制顺序，默认偏向 Tencent / Sina 这类轻量源 | 失败源记录 `fallback_from`，成功源继续返回 |
 | A 股大盘复盘 | TickFlow、AkShare、Tushare、Efinance | 配置 `TICKFLOW_API_KEY` 后，主指数和市场宽度优先尝试 TickFlow | TickFlow 权限不足或失败时回退 AkShare / Tushare / Efinance 链路 |
-| AlphaSift 选股快照 | Tushare、Sina、Efinance、AkShare EM、EastMoney Datacenter | 有 `TUSHARE_TOKEN` 时自动把 `tushare` 放入快照优先级；否则使用免费源链路 | AlphaSift 维护 source health；DSA 状态接口透出 snapshot/daily health |
+| A 股行业 / 所属板块 | Efinance、AStockDataFetcher（EastMoney 直连，参考 a-stock-data 接口形态）、EastMoney reportapi、离线行业种子 | `GET /api/v1/stocks/industry-boards` 优先返回实时行业板块；实时端点失败时回退行业目录；个股所属板块优先复用 Efinance，失败或缺失时回退 AStockDataFetcher | 免费源失败时保持 fail-open，行业板块接口至少返回稳定目录；单股分析继续降级 |
+| AlphaSift 选股快照 | Tushare、Sina、Efinance、AkShare EM、EastMoney Datacenter、DSA screen last-good cache | 有 `TUSHARE_TOKEN` 时自动把 `tushare` 放入快照优先级；否则使用免费源链路 | AlphaSift 维护 source health；DSA 状态接口透出 snapshot/daily health；adapter 故障或空候选带错误时回退 24 小时内的同策略/同市场 last-good 候选并标记 `quality_status=stale` |
 | AlphaSift 日线补特征 | DSA `DataFetcherManager` | AlphaSift 调用 DSA provider context，优先复用 DSA 日线与缓存链路 | DSA 链路失败后才回到 AlphaSift 原始日线源 |
 | AlphaSift 热点题材 | DSA EastMoney provider、AlphaSift hotspot、last-good cache | 未指定 provider 时默认使用 DSA EastMoney provider | 实时失败时回退热点缓存；无缓存时返回稳定空态和可读错误 |
 | 港股 / 美股 | Longbridge、YFinance、AkShare、Tushare、Finnhub、AlphaVantage、Stooq | 配置 Longbridge 凭证后参与港美股日线/实时兜底；YFinance 保持基础兜底 | Longbridge 冷却或失败时回退 YFinance / 其他可用源 |
+
+AlphaSift screen 会在每个候选上追加 `data_quality`、`missing_fields`、`data_sources` 和 `quality_notes`：`data_quality=ok` 表示关键字段完整；`partial` 表示候选仍可展示但缺少价格、成交额、行业或交易状态等字段；`unavailable` 表示缺少代码等不可用字段。若候选来自 screen last-good cache，候选级还会带上 `cache_used=true`、`stale=true`、`cached_at`、`stale_age_hours` 和 `data_quality=stale`。Web 选股页展示这些字段，自动模拟交易的 `risk_review.candidate_data_quality` 也会保存同一份快照，便于审计数据不足时为何观察、跳过或继续生成计划。
+
+Web 选股页会读取 `/api/v1/alphasift/status` 的 `source_health`，展示 snapshot / daily 数据源的状态、失败次数、冷却时间和最近错误摘要。该视图用于快速判断当前降级是单源冷却、网络中断还是上游数据为空；跨 run 统一指标和长期趋势仍属于后续增强。
 
 ## 总体链路图
 
@@ -33,6 +39,7 @@ flowchart TD
 
     S --> D[个股日线与技术面]
     S --> R[实时行情]
+    S --> B[A 股行业/所属板块]
     S --> A[AlphaSift 选股/热点]
     S --> M[大盘复盘]
 
@@ -46,6 +53,9 @@ flowchart TD
     R --> RP[REALTIME_SOURCE_PRIORITY]
     RP --> RS[Tencent -> AkShare Sina -> Efinance -> AkShare EM]
     RP --> RT[Tushare can be placed first when token/points are available]
+
+    B --> BI[Industry boards: AStockDataFetcher push2 -> reportapi -> offline seed]
+    B --> BB[Belong boards: Efinance -> AStockDataFetcher fallback]
 
     A --> AS[Snapshot: Tushare/Sina/Efinance/AkShare EM/EM Datacenter]
     A --> AD[Daily features: DSA DataFetcherManager]
@@ -61,12 +71,20 @@ flowchart TD
     US --> QL
     RS --> QL
     RT --> QL
+    BI --> QL
+    BB --> QL
     AS --> QL
     AD --> QL
     AC --> QL
     TFM --> QL
     MF --> QL
 ```
+
+行业板块列表接口会返回 `data_quality`：
+
+- `realtime`：来自 EastMoney 行业板块实时接口，可用于涨跌幅、涨跌家数和领涨股展示。
+- `directory_fallback`：实时接口不可用，当前只展示 EastMoney reportapi 行业目录；不应作为实时涨跌榜使用。
+- `offline_seed`：在线数据都不可用，当前只展示内置行业目录；不含实时行情字段。
 
 ## 失败与降级图
 
@@ -106,6 +124,9 @@ flowchart TD
     ENV --> DAILY[DSA provider context]
     DAILY --> DFM[DataFetcherManager: Tushare/Efinance/Tencent/AkShare/Pytdx/Baostock/YFinance]
     DFM --> RESULT[候选股 + source_errors/warnings/llm_parse_errors]
+    RESULT --> SCACHE[写入 screen last-good cache]
+    SCREEN -->|运行失败或空候选带错误| SLCACHE[读取 24h 内同策略同市场 screen last-good cache]
+    SLCACHE --> STALERESULT[stale 候选 + cache_used/fallback_used]
 
     API --> HOT{hotspots}
     HOT --> HP{provider specified?}
@@ -140,6 +161,8 @@ REALTIME_SOURCE_PRIORITY=tushare,tencent,akshare_sina,efinance,akshare_em
 SNAPSHOT_SOURCE_PRIORITY=tushare,sina,efinance,akshare_em,em_datacenter
 
 # AlphaSift 选股运行期默认值；显式配置时会保留你的值
+LLM_TIMEOUT_SEC=180
+LLM_MAX_TOKENS=1024
 DAILY_FETCH_RETRIES=3
 DAILY_FETCH_MAX_WORKERS=1
 ```
@@ -189,6 +212,7 @@ LONGBRIDGE_ACCESS_TOKEN=your_access_token
 - Tushare: https://tushare.pro/document/2
 - TickFlow: https://tickflow.org/
 - AkShare: https://akshare.akfamily.xyz/
+- a-stock-data: https://github.com/simonlin1212/a-stock-data
 - Longbridge OpenAPI: https://open.longportapp.com/
 - Finnhub API: https://finnhub.io/docs/api
 - Alpha Vantage API: https://www.alphavantage.co/documentation/

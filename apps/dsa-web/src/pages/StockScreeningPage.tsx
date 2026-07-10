@@ -29,6 +29,7 @@ import {
 import { useNavigate } from 'react-router-dom';
 import {
   alphasiftApi,
+  type AlphaSiftStatus,
   type AlphaSiftCandidate,
   type AlphaSiftHotspotDetail,
   type AlphaSiftHotspot,
@@ -243,6 +244,12 @@ const getScreenMessages = (meta: AlphaSiftScreenResponse | null) => {
   }
   const messages: string[] = [];
   const seen = new Set<string>();
+  if (meta.cacheUsed) {
+    const ageText = meta.staleAgeHours != null ? `，缓存约 ${formatNumber(meta.staleAgeHours, 1)} 小时前生成` : '';
+    const cachedAtText = meta.cachedAt ? `（${formatHotspotUpdatedAt(meta.cachedAt)}）` : '';
+    messages.push(`当前候选来自上次成功缓存${cachedAtText}${ageText}；数据质量已标记为 stale，自动交易会保守跳过成交。`);
+    seen.add('screen_cache_used');
+  }
   [...toMessageList(meta.warnings), ...toMessageList(meta.sourceErrors), ...toMessageList(meta.llmParseErrors)].forEach(
     (value) => {
       const key = normalizeScreenMessageKey(value);
@@ -311,6 +318,115 @@ const hasLlmInsight = (item: AlphaSiftCandidate) =>
       item.llmWatchItems?.length ||
       item.llmCatalysts?.length,
   );
+
+const normalizeCandidateQuality = (value: string | undefined) => String(value || 'unknown').trim().toLowerCase();
+
+const getCandidateQualityClass = (value: string | undefined) => {
+  const quality = normalizeCandidateQuality(value);
+  if (quality === 'ok' || quality === 'available') {
+    return 'bg-success/10 text-success';
+  }
+  if (quality === 'partial' || quality === 'stale' || quality === 'degraded') {
+    return 'bg-warning/10 text-warning';
+  }
+  if (quality === 'unavailable' || quality === 'failed') {
+    return 'bg-danger/10 text-danger';
+  }
+  return 'bg-surface text-secondary-text';
+};
+
+const getCandidateQualityLabel = (value: string | undefined) => {
+  const quality = normalizeCandidateQuality(value);
+  if (quality === 'ok' || quality === 'available') {
+    return '数据 ok';
+  }
+  if (quality === 'partial') {
+    return '数据 partial';
+  }
+  if (quality === 'stale') {
+    return '数据 stale';
+  }
+  if (quality === 'unavailable' || quality === 'failed') {
+    return `数据 ${quality}`;
+  }
+  return '数据 unknown';
+};
+
+type SourceHealthEntry = {
+  scope: string;
+  source: string;
+  status: string;
+  className: string;
+  failureCount: number | null;
+  cooldownUntil: string;
+  lastError: string;
+  updatedAt: string;
+};
+
+const sourceHealthStatusClass = (value: string) => {
+  const status = value.toLowerCase();
+  if (['ok', 'healthy', 'available', 'success'].includes(status)) {
+    return 'bg-success/10 text-success';
+  }
+  if (['cooldown', 'cooling_down', 'partial', 'degraded', 'warning'].includes(status)) {
+    return 'bg-warning/10 text-warning';
+  }
+  if (['failed', 'error', 'unavailable', 'blocked'].includes(status)) {
+    return 'bg-danger/10 text-danger';
+  }
+  return 'bg-surface text-secondary-text';
+};
+
+const sourceHealthText = (value: unknown) => (typeof value === 'string' ? value.trim() : '');
+
+const sourceHealthNumber = (value: unknown) => {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+};
+
+const getSourceHealthEntries = (sourceHealth: AlphaSiftStatus['sourceHealth']): SourceHealthEntry[] => {
+  if (!sourceHealth || typeof sourceHealth !== 'object') {
+    return [];
+  }
+  return Object.entries(sourceHealth).flatMap(([scope, sources]) => {
+    if (!sources || typeof sources !== 'object') {
+      return [];
+    }
+    return Object.entries(sources).map(([source, raw]) => {
+      const detail = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
+      const failureCount =
+        sourceHealthNumber(detail.failure_count) ??
+        sourceHealthNumber(detail.failures) ??
+        sourceHealthNumber(detail.consecutive_failures);
+      const cooldownUntil =
+        sourceHealthText(detail.cooldown_until) ||
+        sourceHealthText(detail.cooldownUntil) ||
+        sourceHealthText(detail.disabled_until);
+      const lastError =
+        sourceHealthText(detail.last_error) ||
+        sourceHealthText(detail.error) ||
+        sourceHealthText(detail.reason) ||
+        sourceHealthText(detail.message);
+      const explicitStatus =
+        sourceHealthText(detail.status) || sourceHealthText(detail.state) || sourceHealthText(detail.health);
+      const status = explicitStatus || (cooldownUntil ? 'cooldown' : failureCount && failureCount > 0 ? 'degraded' : 'ok');
+      return {
+        scope,
+        source,
+        status,
+        className: sourceHealthStatusClass(status),
+        failureCount,
+        cooldownUntil,
+        lastError,
+        updatedAt:
+          sourceHealthText(detail.updated_at) ||
+          sourceHealthText(detail.updatedAt) ||
+          sourceHealthText(detail.last_success_at) ||
+          sourceHealthText(detail.lastSuccessAt),
+      };
+    });
+  });
+};
 
 const getRouteTimeLabel = (item: AlphaSiftHotspotDetail['route'][number]) => {
   const rawTime = item.publishedAt || item.date || item.time || '';
@@ -456,6 +572,7 @@ const StockScreeningPage: React.FC = () => {
   const [loadingHotspots, setLoadingHotspots] = useState(false);
   const [hotspotError, setHotspotError] = useState('');
   const [screenMeta, setScreenMeta] = useState<AlphaSiftScreenResponse | null>(null);
+  const [sourceHealth, setSourceHealth] = useState<AlphaSiftStatus['sourceHealth']>();
   const [expandedCode, setExpandedCode] = useState<string | null>(null);
   const [loading, setLoading] = useState(Boolean(restoredTask?.taskId));
   const [enabling, setEnabling] = useState(false);
@@ -471,6 +588,7 @@ const StockScreeningPage: React.FC = () => {
   const selectedStrategyTag = selectedStrategy?.category || selectedStrategy?.tag || selectedStrategy?.tags?.[0] || '自定义';
   const displayedStrategy = selectedStrategy ? selectedStrategyTitle : `自定义策略 (${strategy})`;
   const screenMessages = useMemo(() => getScreenMessages(screenMeta), [screenMeta]);
+  const sourceHealthEntries = useMemo(() => getSourceHealthEntries(sourceHealth), [sourceHealth]);
   const llmDegraded = screenMeta?.llmRanked === false;
   const alertMessages = llmDegraded
     ? screenMessages.length > 0
@@ -654,6 +772,7 @@ const StockScreeningPage: React.FC = () => {
         }
         setEnabled(status.enabled);
         setAvailable(status.available);
+        setSourceHealth(status.sourceHealth);
         if (status.enabled && status.available) {
           void loadStrategies();
           void loadHotspots(false);
@@ -663,6 +782,7 @@ const StockScreeningPage: React.FC = () => {
         if (active) {
           setEnabled(false);
           setAvailable(false);
+          setSourceHealth(undefined);
         }
       });
     return () => {
@@ -769,9 +889,11 @@ const StockScreeningPage: React.FC = () => {
         const status = await alphasiftApi.getStatus();
         setEnabled(status.enabled);
         setAvailable(status.available);
+        setSourceHealth(status.sourceHealth);
       } catch {
         setEnabled(false);
         setAvailable(false);
+        setSourceHealth(undefined);
       }
       setError(err instanceof Error ? err.message : '开启 AlphaSift 失败');
     } finally {
@@ -879,6 +1001,45 @@ const StockScreeningPage: React.FC = () => {
       ) : null}
 
       {error ? <InlineAlert variant="danger" title="调用失败" message={error} /> : null}
+
+      {enabled ? (
+        <section className="rounded-2xl border border-border/80 bg-card/95 p-4 shadow-soft-card">
+          <div className="mb-4 flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
+            <div>
+              <h2 className="text-sm font-semibold text-foreground">数据源健康</h2>
+              <p className="mt-1 text-xs text-secondary-text">AlphaSift snapshot / daily 源的最近可用性与降级状态。</p>
+            </div>
+            <span className="text-xs text-secondary-text">{sourceHealthEntries.length} 个源</span>
+          </div>
+          {sourceHealthEntries.length === 0 ? (
+            <div className="rounded-xl border border-dashed border-border bg-surface/70 px-4 py-5 text-sm text-secondary-text">
+              暂无数据源健康快照；运行一次选股或等待 AlphaSift 返回状态后会自动更新。
+            </div>
+          ) : (
+            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+              {sourceHealthEntries.map((item) => (
+                <div key={`${item.scope}-${item.source}`} className="rounded-xl border border-border bg-surface/70 p-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-semibold text-foreground">{item.source}</p>
+                      <p className="mt-1 text-xs text-secondary-text">{item.scope}</p>
+                    </div>
+                    <span className={`shrink-0 rounded-lg px-2 py-1 text-xs font-semibold ${item.className}`}>
+                      {item.status}
+                    </span>
+                  </div>
+                  <div className="mt-3 space-y-1 text-xs text-secondary-text">
+                    <p>失败：{item.failureCount ?? 0}</p>
+                    {item.cooldownUntil ? <p>冷却至：{formatHotspotUpdatedAt(item.cooldownUntil)}</p> : null}
+                    {item.updatedAt ? <p>更新：{formatHotspotUpdatedAt(item.updatedAt)}</p> : null}
+                    {item.lastError ? <p className="break-words">最近错误：{summarizeAlphaSiftDiagnostic(item.lastError)}</p> : null}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+      ) : null}
 
       <section className="rounded-2xl border border-border/80 bg-card/95 p-4 shadow-soft-card">
         <div className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
@@ -1258,6 +1419,10 @@ const StockScreeningPage: React.FC = () => {
             <span>
               DSA增强：{screenMeta?.dsaEnrichment?.enrichedCount ?? '-'} / {screenMeta?.dsaEnrichment?.requestedCount ?? '-'}
             </span>
+            <span>
+              数据质量：{screenMeta?.qualityStatus || (screenMeta ? 'ok' : '-')}
+              {screenMeta?.cacheUsed ? ` · 缓存 ${screenMeta.cachedAt ? formatHotspotUpdatedAt(screenMeta.cachedAt) : '-'}` : ''}
+            </span>
           </div>
         </div>
       </section>
@@ -1317,6 +1482,8 @@ const StockScreeningPage: React.FC = () => {
                       : '暂无 LLM 判断';
                   const dsaWarnings = item.dsaContext?.warnings || [];
                   const dsaNews = item.dsaNews || [];
+                  const missingFields = item.missingFields || [];
+                  const dataSources = item.dataSources || [];
                   return (
                     <Fragment key={`${item.rank}-${item.code}`}>
                       <tr className="border-t border-border align-top transition-colors hover:bg-hover/50">
@@ -1329,9 +1496,14 @@ const StockScreeningPage: React.FC = () => {
                         <td className="px-4 py-3 font-bold text-cyan">{formatScore(item.score)}</td>
                         <td className="px-4 py-3 text-secondary-text">{llmDegraded ? '未重排' : formatScore(item.llmScore)}</td>
                         <td className="px-4 py-3">
-                          <span className="rounded-lg bg-success/10 px-2.5 py-1 text-xs font-semibold text-success">
-                            {item.riskLevel || 'unknown'}
-                          </span>
+                          <div className="flex flex-col items-start gap-2">
+                            <span className="rounded-lg bg-success/10 px-2.5 py-1 text-xs font-semibold text-success">
+                              {item.riskLevel || 'unknown'}
+                            </span>
+                            <span className={`rounded-lg px-2.5 py-1 text-xs font-semibold ${getCandidateQualityClass(item.dataQuality)}`}>
+                              {getCandidateQualityLabel(item.dataQuality)}
+                            </span>
+                          </div>
                         </td>
                         <td className="px-4 py-3">
                           <button
@@ -1382,6 +1554,24 @@ const StockScreeningPage: React.FC = () => {
                                       ? [...(item.riskFlags || []), ...(item.llmRisks || [])].join('，')
                                       : '无'}
                                   </p>
+                                </div>
+                                <div>
+                                  <p className="text-xs font-semibold text-secondary-text">数据质量</p>
+                                  <p className="mt-1 text-sm text-foreground">{getCandidateQualityLabel(item.dataQuality)}</p>
+                                  {missingFields.length > 0 ? (
+                                    <p className="mt-1 text-xs text-secondary-text">缺失字段：{missingFields.join('、')}</p>
+                                  ) : (
+                                    <p className="mt-1 text-xs text-secondary-text">关键字段完整</p>
+                                  )}
+                                  <p className="mt-1 text-xs text-secondary-text">
+                                    来源：{dataSources.length > 0 ? dataSources.slice(0, 4).join('、') : '待确认'}
+                                  </p>
+                                  {item.cacheUsed || item.stale ? (
+                                    <p className="mt-1 text-xs text-secondary-text">
+                                      缓存：{item.cachedAt ? formatHotspotUpdatedAt(item.cachedAt) : '已使用'}
+                                      {item.staleAgeHours != null ? `，约 ${formatNumber(item.staleAgeHours, 1)} 小时前` : ''}
+                                    </p>
+                                  ) : null}
                                 </div>
                               </div>
                               <div className="space-y-3">

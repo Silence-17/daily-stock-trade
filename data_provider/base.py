@@ -1060,6 +1060,30 @@ class DataFetcherManager:
                 ),
                 None,
             )
+            change_col = next(
+                (
+                    col
+                    for col in raw_data.columns
+                    if str(col) in {"涨跌幅", "涨跌幅%", "change_pct"}
+                ),
+                None,
+            )
+            lead_col = next(
+                (
+                    col
+                    for col in raw_data.columns
+                    if str(col) in {"领涨股", "龙头股", "lead_stock", "leader"}
+                ),
+                None,
+            )
+            source_col = next(
+                (
+                    col
+                    for col in raw_data.columns
+                    if str(col) in {"source", "来源"}
+                ),
+                None,
+            )
             if name_col is None:
                 return []
             for _, row in raw_data.iterrows():
@@ -1079,6 +1103,21 @@ class DataFetcherManager:
                     board_type_raw = row.get(type_col, "")
                     if not DataFetcherManager._is_missing_board_value(board_type_raw):
                         item["type"] = str(board_type_raw).strip()
+                if change_col is not None:
+                    change_raw = row.get(change_col, "")
+                    if not DataFetcherManager._is_missing_board_value(change_raw):
+                        try:
+                            item["change_pct"] = float(change_raw)
+                        except (TypeError, ValueError):
+                            item["change_pct"] = str(change_raw).strip()
+                if lead_col is not None:
+                    lead_raw = row.get(lead_col, "")
+                    if not DataFetcherManager._is_missing_board_value(lead_raw):
+                        item["lead_stock"] = str(lead_raw).strip()
+                if source_col is not None:
+                    source_raw = row.get(source_col, "")
+                    if not DataFetcherManager._is_missing_board_value(source_raw):
+                        item["source"] = str(source_raw).strip()
                 normalized.append(item)
             return normalized
 
@@ -1086,17 +1125,20 @@ class DataFetcherManager:
             raw_data = [raw_data]
 
         if isinstance(raw_data, (list, tuple, set)):
+            def _pick_present(mapping: Dict[str, Any], keys: Tuple[str, ...]) -> Any:
+                for key in keys:
+                    if key not in mapping:
+                        continue
+                    value = mapping.get(key)
+                    if not DataFetcherManager._is_missing_board_value(value):
+                        return value
+                return None
+
             for item in raw_data:
                 if isinstance(item, dict):
-                    board_name_raw = (
-                        item.get("name")
-                        or item.get("board_name")
-                        or item.get("板块名称")
-                        or item.get("板块")
-                        or item.get("所属板块")
-                        or item.get("板块名")
-                        or item.get("industry")
-                        or item.get("行业")
+                    board_name_raw = _pick_present(
+                        item,
+                        ("name", "board_name", "板块名称", "板块", "所属板块", "板块名", "industry", "行业"),
                     )
                     if DataFetcherManager._is_missing_board_value(board_name_raw):
                         continue
@@ -1105,20 +1147,24 @@ class DataFetcherManager:
                         continue
                     dedupe.add(board_name)
                     normalized_item: Dict[str, Any] = {"name": board_name}
-                    code_raw = (
-                        item.get("code")
-                        or item.get("板块代码")
-                        or item.get("代码")
-                    )
+                    code_raw = _pick_present(item, ("code", "板块代码", "代码"))
                     if not DataFetcherManager._is_missing_board_value(code_raw):
                         normalized_item["code"] = str(code_raw).strip()
-                    type_raw = (
-                        item.get("type")
-                        or item.get("板块类型")
-                        or item.get("类别")
-                    )
+                    type_raw = _pick_present(item, ("type", "板块类型", "类别"))
                     if not DataFetcherManager._is_missing_board_value(type_raw):
                         normalized_item["type"] = str(type_raw).strip()
+                    change_raw = _pick_present(item, ("change_pct", "涨跌幅", "涨跌幅%"))
+                    if not DataFetcherManager._is_missing_board_value(change_raw):
+                        try:
+                            normalized_item["change_pct"] = float(change_raw)
+                        except (TypeError, ValueError):
+                            normalized_item["change_pct"] = str(change_raw).strip()
+                    lead_raw = _pick_present(item, ("lead_stock", "leader", "领涨股", "龙头股"))
+                    if not DataFetcherManager._is_missing_board_value(lead_raw):
+                        normalized_item["lead_stock"] = str(lead_raw).strip()
+                    source_raw = _pick_present(item, ("source", "来源"))
+                    if not DataFetcherManager._is_missing_board_value(source_raw):
+                        normalized_item["source"] = str(source_raw).strip()
                     normalized.append(normalized_item)
                     continue
                 if DataFetcherManager._is_missing_board_value(item):
@@ -1145,7 +1191,9 @@ class DataFetcherManager:
         - 未配置的可选数据源不实例化，避免在批量拉取时反复探测无效源
         - 默认优先级：
           0. EfinanceFetcher (Priority 0) - 最高优先级
+          0. TencentFetcher (Priority 0) - 轻量直连补充
           1. AkshareFetcher (Priority 1)
+          2. AStockDataFetcher (Priority 2) - a-stock-data 风格 EastMoney 板块补充
           2. PytdxFetcher (Priority 2) - 通达信
           3. BaostockFetcher (Priority 3)
           4. YfinanceFetcher (Priority 4)
@@ -1153,6 +1201,7 @@ class DataFetcherManager:
         from src.config import get_config
         from .efinance_fetcher import EfinanceFetcher
         from .tencent_fetcher import TencentFetcher
+        from .a_stock_data_fetcher import AStockDataFetcher
         from .akshare_fetcher import AkshareFetcher
         from .tushare_fetcher import TushareFetcher
         from .tickflow_fetcher import TickFlowFetcher
@@ -1164,6 +1213,7 @@ class DataFetcherManager:
         # 创建所有数据源实例（优先级在各 Fetcher 的 __init__ 中确定）
         efinance = EfinanceFetcher()
         tencent = TencentFetcher()
+        a_stock_data = AStockDataFetcher()
         akshare = AkshareFetcher()
         pytdx = PytdxFetcher()      # 通达信数据源（可配 PYTDX_HOST/PYTDX_PORT）
         baostock = BaostockFetcher()
@@ -1215,6 +1265,7 @@ class DataFetcherManager:
             self._fetchers = [
                 efinance,
                 tencent,
+                a_stock_data,
                 akshare,
                 pytdx,
                 baostock,
@@ -2363,6 +2414,106 @@ class DataFetcherManager:
                 logger.debug(f"[{fetcher.name}] 获取所属板块失败: {e}")
                 continue
         return []
+
+    @staticmethod
+    def _normalize_industry_boards(raw_data: Any) -> List[Dict[str, Any]]:
+        """Normalize industry-board rows for API consumers."""
+        if DataFetcherManager._is_missing_board_value(raw_data):
+            return []
+        if isinstance(raw_data, dict):
+            raw_data = [raw_data]
+        if not isinstance(raw_data, (list, tuple)):
+            return []
+
+        normalized: List[Dict[str, Any]] = []
+        seen = set()
+        for index, item in enumerate(raw_data, start=1):
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or item.get("板块名称") or item.get("板块") or "").strip()
+            if not name:
+                continue
+            code = str(item.get("code") or item.get("板块代码") or item.get("代码") or "").strip()
+            dedupe_key = code or name
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            row = {
+                "rank": item.get("rank") if item.get("rank") is not None else index,
+                "code": code,
+                "name": name,
+            }
+            for key in (
+                "change_pct",
+                "up_count",
+                "down_count",
+                "leader",
+                "leader_change",
+                "source",
+                "data_quality",
+            ):
+                value = item.get(key)
+                if value is not None and value != "":
+                    row[key] = value
+            normalized.append(row)
+        return normalized
+
+    def get_industry_boards(self) -> Tuple[List[Dict[str, Any]], str]:
+        """Get A-share industry board list through ordered provider fallback."""
+        candidates = [
+            fetcher
+            for fetcher in self._get_fetchers_snapshot()
+            if hasattr(fetcher, "get_industry_boards")
+            and self._is_fetcher_available(fetcher, capability="industry_boards")
+        ]
+        last_error = ""
+        for fetcher in candidates:
+            start = time.time()
+            try:
+                record_provider_run_started(
+                    data_type="industry_boards",
+                    provider=fetcher.name,
+                    operation="get_industry_boards",
+                )
+                raw_data = fetcher.get_industry_boards()
+                boards = self._normalize_industry_boards(raw_data)
+                if boards:
+                    record_provider_run(
+                        data_type="industry_boards",
+                        provider=fetcher.name,
+                        operation="get_industry_boards",
+                        success=True,
+                        latency_ms=int((time.time() - start) * 1000),
+                        record_count=len(boards),
+                    )
+                    return boards, fetcher.name
+                last_error = f"{fetcher.name} returned empty industry boards"
+                record_provider_run(
+                    data_type="industry_boards",
+                    provider=fetcher.name,
+                    operation="get_industry_boards",
+                    success=False,
+                    latency_ms=int((time.time() - start) * 1000),
+                    error_type="empty",
+                    error_message=last_error,
+                    record_count=0,
+                )
+            except Exception as e:
+                error_type, error_reason = summarize_exception(e)
+                last_error = f"{fetcher.name} ({error_type}) {error_reason}"
+                record_provider_run(
+                    data_type="industry_boards",
+                    provider=fetcher.name,
+                    operation="get_industry_boards",
+                    success=False,
+                    latency_ms=int((time.time() - start) * 1000),
+                    error_type=error_type,
+                    error_message=error_reason,
+                )
+                logger.warning("[%s] 获取行业板块列表失败: %s", fetcher.name, error_reason)
+        if last_error:
+            logger.warning("[行业板块] 所有数据源均失败，最终错误: %s", last_error)
+        return [], ""
 
     def prefetch_stock_names(self, stock_codes: List[str], use_bulk: bool = False) -> None:
         """

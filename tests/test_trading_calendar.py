@@ -720,6 +720,94 @@ class MarketPhaseContextTestCase(unittest.TestCase):
         self.assertIn("calendar_error", ctx.warnings)
 
 
+class NextTradingWindowContextTestCase(unittest.TestCase):
+    """Tests for next regular trading window diagnostics."""
+
+    def _build_with_calendar(
+        self,
+        market: str,
+        current_time: datetime,
+        fake_calendar: _FakeCalendar,
+    ) -> dict:
+        with patch.object(trading_calendar, "_XCALS_AVAILABLE", True), patch.object(
+            trading_calendar,
+            "xcals",
+            _calendar_namespace(fake_calendar),
+            create=True,
+        ):
+            return trading_calendar.build_next_trading_window_context(
+                market=market,
+                current_time=current_time,
+                trigger_source="vnpy_paper_auto",
+                analysis_intent="auto",
+            )
+
+    def test_lunch_break_returns_afternoon_reopen_window(self):
+        fake_calendar = _FakeCalendar(
+            sessions=[date(2026, 3, 26), date(2026, 3, 27)],
+            close_hour=15,
+            tz_name="Asia/Shanghai",
+            open_time=time(9, 30),
+            break_start=time(11, 30),
+            break_end=time(13, 0),
+        )
+
+        payload = self._build_with_calendar(
+            "cn",
+            datetime(2026, 3, 27, 11, 45, tzinfo=ZoneInfo("Asia/Shanghai")),
+            fake_calendar,
+        )
+
+        self.assertTrue(payload["available"])
+        self.assertEqual(payload["phase"], "lunch_break")
+        self.assertFalse(payload["is_market_open_now"])
+        self.assertEqual(payload["next_window_status"], "opens_later_today")
+        self.assertEqual(payload["next_session_date"], "2026-03-27")
+        self.assertEqual(payload["next_open_at"], "2026-03-27T13:00:00+08:00")
+        self.assertEqual(payload["next_close_at"], "2026-03-27T15:00:00+08:00")
+        self.assertEqual(payload["minutes_to_open"], 75)
+        self.assertEqual(payload["reason"], None)
+
+    def test_postmarket_returns_next_session_window(self):
+        fake_calendar = _FakeCalendar(
+            sessions=[date(2026, 3, 26), date(2026, 3, 27), date(2026, 3, 30)],
+            close_hour=15,
+            tz_name="Asia/Shanghai",
+            open_time=time(9, 30),
+            break_start=time(11, 30),
+            break_end=time(13, 0),
+        )
+
+        payload = self._build_with_calendar(
+            "cn",
+            datetime(2026, 3, 27, 15, 1, tzinfo=ZoneInfo("Asia/Shanghai")),
+            fake_calendar,
+        )
+
+        self.assertTrue(payload["available"])
+        self.assertEqual(payload["phase"], "postmarket")
+        self.assertEqual(payload["next_window_status"], "next_session")
+        self.assertEqual(payload["current_close_at"], "2026-03-27T15:00:00+08:00")
+        self.assertEqual(payload["next_session_date"], "2026-03-30")
+        self.assertEqual(payload["next_open_at"], "2026-03-30T09:30:00+08:00")
+        self.assertEqual(payload["next_close_at"], "2026-03-30T15:00:00+08:00")
+        self.assertEqual(payload["reason"], None)
+
+    def test_calendar_unavailable_returns_actionable_reason(self):
+        with patch.object(trading_calendar, "_XCALS_AVAILABLE", False):
+            payload = trading_calendar.build_next_trading_window_context(
+                market="cn",
+                current_time=datetime(2026, 3, 27, 10, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
+                trigger_source="vnpy_paper_auto",
+                analysis_intent="auto",
+            )
+
+        self.assertFalse(payload["available"])
+        self.assertEqual(payload["phase"], "unknown")
+        self.assertEqual(payload["reason"], "calendar_unavailable")
+        self.assertIn("calendar_unavailable", payload["warnings"])
+
+
 class ComputeEffectiveRegionTestCase(unittest.TestCase):
     """Regression tests for compute_effective_region subset logic."""
 

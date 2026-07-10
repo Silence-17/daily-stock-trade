@@ -3790,6 +3790,29 @@ class SystemConfigServiceTestCase(unittest.TestCase):
         self.assertIn("不会因为本次保存重新绑定监听地址或端口", bind_warning)
         self.assertIn("重启当前进程、Docker 容器或服务管理器后生效", bind_warning)
 
+    def test_update_appends_vnpy_runtime_restart_warning(self) -> None:
+        response = self.service.update(
+            config_version=self.manager.get_config_version(),
+            items=[
+                {"key": "VNPY_RUNTIME_ENABLED", "value": "true"},
+                {"key": "VNPY_GATEWAY_CLASS", "value": "vnpy_ctp:CtpGateway"},
+                {"key": "VNPY_CONNECT_ON_START", "value": "false"},
+            ],
+            reload_now=True,
+        )
+
+        self.assertTrue(response["success"])
+        warning = next(
+            item
+            for item in response["warnings"]
+            if "VNPY_RUNTIME_ENABLED" in item and "VNPY_GATEWAY_CLASS" in item
+        )
+        self.assertIn("vn.py runtime bootstrap", warning)
+        self.assertIn("启动期配置", warning)
+        self.assertIn("MainEngine", warning)
+        self.assertIn("EventEngine", warning)
+        self.assertIn("重启当前进程后生效", warning)
+
     def test_update_warns_when_runtime_model_references_are_cleared(self) -> None:
         self._rewrite_env(
             "STOCK_LIST=600519,000001",

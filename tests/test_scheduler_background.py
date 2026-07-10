@@ -80,6 +80,43 @@ class SchedulerBackgroundTaskTestCase(unittest.TestCase):
 
         self.assertEqual(calls, [])
 
+    def test_background_task_honors_initial_delay(self):
+        fake_schedule = _FakeScheduleModule()
+        with patch.dict(sys.modules, {"schedule": fake_schedule}):
+            from src.scheduler import Scheduler
+
+            scheduler = Scheduler(schedule_time="18:00")
+            calls = []
+            fake_thread = MagicMock()
+            fake_thread.is_alive.return_value = False
+
+            def _make_thread(target=None, **kwargs):
+                fake_thread.start.side_effect = target
+                return fake_thread
+
+            with patch("src.scheduler.time.time", return_value=1000.0):
+                scheduler.add_background_task(
+                    lambda: calls.append("ran"),
+                    interval_seconds=300,
+                    run_immediately=False,
+                    name="delayed",
+                    initial_delay_seconds=120,
+                )
+
+            entry = scheduler._background_tasks[0]
+            self.assertEqual(entry["initial_delay_seconds"], 120)
+            self.assertEqual(entry["last_run"], 820.0)
+
+            with patch("src.scheduler.time.time", return_value=1119.0):
+                scheduler._run_background_tasks()
+            self.assertEqual(calls, [])
+
+            with patch("src.scheduler.threading.Thread", side_effect=_make_thread):
+                with patch("src.scheduler.time.time", return_value=1120.0):
+                    scheduler._run_background_tasks()
+
+        self.assertEqual(calls, ["ran"])
+
     def test_run_with_schedule_registers_background_tasks_before_immediate_daily_task(self):
         fake_schedule = _FakeScheduleModule()
         with patch.dict(sys.modules, {"schedule": fake_schedule}):
@@ -93,7 +130,7 @@ class SchedulerBackgroundTaskTestCase(unittest.TestCase):
                     order.append(("provider", callable(schedule_time_provider)))
 
                 def add_background_task(self, **kwargs):
-                    order.append(("background", kwargs["name"]))
+                    order.append(("background", kwargs["name"], kwargs.get("initial_delay_seconds")))
 
                 def set_daily_task(self, task, run_immediately=True):
                     order.append(("daily", run_immediately))
@@ -110,10 +147,11 @@ class SchedulerBackgroundTaskTestCase(unittest.TestCase):
                         "interval_seconds": 60,
                         "run_immediately": True,
                         "name": "event_monitor",
+                        "initial_delay_seconds": 15,
                     }],
                 )
 
-        self.assertEqual(order[:4], [("init", "18:00"), ("provider", False), ("background", "event_monitor"), ("daily", True)])
+        self.assertEqual(order[:4], [("init", "18:00"), ("provider", False), ("background", "event_monitor", 15), ("daily", True)])
 
     def test_scheduler_reloads_daily_job_when_schedule_time_changes(self):
         fake_schedule = _FakeScheduleModule()

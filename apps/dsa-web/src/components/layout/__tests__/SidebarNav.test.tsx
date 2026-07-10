@@ -48,6 +48,42 @@ describe('SidebarNav', () => {
     expect(screen.queryByRole('link', { name: '选股' })).not.toBeInTheDocument();
   });
 
+  it('shows the industry boards navigation item regardless of AlphaSift status', () => {
+    mockGetAlphaSiftStatus.mockResolvedValueOnce({ enabled: false, available: false, installSpecIsDefault: false });
+
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <SidebarNav />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByRole('link', { name: '行业板块' })).toHaveAttribute('href', '/industry-boards');
+  });
+
+  it('shows the paper trading navigation item regardless of AlphaSift status', () => {
+    mockGetAlphaSiftStatus.mockResolvedValueOnce({ enabled: false, available: false, installSpecIsDefault: false });
+
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <SidebarNav />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByRole('link', { name: '模拟交易' })).toHaveAttribute('href', '/paper-trading');
+  });
+
+  it('shows the Agent console navigation item regardless of AlphaSift status', () => {
+    mockGetAlphaSiftStatus.mockResolvedValueOnce({ enabled: false, available: false, installSpecIsDefault: false });
+
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <SidebarNav />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByRole('link', { name: 'Agent 控制台' })).toHaveAttribute('href', '/agent-console');
+  });
+
   it('shows the screening navigation item when AlphaSift is enabled', async () => {
     mockGetAlphaSiftStatus.mockResolvedValueOnce({ enabled: true, available: false, installSpecIsDefault: false });
 
@@ -71,7 +107,53 @@ describe('SidebarNav', () => {
 
     await screen.findByRole('link', { name: '选股' });
     const hrefs = screen.getAllByRole('link').map((link) => link.getAttribute('href'));
-    expect(hrefs.slice(0, 5)).toEqual(['/', '/chat', '/screening', '/portfolio', '/decision-signals']);
+    expect(hrefs.slice(0, 7)).toEqual([
+      '/',
+      '/chat',
+      '/screening',
+      '/industry-boards',
+      '/portfolio',
+      '/paper-trading',
+      '/agent-console',
+    ]);
+  });
+
+  it('marks the Agent console navigation item active', () => {
+    render(
+      <MemoryRouter initialEntries={['/agent-console']}>
+        <SidebarNav />
+      </MemoryRouter>,
+    );
+
+    const consoleLink = screen.getByRole('link', { name: 'Agent 控制台' });
+    expect(consoleLink).toHaveAttribute('href', '/agent-console');
+    expect(consoleLink).toHaveClass('font-medium');
+  });
+
+  it('keeps the Agent console navigation item active on run detail routes', () => {
+    render(
+      <MemoryRouter initialEntries={['/agent-console/ss-agent-test']}>
+        <SidebarNav />
+      </MemoryRouter>,
+    );
+
+    const consoleLink = screen.getByRole('link', { name: 'Agent 控制台' });
+    expect(consoleLink).toHaveAttribute('href', '/agent-console');
+    expect(consoleLink).toHaveClass('font-medium');
+  });
+
+  it('keeps Agent console directly after paper trading when AlphaSift is enabled', async () => {
+    mockGetAlphaSiftStatus.mockResolvedValueOnce({ enabled: true, available: false, installSpecIsDefault: false });
+
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <SidebarNav />
+      </MemoryRouter>,
+    );
+
+    await screen.findByRole('link', { name: '选股' });
+    const hrefs = screen.getAllByRole('link').map((link) => link.getAttribute('href'));
+    expect(hrefs.slice(5, 7)).toEqual(['/paper-trading', '/agent-console']);
   });
 
   it('refreshes the screening navigation item after any config save event', async () => {

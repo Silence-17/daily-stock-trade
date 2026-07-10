@@ -267,6 +267,48 @@ describe('StockScreeningPage', () => {
     expect(screen.queryByText(/No cached AlphaSift hotspot snapshot/)).not.toBeInTheDocument();
   });
 
+  it('shows AlphaSift source health diagnostics from status', async () => {
+    getAlphaSiftStatus.mockResolvedValueOnce({
+      enabled: true,
+      available: true,
+      installSpecIsDefault: true,
+      sourceHealth: {
+        snapshot: {
+          sina: {
+            status: 'cooldown',
+            failure_count: 2,
+            cooldown_until: '2026-07-03T10:00:00Z',
+            last_error: 'snapshot request timeout',
+          },
+          efinance: {
+            status: 'ok',
+            failures: 0,
+          },
+        },
+        daily: {
+          akshare: {
+            state: 'failed',
+            consecutive_failures: 3,
+            message: "RemoteDisconnected('Remote end closed connection without response')",
+          },
+        },
+      },
+    });
+
+    render(<StockScreeningPage />);
+
+    expect(await screen.findByText('数据源健康')).toBeInTheDocument();
+    expect(screen.getByText('3 个源')).toBeInTheDocument();
+    expect(screen.getByText('sina')).toBeInTheDocument();
+    expect(screen.getByText('efinance')).toBeInTheDocument();
+    expect(screen.getByText('akshare')).toBeInTheDocument();
+    expect(screen.getByText('cooldown')).toBeInTheDocument();
+    expect(screen.getByText('failed')).toBeInTheDocument();
+    expect(screen.getByText('失败：2')).toBeInTheDocument();
+    expect(screen.getByText('最近错误：请求超时')).toBeInTheDocument();
+    expect(screen.getByText('最近错误：网络连接中断')).toBeInTheDocument();
+  });
+
   it('shows backend hotspot empty message before raw source diagnostics', async () => {
     getAlphaSiftStatus.mockResolvedValueOnce({
       enabled: true,
@@ -987,6 +1029,58 @@ describe('StockScreeningPage', () => {
     expect(await screen.findByText('AlphaSift 提示')).toBeInTheDocument();
     expect(screen.getAllByText('数据源降级：tushare（交易日历暂无可用开市日）')).toHaveLength(1);
     expect(screen.queryByText(/trade_cal returned no open trading days/)).not.toBeInTheDocument();
+  });
+
+  it('shows stale cache status when AlphaSift screen falls back to last-good candidates', async () => {
+    getAlphaSiftStatus.mockResolvedValueOnce({
+      enabled: true,
+      available: true,
+      installSpecIsDefault: true,
+    });
+    screenStocks.mockResolvedValueOnce({
+      enabled: true,
+      candidates: [
+        {
+          rank: 1,
+          code: '600519',
+          name: '贵州茅台',
+          score: 88.5,
+          reason: 'last-good cache candidate',
+          dataQuality: 'stale',
+          missingFields: ['amount', 'trading_status'],
+          dataSources: ['last_good_cache'],
+          cacheUsed: true,
+          stale: true,
+          cachedAt: '2026-07-03T00:00:00Z',
+          staleAgeHours: 2.5,
+          raw: {},
+        },
+      ],
+      candidateCount: 1,
+      llmRanked: true,
+      qualityStatus: 'stale',
+      fallbackUsed: true,
+      cacheUsed: true,
+      stale: true,
+      staleAgeHours: 2.5,
+      cachedAt: '2026-07-03T00:00:00Z',
+      sourceErrors: ['alphasift_screen_failed: snapshot timeout'],
+    });
+
+    render(<StockScreeningPage />);
+
+    expect(await screen.findByText('选股已开启')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /运行选股/ }));
+
+    expect(await screen.findByText('AlphaSift 提示')).toBeInTheDocument();
+    expect(screen.getByText(/当前候选来自上次成功缓存/)).toBeInTheDocument();
+    expect(screen.getByText(/数据质量已标记为 stale/)).toBeInTheDocument();
+    expect(screen.getByText(/数据质量：stale/)).toBeInTheDocument();
+    expect(screen.getByText('贵州茅台')).toBeInTheDocument();
+    expect(screen.getAllByText('数据 stale').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText('缺失字段：amount、trading_status')).toBeInTheDocument();
+    expect(screen.getByText('来源：last_good_cache')).toBeInTheDocument();
+    expect(screen.getByText(/缓存：/)).toBeInTheDocument();
   });
 
   it('sanitizes long AlphaSift source diagnostics and keeps the alert constrained', async () => {

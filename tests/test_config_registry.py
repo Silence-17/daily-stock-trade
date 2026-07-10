@@ -239,7 +239,7 @@ class TestGenerationBackendFieldsRegistered(unittest.TestCase):
     def test_schema_response_groups_generation_backend_fields(self):
         schema = build_schema_response()
         self.assertEqual(schema["schema_version"], SCHEMA_VERSION)
-        self.assertEqual(SCHEMA_VERSION, "2026-06-29-claude-code-cli-backend")
+        self.assertEqual(SCHEMA_VERSION, "2026-07-03-vnpy-runtime-bootstrap")
 
         categories = {
             category["category"]: {field["key"] for field in category["fields"]}
@@ -560,6 +560,49 @@ class TestEnvExampleWebSettingsCoverage(unittest.TestCase):
             sorted(active_keys - registered_keys - WEB_SETTINGS_HIDDEN_FROM_UI),
             [],
         )
+
+
+class TestVnpyRuntimeFieldsRegistered(unittest.TestCase):
+    """vn.py runtime bootstrap settings should be visible in the settings schema."""
+
+    _VNPY_KEYS = (
+        "VNPY_RUNTIME_ENABLED",
+        "VNPY_GATEWAY_CLASS",
+        "VNPY_GATEWAY_NAME",
+        "VNPY_CONNECT_SETTINGS_PATH",
+        "VNPY_CONNECT_ON_START",
+        "VNPY_AUTO_ATTACH_EVENTS",
+    )
+
+    def test_field_definitions_exist(self) -> None:
+        expected_types = {
+            "VNPY_RUNTIME_ENABLED": ("boolean", "switch", "false"),
+            "VNPY_GATEWAY_CLASS": ("string", "text", ""),
+            "VNPY_GATEWAY_NAME": ("string", "text", ""),
+            "VNPY_CONNECT_SETTINGS_PATH": ("string", "text", ""),
+            "VNPY_CONNECT_ON_START": ("boolean", "switch", "false"),
+            "VNPY_AUTO_ATTACH_EVENTS": ("boolean", "switch", "true"),
+        }
+        for key in self._VNPY_KEYS:
+            field = get_field_definition(key)
+            data_type, ui_control, default_value = expected_types[key]
+            self.assertEqual(field["category"], "data_source", f"{key} category")
+            self.assertEqual(field["data_type"], data_type, f"{key} data_type")
+            self.assertEqual(field["ui_control"], ui_control, f"{key} control")
+            self.assertEqual(field["default_value"], default_value, f"{key} default")
+            self.assertFalse(field["is_sensitive"], f"{key} should not be sensitive")
+            self.assertIn("restart_required", field.get("warning_codes", []))
+
+    def test_schema_response_includes_vnpy_runtime_fields(self) -> None:
+        schema = build_schema_response()
+        data_source_cat = next(
+            (category for category in schema["categories"] if category["category"] == "data_source"),
+            None,
+        )
+        self.assertIsNotNone(data_source_cat, "data_source category missing")
+        field_keys = {field["key"] for field in data_source_cat["fields"]}
+        for key in self._VNPY_KEYS:
+            self.assertIn(key, field_keys, f"{key} missing from schema response")
 
 
 class TestSettingsHelpContract(unittest.TestCase):

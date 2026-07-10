@@ -549,6 +549,62 @@ class TestFundamentalContext(unittest.TestCase):
             {"name": "消费", "code": "BK0475", "type": "概念"},
         )
 
+    def test_get_belong_boards_preserves_a_stock_data_extended_fields(self) -> None:
+        fetcher = _DummyBoardFetcher(
+            "AStockDataFetcher",
+            priority=0,
+            boards=[
+                {
+                    "name": "食品饮料",
+                    "code": "BK0438",
+                    "change_pct": 0.0,
+                    "lead_stock": "贵州茅台",
+                    "source": "a_stock_data_eastmoney",
+                },
+            ],
+        )
+        manager = DataFetcherManager(fetchers=[fetcher])
+        boards = manager.get_belong_boards("600519")
+        self.assertEqual(
+            boards,
+            [
+                {
+                    "name": "食品饮料",
+                    "code": "BK0438",
+                    "change_pct": 0.0,
+                    "lead_stock": "贵州茅台",
+                    "source": "a_stock_data_eastmoney",
+                },
+            ],
+        )
+
+    def test_get_industry_boards_uses_ordered_fallback(self) -> None:
+        class _EmptyIndustryBoardFetcher:
+            name = "EmptyIndustryBoardFetcher"
+            priority = 0
+
+            def get_industry_boards(self):
+                return []
+
+        class _FallbackIndustryBoardFetcher:
+            name = "AStockDataFetcher"
+            priority = 1
+
+            def get_industry_boards(self):
+                return [{"rank": 1, "code": "BK1036", "name": "半导体"}]
+
+        manager = DataFetcherManager(
+            fetchers=[
+                _EmptyIndustryBoardFetcher(),
+                _FallbackIndustryBoardFetcher(),
+            ]
+        )
+
+        boards, source = manager.get_industry_boards()
+
+        self.assertEqual(source, "AStockDataFetcher")
+        self.assertEqual(boards, [{"rank": 1, "code": "BK1036", "name": "半导体"}])
+
     def test_get_belong_boards_supports_extended_name_aliases_in_dict_payload(self) -> None:
         fetcher = _DummyBoardFetcher(
             "EfinanceFetcher",

@@ -98,6 +98,7 @@ P1 自动生成的 `source_type=analysis` 信号会在 metadata 中写入默认�
 - 通知只引用公开摘要字段：`action`、`horizon`、`reason`、`watch_conditions`、`risk_summary`、`source_report_id`。
 - 通知不得输出 signal `metadata`、`evidence`、raw diagnostics、webhook URL、token 或 cookie。
 - `GET /api/v1/portfolio/risk` 的 `decision_signal_risk` 只统计当前持仓中的 active `sell/reduce/alert` 信号，查询失败时 fail-open。
+- vn.py paper 自动卖出可在显式开启 `auto_signal_exit_enabled` 后消费当前持仓的 active `sell/reduce/avoid` 信号，并以 `strategy_invalidated` 生成本地 paper 或 `vnpy_paper` 卖出计划；该能力仍只属于模拟交易/桥接审计路径，不会绕过真实交易权限或确认设计。
 
 更多告警和通知细节见 `docs/alerts.md` 与 `docs/notifications.md`。
 

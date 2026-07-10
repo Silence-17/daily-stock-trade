@@ -123,14 +123,17 @@ class TestFetcherSourceOptimization(unittest.TestCase):
             "data_provider.akshare_fetcher.AkshareFetcher",
             return_value=_StubFetcher("AkshareFetcher", 1),
         ), patch(
+            "data_provider.a_stock_data_fetcher.AStockDataFetcher",
+            return_value=_StubFetcher("AStockDataFetcher", 2),
+        ), patch(
             "data_provider.pytdx_fetcher.PytdxFetcher",
-            return_value=_StubFetcher("PytdxFetcher", 2),
+            return_value=_StubFetcher("PytdxFetcher", 3),
         ), patch(
             "data_provider.baostock_fetcher.BaostockFetcher",
-            return_value=_StubFetcher("BaostockFetcher", 3),
+            return_value=_StubFetcher("BaostockFetcher", 4),
         ), patch(
             "data_provider.yfinance_fetcher.YfinanceFetcher",
-            return_value=_StubFetcher("YfinanceFetcher", 4),
+            return_value=_StubFetcher("YfinanceFetcher", 5),
         ), patch(
             "data_provider.tushare_fetcher.TushareFetcher",
             return_value=_StubFetcher("TushareFetcher", -1),
@@ -147,6 +150,7 @@ class TestFetcherSourceOptimization(unittest.TestCase):
                 "EfinanceFetcher",
                 "TencentFetcher",
                 "AkshareFetcher",
+                "AStockDataFetcher",
                 "PytdxFetcher",
                 "BaostockFetcher",
                 "YfinanceFetcher",

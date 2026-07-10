@@ -18,7 +18,7 @@ from src.config import (
 from src.notification_noise import NOTIFICATION_SEVERITIES
 from src.notification_routing import ROUTABLE_NOTIFICATION_CHANNELS
 
-SCHEMA_VERSION = "2026-06-29-claude-code-cli-backend"
+SCHEMA_VERSION = "2026-07-03-vnpy-runtime-bootstrap"
 
 _CATEGORY_DEFINITIONS: List[Dict[str, Any]] = [
     {
@@ -939,6 +939,164 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
                 "href": "https://github.com/ZhuLinsen/daily_stock_analysis/blob/main/docs/alphasift-integration.md",
             },
         ],
+    },
+    "VNPY_RUNTIME_ENABLED": {
+        "title": "vn.py Runtime Bootstrap",
+        "description": "Create a vn.py EventEngine/MainEngine during Web/API startup. Disabled by default; the local paper ledger remains available without vn.py.",
+        "category": "data_source",
+        "data_type": "boolean",
+        "ui_control": "switch",
+        "is_sensitive": False,
+        "is_required": False,
+        "is_editable": True,
+        "default_value": "false",
+        "options": [],
+        "validation": {},
+        "display_order": 181,
+        "help_key": "settings.data_source.VNPY_RUNTIME_ENABLED",
+        "examples": [
+            "VNPY_RUNTIME_ENABLED=false",
+            "VNPY_RUNTIME_ENABLED=true",
+        ],
+        "docs": [
+            {
+                "label": "vn.py paper trading guide",
+                "href": "https://github.com/ZhuLinsen/daily_stock_analysis/blob/main/docs/vnpy-paper-trading.md",
+            },
+        ],
+        "warning_codes": ["restart_required"],
+    },
+    "VNPY_GATEWAY_CLASS": {
+        "title": "vn.py Gateway Class",
+        "description": "Optional gateway class import path used when runtime bootstrap is enabled, using module:Class or module.Class syntax.",
+        "category": "data_source",
+        "data_type": "string",
+        "ui_control": "text",
+        "is_sensitive": False,
+        "is_required": False,
+        "is_editable": True,
+        "default_value": "",
+        "placeholder": "package.module:GatewayClass",
+        "options": [],
+        "validation": {
+            "pattern": r"^$|^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*[:.][A-Za-z_][A-Za-z0-9_]*$"
+        },
+        "display_order": 182,
+        "help_key": "settings.data_source.VNPY_GATEWAY_CLASS",
+        "examples": [
+            "VNPY_GATEWAY_CLASS=vnpy_ctp:CtpGateway",
+            "VNPY_GATEWAY_CLASS=vnpy_ctp.gateway.CtpGateway",
+        ],
+        "docs": [
+            {
+                "label": "vn.py paper trading guide",
+                "href": "https://github.com/ZhuLinsen/daily_stock_analysis/blob/main/docs/vnpy-paper-trading.md",
+            },
+        ],
+        "warning_codes": ["restart_required"],
+    },
+    "VNPY_GATEWAY_NAME": {
+        "title": "vn.py Gateway Name",
+        "description": "Optional gateway name passed to vn.py MainEngine.connect and send_order. Leave empty to use the gateway class default.",
+        "category": "data_source",
+        "data_type": "string",
+        "ui_control": "text",
+        "is_sensitive": False,
+        "is_required": False,
+        "is_editable": True,
+        "default_value": "",
+        "options": [],
+        "validation": {"pattern": r"^$|^[A-Za-z0-9_.-]{1,64}$"},
+        "display_order": 183,
+        "help_key": "settings.data_source.VNPY_GATEWAY_NAME",
+        "examples": [
+            "VNPY_GATEWAY_NAME=CTP",
+        ],
+        "docs": [
+            {
+                "label": "vn.py paper trading guide",
+                "href": "https://github.com/ZhuLinsen/daily_stock_analysis/blob/main/docs/vnpy-paper-trading.md",
+            },
+        ],
+        "warning_codes": ["restart_required"],
+    },
+    "VNPY_CONNECT_SETTINGS_PATH": {
+        "title": "vn.py Connect Settings Path",
+        "description": "Optional external JSON file containing gateway connection settings. Keep credentials in that file rather than in .env.",
+        "category": "data_source",
+        "data_type": "string",
+        "ui_control": "text",
+        "is_sensitive": False,
+        "is_required": False,
+        "is_editable": True,
+        "default_value": "",
+        "placeholder": "path/to/vnpy-connect.json",
+        "options": [],
+        "validation": {"pattern": r"^$|^[^\r\n<>|?*]+$"},
+        "display_order": 184,
+        "help_key": "settings.data_source.VNPY_CONNECT_SETTINGS_PATH",
+        "examples": [
+            "VNPY_CONNECT_SETTINGS_PATH=path/to/vnpy-connect.json",
+        ],
+        "docs": [
+            {
+                "label": "vn.py paper trading guide",
+                "href": "https://github.com/ZhuLinsen/daily_stock_analysis/blob/main/docs/vnpy-paper-trading.md",
+            },
+        ],
+        "warning_codes": ["restart_required"],
+    },
+    "VNPY_CONNECT_ON_START": {
+        "title": "vn.py Connect On Start",
+        "description": "Call MainEngine.connect during startup after loading the external connect settings JSON.",
+        "category": "data_source",
+        "data_type": "boolean",
+        "ui_control": "switch",
+        "is_sensitive": False,
+        "is_required": False,
+        "is_editable": True,
+        "default_value": "false",
+        "options": [],
+        "validation": {},
+        "display_order": 185,
+        "help_key": "settings.data_source.VNPY_CONNECT_ON_START",
+        "examples": [
+            "VNPY_CONNECT_ON_START=false",
+            "VNPY_CONNECT_ON_START=true",
+        ],
+        "docs": [
+            {
+                "label": "vn.py paper trading guide",
+                "href": "https://github.com/ZhuLinsen/daily_stock_analysis/blob/main/docs/vnpy-paper-trading.md",
+            },
+        ],
+        "warning_codes": ["restart_required"],
+    },
+    "VNPY_AUTO_ATTACH_EVENTS": {
+        "title": "vn.py Auto Attach Events",
+        "description": "Automatically subscribe the paper-trading sync bridge to vn.py order, trade, account, and position events during runtime bootstrap.",
+        "category": "data_source",
+        "data_type": "boolean",
+        "ui_control": "switch",
+        "is_sensitive": False,
+        "is_required": False,
+        "is_editable": True,
+        "default_value": "true",
+        "options": [],
+        "validation": {},
+        "display_order": 186,
+        "help_key": "settings.data_source.VNPY_AUTO_ATTACH_EVENTS",
+        "examples": [
+            "VNPY_AUTO_ATTACH_EVENTS=true",
+            "VNPY_AUTO_ATTACH_EVENTS=false",
+        ],
+        "docs": [
+            {
+                "label": "vn.py paper trading guide",
+                "href": "https://github.com/ZhuLinsen/daily_stock_analysis/blob/main/docs/vnpy-paper-trading.md",
+            },
+        ],
+        "warning_codes": ["restart_required"],
     },
     "REALTIME_SOURCE_PRIORITY": {
         "title": "Realtime Source Priority",
@@ -4938,6 +5096,7 @@ def _infer_category(key: str) -> str:
             "SEARXNG",
             "NEWS_",
             "BIAS_",
+            "VNPY_",
         )
     ) or key in ("ENABLE_REALTIME_QUOTE", "ENABLE_CHIP_DISTRIBUTION"):
         return "data_source"

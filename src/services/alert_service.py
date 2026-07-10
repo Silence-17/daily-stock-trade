@@ -77,6 +77,7 @@ SYMBOL_ALERT_TYPES = LEGACY_RUNTIME_ALERT_TYPES | TECHNICAL_ALERT_TYPES
 SUPPORTED_ALERT_TYPES = SYMBOL_ALERT_TYPES | PORTFOLIO_ALERT_TYPES | MARKET_ALERT_TYPES
 SUPPORTED_TARGET_SCOPES = frozenset({"single_symbol", "watchlist", "portfolio_holdings", "portfolio_account", "market"})
 SUPPORTED_SEVERITIES = frozenset({"info", "warning", "critical"})
+SUPPORTED_TRIGGER_STATUSES = frozenset({"triggered", "skipped", "degraded", "failed"})
 NULLABLE_RULE_UPDATE_FIELDS = frozenset({"cooldown_policy", "notification_policy"})
 
 logger = logging.getLogger(__name__)
@@ -774,6 +775,15 @@ class AlertService:
             return None
 
     @staticmethod
+    def _coerce_optional_float(value: Any) -> Optional[float]:
+        if value is None or value == "":
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
     def _coerce_datetime(value: Any) -> Optional[datetime]:
         if value is None:
             return None
@@ -866,6 +876,71 @@ class AlertService:
             "page": page,
             "page_size": page_size,
         }
+
+    def record_system_event(
+        self,
+        *,
+        target: str,
+        event_type: str,
+        status: str = "triggered",
+        reason: Optional[str] = None,
+        data_source: str = "system",
+        observed_value: Optional[Any] = None,
+        threshold: Optional[Any] = None,
+        data_timestamp: Optional[Any] = None,
+        diagnostics: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Record a non-rule system event in the alert trigger history."""
+
+        clean_target = str(target or "").strip()[:64]
+        if not clean_target:
+            raise AlertServiceError("target is required")
+
+        clean_event_type = str(event_type or "").strip().lower()
+        if not clean_event_type:
+            raise AlertServiceError("event_type is required")
+
+        clean_status = str(status or "triggered").strip().lower()
+        if clean_status not in SUPPORTED_TRIGGER_STATUSES:
+            raise AlertServiceError(f"unsupported trigger status: {clean_status}")
+
+        clean_reason = self._sanitize_text(reason or clean_event_type)
+        clean_source = str(data_source or "system").strip()[:64] or "system"
+        diagnostics_payload: Dict[str, Any] = {
+            "event_type": clean_event_type,
+            "source": clean_source,
+        }
+        if diagnostics:
+            diagnostics_payload.update(diagnostics)
+            diagnostics_payload["event_type"] = clean_event_type
+            diagnostics_payload["source"] = clean_source
+
+        try:
+            diagnostics_text = json.dumps(diagnostics_payload, ensure_ascii=False)
+        except TypeError:
+            diagnostics_text = json.dumps(
+                {
+                    "event_type": clean_event_type,
+                    "source": clean_source,
+                    "message": self._sanitize_text(diagnostics_payload),
+                },
+                ensure_ascii=False,
+            )
+
+        row = self.repo.create_trigger(
+            {
+                "rule_id": None,
+                "target": clean_target,
+                "observed_value": self._coerce_optional_float(observed_value),
+                "threshold": self._coerce_optional_float(threshold),
+                "reason": clean_reason,
+                "data_source": clean_source,
+                "data_timestamp": self._coerce_datetime(data_timestamp),
+                "status": clean_status,
+                "diagnostics": diagnostics_text,
+            }
+        )
+        return self._serialize_trigger(row)
 
     def _normalize_rule_payload(self, payload: Dict[str, Any], *, source: str = "api") -> Dict[str, Any]:
         target_scope = str(payload.get("target_scope") or "single_symbol").strip()

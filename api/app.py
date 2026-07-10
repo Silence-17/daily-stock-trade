@@ -158,15 +158,18 @@ from api.middlewares.error_handler import add_error_handlers
 from api.v1.schemas.common import HealthResponse
 from src.auth import is_auth_enabled
 from src.data.stock_index_loader import find_existing_stock_index_path
+from src.repositories.runtime_scheduler_repo import RuntimeSchedulerRepository
 from src.services.system_config_service import SystemConfigService
 from src.services.runtime_scheduler import (
     CLI_SCHEDULER_OWNER_ENV,
     RUNTIME_SCHEDULER_ARGS_ENV,
+    RUNTIME_SCHEDULER_DISABLE_DAILY_ENV,
     RUNTIME_SCHEDULER_FORCE_ENABLED_ENV,
     RUNTIME_SCHEDULER_RUN_IMMEDIATELY_ENV,
     RUNTIME_SCHEDULER_SUPPRESS_START_ENV,
     RuntimeSchedulerService,
 )
+from src.services.vnpy_runtime import bootstrap_vnpy_runtime
 from src.services.stock_index_remote_service import (
     get_remote_stock_index_cache_path,
     refresh_remote_stock_index_cache,
@@ -244,6 +247,12 @@ async def app_lifespan(app: FastAPI):
         "yes",
         "on",
     }
+    runtime_disable_daily = os.getenv(RUNTIME_SCHEDULER_DISABLE_DAILY_ENV, "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
     runtime_run_immediately_override = os.getenv(RUNTIME_SCHEDULER_RUN_IMMEDIATELY_ENV)
     if runtime_suppress_start or not runtime_owns_schedule:
         runtime_run_immediately = False
@@ -262,14 +271,26 @@ async def app_lifespan(app: FastAPI):
     os.environ.pop(RUNTIME_SCHEDULER_FORCE_ENABLED_ENV, None)
     os.environ.pop(RUNTIME_SCHEDULER_RUN_IMMEDIATELY_ENV, None)
     os.environ.pop(RUNTIME_SCHEDULER_SUPPRESS_START_ENV, None)
+    os.environ.pop(RUNTIME_SCHEDULER_DISABLE_DAILY_ENV, None)
     os.environ.pop(RUNTIME_SCHEDULER_ARGS_ENV, None)
     runtime_scheduler_service = RuntimeSchedulerService(
         owns_schedule=runtime_owns_schedule,
         force_enabled=runtime_force_enabled,
+        daily_schedule_disabled=runtime_disable_daily,
         run_immediately_in_background=True,
         schedule_args_overrides=runtime_scheduler_args,
+        task_event_repository=RuntimeSchedulerRepository(),
     )
     app.state.runtime_scheduler_service = runtime_scheduler_service
+    vnpy_runtime = bootstrap_vnpy_runtime()
+    app.state.vnpy_runtime_handle = vnpy_runtime
+    app.state.vnpy_runtime_diagnostics = vnpy_runtime.diagnostics
+    if vnpy_runtime.main_engine is not None:
+        app.state.vnpy_main_engine = vnpy_runtime.main_engine
+    if vnpy_runtime.event_engine is not None:
+        app.state.vnpy_event_engine = vnpy_runtime.event_engine
+    if vnpy_runtime.event_bridge is not None:
+        app.state.vnpy_paper_event_bridge = vnpy_runtime.event_bridge
     if not runtime_suppress_start:
         app.state.runtime_scheduler_service.reconcile_from_config(
             run_immediately=runtime_run_immediately,
@@ -292,6 +313,18 @@ async def app_lifespan(app: FastAPI):
         if runtime_scheduler is not None:
             runtime_scheduler.stop()
             delattr(app.state, "runtime_scheduler_service")
+        vnpy_runtime = getattr(app.state, "vnpy_runtime_handle", None)
+        if vnpy_runtime is not None:
+            vnpy_runtime.close()
+            delattr(app.state, "vnpy_runtime_handle")
+        for attr_name in (
+            "vnpy_runtime_diagnostics",
+            "vnpy_main_engine",
+            "vnpy_event_engine",
+            "vnpy_paper_event_bridge",
+        ):
+            if hasattr(app.state, attr_name):
+                delattr(app.state, attr_name)
 
 
 def create_app(static_dir: Optional[Path] = None) -> FastAPI:

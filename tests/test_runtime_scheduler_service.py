@@ -8,7 +8,7 @@ import os
 import sys
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -19,6 +19,7 @@ from fastapi.testclient import TestClient
 from src.services.runtime_scheduler import (
     CLI_SCHEDULER_OWNER_ENV,
     RUNTIME_SCHEDULER_ARGS_ENV,
+    RUNTIME_SCHEDULER_DISABLE_DAILY_ENV,
     RUNTIME_SCHEDULER_FORCE_ENABLED_ENV,
     RUNTIME_SCHEDULER_RUN_IMMEDIATELY_ENV,
     RUNTIME_SCHEDULER_SUPPRESS_START_ENV,
@@ -84,6 +85,46 @@ class _SynchronousThread(_NoopThread):
     def start(self):
         if self.target is not None:
             self.target()
+
+
+class _FakeTaskEventRepository:
+    def __init__(self, initial_events=None):
+        self.events = list(initial_events or [])
+        self.cleanup_calls = []
+
+    def record_task_event(
+        self,
+        *,
+        name,
+        status,
+        message,
+        details=None,
+        duration_seconds=None,
+        timestamp=None,
+    ):
+        event = {
+            "name": name,
+            "status": status,
+            "message": message,
+            "timestamp": timestamp.isoformat() if timestamp is not None else None,
+            "details": details or {},
+        }
+        if duration_seconds is not None:
+            event["duration_seconds"] = duration_seconds
+        self.events.append(event)
+        return event
+
+    def cleanup_task_events(self, *, older_than):
+        self.cleanup_calls.append(older_than)
+        return 0
+
+    def list_task_events(self, *, name=None, status=None, limit=50):
+        events = list(self.events)
+        if name:
+            events = [event for event in events if event["name"] == name]
+        if status:
+            events = [event for event in events if event["status"] == status]
+        return events[-limit:]
 
 
 class RuntimeSchedulerServiceTestCase(unittest.TestCase):
@@ -344,10 +385,12 @@ class RuntimeSchedulerServiceTestCase(unittest.TestCase):
                 interval_seconds: int,
                 run_immediately: bool,
                 name: str | None = None,
+                initial_delay_seconds: int | None = None,
             ) -> None:
                 self.background_tasks.append({
                     "task": task,
                     "interval_seconds": interval_seconds,
+                    "initial_delay_seconds": initial_delay_seconds,
                     "run_immediately": run_immediately,
                     "name": name,
                 })
@@ -391,6 +434,10 @@ class RuntimeSchedulerServiceTestCase(unittest.TestCase):
         ), patch(
             "src.services.runtime_scheduler.threading.Thread",
             _NoopThread,
+        ), patch.object(
+            RuntimeSchedulerService,
+            "_current_vnpy_paper_trading_background_tasks",
+            return_value=[],
         ), patch("src.services.alert_worker.AlertWorker", return_value=fake_worker):
             service.start()
 
@@ -402,6 +449,156 @@ class RuntimeSchedulerServiceTestCase(unittest.TestCase):
         self.assertEqual(scheduler.background_tasks[0]["run_immediately"], True)  # type: ignore[index]
         scheduler.background_tasks[0]["task"]()  # type: ignore[index]
         fake_worker.run_once.assert_called_once()
+
+    def test_start_can_run_background_tasks_without_daily_schedule(self) -> None:
+        class _FakeScheduler:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+                self.background_tasks = []
+                self.daily_task = None
+                self.daily_task_run_immediately = None
+
+            def set_daily_task(self, task, run_immediately: bool) -> None:
+                self.daily_task = task
+                self.daily_task_run_immediately = run_immediately
+
+            def add_background_task(
+                self,
+                task: callable,
+                interval_seconds: int,
+                run_immediately: bool,
+                name: str | None = None,
+                initial_delay_seconds: int | None = None,
+            ) -> None:
+                self.background_tasks.append({
+                    "task": task,
+                    "interval_seconds": interval_seconds,
+                    "initial_delay_seconds": initial_delay_seconds,
+                    "last_run": 1000.0,
+                    "run_immediately": run_immediately,
+                    "name": name,
+                })
+
+            def run(self) -> None:
+                return None
+
+            def stop(self) -> None:
+                return None
+
+            @property
+            def schedule(self):
+                class _Namespace:
+                    @staticmethod
+                    def get_jobs():
+                        return []
+
+                return _Namespace
+
+        config = SimpleNamespace(
+            schedule_enabled=False,
+            schedule_time="18:00",
+            schedule_times=["18:00"],
+        )
+        background_task = MagicMock()
+        background_task.return_value = {
+            "skipped": True,
+            "reason": "auto_trade_disabled",
+            "submitted_count": 0,
+            "skipped_count": 0,
+        }
+        task_event_repo = _FakeTaskEventRepository()
+        service = RuntimeSchedulerService(
+            config_provider=lambda: config,
+            background_tasks_provider=lambda _config: [{
+                "task": background_task,
+                "interval_seconds": 300,
+                "run_immediately": False,
+                "name": "vnpy_paper_auto_trade",
+                "initial_delay_seconds": 120,
+            }],
+            task_event_repository=task_event_repo,
+        )
+
+        with patch(
+            "src.services.runtime_scheduler.Scheduler",
+            _FakeScheduler,
+        ), patch(
+            "src.services.runtime_scheduler.threading.Thread",
+            _NoopThread,
+        ):
+            service.reconcile_from_config()
+
+        scheduler = service._scheduler
+        self.assertIsNotNone(scheduler)
+        status = service.status()
+        self.assertTrue(status["enabled"])
+        self.assertFalse(status["loop_running"])
+        self.assertEqual(status["background_tasks"][0]["name"], "vnpy_paper_auto_trade")
+        self.assertEqual(status["background_tasks"][0]["interval_seconds"], 300)
+        self.assertEqual(status["background_tasks"][0]["initial_delay_seconds"], 120)
+        self.assertFalse(status["background_tasks"][0]["running"])
+        self.assertEqual(status["background_tasks"][0]["next_run_at"], datetime.fromtimestamp(1300.0).isoformat())
+        self.assertEqual(status["next_run_at"], datetime.fromtimestamp(1300.0).isoformat())
+        self.assertIsNone(scheduler.daily_task)  # type: ignore[attr-defined]
+        self.assertEqual(len(scheduler.background_tasks), 1)  # type: ignore[attr-defined]
+        self.assertEqual(scheduler.background_tasks[0]["name"], "vnpy_paper_auto_trade")  # type: ignore[index]
+        scheduler.background_tasks[0]["task"]()  # type: ignore[index]
+        task_events = service.status()["task_events"]
+        self.assertEqual([event["status"] for event in task_events], ["started", "skipped"])
+        self.assertEqual(task_events[-1]["name"], "vnpy_paper_auto_trade")
+        self.assertEqual(task_events[-1]["details"]["reason"], "auto_trade_disabled")
+        self.assertEqual(task_events[-1]["details"]["submitted_count"], 0)
+        self.assertEqual([event["status"] for event in task_event_repo.events], ["started", "skipped"])
+        filtered_events = service.task_events(
+            name="vnpy_paper_auto_trade",
+            status="skipped",
+            limit=10,
+        )
+        self.assertEqual(len(filtered_events), 1)
+        self.assertEqual(filtered_events[0]["status"], "skipped")
+        self.assertEqual(filtered_events[0]["details"]["reason"], "auto_trade_disabled")
+
+    def test_task_events_can_read_persisted_repository_events(self) -> None:
+        service = RuntimeSchedulerService(
+            config_provider=lambda: SimpleNamespace(schedule_enabled=False),
+            task_event_repository=_FakeTaskEventRepository([{
+                "name": "vnpy_paper_auto_retry",
+                "status": "failed",
+                "message": "persisted failure",
+                "timestamp": "2026-07-02T09:32:00",
+                "details": {"error": "boom"},
+            }]),
+        )
+
+        events = service.task_events(
+            name="vnpy_paper_auto_retry",
+            status="failed",
+            limit=10,
+        )
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["message"], "persisted failure")
+        self.assertEqual(events[0]["details"]["error"], "boom")
+
+    def test_background_task_event_persistence_triggers_retention_cleanup(self) -> None:
+        repo = _FakeTaskEventRepository()
+        service = RuntimeSchedulerService(
+            config_provider=lambda: SimpleNamespace(schedule_enabled=False),
+            task_event_repository=repo,
+            task_event_retention_days=7,
+            task_event_cleanup_interval_seconds=0,
+        )
+
+        service._record_background_task_event(
+            name="vnpy_paper_auto_trade",
+            status="completed",
+            message="done",
+        )
+
+        self.assertEqual(len(repo.cleanup_calls), 1)
+        cutoff = repo.cleanup_calls[0]
+        self.assertLessEqual(cutoff, datetime.now() - timedelta(days=7))
+        self.assertGreater(cutoff, datetime.now() - timedelta(days=7, seconds=5))
 
     def test_rebuild_reuses_event_monitor_without_immediate_rerun(self) -> None:
         schedulers = []
@@ -425,10 +622,12 @@ class RuntimeSchedulerServiceTestCase(unittest.TestCase):
                 interval_seconds: int,
                 run_immediately: bool,
                 name: str | None = None,
+                initial_delay_seconds: int | None = None,
             ) -> None:
                 self.background_tasks.append({
                     "task": task,
                     "interval_seconds": interval_seconds,
+                    "initial_delay_seconds": initial_delay_seconds,
                     "run_immediately": run_immediately,
                     "name": name,
                 })
@@ -503,6 +702,7 @@ class RuntimeSchedulerServiceTestCase(unittest.TestCase):
         service = RuntimeSchedulerService(
             config_provider=lambda: config,
             force_enabled=True,
+            background_tasks_provider=lambda _config: [],
         )
 
         with patch.dict(sys.modules, {"schedule": fake_schedule}), patch(
@@ -532,8 +732,10 @@ class RuntimeSchedulerServiceTestCase(unittest.TestCase):
                 *,
                 owns_schedule=True,
                 force_enabled=False,
+                daily_schedule_disabled=False,
                 run_immediately_in_background=False,
                 schedule_args_overrides=None,
+                task_event_repository=None,
             ):
                 self.owns_schedule = owns_schedule
                 self.force_enabled = force_enabled
@@ -586,8 +788,10 @@ class RuntimeSchedulerServiceTestCase(unittest.TestCase):
                 *,
                 owns_schedule=True,
                 force_enabled=False,
+                daily_schedule_disabled=False,
                 run_immediately_in_background=False,
                 schedule_args_overrides=None,
+                task_event_repository=None,
             ):
                 events.append(("init", owns_schedule, force_enabled, run_immediately_in_background))
 
@@ -624,6 +828,56 @@ class RuntimeSchedulerServiceTestCase(unittest.TestCase):
         self.assertIsNone(os.getenv(RUNTIME_SCHEDULER_FORCE_ENABLED_ENV))
         self.assertIsNone(os.getenv(RUNTIME_SCHEDULER_RUN_IMMEDIATELY_ENV))
 
+    def test_lifespan_can_disable_daily_schedule_without_suppressing_start(self) -> None:
+        from api.app import create_app
+
+        events = []
+
+        class FakeRuntimeSchedulerService:
+            def __init__(
+                self,
+                *,
+                owns_schedule=True,
+                force_enabled=False,
+                daily_schedule_disabled=False,
+                run_immediately_in_background=False,
+                schedule_args_overrides=None,
+                task_event_repository=None,
+            ):
+                events.append(("init", owns_schedule, force_enabled, daily_schedule_disabled))
+
+            def reconcile_from_config(self, *, run_immediately=False, clear_enabled_override=False):
+                events.append(("reconcile", run_immediately, clear_enabled_override))
+
+            def stop(self):
+                events.append(("stop",))
+
+        class FakeSystemConfigService:
+            def __init__(self, runtime_scheduler=None):
+                self.runtime_scheduler = runtime_scheduler
+
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {RUNTIME_SCHEDULER_DISABLE_DAILY_ENV: "true"},
+            clear=False,
+        ), patch(
+            "src.config.get_config",
+            return_value=SimpleNamespace(schedule_run_immediately=False),
+        ), patch("api.app.RuntimeSchedulerService", FakeRuntimeSchedulerService), patch(
+            "api.app.SystemConfigService",
+            FakeSystemConfigService,
+        ), patch("api.app._schedule_stock_index_background_refresh"):
+            app = create_app(static_dir=Path(temp_dir))
+            with TestClient(app):
+                pass
+
+        self.assertEqual(events, [
+            ("init", True, False, True),
+            ("reconcile", False, False),
+            ("stop",),
+        ])
+        self.assertIsNone(os.getenv(RUNTIME_SCHEDULER_DISABLE_DAILY_ENV))
+
     def test_lifespan_suppresses_initial_start_without_losing_runtime_ownership(self) -> None:
         from api.app import create_app
 
@@ -635,8 +889,10 @@ class RuntimeSchedulerServiceTestCase(unittest.TestCase):
                 *,
                 owns_schedule=True,
                 force_enabled=False,
+                daily_schedule_disabled=False,
                 run_immediately_in_background=False,
                 schedule_args_overrides=None,
+                task_event_repository=None,
             ):
                 events.append(("init", owns_schedule, force_enabled, run_immediately_in_background))
 
@@ -691,8 +947,10 @@ class RuntimeSchedulerServiceTestCase(unittest.TestCase):
                 *,
                 owns_schedule=True,
                 force_enabled=False,
+                daily_schedule_disabled=False,
                 run_immediately_in_background=False,
                 schedule_args_overrides=None,
+                task_event_repository=None,
             ):
                 events.append(("init_args", schedule_args_overrides))
 
@@ -735,8 +993,10 @@ class RuntimeSchedulerServiceTestCase(unittest.TestCase):
                 *,
                 owns_schedule=True,
                 force_enabled=False,
+                daily_schedule_disabled=False,
                 run_immediately_in_background=False,
                 schedule_args_overrides=None,
+                task_event_repository=None,
             ):
                 events.append(("init", owns_schedule, force_enabled, run_immediately_in_background))
 
@@ -760,6 +1020,7 @@ class RuntimeSchedulerServiceTestCase(unittest.TestCase):
             os.environ.pop(CLI_SCHEDULER_OWNER_ENV, None)
             os.environ.pop(RUNTIME_SCHEDULER_FORCE_ENABLED_ENV, None)
             os.environ.pop(RUNTIME_SCHEDULER_RUN_IMMEDIATELY_ENV, None)
+            os.environ.pop(RUNTIME_SCHEDULER_DISABLE_DAILY_ENV, None)
 
             app = create_app(static_dir=Path(temp_dir))
             with TestClient(app):

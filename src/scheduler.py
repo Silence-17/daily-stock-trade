@@ -301,6 +301,7 @@ class Scheduler:
         interval_seconds: int,
         run_immediately: bool = False,
         name: Optional[str] = None,
+        initial_delay_seconds: Optional[int] = None,
     ) -> None:
         """Register a periodic background task executed inside the scheduler loop.
 
@@ -323,13 +324,24 @@ class Scheduler:
             "running": False,
         }
         if not run_immediately:
-            entry["last_run"] = time.time()
+            delay_seconds = None
+            if initial_delay_seconds is not None:
+                try:
+                    delay_seconds = max(0, int(initial_delay_seconds))
+                except (TypeError, ValueError):
+                    delay_seconds = None
+            if delay_seconds is None:
+                entry["last_run"] = time.time()
+            else:
+                entry["last_run"] = time.time() + delay_seconds - clamped_interval
+                entry["initial_delay_seconds"] = delay_seconds
         self._background_tasks.append(entry)
         logger.info(
-            "已注册后台任务: %s（间隔 %s 秒，立即执行=%s）",
+            "已注册后台任务: %s（间隔 %s 秒，立即执行=%s，首次延迟=%s）",
             entry["name"],
             entry["interval_seconds"],
             run_immediately,
+            entry.get("initial_delay_seconds"),
         )
         if run_immediately:
             self._start_background_task(entry)
@@ -451,6 +463,7 @@ def run_with_schedule(
             interval_seconds=entry["interval_seconds"],
             run_immediately=entry.get("run_immediately", False),
             name=entry.get("name"),
+            initial_delay_seconds=entry.get("initial_delay_seconds"),
         )
     scheduler.set_daily_task(task, run_immediately=run_immediately)
     scheduler.run()

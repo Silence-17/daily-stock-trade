@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from src.storage import DatabaseManager
 from src.config import get_config, Config
+from src.repositories.runtime_scheduler_repo import RuntimeSchedulerRepository
 from src.services.system_config_service import SystemConfigService
 from src.services.runtime_scheduler import RuntimeSchedulerService
 
@@ -76,6 +77,8 @@ def get_runtime_scheduler_service(request: Request) -> RuntimeSchedulerService:
     """Get app-lifecycle shared RuntimeSchedulerService instance."""
     service = getattr(request.app.state, "runtime_scheduler_service", None)
     if service is None:
-        service = RuntimeSchedulerService()
+        service = RuntimeSchedulerService(
+            task_event_repository=RuntimeSchedulerRepository(),
+        )
         request.app.state.runtime_scheduler_service = service
     return service

@@ -37,7 +37,7 @@ AlphaSift 作为独立仓库维护的选股引擎接入 DSA。DSA 默认不启�
 
 - DSA 增强：AlphaSift 通过 DSA provider context 在 LLM 重排前只补充 Top 候选的轻量实时行情和基本面上下文，不在初筛阶段抓新闻；DSA API 返回阶段会对最终 Top 候选补新闻和辅助摘要，并通过 `dsa_enrichment` 记录复用或补全情况。
 - 日 K 线补特征：DSA 调用 AlphaSift 时会优先复用 DSA 历史行情加载链路（数据库缓存、Tushare、Efinance、Akshare、Pytdx、Baostock、Yfinance 等 fallback），仅在 DSA 链路无可用数据时回退到 AlphaSift 原始日线数据源，减少单一上游超时拖垮选股。
-- LLM 环境：DSA 调用 AlphaSift 时会桥接 DSA 已解析的 `LITELLM_MODEL`、`LITELLM_FALLBACK_MODELS`、`LLM_CHANNELS`、`LLM_<NAME>_*`、`LITELLM_CONFIG`、渠道额外请求头和各模型密钥；AlphaSift 独立运行时仍使用自己的 `.env`/环境变量。`LLM_TIMEOUT_SEC` 与 `LLM_MAX_TOKENS` 可被 AlphaSift 选股 LLM 重排读取，分别限制单次请求耗时和输出 token 上限。
+- LLM 环境：DSA 调用 AlphaSift 时会桥接 DSA 已解析的 `LITELLM_MODEL`、`LITELLM_FALLBACK_MODELS`、`LLM_CHANNELS`、`LLM_<NAME>_*`、`LITELLM_CONFIG`、渠道额外请求头和各模型密钥；AlphaSift 独立运行时仍使用自己的 `.env`/环境变量。DSA 会在调用期为 AlphaSift 选股 LLM 重排默认注入 `LLM_TIMEOUT_SEC=180` 与 `LLM_MAX_TOKENS=1024`，分别限制单次请求耗时和输出 token 上限；如果用户已显式配置同名环境变量，则保留用户值。
 - 快照源：DSA 调用 AlphaSift 时，未显式配置 `SNAPSHOT_SOURCE_PRIORITY` 会按 token-aware 顺序注入：有 `TUSHARE_TOKEN` 时为 `tushare,sina,efinance,akshare_em,em_datacenter`，无 token 时为 `sina,efinance,akshare_em,em_datacenter`；同时注入 `DAILY_SOURCE=auto`、`DAILY_FETCH_RETRIES=3`、`DAILY_FETCH_MAX_WORKERS=1` 和默认候选上下文 `news,fund_flow,announcement,quote`。显式配置的源顺序、日线源和候选上下文 provider 会原样保留。
 - 最新 AlphaSift 能力：锁定 commit `0a7b9cd59e81718f851890535241bc105d4ddc64` 包含选股 pipeline 性能优化、Tencent 日 K、Sina snapshot、source health、stale daily fallback、candidate quote context、LLM ranking timeout/max tokens 边界、last-good snapshot fallback、日线历史缓存、行业/概念 provider cache、热点/行业热度因子、hotspot 热点题材榜单、本地 scorecard/post-analysis 元信息、日线数据源健康度排序与告警、硬过滤瀑布诊断、策略评估摘要、多窗口价格路径评估和题材匹配得分。DSA 调用时会注入隔离缓存默认路径 `data/alphasift`、`data/alphasift/snapshot.last_good.json`、`data/alphasift/daily_history`、`data/alphasift/industry_provider_cache`；Web 选股页提供“热点题材”手动刷新入口，请求 `/api/v1/alphasift/hotspots` 时会显式使用 `akshare` provider 优先拉取具体概念/题材异动（例如钼、铅锌、铜、诊断服务等实时板块异动），行业板块仅作为兜底；默认打开页面时优先读取上一次成功且不少于 3 条的热点题材缓存，点击刷新才实时拉取并覆盖缓存，实时拉取失败时会尽量回退旧缓存；如果 AlphaSift 合约层只返回少量或缺少涨跌幅等关键字段的热点，DSA 会用东方财富板块异动直连榜单替代。点击题材会请求 `/api/v1/alphasift/hotspots/{topic}` 展示发酵路线与概念股；题材详情另有 DSA 侧 30 分钟磁盘缓存，路径为 `data/alphasift/hotspot_details` 或自定义 `ALPHASIFT_DATA_DIR/hotspot_details`，重复点开同一题材会优先返回缓存，实时详情失败时可回退过期缓存；手动刷新热点榜单并保留当前题材时会对详情请求传入 `refresh=true` 绕过详情缓存；不会默认触发 AlphaSift 的 DSA deep-analysis 回调，避免无提示扩大递归调用面。
 - 热点刷新容错：`/api/v1/alphasift/hotspots` 未显式传入 provider 且未配置 `INDUSTRY_PROVIDER` 时，默认使用 DSA EastMoney 兜底 provider（响应中 provider 为 `akshare`），避免落到 AlphaSift 的空 provider 路径；东方财富热点直连源遇到连接中断、超时或 `Connection aborted` 会做短 backoff 重试；手动刷新失败且没有可用热点缓存时返回稳定空态 payload、`source_errors=["eastmoney_hotspot_unavailable"]` 和用户可读 `message`，原始异常仅保留在服务端日志或诊断链路中。桌面端更新会保留 `data/alphasift/hotspots.json`、`data/alphasift/hotspot.history.jsonl`、`data/alphasift/hotspot_details` 与 `data/alphasift/snapshot.last_good.json`，避免更新后丢失 last-good 缓存。
@@ -94,7 +94,7 @@ def screen(
 }
 ```
 
-候选项建议包含 `code`、`name`、`score`、`reason`、`risk_level`、`risk_flags`、`price`、`change_pct`、`amount`、`industry`、`factor_scores`，以及 LLM 字段：`llm_score`、`llm_confidence`、`llm_thesis`、`llm_catalysts`、`llm_risks`、`llm_watch_items` 等。
+候选项建议包含 `code`、`name`、`score`、`reason`、`risk_level`、`risk_flags`、`price`、`change_pct`、`amount`、`industry`、`factor_scores`，以及 LLM 字段：`llm_score`、`llm_confidence`、`llm_thesis`、`llm_catalysts`、`llm_risks`、`llm_watch_items` 等。DSA API 返回阶段会额外补充候选级 `data_quality`、`missing_fields`、`data_sources` 和 `quality_notes`，用于在 Web 选股页和自动交易审计中解释候选字段完整性、数据来源和降级原因；screen last-good cache 回退时，候选还会带 `cache_used=true`、`stale=true`、`cached_at` 和 `stale_age_hours`。
 
 DSA 会在支持 `context` 的适配层中传入：
 
@@ -123,13 +123,14 @@ context = {
 
 AlphaSift 会在 L1 初筛后、LLM 重排前调用 `context["dsa"]` 中的 provider，为有限 Top 候选补充 DSA 行情和基本面轻量上下文，并把 `dsa_context` 随候选返回。新闻搜索、完整摘要和缺失字段补全由 DSA API 在最终 Top 候选阶段执行；若候选已经携带完整新闻上下文，DSA API 返回阶段会复用这些字段，避免重复请求。
 
-AlphaSift 侧已在 `ZhuLinsen/alphasift@0a7b9cd59e81718f851890535241bc105d4ddc64` 提供 DSA provider context 支持、DSA adapter contract，并支持复用 DSA 的 `LLM_TIMEOUT_SEC`；同一 pin 还会读取 `LLM_MAX_TOKENS` 限制 LLM 重排输出，且 timeout 后不再盲目重试无 JSON mode 请求。
+AlphaSift 侧已在 `ZhuLinsen/alphasift@0a7b9cd59e81718f851890535241bc105d4ddc64` 提供 DSA provider context 支持、DSA adapter contract，并支持复用 DSA 调用期注入或用户显式配置的 `LLM_TIMEOUT_SEC`；同一 pin 还会读取 `LLM_MAX_TOKENS` 限制 LLM 重排输出，且 timeout 后不再盲目重试无 JSON mode 请求。
 
 ## DSA 后端行为
 
 - `/api/v1/alphasift/status`：返回开关、可用性、默认安装来源标识、适配层元信息和 AlphaSift 进程内 snapshot/daily source health；不会暴露完整安装来源。
 - `/api/v1/alphasift/install`：显式修复安装入口。桌面模式（`DSA_DESKTOP_MODE=true`）不要求管理员会话，非桌面部署必须启用 `ADMIN_AUTH_ENABLED=true` 并携带有效管理员会话，否则返回 `401/403`。接口只允许默认受信任安装来源，并会强制重装锁定 commit，避免旧版 `alphasift` 包残留。
 - `/api/v1/alphasift/strategies`：读取 AlphaSift 策略列表；如果 `ALPHASIFT_ENABLED=true` 但适配层缺失或状态异常，返回 `424 + diagnostics`，不触发运行时安装。
+- `/api/v1/alphasift/status`：返回 AlphaSift 启用/可用状态、非敏感 diagnostics 和 `source_health`。Web 选股页会展示 snapshot / daily 源状态、失败次数、冷却时间和最近错误摘要，用于定位当前选股降级是否来自单一数据源。
 - `/api/v1/alphasift/screen`：调用适配层 `screen(..., use_llm=True)`，并在调用期间临时注入 DSA 已解析的 LLM 运行环境，同时向适配层传入结构化 LLM/DSA provider 配置；AlphaSift 在 LLM 前只消费轻量 DSA provider context，并优先通过 DSA 日线链路补齐 AlphaSift 因子特征，DSA 返回阶段对最终 Top 候选补新闻并复用已增强字段。适配层缺失或运行时异常返回 `424 + diagnostics` 并保留原始错误边界。
 - `/api/v1/alphasift/screen/tasks`：Web/桌面选股页使用的后台任务入口，提交后立即返回 `task_id`，实际选股在共享任务队列中继续执行，避免浏览器长请求被外部快照、行情、新闻或 LLM 延迟拖到超时。
 - `/api/v1/alphasift/screen/tasks/{task_id}`：查询后台选股任务状态。进行中返回 `pending/processing + progress/message`，完成后在 `result` 中返回与 `/screen` 相同的候选结构，失败时返回 `failed + error`；仅接受 `report_type=alphasift_screen` 的任务 ID，普通分析任务不会被误读为选股结果。

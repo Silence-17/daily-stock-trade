@@ -26,6 +26,7 @@ from api.v1.endpoints import (
     stocks,
     system_config,
     usage,
+    vnpy_paper_trading,
 )
 
 # 创建 v1 版本主路由。
@@ -84,6 +85,12 @@ router.include_router(
     portfolio.router,
     prefix="/portfolio",
     tags=["Portfolio"]
+)
+
+router.include_router(
+    vnpy_paper_trading.router,
+    prefix="/vnpy-paper",
+    tags=["VnpyPaperTrading"]
 )
 
 router.include_router(

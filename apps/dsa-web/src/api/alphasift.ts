@@ -72,6 +72,14 @@ export type AlphaSiftCandidate = {
     publishedDate?: string | null;
   }>;
   dsaAnalysisSummary?: string;
+  dataQuality?: string;
+  missingFields?: string[];
+  dataSources?: string[];
+  qualityNotes?: string[];
+  cacheUsed?: boolean;
+  cachedAt?: string | null;
+  stale?: boolean;
+  staleAgeHours?: number | null;
   raw: Record<string, unknown>;
 };
 
@@ -200,6 +208,12 @@ export type AlphaSiftScreenResponse = {
   llmParseErrors?: string[];
   warnings?: string[];
   sourceErrors?: string[];
+  qualityStatus?: string;
+  fallbackUsed?: boolean;
+  cacheUsed?: boolean;
+  cachedAt?: string | null;
+  stale?: boolean;
+  staleAgeHours?: number | null;
   dsaEnrichment?: {
     enabled?: boolean;
     maxCandidates?: number;

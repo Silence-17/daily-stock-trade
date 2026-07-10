@@ -533,6 +533,121 @@ class PortfolioTrade(Base):
     )
 
 
+class StockSelectionAgentRun(Base):
+    """One auditable stock-selection agent run."""
+
+    __tablename__ = 'stock_selection_agent_runs'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    run_uid = Column(String(64), nullable=False, unique=True, index=True)
+    trigger_source = Column(String(32), nullable=False, default='manual', index=True)
+    status = Column(String(24), nullable=False, default='running', index=True)
+    strategy = Column(String(64), nullable=False, index=True)
+    market = Column(String(16), nullable=False, default='cn', index=True)
+    max_results = Column(Integer)
+    cash_per_order = Column(Float)
+    min_score = Column(Float)
+    skip_existing_positions = Column(Boolean, nullable=False, default=True)
+    candidate_count = Column(Integer, nullable=False, default=0)
+    planned_count = Column(Integer, nullable=False, default=0)
+    submitted_count = Column(Integer, nullable=False, default=0)
+    skipped_count = Column(Integer, nullable=False, default=0)
+    message_count = Column(Integer, nullable=False, default=0)
+    error = Column(Text)
+    settings_json = Column(Text)
+    diagnostics_json = Column(Text)
+    started_at = Column(DateTime, default=datetime.now, nullable=False, index=True)
+    completed_at = Column(DateTime)
+    created_at = Column(DateTime, default=datetime.now, index=True)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    __table_args__ = (
+        Index('ix_stock_selection_agent_run_created_status', 'created_at', 'status'),
+    )
+
+
+class StockSelectionAgentDecision(Base):
+    """Candidate-level decision and optional paper-trade result for one run."""
+
+    __tablename__ = 'stock_selection_agent_decisions'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    run_id = Column(Integer, ForeignKey('stock_selection_agent_runs.id'), nullable=False, index=True)
+    sequence = Column(Integer, nullable=False, default=0)
+    symbol = Column(String(16), index=True)
+    name = Column(String(128))
+    market = Column(String(16), nullable=False, default='cn', index=True)
+    action = Column(String(16), nullable=False, default='skip')
+    status = Column(String(24), nullable=False, default='skipped', index=True)
+    reason = Column(String(96))
+    score = Column(Float)
+    confidence = Column(Float)
+    cash_amount = Column(Float)
+    quantity = Column(Float)
+    price = Column(Float)
+    trade_id = Column(Integer, ForeignKey('portfolio_trades.id'), index=True)
+    rationale = Column(Text)
+    risk_flags_json = Column(Text)
+    order_result_json = Column(Text)
+    raw_candidate_json = Column(Text)
+    created_at = Column(DateTime, default=datetime.now, index=True)
+
+    __table_args__ = (
+        Index('ix_stock_selection_agent_decision_run_sequence', 'run_id', 'sequence'),
+    )
+
+
+class StockSelectionAgentTradePlan(Base):
+    """Executable plan derived from a stock-selection agent decision."""
+
+    __tablename__ = 'stock_selection_agent_trade_plans'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    plan_uid = Column(String(64), nullable=False, unique=True, index=True)
+    run_id = Column(Integer, ForeignKey('stock_selection_agent_runs.id'), nullable=False, index=True)
+    decision_id = Column(Integer, ForeignKey('stock_selection_agent_decisions.id'), index=True)
+    symbol = Column(String(16), index=True)
+    name = Column(String(128))
+    market = Column(String(16), nullable=False, default='cn', index=True)
+    side = Column(String(8), nullable=False, default='buy')
+    status = Column(String(24), nullable=False, default='planned', index=True)
+    execution_mode = Column(String(24), nullable=False, default='paper', index=True)
+    planned_cash_amount = Column(Float)
+    planned_quantity = Column(Float)
+    planned_price = Column(Float)
+    submitted_quantity = Column(Float)
+    submitted_price = Column(Float)
+    trade_id = Column(Integer, ForeignKey('portfolio_trades.id'), index=True)
+    skip_reason = Column(String(96))
+    risk_flags_json = Column(Text)
+    order_result_json = Column(Text)
+    created_at = Column(DateTime, default=datetime.now, index=True)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    __table_args__ = (
+        Index('ix_stock_selection_agent_trade_plan_run_status', 'run_id', 'status'),
+    )
+
+
+class RuntimeSchedulerTaskEvent(Base):
+    """Persisted runtime scheduler background task event."""
+
+    __tablename__ = 'runtime_scheduler_task_events'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(96), nullable=False, index=True)
+    status = Column(String(24), nullable=False, index=True)
+    message = Column(Text)
+    details_json = Column(Text)
+    duration_seconds = Column(Float)
+    timestamp = Column(DateTime, default=datetime.now, nullable=False, index=True)
+    created_at = Column(DateTime, default=datetime.now, index=True)
+
+    __table_args__ = (
+        Index('ix_runtime_scheduler_task_event_name_status_time', 'name', 'status', 'timestamp'),
+    )
+
+
 class PortfolioCashLedger(Base):
     """Cash in/out events."""
 
@@ -1180,6 +1295,7 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
 
             # 创建所有表
             Base.metadata.create_all(self._engine)
+            self._ensure_stock_selection_agent_schema()
             self._ensure_llm_usage_telemetry_columns()
             self._ensure_intelligence_item_scope_values()
             self._ensure_schema_migration_record()
@@ -1227,6 +1343,22 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
             raise
         finally:
             session.close()
+
+    def _ensure_stock_selection_agent_schema(self) -> None:
+        """Backfill stock-selection agent audit schema added after the baseline."""
+        inspector = inspect(self._engine)
+        table_name = StockSelectionAgentRun.__tablename__
+        if inspector.has_table(table_name):
+            columns = {column["name"] for column in inspector.get_columns(table_name)}
+            if "planned_count" not in columns:
+                with self._engine.begin() as connection:
+                    connection.execute(
+                        text(
+                            f"ALTER TABLE {table_name} "
+                            "ADD COLUMN planned_count INTEGER NOT NULL DEFAULT 0"
+                        )
+                    )
+        StockSelectionAgentTradePlan.__table__.create(self._engine, checkfirst=True)
 
     def _ensure_intelligence_items_unique_index(self) -> None:
         if not self._is_sqlite_engine:

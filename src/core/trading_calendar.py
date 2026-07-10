@@ -389,6 +389,22 @@ def _session_open_close_for_today(
     )
 
 
+def _session_break_window(
+    cal: Any,
+    session: Any,
+    tz_name: str,
+) -> Tuple[Optional[datetime], Optional[datetime]]:
+    has_break = True
+    if hasattr(cal, "session_has_break"):
+        has_break = bool(cal.session_has_break(session))
+    if not has_break:
+        return None, None
+    return (
+        _as_market_datetime(cal.session_break_start(session), tz_name),
+        _as_market_datetime(cal.session_break_end(session), tz_name),
+    )
+
+
 def _phase_minutes(
     market: Optional[str],
     market_now: datetime,
@@ -512,6 +528,164 @@ def build_market_phase_context(
         analysis_intent=requested_phase,
         warnings=warnings,
     )
+
+
+def build_next_trading_window_context(
+    *,
+    market: Optional[str],
+    current_time: Optional[datetime] = None,
+    trigger_source: str = "system",
+    analysis_intent: str = "auto",
+    analysis_phase: str = "auto",
+    lookahead_days: int = 14,
+) -> Dict[str, Any]:
+    """
+    Build a JSON-safe diagnostic for the current or next regular trading window.
+
+    This helper is intentionally diagnostic-only. It fails closed with
+    ``available=False`` when market metadata or exchange calendars are missing,
+    so callers can explain time-gate skips without changing existing execution
+    decisions.
+    """
+    ctx = build_market_phase_context(
+        market=market,
+        current_time=current_time,
+        trigger_source=trigger_source,
+        analysis_intent=analysis_intent,
+        analysis_phase=analysis_phase,
+    )
+    ctx_payload = ctx.to_dict()
+    tz_name = MARKET_TIMEZONE.get(market or "")
+    market_now = ctx.market_local_time
+    warnings = list(ctx.warnings)
+    result: Dict[str, Any] = {
+        "available": False,
+        "market": ctx_payload.get("market", market),
+        "phase": ctx_payload.get("phase", MarketPhase.UNKNOWN.value),
+        "market_local_time": ctx_payload.get("market_local_time"),
+        "session_date": ctx_payload.get("session_date"),
+        "effective_daily_bar_date": ctx_payload.get("effective_daily_bar_date"),
+        "is_trading_day": ctx_payload.get("is_trading_day"),
+        "is_market_open_now": ctx_payload.get("is_market_open_now"),
+        "minutes_to_open": ctx_payload.get("minutes_to_open"),
+        "minutes_to_close": ctx_payload.get("minutes_to_close"),
+        "timezone": tz_name or None,
+        "next_window_status": "unknown",
+        "current_open_at": None,
+        "current_close_at": None,
+        "next_session_date": None,
+        "next_open_at": None,
+        "next_close_at": None,
+        "trigger_source": trigger_source or "system",
+        "analysis_intent": ctx_payload.get("analysis_intent", analysis_intent),
+        "warnings": warnings,
+        "reason": None,
+    }
+
+    if market not in MARKET_EXCHANGE or market not in MARKET_TIMEZONE:
+        result["reason"] = "unknown_market"
+        _add_warning_code(warnings, "unknown_market")
+        return result
+    if not _XCALS_AVAILABLE:
+        result["reason"] = "calendar_unavailable"
+        _add_warning_code(warnings, "calendar_unavailable")
+        return result
+
+    try:
+        cal = xcals.get_calendar(MARKET_EXCHANGE[market])
+
+        if cal.is_session(market_now.date()):
+            session = cal.date_to_session(market_now.date(), direction="previous")
+            session_open = _as_market_datetime(cal.session_open(session), tz_name)
+            session_close = _as_market_datetime(cal.session_close(session), tz_name)
+            result["current_open_at"] = session_open.isoformat() if session_open else None
+            result["current_close_at"] = session_close.isoformat() if session_close else None
+
+            if session_open is not None and session_close is not None:
+                if ctx.is_market_open_now is True and market_now < session_close:
+                    result.update(
+                        {
+                            "available": True,
+                            "next_window_status": "open_now",
+                            "next_session_date": session.date().isoformat(),
+                            "next_open_at": session_open.isoformat(),
+                            "next_close_at": session_close.isoformat(),
+                            "reason": None,
+                        }
+                    )
+                    return result
+
+                if market_now < session_open:
+                    seconds = (session_open - market_now).total_seconds()
+                    result.update(
+                        {
+                            "available": True,
+                            "next_window_status": "opens_later_today",
+                            "next_session_date": session.date().isoformat(),
+                            "next_open_at": session_open.isoformat(),
+                            "next_close_at": session_close.isoformat(),
+                            "minutes_to_open": max(0, int(seconds // 60)),
+                            "reason": None,
+                        }
+                    )
+                    return result
+
+                break_start, break_end = _session_break_window(cal, session, tz_name)
+                if (
+                    break_start is not None
+                    and break_end is not None
+                    and break_start <= market_now < break_end
+                    and market_now < session_close
+                ):
+                    seconds = (break_end - market_now).total_seconds()
+                    result.update(
+                        {
+                            "available": True,
+                            "next_window_status": "opens_later_today",
+                            "next_session_date": session.date().isoformat(),
+                            "next_open_at": break_end.isoformat(),
+                            "next_close_at": session_close.isoformat(),
+                            "minutes_to_open": max(0, int(seconds // 60)),
+                            "reason": None,
+                        }
+                    )
+                    return result
+
+        max_lookahead = max(0, int(lookahead_days or 0))
+        for offset in range(max_lookahead + 1):
+            candidate_date = market_now.date() + timedelta(days=offset)
+            if not cal.is_session(candidate_date):
+                continue
+            session = cal.date_to_session(candidate_date, direction="previous")
+            session_open = _as_market_datetime(cal.session_open(session), tz_name)
+            session_close = _as_market_datetime(cal.session_close(session), tz_name)
+            if session_open is None or session_close is None or session_close <= market_now:
+                continue
+
+            next_open = session_open if session_open > market_now else market_now
+            seconds = (next_open - market_now).total_seconds()
+            result.update(
+                {
+                    "available": True,
+                    "next_window_status": "opens_later_today" if offset == 0 else "next_session",
+                    "next_session_date": session.date().isoformat(),
+                    "next_open_at": next_open.isoformat(),
+                    "next_close_at": session_close.isoformat(),
+                    "minutes_to_open": max(0, int(seconds // 60)),
+                    "reason": None,
+                }
+            )
+            return result
+
+        result["reason"] = "no_session_in_lookahead"
+        _add_warning_code(warnings, "no_session_in_lookahead")
+        return result
+    except Exception as e:
+        logger.warning("trading_calendar.next_trading_window fail-closed: %s", e)
+        result["reason"] = "calendar_error"
+        result["error"] = str(e)
+        _add_warning_code(warnings, "calendar_error")
+        return result
 
 
 def get_open_markets_today() -> Set[str]:

@@ -12,7 +12,8 @@
 """
 
 import logging
-from typing import Optional
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
 import re
 
 from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile, Depends
@@ -22,6 +23,8 @@ from api.deps import get_system_config_service
 from api.v1.schemas.stocks import (
     ExtractFromImageResponse,
     ExtractItem,
+    IndustryBoard,
+    IndustryBoardListResponse,
     KLineData,
     StockHistoryResponse,
     StockQuote,
@@ -40,7 +43,7 @@ from src.services.import_parser import (
 )
 from src.services.stock_service import StockService
 from src.services.system_config_service import SystemConfigService
-from data_provider.base import normalize_stock_code
+from data_provider.base import DataFetcherManager, normalize_stock_code
 
 logger = logging.getLogger(__name__)
 
@@ -402,6 +405,70 @@ def remove_from_watchlist(
             status_code=500,
             detail={"error": "internal_error", "message": f"从自选删除失败: {str(e)}"},
         )
+
+
+@router.get(
+    "/industry-boards",
+    response_model=IndustryBoardListResponse,
+    responses={
+        200: {"description": "行业板块列表"},
+        500: {"description": "服务器错误", "model": ErrorResponse},
+    },
+    summary="获取 A 股行业板块列表",
+    description="返回 A 股行业板块涨跌幅、上涨/下跌家数和领涨股信息。",
+)
+def get_industry_boards() -> IndustryBoardListResponse:
+    try:
+        manager = DataFetcherManager()
+        boards, source = manager.get_industry_boards()
+        items = [IndustryBoard(**board) for board in boards]
+        quality = _resolve_industry_board_quality(boards)
+        return IndustryBoardListResponse(
+            boards=items,
+            total=len(items),
+            source=source,
+            updated_at=datetime.now(timezone.utc).isoformat(),
+            data_quality=quality["data_quality"],
+            message=quality["message"],
+        )
+    except Exception as e:
+        logger.error("获取行业板块列表失败: %s", e, exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "internal_error", "message": f"获取行业板块列表失败: {str(e)}"},
+        )
+
+
+def _resolve_industry_board_quality(boards: List[Dict[str, Any]]) -> Dict[str, str]:
+    if not boards:
+        return {
+            "data_quality": "unavailable",
+            "message": "行业板块实时数据暂不可用。",
+        }
+    qualities = {
+        str(board.get("data_quality") or "").strip()
+        for board in boards
+        if isinstance(board, dict)
+    }
+    if "realtime" in qualities:
+        return {
+            "data_quality": "realtime",
+            "message": "实时涨跌幅、涨跌家数与领涨股来自 EastMoney 行业板块接口。",
+        }
+    if "directory_fallback" in qualities:
+        return {
+            "data_quality": "directory_fallback",
+            "message": "EastMoney 实时行业板块暂不可用，当前显示 reportapi 行业目录；涨跌幅、涨跌家数与领涨股不可用于实时排序。",
+        }
+    if "offline_seed" in qualities:
+        return {
+            "data_quality": "offline_seed",
+            "message": "在线行业板块数据暂不可用，当前显示内置行业目录；不含实时行情字段。",
+        }
+    return {
+        "data_quality": "unknown",
+        "message": "行业板块数据来源未提供明确质量标识。",
+    }
 
 
 @router.get(

@@ -201,6 +201,32 @@ class AlertApiTestCase(unittest.TestCase):
         self.assertEqual(detail["severity"], "warning")
         self.assertEqual(detail["name"], "Moutai breakout")
 
+    def test_system_event_trigger_can_be_recorded_without_rule(self) -> None:
+        event = AlertService().record_system_event(
+            target="vnpy_paper",
+            event_type="failure_fuse_open",
+            status="triggered",
+            reason="failure_fuse_open",
+            data_source="vnpy_paper_auto",
+            observed_value=2,
+            threshold=2,
+            diagnostics={"agent_run_uid": "run-system-event"},
+        )
+
+        self.assertIsNone(event["rule_id"])
+        self.assertEqual(event["target"], "vnpy_paper")
+        self.assertEqual(event["status"], "triggered")
+
+        resp = self.client.get("/api/v1/alerts/triggers?target=vnpy_paper")
+        self.assertEqual(resp.status_code, 200, resp.text)
+        item = resp.json()["items"][0]
+        self.assertIsNone(item["rule_id"])
+        self.assertEqual(item["reason"], "failure_fuse_open")
+        self.assertEqual(item["data_source"], "vnpy_paper_auto")
+        self.assertEqual(item["observed_value"], 2.0)
+        self.assertEqual(item["threshold"], 2.0)
+        self.assertIn('"event_type": "failure_fuse_open"', item["diagnostics"])
+
     def test_rule_update_allows_null_for_reserved_policy_fields(self) -> None:
         rule = self._create_rule(
             {

@@ -16,12 +16,23 @@ const TITLES: Record<string, { title: UiTextKey; description: UiTextKey }> = {
   '/': { title: 'layout.route.home.title', description: 'layout.route.home.description' },
   '/chat': { title: 'layout.route.chat.title', description: 'layout.route.chat.description' },
   '/portfolio': { title: 'layout.route.portfolio.title', description: 'layout.route.portfolio.description' },
+  '/industry-boards': { title: 'layout.route.industryBoards.title', description: 'layout.route.industryBoards.description' },
+  '/paper-trading': { title: 'layout.route.paperTrading.title', description: 'layout.route.paperTrading.description' },
+  '/agent-console': { title: 'layout.route.agentConsole.title', description: 'layout.route.agentConsole.description' },
   '/screening': { title: 'layout.route.screening.title', description: 'layout.route.screening.description' },
   '/backtest': { title: 'layout.route.backtest.title', description: 'layout.route.backtest.description' },
   '/alerts': { title: 'layout.route.alerts.title', description: 'layout.route.alerts.description' },
   '/usage': { title: 'layout.route.usage.title', description: 'layout.route.usage.description' },
   '/settings': { title: 'layout.route.settings.title', description: 'layout.route.settings.description' },
 };
+
+function resolveRouteTitle(pathname: string): { title: UiTextKey; description: UiTextKey } | undefined {
+  return TITLES[pathname] ?? (
+    pathname.startsWith('/agent-console/')
+      ? TITLES['/agent-console']
+      : undefined
+  );
+}
 
 export const ShellHeader: React.FC<ShellHeaderProps> = ({
   collapsed,
@@ -30,7 +41,7 @@ export const ShellHeader: React.FC<ShellHeaderProps> = ({
 }) => {
   const location = useLocation();
   const { t } = useUiLanguage();
-  const current = TITLES[location.pathname];
+  const current = resolveRouteTitle(location.pathname);
 
   return (
     <header className="sticky top-0 z-30 border-b border-border/60 bg-background/84 backdrop-blur-xl">

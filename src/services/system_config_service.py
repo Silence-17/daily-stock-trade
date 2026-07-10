@@ -2094,6 +2094,23 @@ class SystemConfigService:
                 )
             )
 
+        vnpy_runtime_keys = submitted_keys & {
+            "VNPY_RUNTIME_ENABLED",
+            "VNPY_GATEWAY_CLASS",
+            "VNPY_GATEWAY_NAME",
+            "VNPY_CONNECT_SETTINGS_PATH",
+            "VNPY_CONNECT_ON_START",
+            "VNPY_AUTO_ATTACH_EVENTS",
+        }
+        if vnpy_runtime_keys:
+            warnings.append(
+                (
+                    f"{', '.join(sorted(vnpy_runtime_keys))} 已写入 .env。"
+                    "vn.py runtime bootstrap 属于启动期配置：当前已运行的 WebUI/API/Desktop 进程不会因为本次保存立即创建或重建 "
+                    "MainEngine、EventEngine、gateway 连接或事件订阅；请重启当前进程后生效。"
+                )
+            )
+
         return warnings
 
     @staticmethod

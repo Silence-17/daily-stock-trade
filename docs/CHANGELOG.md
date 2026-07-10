@@ -9,9 +9,232 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [改进] Runtime scheduler 后台任务支持 `initial_delay_seconds`，状态接口透出任务级首次延迟，便于把自动买入首次运行对齐到下一交易窗口。
+- [改进] `vnpy-paper` 自动交易 readiness 新增 `timing_alignment`/“调度窗口”诊断，关联自动任务下次触发时间与交易窗口开收盘时间，避免 scheduler 空闲或盘后启动被误判为模拟交易不可用。
+- [测试] 扩展 scheduler、RuntimeSchedulerService、vn.py paper 服务/API/Web API/Web 页面回归，覆盖首次延迟调度、自动买入窗口对齐和 readiness 调度窗口展示。
+- [文档] 新增 `docs/current-project-status.md`，记录当前本地项目状态、真实接口 smoke 结果、验证命令和未完成目标。
+- [文档] 更新 vn.py 模拟交易说明、full guide 中英文版和在线选股 Agent goals，补充自动买入首次调度对齐交易窗口与 readiness 调度窗口语义。
+- [改进] `vnpy-paper` Agent run 新增 `agent_summary.review_quality`，按规则/LLM 复核覆盖率、阻断/失败状态和数据质量生成复核质量状态、评分、风险标记和人工确认建议。
+- [改进] `vnpy-paper` 每日 Agent 总结新增 `review_quality_counts`、`review_quality_flag_counts` 和 `review_quality_score_avg`，`health` 会把 `guarded` / `needs_review` 纳入 warning，Web Agent 控制台展示复核质量和复核风险。
+- [改进] `vnpy-paper` 状态接口新增 `diagnostics.auto_trade_readiness`，结构化返回自动交易 readiness、阻断原因、关注项和关键组件状态。
+- [修复] `vnpy-paper` readiness 改用 `scheduler.loop_running` 判断调度循环存活，避免 scheduler 空闲时被误报为 `scheduler_not_running`。
+- [改进] Web 模拟交易页新增“可用性诊断”摘要，优先展示后端 readiness，并归纳本地账本、自动任务、交易窗口、连续失败熔断和 vn.py bridge 状态。
+- [改进] Web 模拟交易页首屏状态加载失败时区分 vn.py paper 路由 404、状态接口超时和本地服务连接失败，并给出对应排障提示。
+- [改进] Web 模拟交易页新增持仓估值降级提示，并在当前持仓表展示价格源、缺价和陈旧价格状态。
+- [改进] `vnpy-paper` 状态诊断新增 `diagnostics.alphasift`，readiness 和 Web 可用性诊断展示 AlphaSift 选股依赖状态与策略数量。
+- [测试] 扩展 `vnpy-paper` 服务/API/Web API/Agent 控制台回归，覆盖复核质量摘要、每日聚合、camelCase 映射和页面展示。
+- [测试] 扩展 `vnpy-paper` API 和 Web 模拟交易页回归，覆盖 readiness 诊断和可用性诊断摘要展示。
+- [文档] 更新 vn.py 模拟交易说明、full guide 中英文版和在线选股 Agent goals，标注基础复核质量摘要和可用性诊断已落地以及长周期/多模型/人工验收仍待补齐。
+- [改进] `vnpy-paper` 自动再平衡支持 `auto_target_position_weights` 和 `auto_target_industry_weights`，可按股票/行业目标权益占比跳过超目标买入并生成超配减仓计划。
+- [改进] Web 模拟交易页新增目标持仓权重和目标行业权重设置输入，并在保存自动交易配置时同步到后端。
+- [测试] 扩展 `vnpy-paper` 服务/API/Web API/Web 页面回归，覆盖目标权重买入拦截、再平衡卖出数量、设置字段映射和页面表单保存。
+- [文档] 更新 vn.py 模拟交易说明、full guide 中英文版和在线选股 Agent goals，标注目标权重基础再平衡已落地以及真实 gateway/跨币种估值仍待验证。
+- [改进] `vnpy-paper` 每日 Agent 总结新增 `workflow_status_counts` 和 `workflow_stage_counts`，Web Agent 控制台展示“工作流阶段”分布。
+- [测试] 扩展 `vnpy-paper` API/Web API/Agent 控制台回归，覆盖 workflow 每日聚合、camelCase 映射和页面展示。
+- [改进] `vnpy-paper` Agent run 详情新增派生 `diagnostics.agent_workflow`，按计划、数据质量、候选复核、交易计划和执行阶段输出状态机摘要、当前阶段和下一步。
+- [改进] Web Agent 控制台新增“Agent 工作流”卡片，展示 run 的整体状态、当前阶段、下一步和阶段级状态徽标。
+- [测试] 扩展 `vnpy-paper` 服务/API/Agent 控制台回归，覆盖 `agent_workflow` 派生和页面展示。
+- [改进] `vnpy-paper` 的 `agent_plan.llm_dynamic_plan` 与 `order_result.llm_review` 新增 `prompt_version` 和 `evaluator_version` 审计字段，并在 LLM 调用 audit context 中同步记录。
+- [改进] Web Agent 控制台在 LLM 动态计划卡片和候选级 LLM 复核区域展示 prompt/evaluator 版本，便于回看不同版本复核结果。
+- [测试] 扩展 `vnpy-paper` 服务和 Agent 控制台回归，覆盖 LLM 动态计划、买入前复核版本字段落库、调用审计上下文和页面展示。
+- [改进] `vnpy-paper` Agent run 总结和每日总结新增 `llm_review_counts`，聚合可选 LLM 买入前复核的通过、阻断和失败状态。
+- [改进] Web Agent 控制台“今日 Agent 总结”新增 LLM 复核状态卡片，用于区分规则 Agent 复核与 LLM 买入复核卡点。
+- [测试] 扩展 `vnpy-paper` 服务/API/Web API/Agent 控制台回归，覆盖 LLM 复核统计落库、每日汇总、camelCase 映射和页面展示。
+- [文档] 更新 vn.py 模拟交易说明、full guide 中英文版和在线选股 Agent goals，补充 `llm_review_counts` 的接口与页面语义。
+- [改进] `vnpy-paper` 自动交易新增默认关闭的 LLM 动态计划开关 `auto_llm_plan_enabled`，可在 AlphaSift 选股前生成 `agent_plan.llm_dynamic_plan` 并按策略白名单、保存上限收紧本轮策略/候选数/每票预算/最低分。
+- [改进] Web 模拟交易页新增“LLM 动态计划”设置开关，Agent 控制台计划卡片展示 LLM 动态计划状态、已应用覆盖和理由摘要。
+- [测试] 扩展 `vnpy-paper` 服务/API/Web API/Web 页面回归，覆盖 LLM 动态计划本轮参数覆盖、设置映射和页面展示。
+- [文档] 更新 vn.py 模拟交易说明、full guide 中英文版和在线选股 Agent goals，标注 LLM 动态计划已默认关闭落地并保留跨市场目标、长期质量评估等缺口。
+- [改进] `vnpy-paper` 自动交易新增默认关闭的 LLM 买入前复核开关 `auto_llm_review_enabled`，规则风控通过后生成 `order_result.llm_review`，`blocked`、模型不可用、JSON 解析失败或调用异常都会 fail-closed 跳过候选。
+- [改进] Web 模拟交易页新增“LLM 买入复核”设置开关，Agent 控制台候选决策表展示 `order_result.llm_review` 状态和摘要。
+- [测试] 扩展 `vnpy-paper` 服务/API/Web API/Web 页面回归，覆盖 LLM 买入前复核通过、阻断、设置映射和页面展示。
+- [文档] 更新 vn.py 模拟交易说明、full guide 中英文版和在线选股 Agent goals，标注 LLM 买入前复核已可选落地并保留动态策略规划、复核质量评估等剩余缺口。
+- [改进] `vnpy-paper` Agent run 新增手动 LLM 复盘接口 `POST /api/v1/vnpy-paper/agent-runs/{run_uid}/llm-recap`，基于结构化审计数据写入 `diagnostics.llm_recap`，失败仅记录原因且不改变订单或交易计划状态。
+- [改进] Web Agent 控制台支持在运行详情中触发并展示可选 LLM 复盘，作为审计辅助而非自动交易决策入口。
+- [测试] 扩展 `vnpy-paper` API/Web API/Agent 控制台回归，覆盖 LLM 复盘接口、字段映射、页面展示和手动触发。
+- [文档] 更新 vn.py 模拟交易说明、full guide 中英文版和在线选股 Agent goals，标注 LLM 复盘已手动可选落地，LLM 下单前复核与动态策略自选仍待补齐。
+- [改进] `vnpy-paper` 自动交易 `agent_plan` 新增规则派生 `plan_profile`、`execution_policy`、`sizing_plan` 和 `adaptive_controls`，用于审计计划档位、执行路由、预算上限、风控层和降级动作。
+- [改进] Web Agent 控制台的 Agent 计划卡片新增计划档位和风控档位展示，便于不用打开 JSON 也能理解本轮自动选股计划。
+- [测试] 扩展 `vnpy-paper` 服务和 Agent 控制台回归，覆盖动态计划审计字段和页面展示。
+- [文档] 更新 vn.py 模拟交易说明、full guide 和在线选股 Agent goals，标注规则派生动态计划已落地、LLM 动态目标/策略自选择仍待补齐。
+- [改进] `vnpy-paper` 自动交易审计新增规则 Agent 买入前 `agent_review`，在候选决策和交易计划 `order_result` 中记录复核状态、摘要、检查项和后续 LLM 复核占位。
+- [改进] Agent run 每轮总结和每日总结新增 `agent_review_counts`，Web Agent 控制台展示今日复核状态分布和候选级“Agent 复核”徽标。
+- [测试] 扩展 `vnpy-paper` 服务/API/Web API/Agent 控制台回归，覆盖 `agent_review` 落库、每日聚合、camelCase 映射和页面渲染。
+- [文档] 更新 vn.py 模拟交易说明、full guide 和在线选股 Agent goals，标注规则 Agent 二次复核已落地、LLM 二次复核和 LLM 复盘总结仍待补齐。
+- [改进] `vnpy-paper` 自动卖出风控新增默认关闭的 `auto_rebalance_enabled`，开启后可复用单票、总仓位和行业仓位暴露上限生成基础组合再平衡卖出计划。
+- [改进] Web 模拟交易页新增“组合再平衡”设置开关，并在保存自动交易配置时同步到后端 `auto_rebalance_enabled`。
+- [测试] 扩展 `vnpy-paper` 服务/Web API/Web 页面回归，覆盖基础组合再平衡卖出数量、设置字段映射和页面表单保存。
+- [文档] 更新 vn.py 模拟交易说明、full guide 和在线选股 Agent goals，标注基础再平衡已落地以及真实 gateway 长跑验证缺口。
+- [改进] `vnpy-paper` 新增 `GET /api/v1/vnpy-paper/agent-runs/daily-summary`，按日聚合 Agent run、成交/跳过、执行模式、数据质量、主要跳过原因和热门标的。
+- [改进] Web Agent 控制台新增“今日 Agent 总结”区块，和策略/市场/状态筛选联动展示每日结构化运行摘要。
+- [测试] 扩展 `vnpy-paper` API/Web API/Agent 控制台回归，覆盖每日 Agent 总结接口、字段映射和页面渲染。
+- [文档] 更新 vn.py 模拟交易说明、full guide 和在线选股 Agent goals，标注每日结构化总结已落地、LLM 复盘总结仍待补齐。
+
+- [改进] Runtime scheduler 持久化后台任务事件新增保留/低频清理策略，默认保留 30 天，可通过 `DSA_RUNTIME_SCHEDULER_TASK_EVENT_RETENTION_DAYS` 和 `DSA_RUNTIME_SCHEDULER_TASK_EVENT_CLEANUP_INTERVAL_SECONDS` 调整。
+- [测试] 扩展 RuntimeSchedulerRepository 与 RuntimeSchedulerService 回归，覆盖旧任务事件清理和持久化写入后触发保留策略。
+- [改进] `vnpy-paper` 绩效摘要新增 `daily_returns` 日度收益序列，Web 模拟交易页展示日盈亏、日收益率、累计收益率、回撤和交易数。
+- [测试] 扩展 `vnpy-paper` 服务/API/Web API/Web 页面回归，覆盖日度收益聚合、接口透出和页面渲染。
+- [改进] `vnpy-paper` 恢复扫描会将超时 `part_filled` 计划归档为 `vnpy_partial_fill_timeout`，并阻止自动重试以避免部分成交场景重复委托。
+- [测试] 扩展 `vnpy-paper` 服务回归，覆盖部分成交超时归档和恢复矩阵不可自动重试状态。
+- [改进] `vnpy-paper` 绩效摘要新增 `monthly_returns` 月度收益序列，Web 模拟交易页展示月盈亏、月收益率、累计收益率、回撤和交易数。
+- [测试] 扩展 `vnpy-paper` 服务/API/Web API/Web 页面回归，覆盖月度收益聚合、接口透出和页面渲染。
+- [改进] `vnpy-paper` 状态接口完整持仓快照新增 10 秒短 TTL 缓存，并在成交、vn.py 成交回调、账户重置或恢复后主动失效。
+- [测试] 扩展 `vnpy-paper` 服务回归，覆盖状态快照缓存命中和成交后缓存失效。
+- [改进] `vnpy-paper` 自动卖出风控新增 `auto_sell_position_pct`，支持止损/止盈/移动止损/最大持仓天数触发后按当前持仓比例分批卖出，并在 Agent 审计中记录持仓数量和卖出比例。
+- [测试] 扩展 `vnpy-paper` 服务/API/Web API/Web 页面回归，覆盖分批卖出数量、设置字段映射和页面表单保存。
+- [改进] `vnpy-paper` 自动卖出风控新增 `auto_signal_exit_enabled`，可将当前持仓的 active `DecisionSignal` 防守信号转换为 `strategy_invalidated` 卖出计划。
+- [测试] 扩展 `vnpy-paper` 服务/API/Web API/Web 页面回归，覆盖策略失效信号触发卖出、设置字段映射和页面表单保存。
+- [改进] `vnpy-paper` 自动卖出风控新增 `auto_no_progress_days` 与 `auto_no_progress_min_return_pct`，支持持仓超时仍未走强时以 `no_progress_timeout` 生成卖出计划。
+- [测试] 扩展 `vnpy-paper` 服务/API/Web API/Web 页面回归，覆盖超时未走强卖出、设置字段映射和页面表单保存。
+
+- [改进] `vnpy-paper` 新增 `GET /api/v1/vnpy-paper/task-health`，按后台自动买入和自动恢复扫描任务聚合注册、运行、最近事件和异常原因。
+- [改进] Web 模拟交易页新增“任务健康检查”面板，展示整体健康、调度器状态、自动交易开关、任务级下次运行和最近事件详情。
+- [测试] 扩展 `vnpy-paper` API/Web API/Web 页面回归，覆盖任务健康摘要接口、camelCase 映射和页面渲染。
+- [改进] `vnpy-paper` 新增 `GET /api/v1/vnpy-paper/task-events`，可按后台任务名、状态和条数读取最近任务事件。
+- [改进] Web 模拟交易页“后台任务日志”支持按任务名和 started/completed/skipped/failed 状态筛选，并展示最多 50 条后台事件。
+- [测试] 扩展 runtime scheduler、`vnpy-paper` API/Web API/Web 页面回归，覆盖后台任务日志筛选和参数联动。
+- [改进] Runtime scheduler 后台任务事件新增数据库持久化，API 进程重启后 `/api/v1/vnpy-paper/task-events` 仍可读取最近自动买入/恢复扫描事件。
+- [改进] `vnpy-paper` 任务健康摘要会读取持久化最近任务事件，避免 API 进程重启后丢失最近失败/跳过原因。
+- [改进] `vnpy-paper` 新增 `GET /api/v1/vnpy-paper/task-event-summary`，按最近后台事件聚合任务级失败率、平均耗时、最近失败/跳过和状态计数。
+- [改进] Web 模拟交易页“后台任务日志”新增“任务趋势”摘要，展示最近持久化事件的 completed/skipped/failed/started 分布和任务级失败率。
+- [测试] 新增 `RuntimeSchedulerRepository` SQLite 回归，并覆盖 `/task-events` 读取持久化任务事件。
+- [改进] `vnpy-paper` 新增只读账户历史接口 `GET /api/v1/vnpy-paper/accounts`，用于查看当前 paper 账户和重置后归档账户。
+- [改进] Web 模拟交易页新增“模拟账户历史”只读列表，重置账户后可核对旧账本归档状态。
+- [测试] 扩展 `vnpy-paper` 服务/API/Web API/Web 页面回归，覆盖只读账户历史接口、页面展示和重置后刷新。
+- [改进] `vnpy-paper` 新增 `POST /api/v1/vnpy-paper/accounts/{account_id}/restore`，可受控恢复/切换旧 `vnpy_paper` 账户并归档原当前账户。
+- [改进] Web 模拟交易页的“模拟账户历史”新增确认后恢复/切换入口，便于回到重置前账本继续模拟交易。
+- [测试] 扩展 `vnpy-paper` 服务/API/Web API/Web 页面回归，覆盖账户恢复/切换、非 paper 账户拒绝和恢复后刷新。
+- [改进] Web 模拟交易页的“模拟账户历史”新增全部、当前、已归档和活跃非当前筛选，便于审计重置后的 paper 账户状态。
+- [测试] 扩展 Web 模拟交易页回归，覆盖模拟账户历史状态筛选。
+- [改进] `vnpy-paper` 新增 `POST /api/v1/vnpy-paper/accounts/archived/cleanup` 隐藏式批量清理接口，可从默认历史视图隐藏旧归档账户且保留 Portfolio 流水审计。
+- [改进] Web 模拟交易页“模拟账户历史”新增“清理已归档”入口，确认后批量隐藏旧归档账户。
+- [测试] 扩展 `vnpy-paper` 服务/API/Web API/Web 页面回归，覆盖归档账户隐藏式清理、`include_hidden` 审计查看和恢复后取消隐藏。
+- [改进] Web 模拟交易页新增 paper 账户权益曲线，基于 `GET /api/v1/vnpy-paper/performance` 的 `equity_curve` 展示最新权益、峰值权益和收益率。
+- [测试] 扩展 Web 模拟交易页回归，覆盖权益曲线渲染。
+- [改进] Web 模拟交易页新增窗口级绩效矩阵，按策略和行业展示样本数、计划数、成交数、跳过数、成交金额和填充率。
+- [测试] 扩展 Web 模拟交易页回归，覆盖绩效矩阵渲染。
+- [改进] `vnpy-paper` 绩效摘要接口新增 `created_from` / `created_to` 时间范围过滤，窗口级策略/行业归因可按 Agent run 创建时间筛选。
+- [改进] Web 模拟交易页“绩效窗口”新增开始/结束时间筛选控件，绩效矩阵标题同步显示当前窗口。
+- [测试] 扩展 `vnpy-paper` 服务/API/Web API/Web 页面回归，覆盖绩效摘要时间窗口过滤和页面筛选参数联动。
+- [改进] `vnpy-paper` 新增只读 `GET /api/v1/vnpy-paper/trade-plans/recovery-summary`，汇总非终态交易计划的活跃提交态、疑似卡住、可撤单、可重试、冷却中和重试超限状态。
+- [改进] Web 模拟交易页新增“交易计划恢复矩阵”，展示恢复摘要和需要关注的交易计划，便于排查 vn.py 提交态或重试链路。
+- [测试] 扩展 `vnpy-paper` 服务/API/Web API/Web 页面回归，覆盖交易计划恢复矩阵的后端聚合、接口响应和页面渲染。
+- [改进] `vnpy-paper` 新增 `POST /api/v1/vnpy-paper/trade-plans/recovery/run`，可手动触发一次受限交易计划恢复扫描，复用后台到期重试、超时归档和 retry 冷却控制。
+- [改进] Web 模拟交易页“交易计划恢复矩阵”新增确认后的“运行恢复扫描”入口，触发后刷新状态、绩效、恢复矩阵和自动交易告警历史。
+- [测试] 扩展 `vnpy-paper` API/Web API/Web 页面回归，覆盖手动恢复扫描接口、参数映射和页面按钮联动。
+- [改进] Runtime scheduler 状态新增最近 `task_events`，记录后台任务 started/completed/skipped/failed、耗时和自动买入/自动重试摘要。
+- [改进] Web 模拟交易页新增“后台任务日志”，展示自动买入、自动重试和事件监控最近执行结果，便于解释后台任务为何执行或跳过。
+- [测试] 扩展 runtime scheduler、`vnpy-paper` API 和 Web 模拟交易页回归，覆盖后台任务事件透出和页面展示。
+- [新功能] Web 新增“Agent 控制台”入口 `/agent-console`，集中展示自动选股 run 分页历史、筛选、`/agent-console/<runUid>` 独立详情路由、查询参数兼容深链、候选决策、交易计划、时间线和 JSON 导出。
+- [改进] `GET /api/v1/vnpy-paper/agent-runs` 响应新增过滤后的 `total`，供 Web Agent 控制台分页展示。
+- [改进] Web 模拟交易页暂停自动买入前新增确认，并在自动买入关闭时提供“恢复自动买入”入口触发 scheduler reconcile。
+- [文档] 更新 vn.py 模拟交易说明、full guide 和在线选股 Agent goals，补充独立 Agent 控制台入口、审计能力和剩余缺口。
+- [测试] 新增 Agent 控制台页面、独立详情路由、侧边栏入口和模拟交易自动买入暂停/恢复回归测试。
+- [改进] AlphaSift screen 候选新增 `data_quality`、`missing_fields`、`data_sources` 和 `quality_notes`，用于标注候选级字段完整性和数据来源。
+- [改进] AlphaSift screen last-good cache 回退时会逐条标记候选 `cache_used/stale/cached_at/stale_age_hours`，并把候选级 `data_quality` 置为 `stale`，Web 展开详情展示候选缓存时间。
+- [改进] Web 选股页候选表和展开详情新增候选级数据质量、缺失字段与来源展示；自动交易 `risk_review` 同步保存候选数据质量快照，便于审计为何买入或跳过。
+- [改进] Web 选股页新增 AlphaSift 数据源健康视图，展示 `source_health` 中 snapshot/daily 源的状态、失败次数、冷却时间和最近错误摘要。
+- [测试] 扩展 AlphaSift API、`vnpy-paper` 服务和 Web 选股页回归，覆盖候选级数据质量归一化、审计落库和页面展示。
+- [改进] `vnpy-paper` 自动整仓卖出风控支持 `vnpy_paper` 执行模式，止损/止盈/移动止损/最大持仓天数触发后会提交 vn.py `MainEngine.send_order` 卖出委托并等待成交回报入账。
+- [改进] `vnpy_paper` 自动交易新增活跃提交态防重复保护，同股票同方向已有 `submitted` / `part_filled` / `cancel_requested` 计划时以 `active_vnpy_order_exists` 跳过，避免成交回报到达前重复提交买入或卖出。
+- [改进] `vnpy-paper` Agent run 列表和导出接口新增 `created_from` / `created_to` 时间范围过滤，Web 模拟交易页“自动选股 Agent 记录”支持按创建时间窗口筛选和导出。
+- [改进] `vnpy-paper` 自动交易关键异常写入告警中心系统事件后会复用 alert 通知路由外发，并把真实渠道、`__no_channel__` 或调度异常写入 `alert_notifications`，便于在告警中心审计投递结果。
+- [改进] `vnpy-paper` 账户级自动交易风控触发 `cash_low_watermark` 或 `account_drawdown_limit_reached` 时会写入告警中心系统事件并复用 alert 路由通知，诊断中包含现金、权益、回撤和阈值。
+- [改进] `vnpy-paper` 后台自动重试任务会归档超时的 `cancel_requested` 计划为 `failed/vnpy_cancel_timeout` 并写入告警，避免撤单请求长期挂起后持续阻塞同股票同方向委托。
+- [改进] AlphaSift screen 成功候选会写入同策略/同市场 last-good cache；adapter 运行失败或返回空候选且带 `source_errors` 时回退为 `quality_status=stale` 的缓存候选，自动交易仍按现有数据质量 gate 保守跳过成交。
+- [改进] AlphaSift screen last-good cache 新增 24 小时过期策略，Web 选股页会展示缓存候选提示、缓存时间和 `stale` 数据质量。
+- [测试] 扩展 `vnpy-paper` 服务回归，覆盖 vn.py 自动卖出提交、不本地提前成交，以及活跃买入/卖出委托防重复。
+- [测试] 扩展 `vnpy-paper` API/Web API/Web 页面回归，覆盖 Agent run 时间范围筛选参数和页面工具栏联动。
+- [测试] 扩展 `vnpy-paper` 服务回归，覆盖自动交易系统事件触发 alert 路由通知、成功渠道落库和未配置渠道的 `__no_channel__` synthetic attempt。
+- [测试] 扩展 `vnpy-paper` 服务回归，覆盖现金低水位和账户回撤风控触发时的告警中心系统事件、观测值和阈值落库。
+- [测试] 扩展 `vnpy-paper` 服务回归，覆盖 `cancel_requested` 计划超时归档为 `vnpy_cancel_timeout`、候选决策回写和告警事件。
+- [测试] 扩展 AlphaSift API 回归，覆盖 screen last-good cache 在 adapter 异常和空候选带错误时的 stale fallback 行为。
+- [测试] 扩展 AlphaSift API 和 Web 选股页回归，覆盖过期 screen cache 不再兜底，以及缓存候选的页面提示。
+- [文档] 更新 `vn.py` 模拟交易说明、告警中心和在线选股 Agent goals，说明自动交易关键异常已具备 alert 路由通知与通知尝试审计能力。
+- [修复] 自动模拟交易 time gate 修正交易日历 keyword-only 参数调用，并改用 `auto` 阶段推断，避免真实运行被误判为 `market_phase_unknown` 或把非交易时段强制视为 `intraday`。
+- [修复] `vnpy-paper` 配置读取兼容 UTF-8 BOM，避免旧 `data/vnpy_paper_trading.json` 导致保存过的自动交易设置在重启后回落默认值。
+- [改进] 自动选股 Agent run 新增结构化 `diagnostics.agent_plan`，记录策略、市场、执行模式、每票预算、风控预算、过滤器、gate 和预期产物，Web 详情页展示“Agent 计划”摘要。
+- [改进] 自动选股 Agent run 新增结构化 `diagnostics.agent_summary` 和 `agent_summary` 时间线事件，聚合本轮结果、候选/计划/成交/跳过计数、数据质量、主要跳过原因和风控复核统计，Web 详情页展示“运行总结”。
+- [改进] 自动选股 Agent 候选决策和交易计划审计新增 `order_result.position_plan` 与 `order_result.risk_review`，记录候选级仓位计划、计划价格/数量、执行模式和规则风控复核结论。
+- [改进] vn.py 订单状态回写新增部分成交语义：`parttraded` / `partial_filled` 会把 Agent 交易计划标记为 `part_filled`，记录已成交数量/价格并等待成交回报写入本地 Portfolio。
+- [改进] `vnpy-paper` 状态接口新增 `diagnostics.trading_window`，Web 模拟交易页展示“可交易窗口”、下次开盘/收盘和 time gate 执行状态，便于解释自动交易为何等待或跳过。
+- [改进] `vnpy-paper` 状态接口新增 `diagnostics.failure_fuse`，Web 模拟交易页展示连续失败熔断是否打开、阈值和连续失败数。
+- [改进] `vnpy-paper` 新增 `POST /failure-fuse/reset` 和 Web“恢复熔断”入口，可重置连续失败熔断统计基线且保留历史 Agent run 审计。
+- [新功能] `vnpy-paper` 新增可选 vn.py `MainEngine.send_order` 桥接入口，支持 `vnpy_gateway_name`、手动委托 `execution_route="vnpy_bridge"` 和自动交易 `auto_execution_mode="vnpy_paper"`，提交成功记录 `submitted` 且不写入本地 Portfolio 成交。
+- [新功能] `vnpy-paper` 新增 `POST /api/v1/vnpy-paper/vnpy-events/trades` 成交回报同步入口，可按 `vt_orderid` 匹配 vn.py 提交态交易计划，幂等写入 Portfolio 流水并回写 Agent 审计。
+- [新功能] `vnpy-paper` 新增 `POST /api/v1/vnpy-paper/vnpy-events/orders`、`/account` 和 `/positions` 外部事件回写入口，支持按 `vt_orderid` 回写订单拒绝/撤销状态，并在状态诊断中暴露最新 vn.py 账户与持仓快照。
+- [新功能] `vnpy-paper` 新增 `POST /api/v1/vnpy-paper/vnpy-events/attach` 注入式 EventEngine bridge，可在宿主进程提供 `vnpy_event_engine` 或 `main_engine.event_engine` 时自动订阅订单、成交、账户和持仓事件并转入 DSA 同步入口。
+- [新功能] 新增 opt-in vn.py runtime bootstrap，支持通过 `VNPY_RUNTIME_ENABLED` 在 API 启动期创建 EventEngine/MainEngine、按 `VNPY_GATEWAY_CLASS` add gateway、按外部 JSON 连接参数显式 connect，并把诊断暴露到 `diagnostics.vnpy_runtime`。
+- [改进] 系统配置 schema 新增 `VNPY_RUNTIME_*` / `VNPY_GATEWAY_*` 字段和启动期重启提示，Web 设置页可查看并保存 vn.py runtime bootstrap 配置。
+- [改进] Web 模拟交易页新增 Runtime/MainEngine bridge 诊断卡、vn.py gateway 设置和手动委托路由选择，便于区分本地 paper 成交、vn.py runtime 状态与 vn.py 提交态。
+- [改进] Web API client 新增 vn.py 成交回报同步方法，统一处理 `vt_orderid`、`vt_tradeid`、成交数量、价格和原始回报载荷的 snake_case 映射。
+- [改进] Web API client 新增 vn.py 订单状态、账户快照和持仓快照同步方法，统一处理 EventEngine 外部回调载荷的 snake_case 映射。
+- [改进] Web API client 新增 vn.py EventEngine attach 方法，便于调试面板或宿主集成触发回调注册。
+- [文档] 更新 `.env.example`、vn.py 模拟交易说明和在线选股 Agent goals，补充 `VNPY_RUNTIME_*` 配置、敏感连接参数外置 JSON 约束和真实 gateway 验收缺口。
+- [测试] 扩展 vn.py adapter 与自动交易回归测试，覆盖 `MainEngine.send_order` 成功提交、网关提交异常记录为 `failed`、以及无 vn.py 环境继续 fallback。
+- [测试] 扩展 vn.py paper 服务/API/Web API 回归测试，覆盖提交态计划收到成交回报后写入本地 paper 账本、回写交易计划/候选决策、以及重复回报幂等处理。
+- [测试] 扩展 vn.py EventEngine bridge 回归测试，覆盖事件 handler 注册/注销、订单状态事件自动回写 Agent 计划、以及 attach endpoint 注册注入式 EventEngine。
+- [测试] 新增 vn.py runtime bootstrap 回归测试，覆盖默认关闭、vn.py 缺失降级、fake gateway add/connect、事件自动 attach 和关闭清理。
+- [修复] AlphaSift 选股 LLM 重排调用期默认注入 `LLM_TIMEOUT_SEC=180` 与 `LLM_MAX_TOKENS=1024`，并在 DSA context 中透传同值，降低热点选股因 LiteLLM 默认 60 秒超时而降级为 `screen_score` 排序的概率。
 - [改进] #1777 台股三大法人 fetcher（`TwInstitutionalFetcher`）增加缓存防击穿：并发同 (市场, 日期) 调用合并为单次上游请求，保护 TWSE T86 ~3 req/5s 限流额度；不同 key 仍并行；新增并发单次抓取、不同 key 各抓一次、HTTP 错误 fail-open 回归测试。
 - [修复] A 股个股分析遇到空 `belong_boards` 占位时会继续补查所属板块，关联板块模块在已有板块时稳定展示；对应涨跌幅缺失时只显示板块，不再输出占位涨跌幅。
 - [修复] 大盘复盘在 LLM 标题漂移或正文缺少板块段时，会从结构化 `sectors` 兜底渲染板块表，避免 Web 与推送报告偶发缺少板块主线。
+- [新功能] 接入 a-stock-data 风格 EastMoney 直连行业板块数据源，新增 `GET /api/v1/stocks/industry-boards`，并在 Web 侧边栏新增“行业板块”页面展示涨跌幅、涨跌家数与领涨股；实时端点失败时回退 EastMoney reportapi 行业目录和离线行业种子。
+- [改进] 行业板块接口新增 `data_quality` 与 `message`，Web 页面在非实时兜底数据时明确标记“备用目录”，避免将目录数据误读为实时涨跌榜。
+- [测试] 新增 AStockDataFetcher、行业板块 API、Web 行业板块页面与导航入口回归测试。
+- [文档] 更新数据源稳定性说明，补充 A 股行业板块列表与所属板块 fallback 链路。
+- [新功能] 新增 vn.py 风格本地模拟交易 API 与 Web “模拟交易”页面，支持模拟账户初始化、手动模拟委托、持仓快照和近期成交展示。
+- [修复] 模拟交易页面拆分“本地模拟可用”和“vn.py 环境已安装”状态，默认手动委托改为更易成交的一手 A 股测试单，并在按金额不足一手时返回明确跳过原因。
+- [新功能] 新增 AlphaSift 选股驱动的定时自动模拟买入选项，默认关闭，开启后通过 runtime scheduler 后台任务按间隔提交本地 paper 订单。
+- [改进] Runtime scheduler 支持在每日分析定时任务关闭时仅运行后台任务，供事件监控和自动模拟交易等独立后台能力使用。
+- [测试] 新增 vn.py 模拟交易服务/API、调度器后台任务、Web API、页面和导航入口回归测试。
+- [文档] 新增 `docs/vnpy-paper-trading.md`，说明本地模拟账本、自动交易边界、API 和回滚方式。
+- [文档] 新增在线选股 Agent 与自动模拟交易目标拆解文档，明确当前完成度、未完成事项、阶段目标和验收标准。
+- [改进] 模拟交易状态接口支持跳过持仓快照和近期成交的轻量查询，Web 模拟交易页改为先加载可操作状态、再后台刷新完整持仓快照。
+- [新功能] 自动模拟交易新增选股 Agent run 与候选决策审计表，记录策略、候选评分、成交、跳过原因和关联 `trade_id`。
+- [新功能] `vnpy-paper` API 新增 `GET /agent-runs` 与 `GET /agent-runs/{run_uid}`，Web 模拟交易页新增“自动选股 Agent 记录”区块展示最近运行和候选决策。
+- [测试] 新增自动选股 Agent 审计写入、API 列表/详情、Web API 与页面展示回归测试。
+- [文档] 更新 vn.py 模拟交易说明和在线选股 Agent 目标拆解，标注已完成的运行记录、候选决策和 Web 审计入口。
+- [新功能] 自动模拟交易新增 `dry_run` 执行模式和 `stock_selection_agent_trade_plans` 交易计划审计，支持只生成计划不写入模拟成交。
+- [改进] Web 模拟交易页自动选股 Agent 记录展示计划数、执行模式和交易计划状态，区分 planned、filled、skipped。
+- [改进] 自动模拟交易新增最大持仓数风控配置，达到上限时以 `max_positions_reached` 记录候选跳过原因并阻止模拟成交。
+- [改进] 自动模拟交易新增每日买入次数和每日预算风控，分别以 `daily_order_limit_reached`、`daily_budget_exceeded` 记录候选跳过原因并阻止模拟成交。
+- [改进] 自动模拟成交默认启用交易时段 gate，非交易日、盘前、午休、盘后或日历未知时记录 `non_trading_day`、`outside_trading_session` 或 `market_phase_unknown` 并跳过 paper 下单；`dry_run` 和 `manual_approval` 仍可生成计划。
+- [新功能] 自动模拟交易新增 `manual_approval` 执行模式和交易计划审批 API/Web 入口，自动任务可只生成待审批计划，用户确认后再写入本地 paper 成交并回写 Agent 审计。
+- [改进] 自动模拟交易新增 AlphaSift 数据质量 gate，将 `quality_status`、`warnings`、`source_errors`、`fallback_used` 和 `stale` 归一为 `ok/partial/stale/unavailable`，`stale/unavailable` 只写跳过审计不成交。
+- [改进] Web 模拟交易页新增“暂停自动买入”按钮，可一键关闭自动交易配置并触发后台 scheduler 重新 reconcile。
+- [新功能] 自动模拟交易新增基础整仓卖出风控配置，支持按止损百分比、止盈百分比和最大持仓天数触发本地 paper 卖出，并写入 Agent 决策和交易计划审计。
+- [改进] Web 模拟交易页新增“立即 dry-run”演练入口，可不保存设置、不开启后台自动交易就临时生成自动选股交易计划，并在 Agent run diagnostics 中记录本次执行模式覆盖。
+- [改进] `vnpy-paper` 状态接口新增 runtime scheduler 状态，Web 模拟交易页展示后台调度、自动交易任务注册、下次运行和最近跳过/错误信息。
+- [修复] `main.py --serve-only` / `--webui-only` 不再压制整个 runtime scheduler，仅禁用每日分析 daily job，避免自动模拟交易等独立后台任务无法注册。
+- [改进] Web 模拟交易页的自动选股 Agent 详情新增单次 run JSON 导出入口，便于复盘候选决策、交易计划和运行诊断。
+- [改进] Runtime scheduler 状态新增后台任务级 `next_run_at`，Web 模拟交易页优先展示自动模拟交易任务的下一次触发时间。
+- [改进] 自动模拟交易新增股票黑名单风控配置，命中候选以 `symbol_blacklisted` 记录跳过并写入 Agent 审计，不提交模拟成交。
+- [改进] 自动模拟交易新增候选级基础风控配置，可过滤 ST/退市风险、停牌、涨跌停和成交额过低候选，并以明确 reason code 写入 Agent 决策和交易计划审计。
+- [改进] 自动模拟交易新增账户级基础风控配置，可按最低现金余额和最大回撤限制自动买入，并以明确 reason code 写入 Agent 审计。
+- [改进] 自动模拟交易新增可选大盘红绿灯风控，可基于最近大盘复盘 `MarketLightSnapshot` 在红灯或黄灯时跳过自动买入并写入 Agent 审计。
+- [改进] Web 模拟交易页的自动选股 Agent 详情新增风控统计摘要，按 reason code 聚合展示本轮跳过/风险原因次数。
+- [改进] 自动模拟交易新增可选连续失败熔断，同策略/同市场最近运行连续失败达到阈值时以 `failure_fuse_open` 跳过自动买入。
+- [改进] 自动模拟交易新增基础仓位暴露风控，可按单票金额、总持仓金额、总仓位比例、行业金额和行业仓位比例限制自动买入，并在 dry-run / 手动审批计划中同步占用本轮风控预算。
+- [改进] 自动模拟交易基础卖出风控新增移动止损百分比，按本地峰值价回撤触发 `trailing_stop_triggered` 整仓模拟卖出并清理峰值记录。
+- [改进] `vnpy-paper` Agent run 详情新增运行时间线，Web 模拟交易页展示开始、数据质量、候选决策、交易计划和完成状态，便于解释自动交易为何执行或跳过。
+- [改进] `vnpy-paper` 交易计划重试扩展到 `manual_approval`、`paper` 和 `vnpy_paper` 的失败/可恢复跳过计划，新增 retry 次数与冷却审计，并注册 `vnpy_paper_auto_retry` 后台任务扫描到期自动计划，避免绕过数据质量和风控类跳过原因。
+- [改进] `vnpy_paper_auto_retry` 后台任务新增提交态订单超时归档：`vnpy_paper` 的 `submitted` 计划超过 30 分钟未收到终态回报时标记为 `failed/vnpy_order_timeout` 并保留原 `vt_orderid` 审计。
+- [改进] 自动模拟交易关键异常接入告警中心历史：连续失败熔断、AlphaSift 筛选异常、数据质量阻断、后台自动重试失败/未成交和 vn.py 提交态订单超时会写入 `target=vnpy_paper` 的系统触发记录，便于 Web 告警中心和 API 审计排查。
+- [改进] Web 模拟交易页新增“自动交易告警历史”区块，展示最近 `target=vnpy_paper` 的数据质量、熔断、自动重试和 vn.py 订单超时系统事件。
+- [新功能] `vnpy-paper` 新增 `POST /trade-plans/{plan_uid}/cancel` 和 Web “撤单”入口，支持对 `vnpy_paper` 的 `submitted` / `part_filled` 计划调用 vn.py `MainEngine.cancel_order`，并以 `cancel_requested` 状态等待订单回报确认终态。
+- [改进] Web 模拟交易页 vn.py 诊断卡新增 `CancelRequest` / `cancel_order` 支持状态，便于在发起撤单前确认当前 bridge 是否具备撤单能力。
+- [改进] `vnpy-paper` Agent run 列表和导出接口新增 `trigger_source`、`strategy`、`market`、`status` 过滤参数，Web 模拟交易页“自动选股 Agent 记录”支持按策略、市场和状态筛选后查看/导出。
+- [改进] 新增可选 vn.py adapter 基础映射层，`vnpy-paper` 状态诊断可显示 DSA 委托到 vn.py `OrderRequest` 的 adapter 可用性；未安装 vn.py 时继续使用本地 paper fallback。
+- [新功能] Web 模拟交易页新增“重置账户”入口，后端通过 `POST /api/v1/vnpy-paper/account/reset` 归档旧 `vnpy_paper` 账户并创建干净模拟账户，旧流水保留用于审计。
+- [测试] 新增 `vnpy-paper` API 端到端回归，覆盖自动交易设置、固定 AlphaSift 候选、模拟成交写入和 Agent run 决策/交易计划/时间线回查。
+- [测试] 新增 `python scripts/check_vnpy_adapter.py` 可选 vn.py adapter smoke 脚本，未安装 vn.py 时输出本地 paper fallback 诊断，安装后尝试构造真实 `OrderRequest`。
+- [新功能] `vnpy-paper` 新增 `GET /performance` 纸面绩效摘要，Web 模拟交易页展示累计收益、收益率、Agent 运行次数、成交/计划数和主要跳过原因。
+- [改进] `vnpy-paper` 纸面绩效摘要新增成交流水指标，按当前模拟账户聚合买卖次数、成交额、FIFO 卖出胜率、平均卖出收益和已实现交易收益。
+- [改进] `vnpy-paper` 纸面绩效摘要新增权益路径、最大回撤、换手率、当前仓位和按策略/行业归因，Web 模拟交易页同步展示这些审计指标。
+- [新功能] `vnpy-paper` 新增最近 Agent run 批量导出接口和 Web “导出最近记录”入口，可导出运行详情、候选决策、交易计划和时间线。
+- [测试] 扩展 `vnpy-paper` 服务/API/Web 回归测试，覆盖绩效风险指标、策略归因、行业归因和 adapter 诊断展示。
+- [测试] 扩展 `vnpy-paper` adapter、服务、API、Web API 和页面回归测试，覆盖 vn.py `CancelRequest` 映射、主动撤单接口和 Web 交易计划撤单入口。
 
 <!-- 新条目格式：- [类型] 描述（类型取值：新功能/改进/修复/文档/测试/chore）-->
 <!-- 每条独立一行追加到本段末尾，无需分类标题，合并时冲突最小 -->
@@ -354,7 +577,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### 文档
 
 - 明确 AlphaSift 与 LiteLLM 兼容边界：仅桥接 DSA 已声明 provider/model/base URL 为调用期注入，不对 `.env` 做 provider/model 路由迁移；回退方式为关闭 AlphaSift 并恢复原有 `LITELLM_*`/`LLM_*` 配置。
-- 明确 AlphaSift 仅复用 DSA 现有 LLM/LiteLLM 配置语义，不新增 `LITELLM_MODEL`、`OPENAI_MODEL`、`OPENAI_BASE_URL`、`LLM_TIMEOUT_SEC` 等模型语义迁移；失败提示与回退路径统一沿用既有系统配置链路，仅影响 AlphaSift 选股能力本身。
+- 明确 AlphaSift 仅复用 DSA 现有 LLM/LiteLLM 配置语义，不新增 `LITELLM_MODEL`、`OPENAI_MODEL`、`OPENAI_BASE_URL` 等模型语义迁移；`LLM_TIMEOUT_SEC` / `LLM_MAX_TOKENS` 只作为 AlphaSift 选股 LLM 重排的调用期控制项，失败提示与回退路径统一沿用既有系统配置链路，仅影响 AlphaSift 选股能力本身。
 - 明确 AlphaSift 自动安装来源锁定、`missing_module` 与运行时异常行为边界，以及 LLM/provider/base URL 与自定义通道回退路径，便于问题溯源与回滚到原有 LLM 配置。
 - 明确同股历史趋势新增模型字段为历史快照展示元数据，不影响运行时 LLM Provider/Model/Base URL 路由与配置迁移清理；回退方式为按常规发布回滚本变更。
 - 明确 #1311 的兼容性边界：渲染层仅消费分析结果 `model_used` 展示字段，未改动 `wechat/slack/feishu/telegram` sender 发送链路，不触发 provider/model/base_url 兼容迁移。
