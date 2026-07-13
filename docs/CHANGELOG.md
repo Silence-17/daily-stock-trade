@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [修复] `vnpy_paper` 成交回报改为按 `vt_tradeid` 幂等累计多笔部分成交，达到计划数量后才标记 `filled`，并保留累计数量、加权均价、剩余数量和成交明细审计。
+- [改进] vn.py 超时恢复扫描会先通过 `MainEngine.get_order` / `get_all_trades` 对账漏失回报；查询到订单或成交时同步本地计划和 Portfolio，查询异常时保护原活跃计划，网关取消/拒绝/失败和所有超时终态禁止自动重提，避免误归档或用户撤单后重复下单。
+- [测试] 扩展 vn.py adapter、paper service 和 API 回归，覆盖订单快照过滤、多笔成交幂等累计、服务漏回调恢复、网关查询异常保护和恢复计数字段。
 - [新功能] 新增 `GET /api/v1/vnpy-paper/agent-runs/data-quality-trends`，按 1 至 90 天窗口汇总 Agent run 数据质量、降级率、警告、source error 和逐日趋势。
 - [新功能] Agent 控制台新增 7/30/90 天跨 run 数据质量趋势视图，并复用策略、市场和状态筛选。
 - [修复] Agent 控制台运行历史与详情卡增加移动端宽度约束，避免长 run UID 撑出页面横向滚动。

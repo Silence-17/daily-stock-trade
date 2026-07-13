@@ -1072,6 +1072,9 @@ describe('VnpyPaperTradingPage', () => {
       accepted: true,
       skipped: false,
       expiredCount: 1,
+      reconciledCount: 2,
+      protectedCount: 3,
+      reconciliationFailedCount: 1,
       scannedCount: 3,
       attemptedCount: 2,
       submittedCount: 1,
@@ -1429,7 +1432,7 @@ describe('VnpyPaperTradingPage', () => {
     fireEvent.click(within(matrix).getByRole('button', { name: /运行恢复扫描/ }));
 
     await waitFor(() => expect(runTradePlanRecovery).toHaveBeenCalledWith(5, 200));
-    expect(await screen.findByText(/恢复扫描完成/)).toBeInTheDocument();
+    expect(await screen.findByText(/恢复扫描完成：对账 2，保护 3，对账异常 1/)).toBeInTheDocument();
     await waitFor(() => expect(getTradePlanRecoverySummary).toHaveBeenCalledTimes(2));
     confirmSpy.mockRestore();
   });

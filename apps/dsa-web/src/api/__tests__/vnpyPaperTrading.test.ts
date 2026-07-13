@@ -687,6 +687,9 @@ describe('vnpyPaperTradingApi', () => {
         accepted: true,
         skipped: false,
         expired_count: 1,
+        reconciled_count: 2,
+        protected_count: 3,
+        reconciliation_failed_count: 1,
         scanned_count: 3,
         attempted_count: 2,
         submitted_count: 1,
@@ -707,6 +710,9 @@ describe('vnpyPaperTradingApi', () => {
       },
     );
     expect(result.expiredCount).toBe(1);
+    expect(result.reconciledCount).toBe(2);
+    expect(result.protectedCount).toBe(3);
+    expect(result.reconciliationFailedCount).toBe(1);
     expect(result.attemptedCount).toBe(2);
     expect(result.messages).toEqual(['vnpy_order_timeout:plan-1']);
   });

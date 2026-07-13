@@ -111,6 +111,8 @@ def get_vnpy_bridge_status(
 
     send_order_supported = callable(getattr(main_engine, "send_order", None)) if main_engine is not None else False
     cancel_order_supported = callable(getattr(main_engine, "cancel_order", None)) if main_engine is not None else False
+    get_order_supported = callable(getattr(main_engine, "get_order", None)) if main_engine is not None else False
+    get_all_trades_supported = callable(getattr(main_engine, "get_all_trades", None)) if main_engine is not None else False
     gateway_configured = bool(str(gateway_name or "").strip())
     adapter_status = get_vnpy_adapter_status()
     order_request_supported = bool(adapter_status.get("order_request_supported"))
@@ -138,6 +140,9 @@ def get_vnpy_bridge_status(
         "main_engine_configured": main_engine is not None,
         "send_order_supported": send_order_supported,
         "cancel_order_supported": cancel_order_supported,
+        "get_order_supported": get_order_supported,
+        "get_all_trades_supported": get_all_trades_supported,
+        "order_reconciliation_supported": get_order_supported or get_all_trades_supported,
         "order_request_supported": order_request_supported,
     }
 
@@ -178,7 +183,7 @@ def get_vnpy_event_bridge_status(*, event_engine: Optional[Any] = None) -> Dict[
 
 
 class VnpyMainEngineBridge:
-    """Small adapter around vn.py MainEngine.send_order."""
+    """Small adapter around vn.py MainEngine order routing and reconciliation."""
 
     def __init__(self, *, main_engine: Any, gateway_name: str) -> None:
         self.main_engine = main_engine
@@ -220,6 +225,37 @@ class VnpyMainEngineBridge:
             "cancel_request": request,
             "cancel_request_payload": payload,
             "raw_result": raw_result,
+        }
+
+    def snapshot_order(self, vt_orderid: str) -> Dict[str, Any]:
+        """Read one order and its trades from MainEngine's in-memory state."""
+
+        order_id = str(vt_orderid or "").strip()
+        if not order_id:
+            raise VnpyAdapterError("vt_orderid is required")
+        get_order = getattr(self.main_engine, "get_order", None)
+        get_all_trades = getattr(self.main_engine, "get_all_trades", None)
+        get_order_supported = callable(get_order)
+        get_all_trades_supported = callable(get_all_trades)
+        if not get_order_supported and not get_all_trades_supported:
+            raise VnpyAdapterError("vn.py main_engine does not provide order reconciliation queries")
+
+        order = get_order(order_id) if get_order_supported else None
+        trades = []
+        if get_all_trades_supported:
+            for trade in list(get_all_trades() or []):
+                trade_order_id = _object_value(trade, "vt_orderid", "vtOrderid")
+                if str(trade_order_id or "").strip() == order_id:
+                    trades.append(trade)
+        return {
+            "supported": True,
+            "vt_orderid": order_id,
+            "order": order,
+            "trades": trades,
+            "order_found": order is not None,
+            "trade_count": len(trades),
+            "get_order_supported": get_order_supported,
+            "get_all_trades_supported": get_all_trades_supported,
         }
 
 
@@ -557,3 +593,12 @@ def _extract_order_id(vt_orderid: str) -> str:
     if "." not in text:
         return text
     return text.rsplit(".", 1)[-1].strip()
+
+
+def _object_value(value: Any, *names: str) -> Any:
+    for name in names:
+        if isinstance(value, dict) and name in value:
+            return value.get(name)
+        if hasattr(value, name):
+            return getattr(value, name)
+    return None

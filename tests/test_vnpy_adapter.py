@@ -184,6 +184,22 @@ class VnpyAdapterTestCase(unittest.TestCase):
         self.assertEqual(main_engine.cancel_calls[0][1], "SIM")
         self.assertEqual(main_engine.cancel_calls[0][0].orderid, "1")
 
+    def test_main_engine_bridge_snapshots_order_and_filters_trades(self) -> None:
+        main_engine = _FakeMainEngine()
+        matching_trade = {"vt_orderid": "SIM.1", "vt_tradeid": "SIM.T1"}
+        main_engine.orders["SIM.1"] = {"vt_orderid": "SIM.1", "status": "alltraded"}
+        main_engine.trades = [matching_trade, {"vt_orderid": "SIM.2", "vt_tradeid": "SIM.T2"}]
+
+        snapshot = VnpyMainEngineBridge(
+            main_engine=main_engine,
+            gateway_name="SIM",
+        ).snapshot_order("SIM.1")
+
+        self.assertTrue(snapshot["supported"])
+        self.assertTrue(snapshot["order_found"])
+        self.assertEqual(snapshot["trade_count"], 1)
+        self.assertEqual(snapshot["trades"], [matching_trade])
+
     def test_event_subscription_bridge_registers_and_unregisters_handlers(self) -> None:
         installed = _install_fake_vnpy_modules()
         event_engine = _FakeEventEngine()
@@ -293,6 +309,8 @@ class _FakeMainEngine:
     def __init__(self) -> None:
         self.calls = []
         self.cancel_calls = []
+        self.orders = {}
+        self.trades = []
 
     def send_order(self, request, gateway_name):
         self.calls.append((request, gateway_name))
@@ -301,6 +319,12 @@ class _FakeMainEngine:
     def cancel_order(self, request, gateway_name):
         self.cancel_calls.append((request, gateway_name))
         return True
+
+    def get_order(self, vt_orderid):
+        return self.orders.get(vt_orderid)
+
+    def get_all_trades(self):
+        return list(self.trades)
 
 
 class _FakeEventEngine:

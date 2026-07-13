@@ -79,6 +79,18 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         os.environ.pop("DATABASE_PATH", None)
         self.temp_dir.cleanup()
 
+    @staticmethod
+    def _age_trade_plan(plan_id: int, *, minutes: int = 45) -> None:
+        with DatabaseManager.get_instance().get_session() as session:
+            session.execute(
+                text(
+                    f"UPDATE {StockSelectionAgentTradePlan.__tablename__} "
+                    "SET updated_at = :updated_at WHERE id = :id"
+                ),
+                {"updated_at": datetime.now() - timedelta(minutes=minutes), "id": int(plan_id)},
+            )
+            session.commit()
+
     def test_cash_order_fills_cn_buy_in_100_share_lots(self) -> None:
         with patch(
             "src.services.portfolio_service.PortfolioService._fetch_realtime_position_price",
@@ -1647,6 +1659,261 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertTrue(duplicate["accepted"])
         self.assertEqual(duplicate["trade_id"], callback["trade_id"])
         self.assertTrue(duplicate["raw"]["duplicate_callback"])
+
+    def test_vnpy_trade_callbacks_accumulate_multiple_fills_idempotently(self) -> None:
+        run = self.service.agent_repo.create_run(
+            run_uid="multi-fill-run",
+            trigger_source="vnpy_paper_auto",
+            strategy="dual_low",
+            market="cn",
+            settings={},
+            diagnostics={},
+        )
+        self.service.agent_repo.record_trade_plan(
+            plan_uid="multi-fill-plan",
+            run_id=int(run["id"]),
+            decision_id=None,
+            symbol="600519",
+            market="cn",
+            side="buy",
+            status="submitted",
+            execution_mode="vnpy_paper",
+            planned_cash_amount=1000,
+            planned_quantity=100,
+            planned_price=10,
+            submitted_quantity=100,
+            submitted_price=10,
+            order_result={"status": "submitted", "raw": {"vt_orderid": "SIM.MULTI"}},
+        )
+
+        first = self.service.sync_vnpy_trade_callback(
+            vt_orderid="SIM.MULTI",
+            vt_tradeid="SIM.MULTI.T1",
+            quantity=40,
+            price=10,
+            trade_date=date(2026, 7, 6),
+        )
+        order_state = self.service.sync_vnpy_order_callback(
+            vt_orderid="SIM.MULTI",
+            status="parttraded",
+            volume=100,
+            traded=40,
+            price=10,
+        )
+        second = self.service.sync_vnpy_trade_callback(
+            vt_orderid="SIM.MULTI",
+            vt_tradeid="SIM.MULTI.T2",
+            quantity=60,
+            price=11,
+            trade_date=date(2026, 7, 6),
+        )
+        duplicate = self.service.sync_vnpy_trade_callback(
+            vt_orderid="SIM.MULTI",
+            vt_tradeid="SIM.MULTI.T2",
+            quantity=60,
+            price=11,
+            trade_date=date(2026, 7, 6),
+        )
+
+        self.assertEqual(first["status"], "part_filled")
+        self.assertEqual(first["raw"]["fill_sync"]["cumulative_quantity"], 40.0)
+        self.assertEqual(first["raw"]["fill_sync"]["remaining_quantity"], 60.0)
+        self.assertEqual(order_state["raw"]["fill_sync"]["trade_count"], 1)
+        self.assertEqual(second["status"], "filled")
+        self.assertEqual(second["quantity"], 100.0)
+        self.assertAlmostEqual(second["price"], 10.6)
+        self.assertEqual(second["raw"]["fill_sync"]["trade_count"], 2)
+        self.assertEqual(second["raw"]["fill_sync"]["cumulative_notional"], 1060.0)
+        self.assertTrue(duplicate["raw"]["duplicate_callback"])
+        account_id = int(self.service.get_settings().account_id)
+        trades = self.service.portfolio.list_trade_events(account_id=account_id, page=1)
+        self.assertEqual(len(trades["items"]), 2)
+
+    def test_cancelled_order_after_partial_fill_keeps_actual_fill_summary(self) -> None:
+        run = self.service.agent_repo.create_run(
+            run_uid="partial-cancel-run",
+            trigger_source="vnpy_paper_auto",
+            strategy="dual_low",
+            market="cn",
+            settings={},
+            diagnostics={},
+        )
+        self.service.agent_repo.record_trade_plan(
+            plan_uid="partial-cancel-plan",
+            run_id=int(run["id"]),
+            decision_id=None,
+            symbol="600519",
+            market="cn",
+            side="buy",
+            status="submitted",
+            execution_mode="vnpy_paper",
+            planned_cash_amount=1000,
+            planned_quantity=100,
+            planned_price=10,
+            submitted_quantity=100,
+            submitted_price=10,
+            order_result={"status": "submitted", "raw": {"vt_orderid": "SIM.CANCELLED"}},
+        )
+        partial = self.service.sync_vnpy_trade_callback(
+            vt_orderid="SIM.CANCELLED",
+            vt_tradeid="SIM.CANCELLED.T1",
+            quantity=40,
+            price=10.25,
+        )
+
+        cancelled = self.service.sync_vnpy_order_callback(
+            vt_orderid="SIM.CANCELLED",
+            status="cancelled",
+            volume=100,
+            traded=40,
+            price=11,
+        )
+        refreshed = self.service.agent_repo.get_trade_plan("partial-cancel-plan")
+
+        self.assertEqual(partial["status"], "part_filled")
+        self.assertEqual(cancelled["status"], "failed")
+        self.assertEqual(cancelled["reason"], "vnpy_order_cancelled")
+        self.assertEqual(cancelled["quantity"], 40.0)
+        self.assertEqual(cancelled["price"], 10.25)
+        self.assertEqual(cancelled["raw"]["fill_sync"]["cumulative_quantity"], 40.0)
+        self.assertIsNotNone(refreshed)
+        assert refreshed is not None
+        self.assertEqual(refreshed["submitted_quantity"], 40.0)
+        self.assertEqual(refreshed["submitted_price"], 10.25)
+        self.assertEqual(refreshed["trade_id"], partial["trade_id"])
+
+    def test_stale_vnpy_plan_reconciles_main_engine_fill_before_expiring(self) -> None:
+        main_engine = _FakeMainEngine()
+        main_engine.orders["SIM.RECOVER"] = SimpleNamespace(
+            vt_orderid="SIM.RECOVER",
+            status="ALLTRADED",
+            symbol="600519",
+            direction="LONG",
+            exchange="SSE",
+            volume=100,
+            traded=100,
+            price=10.2,
+        )
+        main_engine.trades = [
+            SimpleNamespace(
+                vt_orderid="SIM.RECOVER",
+                vt_tradeid="SIM.RECOVER.T1",
+                symbol="600519",
+                direction="LONG",
+                exchange="SSE",
+                volume=100,
+                price=10.2,
+                datetime=datetime(2026, 7, 6, 2, 30, tzinfo=timezone.utc),
+            )
+        ]
+        self.service = VnpyPaperTradingService(
+            data_fetcher_manager=_FakeDataFetcherManager(price=10.0),
+            config_path=self.config_path,
+            vnpy_main_engine=main_engine,
+        )
+        self.service.update_settings({"vnpy_gateway_name": "SIM"})
+        run = self.service.agent_repo.create_run(
+            run_uid="reconcile-filled-run",
+            trigger_source="vnpy_paper_auto",
+            strategy="dual_low",
+            market="cn",
+            settings={},
+            diagnostics={},
+        )
+        plan = self.service.agent_repo.record_trade_plan(
+            plan_uid="reconcile-filled-plan",
+            run_id=int(run["id"]),
+            decision_id=None,
+            symbol="600519",
+            market="cn",
+            side="buy",
+            status="submitted",
+            execution_mode="vnpy_paper",
+            planned_cash_amount=1000,
+            planned_quantity=100,
+            planned_price=10,
+            submitted_quantity=100,
+            submitted_price=10,
+            order_result={"status": "submitted", "raw": {"vt_orderid": "SIM.RECOVER"}},
+        )
+        self._age_trade_plan(int(plan["id"]))
+
+        result = self.service.expire_stale_vnpy_trade_plans(max_plans=3, scan_limit=10)
+        refreshed = self.service.agent_repo.get_trade_plan("reconcile-filled-plan")
+
+        self.assertEqual(result["expired_count"], 0)
+        self.assertEqual(result["reconciled_count"], 1)
+        self.assertEqual(result["protected_count"], 1)
+        self.assertEqual(result["reconciliation_failed_count"], 0)
+        self.assertIsNotNone(refreshed)
+        assert refreshed is not None
+        self.assertEqual(refreshed["status"], "filled")
+        self.assertEqual(refreshed["order_result"]["raw"]["fill_sync"]["trade_count"], 1)
+
+    def test_stale_vnpy_plan_query_failure_is_protected_from_expiration(self) -> None:
+        main_engine = _FailingQueryMainEngine(RuntimeError("gateway cache unavailable"))
+        self.service = VnpyPaperTradingService(
+            data_fetcher_manager=_FakeDataFetcherManager(price=10.0),
+            config_path=self.config_path,
+            vnpy_main_engine=main_engine,
+        )
+        self.service.update_settings({"vnpy_gateway_name": "SIM"})
+        run = self.service.agent_repo.create_run(
+            run_uid="reconcile-failed-run",
+            trigger_source="vnpy_paper_auto",
+            strategy="dual_low",
+            market="cn",
+            settings={},
+            diagnostics={},
+        )
+        plan = self.service.agent_repo.record_trade_plan(
+            plan_uid="reconcile-failed-plan",
+            run_id=int(run["id"]),
+            decision_id=None,
+            symbol="600519",
+            market="cn",
+            side="buy",
+            status="submitted",
+            execution_mode="vnpy_paper",
+            planned_cash_amount=1000,
+            planned_quantity=100,
+            planned_price=10,
+            submitted_quantity=100,
+            submitted_price=10,
+            order_result={"status": "submitted", "raw": {"vt_orderid": "SIM.FAIL"}},
+        )
+        self._age_trade_plan(int(plan["id"]))
+
+        with patch.object(self.service, "_record_auto_trade_alert_event"):
+            result = self.service.expire_stale_vnpy_trade_plans(max_plans=3, scan_limit=10)
+        refreshed = self.service.agent_repo.get_trade_plan("reconcile-failed-plan")
+
+        self.assertEqual(result["expired_count"], 0)
+        self.assertEqual(result["reconciliation_failed_count"], 1)
+        self.assertEqual(result["protected_count"], 1)
+        self.assertEqual(result["failed_count"], 1)
+        self.assertIsNotNone(refreshed)
+        assert refreshed is not None
+        self.assertEqual(refreshed["status"], "submitted")
+
+    def test_terminal_vnpy_gateway_failures_are_not_automatically_retryable(self) -> None:
+        for reason in (
+            "vnpy_order_cancelled",
+            "vnpy_order_rejected",
+            "vnpy_order_failed",
+            "vnpy_order_timeout",
+            "vnpy_partial_fill_timeout",
+            "vnpy_cancel_timeout",
+        ):
+            with self.subTest(reason=reason):
+                with self.assertRaisesRegex(ValueError, "trade_plan_not_retryable"):
+                    self.service._validate_trade_plan_retry(
+                        {
+                            "status": "failed",
+                            "skip_reason": reason,
+                            "order_result": {"reason": reason},
+                        }
+                    )
 
     def test_vnpy_order_callback_parttraded_marks_plan_part_filled_until_trade_callback(self) -> None:
         installed = _install_fake_vnpy_modules()
@@ -3651,6 +3918,8 @@ class _FakeMainEngine:
     def __init__(self) -> None:
         self.calls = []
         self.cancel_calls = []
+        self.orders = {}
+        self.trades = []
 
     def send_order(self, request, gateway_name):
         self.calls.append((request, gateway_name))
@@ -3659,6 +3928,12 @@ class _FakeMainEngine:
     def cancel_order(self, request, gateway_name):
         self.cancel_calls.append((request, gateway_name))
         return True
+
+    def get_order(self, vt_orderid):
+        return self.orders.get(vt_orderid)
+
+    def get_all_trades(self):
+        return list(self.trades)
 
 
 class _FakeEventEngine:
@@ -3684,6 +3959,15 @@ class _FailingMainEngine(_FakeMainEngine):
 
     def send_order(self, request, gateway_name):
         self.calls.append((request, gateway_name))
+        raise self.exc
+
+
+class _FailingQueryMainEngine(_FakeMainEngine):
+    def __init__(self, exc: Exception) -> None:
+        super().__init__()
+        self.exc = exc
+
+    def get_order(self, vt_orderid):
         raise self.exc
 
 

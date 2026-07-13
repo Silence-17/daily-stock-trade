@@ -526,6 +526,9 @@ export type VnpyPaperTradePlanRecoveryRunResponse = {
   skipped: boolean;
   reason?: string | null;
   expiredCount: number;
+  reconciledCount: number;
+  protectedCount: number;
+  reconciliationFailedCount: number;
   scannedCount: number;
   attemptedCount: number;
   submittedCount: number;

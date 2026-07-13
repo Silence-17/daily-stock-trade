@@ -89,6 +89,11 @@ RETRYABLE_TRADE_PLAN_SKIP_REASONS = {
     "vnpy_bridge_unavailable",
 }
 NON_RETRYABLE_TRADE_PLAN_FAILURE_REASONS = {
+    "vnpy_cancel_timeout",
+    "vnpy_order_cancelled",
+    "vnpy_order_failed",
+    "vnpy_order_rejected",
+    "vnpy_order_timeout",
     "vnpy_partial_fill_timeout",
 }
 ACTIVE_VNPY_TRADE_PLAN_STATUSES = {"submitted", "part_filled", "cancel_requested"}
@@ -1803,15 +1808,38 @@ class VnpyPaperTradingService:
         order_volume = _safe_float(volume)
         traded_quantity = _safe_float(traded)
         is_part_filled = self._vnpy_order_is_part_filled(order_status)
+        failed_reason = self._vnpy_order_failure_reason(order_status)
+        previous_order_result = plan.get("order_result") if isinstance(plan.get("order_result"), dict) else {}
+        previous_order_raw = (
+            previous_order_result.get("raw")
+            if isinstance(previous_order_result.get("raw"), dict)
+            else {}
+        )
+        fill_sync = (
+            previous_order_raw.get("fill_sync")
+            if isinstance(previous_order_raw.get("fill_sync"), dict)
+            else {}
+        )
+        synced_quantity = _safe_float(fill_sync.get("cumulative_quantity"))
+        synced_average_price = _safe_float(fill_sync.get("average_price"))
+        callback_filled_quantity = max(
+            traded_quantity or 0.0,
+            synced_quantity or 0.0,
+        )
+        use_filled_quantity = bool(
+            callback_filled_quantity > 0 and (is_part_filled or failed_reason is not None)
+        )
         submitted_quantity = (
-            traded_quantity
-            if is_part_filled and traded_quantity is not None
+            callback_filled_quantity
+            if use_filled_quantity
             else order_volume
             or _safe_float(plan.get("submitted_quantity"))
             or _safe_float(plan.get("planned_quantity"))
         )
         submitted_price = (
-            _safe_float(price)
+            synced_average_price
+            if use_filled_quantity and synced_average_price is not None
+            else _safe_float(price)
             or _safe_float(plan.get("submitted_price"))
             or _safe_float(plan.get("planned_price"))
         )
@@ -1821,6 +1849,7 @@ class VnpyPaperTradingService:
             else None
         )
         order_raw = {
+            **previous_order_raw,
             "vt_orderid": order_id,
             "vnpy_order_status": order_status,
             "raw_status": status,
@@ -1830,7 +1859,6 @@ class VnpyPaperTradingService:
             "callback": raw or {},
         }
 
-        failed_reason = self._vnpy_order_failure_reason(order_status)
         if failed_reason is not None:
             result = self._failed_order(
                 symbol=symbol_norm,
@@ -2923,6 +2951,9 @@ class VnpyPaperTradingService:
             "skipped": False,
             "reason": None,
             "expired_count": int(expiration.get("expired_count") or 0),
+            "reconciled_count": int(expiration.get("reconciled_count") or 0),
+            "protected_count": int(expiration.get("protected_count") or 0),
+            "reconciliation_failed_count": int(expiration.get("reconciliation_failed_count") or 0),
             "scanned_count": len(candidates),
             "attempted_count": 0,
             "submitted_count": 0,
@@ -3020,10 +3051,37 @@ class VnpyPaperTradingService:
             "accepted": True,
             "scanned_count": len(candidates),
             "expired_count": 0,
+            "reconciled_count": 0,
+            "protected_count": 0,
+            "reconciliation_failed_count": 0,
             "failed_count": 0,
             "messages": [],
         }
         for plan in candidates[:limit]:
+            try:
+                reconciliation = self._reconcile_stale_vnpy_trade_plan(plan)
+            except Exception as exc:  # noqa: BLE001 - gateway query failures must fail closed.
+                logger.warning("Reconcile stale vn.py trade plan failed for %s: %s", plan.get("plan_uid"), exc)
+                result["reconciliation_failed_count"] = int(result["reconciliation_failed_count"]) + 1
+                result["protected_count"] = int(result["protected_count"]) + 1
+                result["failed_count"] = int(result["failed_count"]) + 1
+                result["messages"].append(f"vnpy_order_reconciliation_failed:{plan.get('plan_uid')}")
+                self._record_auto_trade_alert_event(
+                    "vnpy_order_reconciliation_failed",
+                    status="failed",
+                    reason=str(exc) or "vnpy_order_reconciliation_failed",
+                    diagnostics={
+                        "plan_uid": plan.get("plan_uid"),
+                        "run_id": plan.get("run_id"),
+                        "symbol": plan.get("symbol"),
+                        "execution_mode": plan.get("execution_mode"),
+                    },
+                )
+                continue
+            if reconciliation.get("supported") and reconciliation.get("observed"):
+                result["reconciled_count"] = int(result["reconciled_count"]) + 1
+                result["protected_count"] = int(result["protected_count"]) + 1
+                continue
             try:
                 self._expire_stale_vnpy_trade_plan(plan, timeout_seconds=timeout)
                 result["expired_count"] = int(result["expired_count"]) + 1
@@ -3044,7 +3102,86 @@ class VnpyPaperTradingService:
                 )
         if int(result["expired_count"]):
             result["messages"].append(f"expired_vnpy_orders:{result['expired_count']}")
+        if int(result["reconciled_count"]):
+            result["messages"].append(f"reconciled_vnpy_orders:{result['reconciled_count']}")
+        if int(result["reconciliation_failed_count"]):
+            result["messages"].append(
+                f"vnpy_order_reconciliation_failed:{result['reconciliation_failed_count']}"
+            )
         return result
+
+    def _reconcile_stale_vnpy_trade_plan(self, plan: Dict[str, Any]) -> Dict[str, Any]:
+        order_result = plan.get("order_result") if isinstance(plan.get("order_result"), dict) else {}
+        raw = order_result.get("raw") if isinstance(order_result.get("raw"), dict) else {}
+        vt_orderid = str(
+            raw.get("vt_orderid") or raw.get("vtOrderid") or raw.get("order_id") or ""
+        ).strip()
+        settings = self.get_settings()
+        if not vt_orderid or self.vnpy_main_engine is None or not settings.vnpy_gateway_name:
+            return {"supported": False, "observed": False, "vt_orderid": vt_orderid or None}
+
+        bridge_status = get_vnpy_bridge_status(
+            main_engine=self.vnpy_main_engine,
+            gateway_name=settings.vnpy_gateway_name,
+        )
+        if not bridge_status.get("order_reconciliation_supported"):
+            return {"supported": False, "observed": False, "vt_orderid": vt_orderid}
+
+        snapshot = VnpyMainEngineBridge(
+            main_engine=self.vnpy_main_engine,
+            gateway_name=settings.vnpy_gateway_name,
+        ).snapshot_order(vt_orderid)
+        trades = list(snapshot.get("trades") or [])
+        for trade in trades:
+            synced = self.sync_vnpy_trade_callback(
+                vt_orderid=vt_orderid,
+                vt_tradeid=self._event_value(trade, "vt_tradeid", "vtTradeid"),
+                symbol=self._event_value(trade, "symbol"),
+                side=self._side_from_vnpy_direction(self._event_value(trade, "direction")),
+                market=self._market_from_vnpy_exchange(self._event_value(trade, "exchange")),
+                quantity=_safe_float(self._event_value(trade, "volume")),
+                price=_safe_float(self._event_value(trade, "price")),
+                trade_date=self._event_value(trade, "datetime", "trade_date", "tradeDate"),
+                raw={"reconciled_from_main_engine": True, **self._object_public_dict(trade)},
+            )
+            if not synced.get("accepted"):
+                raise VnpyAdapterError(
+                    str(synced.get("reason") or "vn.py trade reconciliation was not accepted")
+                )
+
+        order = snapshot.get("order")
+        if order is not None:
+            synced_order = self.sync_vnpy_order_callback(
+                vt_orderid=vt_orderid,
+                status=self._event_text(self._event_value(order, "status")),
+                symbol=self._event_value(order, "symbol"),
+                side=self._side_from_vnpy_direction(self._event_value(order, "direction")),
+                market=self._market_from_vnpy_exchange(self._event_value(order, "exchange")),
+                volume=_safe_float(self._event_value(order, "volume")),
+                traded=_safe_float(self._event_value(order, "traded")),
+                price=_safe_float(self._event_value(order, "price")),
+                rejected_reason=self._event_value(
+                    order,
+                    "rejected_reason",
+                    "rejectedReason",
+                    "status_msg",
+                    "statusMsg",
+                ),
+                raw={"reconciled_from_main_engine": True, **self._object_public_dict(order)},
+            )
+            if not synced_order.get("accepted") and synced_order.get("reason") == "vnpy_order_plan_not_found":
+                raise VnpyAdapterError("vn.py order reconciliation plan disappeared")
+
+        observed = bool(order is not None or trades)
+        refreshed = self.agent_repo.get_trade_plan(str(plan.get("plan_uid") or "")) if observed else None
+        return {
+            "supported": True,
+            "observed": observed,
+            "vt_orderid": vt_orderid,
+            "order_found": order is not None,
+            "trade_count": len(trades),
+            "status": refreshed.get("status") if isinstance(refreshed, dict) else plan.get("status"),
+        }
 
     def _auto_retry_candidate_trade_plans(self, *, scan_limit: int) -> List[Dict[str, Any]]:
         runs = self.agent_repo.list_recent_runs(

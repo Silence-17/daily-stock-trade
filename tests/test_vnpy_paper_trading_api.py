@@ -1377,6 +1377,9 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
             "accepted": True,
             "skipped": False,
             "expired_count": 1,
+            "reconciled_count": 2,
+            "protected_count": 3,
+            "reconciliation_failed_count": 1,
             "scanned_count": 3,
             "attempted_count": 2,
             "submitted_count": 1,
@@ -1397,6 +1400,9 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertEqual(payload["expired_count"], 1)
+        self.assertEqual(payload["reconciled_count"], 2)
+        self.assertEqual(payload["protected_count"], 3)
+        self.assertEqual(payload["reconciliation_failed_count"], 1)
         self.assertEqual(payload["attempted_count"], 2)
         self.assertEqual(payload["messages"], ["vnpy_order_timeout:plan-1"])
         service.retry_due_trade_plans.assert_called_once_with(max_plans=2, scan_limit=50)

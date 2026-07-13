@@ -760,8 +760,8 @@ python main.py --schedule --no-run-immediately
 > `GET /api/v1/vnpy-paper/performance` 的 Web 展示包含绩效摘要、权益曲线、日度收益表、月度收益表和窗口级绩效矩阵；矩阵按当前 `run_limit` 以及可选 `created_from` / `created_to` Agent run 创建时间窗口展开策略/行业样本数、计划数、成交数、跳过数、成交金额和填充率，用于本地 paper 复盘，不等同完整历史行情回测。
 > 同一接口还返回 `daily_returns` 与 `monthly_returns`，Web 模拟交易页展示“日度收益”和“月度收益”表，按每日/每月最后权益聚合盈亏、收益率、累计收益率、回撤和交易数；它补充的是 paper 账本复盘粒度，仍不是完整回测净值曲线。
 > `GET /api/v1/vnpy-paper/trade-plans/recovery-summary` 返回只读交易计划恢复矩阵，Web 模拟交易页据此展示活跃提交态、疑似卡住、可撤单、可重试、冷却中和重试超限计划；该接口不自动修改订单状态。
-> `POST /api/v1/vnpy-paper/trade-plans/recovery/run` 可在页面确认后手动运行一次受限恢复扫描，复用后台到期重试逻辑，返回超时归档、尝试重试、提交、跳过和失败计数。
-> `vnpy_paper` 的 `part_filled` 计划若超过订单超时窗口仍未收到成交回报，会归档为 `failed` / `vnpy_partial_fill_timeout` 并写入告警，但不会进入自动重试队列，避免真实 gateway 已部分成交而本地尚未对账时重复委托。
+> `POST /api/v1/vnpy-paper/trade-plans/recovery/run` 可在页面确认后手动运行一次受限恢复扫描，复用后台到期重试逻辑。超时活跃计划会先通过注入的 `MainEngine.get_order` / `get_all_trades` 对账并补同步漏失回报；响应除超时归档、重试、提交、跳过和失败计数外，还返回 `reconciled_count`、`protected_count` 和 `reconciliation_failed_count`。
+> `vnpy_paper` 成交回报按 `vt_tradeid` 幂等累计，一张委托可分多笔更新 `part_filled`，累计达到计划数量后才变为 `filled`。网关明确取消、拒绝或失败，以及 `vnpy_order_timeout`、`vnpy_partial_fill_timeout`、`vnpy_cancel_timeout` 都不会进入自动重试队列；MainEngine 查询异常也会保护原活跃计划，避免用户撤单或状态不明时重复委托。
 > 自动卖出风控支持 `auto_sell_position_pct` 设置每次卖出的持仓比例；留空时默认整仓卖出，设置为 `50` 时止损、止盈、移动止损或最大持仓天数触发后只提交当前持仓 50% 的卖出计划，并在 Agent 审计的 `position_plan` 中记录 `sizing_method=position_pct`、持仓数量和卖出比例。
 > 自动卖出风控支持 `auto_no_progress_days` 与 `auto_no_progress_min_return_pct`：持仓达到指定天数且浮盈不高于阈值时会以 `no_progress_timeout` 生成卖出计划；收益阈值留空时按 0% 处理。
 > 自动卖出风控还支持 `auto_signal_exit_enabled`：开启后会读取当前持仓对应的 active `DecisionSignal`，命中 `sell/reduce/avoid` 防守信号时以 `strategy_invalidated` 生成卖出计划，并把信号摘要写入候选原始载荷和 Agent 风控审计。

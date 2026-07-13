@@ -1785,7 +1785,7 @@ const VnpyPaperTradingPage: React.FC = () => {
   };
 
   const handleRunTradePlanRecovery = async () => {
-    if (!window.confirm('运行一次交易计划恢复扫描？到期的失败计划可能会被重新提交。')) {
+    if (!window.confirm('运行一次交易计划恢复扫描？超时的 vn.py 计划会先对账，确认可恢复的失败计划可能会被重新提交。')) {
       return;
     }
     setTradePlanRecoveryRunning(true);
@@ -1795,7 +1795,7 @@ const VnpyPaperTradingPage: React.FC = () => {
     try {
       const result = await vnpyPaperTradingApi.runTradePlanRecovery(5, 200);
       setSuccess(
-        `恢复扫描完成：归档 ${formatNumber(result.expiredCount, 0)}，尝试 ${formatNumber(result.attemptedCount, 0)}，提交 ${formatNumber(result.submittedCount, 0)}`
+        `恢复扫描完成：对账 ${formatNumber(result.reconciledCount, 0)}，保护 ${formatNumber(result.protectedCount, 0)}，对账异常 ${formatNumber(result.reconciliationFailedCount, 0)}，归档 ${formatNumber(result.expiredCount, 0)}，尝试 ${formatNumber(result.attemptedCount, 0)}，提交 ${formatNumber(result.submittedCount, 0)}`
       );
       await loadFullStatus();
       await loadPerformance();
