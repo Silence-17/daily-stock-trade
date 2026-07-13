@@ -79,6 +79,29 @@ class RuntimeSchedulerRepositoryTestCase(unittest.TestCase):
         self.assertEqual(len(remaining), 1)
         self.assertEqual(remaining[0]["message"], "new event")
 
+    def test_list_task_events_filters_by_start_time(self) -> None:
+        repo = RuntimeSchedulerRepository(self.db)
+        repo.record_task_event(
+            name="vnpy_paper_auto_trade",
+            status="completed",
+            message="outside window",
+            timestamp=datetime(2026, 7, 1, 9, 31, 0),
+        )
+        repo.record_task_event(
+            name="vnpy_paper_auto_trade",
+            status="failed",
+            message="inside window",
+            timestamp=datetime(2026, 7, 3, 9, 31, 0),
+        )
+
+        events = repo.list_task_events(
+            started_at=datetime(2026, 7, 2, 0, 0, 0),
+            limit=5000,
+        )
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["message"], "inside window")
+
 
 if __name__ == "__main__":
     unittest.main()

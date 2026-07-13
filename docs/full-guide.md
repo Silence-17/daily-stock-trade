@@ -750,6 +750,10 @@ python main.py --schedule --no-run-immediately
 > Web 模拟交易页还会读取 `GET /api/v1/vnpy-paper/task-health` 展示“任务健康检查”，按自动买入与自动恢复扫描聚合任务是否注册、运行、停用、持久化最近失败/跳过原因和下次运行时间。
 > `GET /api/v1/vnpy-paper/status` 的完整持仓快照会使用进程内 10 秒短 TTL 缓存，减少频繁刷新时重复重放 Portfolio 和拉取行情估值；成交、vn.py 成交回调、账户重置或账户恢复后会主动失效缓存，响应诊断包含 `snapshot_cache_hit` 和 `snapshot_cache_ttl_seconds`。
 > Web 模拟交易页还会读取 `GET /api/v1/vnpy-paper/task-event-summary` 展示“任务趋势”，按最近持久化事件聚合 completed/skipped/failed/started 分布、任务级失败率、平均耗时和最近失败/跳过时间。
+>
+> “长期稳定性”通过 `GET /api/v1/vnpy-paper/task-metrics` 提供 7/30/90 天窗口，按 completed/skipped/failed 终态运行计算成功率、失败率、跳过率、平均/P95 耗时和连续失败，并展示任务级与逐日趋势；started 事件不计入成功率分母。
+>
+> Agent 控制台通过 `GET /api/v1/vnpy-paper/agent-runs/data-quality-trends` 展示 7/30/90 天跨 run 数据质量趋势，包括 ok/partial/stale/unavailable/unknown 分布、降级率、警告、source error 和逐日结果；缺少整体质量快照的旧 run 归为 unknown。
 > 持久化后台任务事件默认保留 30 天；可通过 `DSA_RUNTIME_SCHEDULER_TASK_EVENT_RETENTION_DAYS` 和 `DSA_RUNTIME_SCHEDULER_TASK_EVENT_CLEANUP_INTERVAL_SECONDS` 调整，设保留天数为 `0` 时不自动清理。该策略只清理 `runtime_scheduler_task_events` 任务日志，不删除 Agent run、交易计划、Portfolio 成交或资金流水。
 > Web 模拟交易页还会读取 `GET /api/v1/vnpy-paper/accounts?include_inactive=true` 展示“模拟账户历史”，用于核对当前 paper 账户和重置后归档账户，并可按全部、当前、已归档、活跃非当前筛选；非当前 `vnpy_paper` 账户可在确认后通过 `POST /api/v1/vnpy-paper/accounts/{account_id}/restore` 恢复/切换为当前账户，后端会归档原当前 paper 账户并清空移动止损峰值记录，不删除历史流水。
 > `POST /api/v1/vnpy-paper/accounts/archived/cleanup` 提供隐藏式批量清理：只把非当前、非活跃的旧 `vnpy_paper` 账户从默认历史视图隐藏，保留 Portfolio 账户、成交和资金流水；`GET /accounts?...&include_hidden=true` 仍可审计查看，恢复隐藏账户时会自动取消隐藏。
@@ -763,7 +767,7 @@ python main.py --schedule --no-run-immediately
 > 自动卖出风控还支持 `auto_signal_exit_enabled`：开启后会读取当前持仓对应的 active `DecisionSignal`，命中 `sell/reduce/avoid` 防守信号时以 `strategy_invalidated` 生成卖出计划，并把信号摘要写入候选原始载荷和 Agent 风控审计。
 > 自动卖出风控还支持默认关闭的 `auto_rebalance_enabled`：开启后会复用单票、总仓位和行业仓位暴露上限，超限时按超出金额计算卖出数量，生成 `rebalance_*_exceeded` 卖出计划；也可通过 `auto_target_position_weights` / `auto_target_industry_weights` 设置股票或行业目标权益占比，超配时生成 `rebalance_target_position_weight_exceeded` / `rebalance_target_industry_weight_exceeded`。目标权重也会参与买入侧风控，候选或本轮已计划金额会突破目标时以 `target_position_weight_limit_reached` / `target_industry_weight_limit_reached` 跳过。候选原始载荷会记录 `rebalance_plan`、目标权重、阈值金额和超配金额。
 > Agent 控制台会读取 `GET /api/v1/vnpy-paper/agent-runs/daily-summary` 展示“今日 Agent 总结”，按日期聚合 run 数、候选/计划/成交/跳过计数、状态分布、执行模式、数据质量、Agent 复核状态、LLM 复核状态、复核质量状态/风险标记/平均分、工作流状态/阶段、主要跳过原因和热门标的；候选决策详情会展示 `order_result.agent_review` 的规则 Agent 买入前复核状态和摘要，Agent 计划卡片会展示规则派生的计划档位、风控档位和可选 `llm_dynamic_plan` 状态。运行详情会派生 `diagnostics.agent_workflow`，按计划、数据质量、候选复核、交易计划和执行阶段展示当前阶段、整体状态和下一步，并通过 `diagnostics.agent_summary.review_quality` 展示本轮复核质量、覆盖率、风险标记和是否建议人工确认。运行详情还可手动触发 `POST /api/v1/vnpy-paper/agent-runs/{run_uid}/llm-recap` 生成可选 LLM 复盘并写入 `diagnostics.llm_recap`；该入口只做审计复盘，不提交订单，也不会改变交易计划状态。模拟交易设置中的 `auto_llm_plan_enabled` 默认关闭；开启后会在 AlphaSift 选股前调用 LLM 生成本轮动态计划，只允许在已知策略白名单内选择策略并在保存配置上限内收紧候选数、每票预算和最低分。`auto_llm_review_enabled` 同样默认关闭；开启后会在规则风控通过后调用 LLM 生成 `order_result.llm_review`，`blocked` 或调用失败会跳过候选。`llm_dynamic_plan` 与 `llm_review` 都会记录 `prompt_version` 和 `evaluator_version`，Agent 控制台会在对应位置展示这些审计版本。
-> `GET /api/v1/vnpy-paper/status` 会在 `diagnostics.auto_trade_readiness` 中返回自动交易 readiness 摘要，包含总状态、下一步建议、阻断原因、关注项以及本地账本、自动交易开关、runtime scheduler、自动任务、AlphaSift 选股依赖、调度窗口、交易窗口、连续失败熔断和 vn.py bridge 的组件状态；模拟交易页的“可用性诊断”优先展示该结构化摘要。`scheduler.loop_running` 表示调度循环是否存活，`scheduler.running` 仅表示当前是否正在执行分析任务，readiness 会按 `loop_running` 判断定时自动交易是否可继续调度。`diagnostics.auto_trade_readiness.timing_alignment` 会对比自动任务下次触发时间和交易窗口开收盘时间；当 time gate 生效且服务启动时不在交易窗口内，首次自动买入后台任务会延迟到下一开盘窗口，避免固定间隔从盘后启动后反复错过交易时段。
+> `GET /api/v1/vnpy-paper/status` 会在 `diagnostics.system_health` 中返回跨模块健康视图，统一汇总本地账本、选股来源、自动化调度、调度窗口、交易窗口、持仓估值和 vn.py bridge；模拟交易页的“可用性诊断”优先展示该结构化摘要，旧后端再回退到 `diagnostics.auto_trade_readiness`。`diagnostics.auto_trade_readiness` 仍提供自动交易 readiness、阻断原因、关注项和组件状态；`scheduler.loop_running` 表示调度循环是否存活，`scheduler.running` 仅表示当前是否正在执行分析任务，readiness 会按 `loop_running` 判断定时自动交易是否可继续调度。`diagnostics.auto_trade_readiness.timing_alignment` 会对比自动任务下次触发时间和交易窗口开收盘时间；当 time gate 生效且服务启动时不在交易窗口内，首次自动买入后台任务会延迟到下一开盘窗口，避免固定间隔从盘后启动后反复错过交易时段。
 
 #### 环境变量方式
 
@@ -1509,7 +1513,7 @@ FastAPI 提供 RESTful API 服务，支持配置管理和触发分析。
 - 🧭 **首次配置提示** - 首页会读取只读配置状态，缺少 LLM 主渠道、自选股等基础项时提示缺口并引导进入系统设置
 - 📊 **实时进度** - 分析任务状态实时更新，支持多任务并行；普通分析链路在进入 LLM 阶段后会优先尝试 LiteLLM 流式生成，并通过任务 SSE 回灌更细粒度的 `message/progress`
 - 🧪 **AlphaSift 选股任务可恢复** - 选股页提交后台任务后轮询状态，切换页面再返回会恢复当前任务进度或最终结果，避免外部快照/行情/LLM 变慢时丢失反馈
-- 🤖 **自动选股 Agent 控制台** - 左侧导航 `/agent-console` 可分页查看自动选股 run 历史、策略/市场/状态/时间筛选、`/agent-console/<runUid>` 独立详情路由、Agent 计划档位、默认关闭的 LLM 动态计划、候选决策、规则 Agent 复核、默认关闭的 LLM 买入复核、复核质量摘要、可选 LLM 复盘、交易计划和运行时间线；模拟交易页展示可用性诊断、可筛选后台任务日志、任务趋势和任务健康检查，并可导出 JSON 审计证据
+- 🤖 **自动选股 Agent 控制台** - 左侧导航 `/agent-console` 可分页查看自动选股 run 历史、策略/市场/状态/时间筛选、`/agent-console/<runUid>` 独立详情路由、Agent 计划档位、默认关闭的 LLM 动态计划、候选决策、规则 Agent 复核、默认关闭的 LLM 买入复核、复核质量摘要、可选 LLM 复盘、交易计划和运行时间线；模拟交易页展示可用性诊断、可筛选后台任务日志、任务趋势、7/30/90 天长期稳定性指标和任务健康检查，并可导出 JSON 审计证据
 - 🗂️ **大盘复盘任务可见性** - 首页触发大盘复盘后会返回 `task_id` 并轮询 `GET /api/v1/analysis/status/{task_id}`，在进行中/完成/失败场景给出可见反馈，失败时直接透出报错内容
 - 🗂️ **市场复盘历史独立入口** - 大盘复盘历史通过专用入口与普通个股历史隔离；建议通过 `stock_code=MARKET` + `report_type=market_review` 直接查询与回放大盘复盘记录
 - 🧾 **市场复盘历史可复用** - 大盘复盘任务会持久化到分析历史，`report_type` 为 `market_review`，可直接通过历史列表/详情打开对应 Markdown 或详情页，不会重新触发分析重算

@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query, Request
@@ -17,6 +17,7 @@ from api.v1.schemas.vnpy_paper_trading import (
     VnpyPaperArchivedAccountCleanupRequest,
     VnpyPaperArchivedAccountCleanupResponse,
     VnpyPaperAgentDailySummaryResponse,
+    VnpyPaperAgentDataQualityTrendsResponse,
     VnpyPaperAgentRunRecapRequest,
     VnpyPaperAgentRunRecapResponse,
     VnpyPaperAgentRunDetail,
@@ -31,6 +32,7 @@ from api.v1.schemas.vnpy_paper_trading import (
     VnpyPaperStatusResponse,
     VnpyPaperTaskEventListResponse,
     VnpyPaperTaskEventSummaryResponse,
+    VnpyPaperTaskMetricsResponse,
     VnpyPaperTaskHealthResponse,
     VnpyPaperTradePlanRecoveryRunResponse,
     VnpyPaperTradePlanRecoverySummaryResponse,
@@ -102,6 +104,14 @@ def _with_scheduler_status(
     return payload
 
 
+def _with_system_health(payload: Dict[str, Any]) -> Dict[str, Any]:
+    diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), dict) else {}
+    diagnostics = dict(diagnostics)
+    diagnostics["system_health"] = _system_health_payload(payload)
+    payload["diagnostics"] = diagnostics
+    return payload
+
+
 def _with_alphasift_status(payload: Dict[str, Any]) -> Dict[str, Any]:
     diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), dict) else {}
     diagnostics = dict(diagnostics)
@@ -151,6 +161,321 @@ def _scheduler_loop_running(scheduler_status: Dict[str, Any]) -> bool:
     if "loop_running" in scheduler_status:
         return bool(scheduler_status.get("loop_running"))
     return bool(scheduler_status.get("enabled"))
+
+
+def _health_status_rank(status: str) -> int:
+    if status == "blocked":
+        return 3
+    if status == "warning":
+        return 2
+    if status == "disabled":
+        return 1
+    return 0
+
+
+def _snapshot_valuation_health(status_payload: Dict[str, Any]) -> Dict[str, Any]:
+    diagnostics = status_payload.get("diagnostics") if isinstance(status_payload.get("diagnostics"), dict) else {}
+    snapshot_requested = diagnostics.get("snapshot_requested")
+    if snapshot_requested is False:
+        return {
+            "status": "disabled",
+            "reason": "snapshot_not_requested",
+            "detail": "轻量状态未拉取持仓估值",
+            "required": False,
+        }
+    snapshot_error = diagnostics.get("snapshot_error")
+    if snapshot_error:
+        return {
+            "status": "warning",
+            "reason": "snapshot_error",
+            "detail": str(snapshot_error),
+            "required": False,
+        }
+    snapshot = status_payload.get("snapshot") if isinstance(status_payload.get("snapshot"), dict) else {}
+    if not snapshot:
+        return {
+            "status": "disabled",
+            "reason": "snapshot_unavailable",
+            "detail": "本次状态未返回持仓快照",
+            "required": False,
+        }
+    limitations = []
+    raw_limitations = snapshot.get("limitations")
+    if isinstance(raw_limitations, list):
+        limitations.extend(item for item in raw_limitations if isinstance(item, dict))
+    stale_count = 0
+    missing_count = 0
+    account_count = 0
+    position_count = 0
+    for account in list(snapshot.get("accounts") or []):
+        if not isinstance(account, dict):
+            continue
+        account_count += 1
+        raw_account_limitations = account.get("limitations")
+        if isinstance(raw_account_limitations, list):
+            limitations.extend(item for item in raw_account_limitations if isinstance(item, dict))
+        for position in list(account.get("positions") or []):
+            if not isinstance(position, dict):
+                continue
+            position_count += 1
+            if position.get("price_available") is False:
+                missing_count += 1
+            if position.get("price_stale") is True:
+                stale_count += 1
+    if missing_count or stale_count or limitations:
+        parts = []
+        if missing_count:
+            parts.append(f"缺价 {missing_count} 笔")
+        if stale_count:
+            parts.append(f"陈旧价格 {stale_count} 笔")
+        if limitations:
+            parts.append(f"限制 {len(limitations)} 项")
+        return {
+            "status": "warning",
+            "reason": "valuation_degraded",
+            "detail": "，".join(parts),
+            "required": False,
+            "position_count": position_count,
+            "account_count": account_count,
+        }
+    return {
+        "status": "ready",
+        "reason": "valuation_ready",
+        "detail": f"账户 {account_count} 个，持仓 {position_count} 笔",
+        "required": False,
+        "position_count": position_count,
+        "account_count": account_count,
+    }
+
+
+def _system_health_payload(status_payload: Dict[str, Any]) -> Dict[str, Any]:
+    diagnostics = status_payload.get("diagnostics") if isinstance(status_payload.get("diagnostics"), dict) else {}
+    settings = status_payload.get("settings") if isinstance(status_payload.get("settings"), dict) else {}
+    scheduler_status = status_payload.get("scheduler") if isinstance(status_payload.get("scheduler"), dict) else {}
+    readiness = diagnostics.get("auto_trade_readiness") if isinstance(diagnostics.get("auto_trade_readiness"), dict) else {}
+    timing_alignment = readiness.get("timing_alignment") if isinstance(readiness.get("timing_alignment"), dict) else {}
+    alphasift = diagnostics.get("alphasift") if isinstance(diagnostics.get("alphasift"), dict) else {}
+    trading_window = diagnostics.get("trading_window") if isinstance(diagnostics.get("trading_window"), dict) else {}
+    vnpy_bridge = diagnostics.get("vnpy_bridge") if isinstance(diagnostics.get("vnpy_bridge"), dict) else {}
+    vnpy_runtime = diagnostics.get("vnpy_runtime") if isinstance(diagnostics.get("vnpy_runtime"), dict) else {}
+
+    auto_trade_enabled = bool(settings.get("auto_trade_enabled"))
+    execution_mode = str(settings.get("auto_execution_mode") or status_payload.get("mode") or "paper")
+    time_gate_enforced = bool(trading_window.get("time_gate_enforced"))
+    market_open_now = trading_window.get("is_market_open_now") is True
+    components: List[Dict[str, Any]] = []
+
+    def add_component(
+        *,
+        key: str,
+        label: str,
+        status: str,
+        reason: str,
+        detail: str,
+        required: bool = True,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        item = {
+            "key": key,
+            "label": label,
+            "status": status,
+            "reason": reason,
+            "detail": detail,
+            "required": required,
+            "tone": _status_tone(status),
+        }
+        if extra:
+            item.update(extra)
+        components.append(item)
+
+    paper_enabled = bool(settings.get("enabled", status_payload.get("enabled", False)))
+    paper_available = bool(status_payload.get("available", paper_enabled))
+    add_component(
+        key="paper_ledger",
+        label="本地账本",
+        status="ready" if paper_enabled and paper_available else "blocked",
+        reason="paper_ledger_ready" if paper_enabled and paper_available else "paper_ledger_unavailable",
+        detail="本地 paper 账本可写入 Portfolio" if paper_enabled and paper_available else "模拟交易关闭或本地账本不可用",
+    )
+
+    alphasift_enabled = bool(alphasift.get("enabled", True)) if alphasift else True
+    alphasift_available = bool(alphasift.get("available")) if alphasift else False
+    add_component(
+        key="selection_source",
+        label="选股来源",
+        status=(
+            "disabled"
+            if not auto_trade_enabled
+            else "ready"
+            if alphasift_enabled and alphasift_available
+            else "blocked"
+        ),
+        reason=(
+            "auto_trade_disabled"
+            if not auto_trade_enabled
+            else "alphasift_ready"
+            if alphasift_enabled and alphasift_available
+            else "alphasift_unavailable"
+        ),
+        detail=(
+            "自动买入关闭"
+            if not auto_trade_enabled
+            else f"AlphaSift 策略 {alphasift.get('strategy_count') or '-'} 个"
+            if alphasift_enabled and alphasift_available
+            else str(alphasift.get("error") or alphasift.get("diagnostics") or "AlphaSift 不可用")
+        ),
+        required=auto_trade_enabled,
+    )
+
+    scheduler_loop_running = _scheduler_loop_running(scheduler_status)
+    add_component(
+        key="automation_loop",
+        label="自动化调度",
+        status=(
+            "disabled"
+            if not auto_trade_enabled
+            else "ready"
+            if scheduler_status.get("enabled") and scheduler_loop_running
+            else "blocked"
+        ),
+        reason=(
+            "auto_trade_disabled"
+            if not auto_trade_enabled
+            else "scheduler_loop_running"
+            if scheduler_status.get("enabled") and scheduler_loop_running
+            else "scheduler_not_running"
+        ),
+        detail=(
+            "自动买入关闭"
+            if not auto_trade_enabled
+            else f"下次 {scheduler_status.get('next_run_at') or '-'}"
+            if scheduler_status.get("enabled") and scheduler_loop_running
+            else "Runtime scheduler 未运行"
+        ),
+        required=auto_trade_enabled,
+    )
+
+    add_component(
+        key="scheduling_window",
+        label="调度窗口",
+        status=str(timing_alignment.get("status") or ("disabled" if not auto_trade_enabled else "warning")),
+        reason=str(timing_alignment.get("reason") or ("auto_trade_disabled" if not auto_trade_enabled else "timing_alignment_unknown")),
+        detail=str(timing_alignment.get("detail") or "暂无法判断自动任务是否落在交易窗口"),
+        required=auto_trade_enabled and time_gate_enforced,
+        extra={
+            "next_run_at": timing_alignment.get("next_run_at"),
+            "window_open_at": timing_alignment.get("window_open_at"),
+            "window_close_at": timing_alignment.get("window_close_at"),
+        },
+    )
+    add_component(
+        key="trading_window",
+        label="交易窗口",
+        status=(
+            "disabled"
+            if not auto_trade_enabled
+            else "ready"
+            if not time_gate_enforced or market_open_now
+            else "warning"
+        ),
+        reason=(
+            "auto_trade_disabled"
+            if not auto_trade_enabled
+            else "time_gate_not_enforced"
+            if not time_gate_enforced
+            else "market_open_now"
+            if market_open_now
+            else str(trading_window.get("gate_reason") or trading_window.get("next_window_status") or "waiting_for_trading_window")
+        ),
+        detail=(
+            "自动买入关闭"
+            if not auto_trade_enabled
+            else f"{execution_mode} 模式不强制交易时段拦截"
+            if not time_gate_enforced
+            else f"当前窗口至 {trading_window.get('current_close_at') or trading_window.get('next_close_at') or '-'}"
+            if market_open_now
+            else f"等待 {trading_window.get('next_open_at') or trading_window.get('reason') or '-'}"
+        ),
+        required=auto_trade_enabled and time_gate_enforced,
+    )
+
+    valuation = _snapshot_valuation_health(status_payload)
+    add_component(
+        key="valuation",
+        label="持仓估值",
+        status=str(valuation.get("status") or "warning"),
+        reason=str(valuation.get("reason") or "valuation_unknown"),
+        detail=str(valuation.get("detail") or "暂无法判断持仓估值质量"),
+        required=bool(valuation.get("required")),
+        extra={
+            key: value
+            for key, value in valuation.items()
+            if key not in {"status", "reason", "detail", "required"}
+        },
+    )
+
+    vnpy_required = execution_mode == "vnpy_paper"
+    vnpy_bridge_available = bool(vnpy_bridge.get("available"))
+    add_component(
+        key="vnpy_bridge",
+        label="vn.py bridge",
+        status=(
+            "ready"
+            if not vnpy_required or vnpy_bridge_available
+            else "blocked"
+        ),
+        reason=(
+            "vnpy_bridge_not_required"
+            if not vnpy_required
+            else "vnpy_bridge_ready"
+            if vnpy_bridge_available
+            else str(vnpy_bridge.get("reason") or "vnpy_bridge_unavailable")
+        ),
+        detail=(
+            f"{execution_mode} 模式不要求 vn.py bridge"
+            if not vnpy_required
+            else "MainEngine 可提交委托"
+            if vnpy_bridge_available
+            else str(vnpy_bridge.get("mode") or "not_configured")
+        ),
+        required=vnpy_required,
+        extra={
+            "runtime_mode": vnpy_runtime.get("mode"),
+            "runtime_available": vnpy_runtime.get("available"),
+        },
+    )
+
+    required_components = [item for item in components if item.get("required") is not False]
+    required_blockers = [item["reason"] for item in required_components if item.get("status") == "blocked"]
+    warnings = [item["reason"] for item in components if item.get("status") == "warning"]
+    disabled = [item["reason"] for item in components if item.get("status") == "disabled"]
+    if required_blockers:
+        status = "blocked"
+        next_action = required_blockers[0]
+    elif warnings:
+        status = "warning"
+        next_action = warnings[0]
+    elif not auto_trade_enabled:
+        status = "disabled"
+        next_action = "enable_auto_trade"
+    else:
+        status = "ready"
+        next_action = "wait_for_next_scheduled_run"
+    score_denominator = max(len(components), 1)
+    score_penalty = sum(_health_status_rank(str(item.get("status") or "")) for item in components)
+    health_score = max(0, round(100 - (score_penalty / (score_denominator * 3) * 100), 2))
+    return {
+        "schema_version": 1,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "status": status,
+        "ready": status == "ready",
+        "next_action": next_action,
+        "health_score": health_score,
+        "required_blockers": required_blockers,
+        "warnings": warnings,
+        "disabled": disabled,
+        "components": components,
+    }
 
 
 def _parse_alignment_datetime(value: Any) -> Optional[datetime]:
@@ -624,15 +949,19 @@ def _scheduler_task_events(
     name: Optional[str],
     status: Optional[str],
     limit: int,
+    started_at: Optional[datetime] = None,
 ) -> List[Dict[str, Any]]:
     name_filter = (name or "").strip()
     status_filter = (status or "").strip()
     if hasattr(scheduler, "task_events"):
-        events = scheduler.task_events(
-            name=name_filter or None,
-            status=status_filter or None,
-            limit=limit,
-        )
+        query = {
+            "name": name_filter or None,
+            "status": status_filter or None,
+            "limit": limit,
+        }
+        if started_at is not None:
+            query["started_at"] = started_at
+        events = scheduler.task_events(**query)
         return [event for event in list(events or []) if isinstance(event, dict)]
     try:
         scheduler_status = scheduler.status()
@@ -646,6 +975,9 @@ def _scheduler_task_events(
         events = [event for event in events if str(event.get("name") or "") == name_filter]
     if status_filter:
         events = [event for event in events if str(event.get("status") or "") == status_filter]
+    if started_at is not None:
+        cutoff = started_at.isoformat()
+        events = [event for event in events if str(event.get("timestamp") or "") >= cutoff]
     return events[-limit:]
 
 
@@ -719,6 +1051,128 @@ def _task_event_summary_payload(events: List[Dict[str, Any]], *, limit: int) -> 
     }
 
 
+def _percentile(values: List[float], percentile: float) -> Optional[float]:
+    if not values:
+        return None
+    ordered = sorted(values)
+    index = max(0, min(len(ordered) - 1, int((len(ordered) - 1) * percentile + 0.999999)))
+    return round(ordered[index], 3)
+
+
+def _task_metrics_payload(
+    events: List[Dict[str, Any]],
+    *,
+    window_days: int,
+    window_started_at: datetime,
+    window_ended_at: datetime,
+    limit: int,
+) -> Dict[str, Any]:
+    terminal_statuses = {"completed", "skipped", "failed"}
+    task_buckets: Dict[str, Dict[str, Any]] = {}
+    daily_buckets: Dict[str, Dict[str, Any]] = {}
+    terminal_events: List[Dict[str, Any]] = []
+    started_count = 0
+
+    for event in events:
+        status = str(event.get("status") or "").strip()
+        if status == "started":
+            started_count += 1
+        if status not in terminal_statuses:
+            continue
+        terminal_events.append(event)
+        name = str(event.get("name") or "").strip() or "unknown"
+        timestamp = str(event.get("timestamp") or "")
+        date_key = timestamp[:10] if len(timestamp) >= 10 else "unknown"
+        duration = event.get("duration_seconds")
+        try:
+            duration_value = float(duration) if duration is not None else None
+        except (TypeError, ValueError):
+            duration_value = None
+
+        task = task_buckets.setdefault(name, {
+            "name": name,
+            "label": _TASK_HEALTH_LABELS.get(name, name),
+            "run_count": 0,
+            "completed_count": 0,
+            "skipped_count": 0,
+            "failed_count": 0,
+            "durations": [],
+            "last_run_at": None,
+            "last_failure_at": None,
+        })
+        day = daily_buckets.setdefault(date_key, {
+            "date": date_key,
+            "run_count": 0,
+            "completed_count": 0,
+            "skipped_count": 0,
+            "failed_count": 0,
+            "durations": [],
+        })
+        for bucket in (task, day):
+            bucket["run_count"] += 1
+            bucket[f"{status}_count"] += 1
+            if duration_value is not None:
+                bucket["durations"].append(duration_value)
+        task["last_run_at"] = timestamp or task["last_run_at"]
+        if status == "failed":
+            task["last_failure_at"] = timestamp or task["last_failure_at"]
+
+    def finalize(bucket: Dict[str, Any], *, include_p95: bool) -> Dict[str, Any]:
+        run_count = int(bucket.get("run_count") or 0)
+        durations = list(bucket.pop("durations", []))
+        bucket["success_rate_pct"] = round(int(bucket.get("completed_count") or 0) / run_count * 100, 2) if run_count else 0.0
+        bucket["failure_rate_pct"] = round(int(bucket.get("failed_count") or 0) / run_count * 100, 2) if run_count else 0.0
+        if include_p95:
+            bucket["skip_rate_pct"] = round(int(bucket.get("skipped_count") or 0) / run_count * 100, 2) if run_count else 0.0
+        bucket["avg_duration_seconds"] = round(sum(durations) / len(durations), 3) if durations else None
+        if include_p95:
+            bucket["p95_duration_seconds"] = _percentile(durations, 0.95)
+        return bucket
+
+    items = [finalize(bucket, include_p95=True) for bucket in task_buckets.values()]
+    items.sort(key=lambda item: (-int(item["failed_count"]), -int(item["run_count"]), item["name"]))
+    daily = [finalize(bucket, include_p95=False) for bucket in daily_buckets.values()]
+    daily.sort(key=lambda item: item["date"])
+
+    completed_count = sum(1 for event in terminal_events if event.get("status") == "completed")
+    skipped_count = sum(1 for event in terminal_events if event.get("status") == "skipped")
+    failed_count = sum(1 for event in terminal_events if event.get("status") == "failed")
+    durations = []
+    for event in terminal_events:
+        try:
+            if event.get("duration_seconds") is not None:
+                durations.append(float(event["duration_seconds"]))
+        except (TypeError, ValueError):
+            pass
+    failure_streak = 0
+    for event in reversed(terminal_events):
+        if str(event.get("status") or "") != "failed":
+            break
+        failure_streak += 1
+    run_count = len(terminal_events)
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "window_days": window_days,
+        "window_started_at": window_started_at.isoformat(),
+        "window_ended_at": window_ended_at.isoformat(),
+        "event_count": len(events),
+        "run_count": run_count,
+        "started_count": started_count,
+        "completed_count": completed_count,
+        "skipped_count": skipped_count,
+        "failed_count": failed_count,
+        "success_rate_pct": round(completed_count / run_count * 100, 2) if run_count else 0.0,
+        "skip_rate_pct": round(skipped_count / run_count * 100, 2) if run_count else 0.0,
+        "failure_rate_pct": round(failed_count / run_count * 100, 2) if run_count else 0.0,
+        "avg_duration_seconds": round(sum(durations) / len(durations), 3) if durations else None,
+        "p95_duration_seconds": _percentile(durations, 0.95),
+        "current_failure_streak": failure_streak,
+        "truncated": len(events) >= limit,
+        "items": items,
+        "daily": daily,
+    }
+
+
 def _with_vnpy_runtime_status(payload: Dict[str, Any], request: Request) -> Dict[str, Any]:
     runtime_diagnostics = getattr(request.app.state, "vnpy_runtime_diagnostics", None)
     if isinstance(runtime_diagnostics, dict):
@@ -731,10 +1185,10 @@ def _with_status_dependencies(
     scheduler: RuntimeSchedulerService,
     request: Request,
 ) -> Dict[str, Any]:
-    return _with_vnpy_runtime_status(
-        _with_scheduler_status(_with_alphasift_status(payload), scheduler),
-        request,
-    )
+    payload = _with_alphasift_status(payload)
+    payload = _with_scheduler_status(payload, scheduler)
+    payload = _with_vnpy_runtime_status(payload, request)
+    return _with_system_health(payload)
 
 
 @router.get(
@@ -850,6 +1304,40 @@ def get_vnpy_paper_task_event_summary(
         )
     except Exception as exc:
         raise _internal_error("Summarize vn.py paper task events failed", exc)
+
+
+@router.get(
+    "/task-metrics",
+    response_model=VnpyPaperTaskMetricsResponse,
+    responses={500: {"model": ErrorResponse}},
+    summary="Get long-window vn.py paper background task metrics",
+)
+def get_vnpy_paper_task_metrics(
+    scheduler: RuntimeSchedulerService = Depends(get_runtime_scheduler_service),
+    days: int = Query(30, ge=1, le=90, description="Calendar window in days to aggregate."),
+) -> VnpyPaperTaskMetricsResponse:
+    try:
+        window_ended_at = datetime.now()
+        window_started_at = window_ended_at - timedelta(days=days)
+        limit = 5000
+        events = _scheduler_task_events(
+            scheduler,
+            name=None,
+            status=None,
+            limit=limit,
+            started_at=window_started_at,
+        )
+        return VnpyPaperTaskMetricsResponse.model_validate(
+            _task_metrics_payload(
+                events,
+                window_days=days,
+                window_started_at=window_started_at,
+                window_ended_at=window_ended_at,
+                limit=limit,
+            )
+        )
+    except Exception as exc:
+        raise _internal_error("Get vn.py paper task metrics failed", exc)
 
 
 @router.post(
@@ -1453,6 +1941,33 @@ def get_vnpy_paper_agent_daily_summary(
         )
     except Exception as exc:
         raise _internal_error("Summarize vn.py paper agent daily runs failed", exc)
+
+
+@router.get(
+    "/agent-runs/data-quality-trends",
+    response_model=VnpyPaperAgentDataQualityTrendsResponse,
+    responses={500: {"model": ErrorResponse}},
+    summary="Summarize cross-run stock-selection data quality trends",
+)
+def get_vnpy_paper_agent_data_quality_trends(
+    days: int = Query(30, ge=1, le=90),
+    trigger_source: Optional[str] = Query(None, min_length=1, max_length=64),
+    strategy: Optional[str] = Query(None, min_length=1, max_length=64),
+    market: Optional[str] = Query(None, min_length=1, max_length=16),
+    status: Optional[str] = Query(None, min_length=1, max_length=32),
+) -> VnpyPaperAgentDataQualityTrendsResponse:
+    try:
+        return VnpyPaperAgentDataQualityTrendsResponse.model_validate(
+            _agent_repo().summarize_data_quality_trends(
+                days=days,
+                trigger_source=trigger_source,
+                strategy=strategy,
+                market=market,
+                status=status,
+            )
+        )
+    except Exception as exc:
+        raise _internal_error("Summarize vn.py paper agent data quality trends failed", exc)
 
 
 @router.post(

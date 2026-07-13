@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [新功能] 新增 `GET /api/v1/vnpy-paper/agent-runs/data-quality-trends`，按 1 至 90 天窗口汇总 Agent run 数据质量、降级率、警告、source error 和逐日趋势。
+- [新功能] Agent 控制台新增 7/30/90 天跨 run 数据质量趋势视图，并复用策略、市场和状态筛选。
+- [修复] Agent 控制台运行历史与详情卡增加移动端宽度约束，避免长 run UID 撑出页面横向滚动。
+- [测试] 扩展 Agent 数据质量趋势 repository/API/Web API/Web 页面回归，并完成 1440px 与 390px 浏览器布局验收。
+- [新功能] 新增 `GET /api/v1/vnpy-paper/task-metrics`，按 1 至 90 天窗口聚合后台任务终态运行、成功率、失败率、跳过率、平均/P95 耗时、连续失败和逐日趋势。
+- [新功能] Web 模拟交易页新增“长期稳定性”视图，可切换 7/30/90 天窗口并查看任务级与逐日指标。
+- [测试] 扩展 runtime scheduler repository/service、vn.py paper API、Web API 与页面回归，覆盖时间窗过滤、终态运行口径、长期指标聚合和窗口切换。
+- [文档] 更新 vn.py 模拟交易说明、full guide 中英文版、项目状态和在线选股 Agent goals，记录后台任务长期指标基础能力。
+- [改进] `vnpy-paper` 状态接口新增 `diagnostics.system_health`，统一汇总本地账本、选股来源、自动化调度、调度窗口、交易窗口、持仓估值和 vn.py bridge 健康状态。
+- [改进] Web 模拟交易页“可用性诊断”优先展示后端 `system_health.components`，旧后端仍回退到 `auto_trade_readiness` 或本地推导。
+- [测试] 扩展 `vnpy-paper` API 和 Web 模拟交易页回归，覆盖统一健康视图和可用性诊断优先级。
+- [文档] 更新 vn.py 模拟交易说明、full guide 中英文版和在线选股 Agent goals，标注跨模块统一健康视图基础已落地。
 - [改进] Runtime scheduler 后台任务支持 `initial_delay_seconds`，状态接口透出任务级首次延迟，便于把自动买入首次运行对齐到下一交易窗口。
 - [改进] `vnpy-paper` 自动交易 readiness 新增 `timing_alignment`/“调度窗口”诊断，关联自动任务下次触发时间与交易窗口开收盘时间，避免 scheduler 空闲或盘后启动被误判为模拟交易不可用。
 - [测试] 扩展 scheduler、RuntimeSchedulerService、vn.py paper 服务/API/Web API/Web 页面回归，覆盖首次延迟调度、自动买入窗口对齐和 readiness 调度窗口展示。

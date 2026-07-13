@@ -21,7 +21,8 @@
 - 自动模拟成交默认启用交易时段限制；市场非交易日、盘前、午休、盘后或日历未知时不会提交 paper 订单，并记录 `non_trading_day`、`outside_trading_session` 或 `market_phase_unknown`。`dry_run` 和 `manual_approval` 仍允许在任意时间生成计划。
 - 状态接口会返回 `diagnostics.trading_window`；Web 模拟交易页展示“可交易窗口”，可区分当前开市、今日稍后开市、下一交易日、交易日历不可用、时间窗关闭或当前执行模式不强制拦截，并显示对应的下次开盘/收盘时间。
 - 状态接口新增 `diagnostics.auto_trade_readiness`，结构化返回自动交易 readiness：总状态、下一步建议、阻断原因、关注项和本地账本、自动交易开关、runtime scheduler、自动任务、AlphaSift 选股依赖、调度窗口、交易窗口、连续失败熔断、vn.py bridge 等组件状态。`diagnostics.auto_trade_readiness.timing_alignment` 会把自动任务下次触发时间与交易窗口开收盘时间对齐展示；`diagnostics.alphasift` 会轻量返回自动交易依赖的 AlphaSift 启用状态、可用性、版本和策略数量；异常只写入诊断，不会拖垮本地 paper 状态接口。
-- Web 模拟交易页“可用性诊断”摘要会优先使用 `diagnostics.auto_trade_readiness`，旧后端无该字段时再基于现有状态字段本地推导，帮助快速判断为何不可用或为何本轮不会自动提交。
+- 状态接口新增 `diagnostics.system_health`，把本地账本、选股来源、自动化调度、调度窗口、交易窗口、持仓估值和 vn.py bridge 合并为跨模块健康视图。`required_blockers` 表示会阻断自动执行的必需组件，`warnings` 表示需要关注但不一定阻断的降级，`disabled` 表示因配置或轻量查询暂未启用的组件。
+- Web 模拟交易页“可用性诊断”摘要会优先使用 `diagnostics.system_health.components`，旧后端无该字段时回退到 `diagnostics.auto_trade_readiness`，再无 readiness 时才基于现有状态字段本地推导，帮助快速判断为何不可用或为何本轮不会自动提交。
 - Web 模拟交易页的首屏状态加载失败时会区分常见排障原因：`/api/v1/vnpy-paper/status` 返回 404 时提示后端可能仍是旧进程或未加载 vn.py paper 路由；请求超时时提示优先检查轻量状态接口和行情/估值数据源；本地连接失败时提示检查 Web/API 服务和 `API_BASE_URL`。
 - Web 模拟交易页会根据状态诊断、Portfolio 快照 `limitations` 和持仓级 `price_available` / `price_stale` 展示“持仓估值降级”提示；当前持仓表同步显示价格源，缺价时标记为“缺价”，避免市值或浮盈显示为 0 时缺少解释。
 - 状态接口的完整持仓快照使用进程内 10 秒短 TTL 缓存，减少页面刷新时重复重放 Portfolio 和拉取行情估值；本地成交、vn.py 成交回调、账户重置或账户恢复后会主动失效缓存。`diagnostics.snapshot_cache_hit` 和 `diagnostics.snapshot_cache_ttl_seconds` 可用于判断本次状态是否来自缓存。
@@ -54,6 +55,8 @@
 - Web 模拟交易页新增“任务健康检查”，基于 `GET /api/v1/vnpy-paper/task-health` 汇总 `vnpy_paper_auto_trade` 和 `vnpy_paper_auto_retry` 是否注册、是否运行、是否被配置停用、最近事件是否失败/跳过以及下次运行时间；任务健康摘要会优先使用持久化最近事件，便于 API 进程重启后继续判断自动选股和恢复扫描为什么未执行。
 - Web 模拟交易页的“后台任务日志”会读取 `GET /api/v1/vnpy-paper/task-events`，支持按任务名和 started/completed/skipped/failed 状态筛选数据库持久化的最近任务事件；API 进程重启后仍可用于定位自动买入、自动恢复扫描或事件监控到底在哪一步被跳过或失败。
 - Web 模拟交易页的“任务趋势”会读取 `GET /api/v1/vnpy-paper/task-event-summary`，基于最近持久化任务事件展示 completed/skipped/failed/started 分布、任务级失败率、平均耗时和最近失败/跳过时间，用于判断后台自动化是否持续健康。
+- Web 模拟交易页的“长期稳定性”会读取 `GET /api/v1/vnpy-paper/task-metrics`，可切换 7/30/90 天窗口，展示终态运行数、成功/失败/跳过率、平均与 P95 耗时、当前连续失败、任务级明细和逐日趋势。成功率分母只包含 `completed`、`skipped`、`failed` 终态事件，`started` 仅单独计数，避免一次运行被重复计算。
+- Agent 控制台会读取 `GET /api/v1/vnpy-paper/agent-runs/data-quality-trends`，按 7/30/90 天窗口展示跨 run 的 `ok`、`partial`、`stale`、`unavailable`、`unknown` 分布、降级率、警告、source error 和逐日趋势。旧 run 没有整体质量快照时归入 `unknown`，不会被误算成健康。
 - 持久化后台任务事件默认保留 30 天，runtime scheduler 写入新事件后会按 `DSA_RUNTIME_SCHEDULER_TASK_EVENT_RETENTION_DAYS` 和 `DSA_RUNTIME_SCHEDULER_TASK_EVENT_CLEANUP_INTERVAL_SECONDS` 做低频清理；该清理只删除 `runtime_scheduler_task_events` 中的任务日志，不删除 Agent run、交易计划、Portfolio 成交或资金流水。保留天数设为 `0` 时不自动清理，适合由外部归档策略接管的部署。
 - 绩效接口会基于本地 paper 账本返回 `daily_returns` 和 `monthly_returns`，按每日/每月最后权益聚合盈亏、收益率、累计收益率、回撤和交易数；Web 模拟交易页展示最近日度收益表和月度收益表。该视图用于 paper 运行复盘，不等同接入完整历史行情后的回测级净值曲线。
 - 后台自动重试任务会先扫描超时的 `vnpy_paper` 活跃计划；若 `submitted` 计划超过 30 分钟未收到订单终态或成交回报，会标记为 `failed` / `vnpy_order_timeout`，保留原 `vt_orderid` 和 timeout 审计，之后再按 retry 冷却进入受控恢复流程。若 `cancel_requested` 计划超过 30 分钟未收到撤单或订单终态回报，会标记为 `failed` / `vnpy_cancel_timeout` 并写入告警，避免撤单挂起长期阻塞同股票同方向新委托。若 `part_filled` 计划超过 30 分钟仍未收到成交回报，会标记为 `failed` / `vnpy_partial_fill_timeout` 并写入告警，但不会进入自动重试，需先人工或后续回调完成对账，避免部分成交场景重复委托。
@@ -72,10 +75,11 @@
 所有接口前缀为 `/api/v1/vnpy-paper`：
 
 - `GET /status`：读取模拟交易状态、设置、账户快照、近期成交和最近一次自动运行摘要。
-- `GET /status` 响应包含 `scheduler`、`diagnostics.auto_trade_readiness`、`diagnostics.vnpy_adapter`、`diagnostics.vnpy_bridge`、`diagnostics.vnpy_event_bridge`、`diagnostics.vnpy_runtime`、`diagnostics.trading_window`、`diagnostics.snapshot_cache_hit` 和 `diagnostics.failure_fuse`，用于展示 runtime scheduler 是否启动、`vnpy_paper_auto_trade` / `vnpy_paper_auto_retry` 是否注册、顶层/任务级 `next_run_at`、任务级 `initial_delay_seconds`、`last_error`、`last_skip_reason`、最近 `scheduler.task_events`、自动交易 readiness、持仓快照是否命中短缓存、连续失败熔断状态，以及 vn.py `OrderRequest` adapter、`MainEngine` 桥接、EventEngine 回调、可选 runtime bootstrap 和自动交易可交易窗口是否可用。`scheduler.loop_running` 表示调度循环是否存活，`scheduler.running` 仍表示当前是否正在执行分析任务；readiness 使用 `loop_running` 判断自动交易定时任务是否可继续调度，并用 `timing_alignment` 判断下一次自动买入是否落在交易窗口内。
+- `GET /status` 响应包含 `scheduler`、`diagnostics.system_health`、`diagnostics.auto_trade_readiness`、`diagnostics.vnpy_adapter`、`diagnostics.vnpy_bridge`、`diagnostics.vnpy_event_bridge`、`diagnostics.vnpy_runtime`、`diagnostics.trading_window`、`diagnostics.snapshot_cache_hit` 和 `diagnostics.failure_fuse`，用于展示 runtime scheduler 是否启动、`vnpy_paper_auto_trade` / `vnpy_paper_auto_retry` 是否注册、顶层/任务级 `next_run_at`、任务级 `initial_delay_seconds`、`last_error`、`last_skip_reason`、最近 `scheduler.task_events`、跨模块健康视图、自动交易 readiness、持仓快照是否命中短缓存、连续失败熔断状态，以及 vn.py `OrderRequest` adapter、`MainEngine` 桥接、EventEngine 回调、可选 runtime bootstrap 和自动交易可交易窗口是否可用。`scheduler.loop_running` 表示调度循环是否存活，`scheduler.running` 仍表示当前是否正在执行分析任务；readiness 使用 `loop_running` 判断自动交易定时任务是否可继续调度，并用 `timing_alignment` 判断下一次自动买入是否落在交易窗口内。
 - `GET /task-health`：读取后台任务健康摘要，返回整体健康状态、调度器启用/运行状态、自动交易开关、健康/关注/异常/停用计数，以及每个后台任务的注册状态、运行状态、间隔、下次运行时间、持久化最近事件和 reason code。
 - `GET /task-events?limit=50&name=vnpy_paper_auto_retry&status=failed`：读取数据库持久化的最近后台任务事件，`limit` 范围 1~100，可选 `name` 和 `status` 过滤，用于 Web “后台任务日志”筛选和跨进程重启排障。
 - `GET /task-event-summary?limit=100`：聚合最近后台任务事件，返回全局状态计数和每个任务的总数、失败率、平均耗时、最近事件、最近失败和最近跳过时间。
+- `GET /task-metrics?days=30`：按 1 至 90 天窗口读取最多 5000 条持久化任务事件，返回终态运行成功/失败/跳过率、平均与 P95 耗时、当前连续失败、任务级指标和逐日趋势；响应中的 `truncated=true` 表示当前窗口超过读取上限，页面会提示统计结果已截断。
 - `GET /status?include_snapshot=false&include_recent_trades=false`：读取轻量状态，只返回设置、账户、可用性和诊断信息，不拉取持仓估值或近期成交；Web 页面首屏使用该路径避免被行情估值拖慢。
 - `POST /account/ensure`：创建或复用 `vnpy_paper` 模拟账户，并按初始资金写入一笔现金流入。
 - `POST /account/reset`：归档当前 `vnpy_paper` 模拟账户，创建新的干净模拟账户并返回最新状态；响应 `diagnostics.account_reset` 包含旧账户和新账户 ID。
@@ -100,6 +104,7 @@
 - `POST /trade-plans/recovery/run?max_plans=5&scan_limit=200`：手动运行一次受限交易计划恢复扫描；复用后台到期重试逻辑，返回超时归档数、扫描数、尝试数、提交数、跳过数、失败数和消息列表。
 - `GET /agent-runs`：读取最近的自动选股 Agent 运行摘要；支持 `limit`、`offset`、`trigger_source`、`strategy`、`market`、`status`、`created_from` 和 `created_to` 过滤；响应包含过滤后的 `total`。
 - `GET /agent-runs/daily-summary?date=2026-07-06`：聚合某一天的自动选股 Agent 运行摘要，返回 run 数、候选/计划/成交/跳过计数、状态分布、执行模式分布、数据质量分布、Agent 复核状态、LLM 复核状态、复核质量状态/风险标记/平均分、工作流状态/阶段分布、交易计划状态、主要跳过原因和热门标的；当复核质量出现 `guarded` 或 `needs_review` 时，摘要 `health` 会进入 `warning`；支持 `trigger_source`、`strategy`、`market`、`status` 过滤。
+- `GET /agent-runs/data-quality-trends?days=30`：按 1 至 90 天窗口汇总跨 run 的整体筛选数据质量、降级率、警告/source error 和逐日趋势；支持 `trigger_source`、`strategy`、`market`、`status` 过滤，最多扫描 5000 条，`truncated=true` 表示结果已截断。
 - `GET /agent-runs/export?limit=50&include_details=true`：导出最近 Agent run；`include_details=true` 时内联候选决策、交易计划和时间线；同样支持 `trigger_source`、`strategy`、`market`、`status`、`created_from` 和 `created_to` 过滤。
 - `GET /agent-runs/{run_uid}`：读取单次运行的候选决策、交易计划、风控/跳过原因和模拟成交关联。
 - `POST /agent-runs/{run_uid}/llm-recap`：基于该 run 的结构化审计数据生成一次可选 LLM 复盘，并写入 `diagnostics.llm_recap`；请求体支持 `max_output_tokens`（200~2000，默认 800）。LLM 不可用、空响应或调用失败时返回 `accepted=false` 和失败原因，不改变订单、交易计划或自动交易状态。

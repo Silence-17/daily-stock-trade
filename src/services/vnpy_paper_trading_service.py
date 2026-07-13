@@ -1522,32 +1522,6 @@ class VnpyPaperTradingService:
                 raw={"vt_orderid": order_id, **(raw or {})},
             )
 
-        existing_trade_id = _safe_int(plan.get("trade_id"))
-        if str(plan.get("status") or "") == "filled" and existing_trade_id is not None:
-            return {
-                "accepted": True,
-                "status": "filled",
-                "trade_id": existing_trade_id,
-                "account_id": self.get_settings().account_id,
-                "symbol": plan.get("symbol"),
-                "side": plan.get("side"),
-                "quantity": _safe_float(plan.get("submitted_quantity")),
-                "price": _safe_float(plan.get("submitted_price")),
-                "cash_amount": (
-                    (_safe_float(plan.get("submitted_quantity")) or 0.0)
-                    * (_safe_float(plan.get("submitted_price")) or 0.0)
-                ),
-                "source": "vnpy_main_engine",
-                "message": "vn.py trade callback already synced.",
-                "reason": None,
-                "raw": {
-                    "vt_orderid": order_id,
-                    "vt_tradeid": str(vt_tradeid or "").strip() or None,
-                    "duplicate_callback": True,
-                    **(raw or {}),
-                },
-            }
-
         symbol_norm = self._normalize_symbol(symbol or plan.get("symbol") or "")
         side_norm = str(side or plan.get("side") or "buy").strip().lower()
         if side_norm not in {"buy", "sell"}:
@@ -1572,6 +1546,47 @@ class VnpyPaperTradingService:
         trade_day = self._coerce_trade_date(trade_date)
         trade_ref = str(vt_tradeid or "").strip() or f"{order_id}:{trade_quantity}:{trade_price}:{trade_day.isoformat()}"
         trade_uid = f"vnpy-trade-{trade_ref}"[:128]
+        original_order = plan.get("order_result") if isinstance(plan.get("order_result"), dict) else {}
+        order_raw = original_order.get("raw") if isinstance(original_order, dict) else {}
+        if not isinstance(order_raw, dict):
+            order_raw = {}
+        fill_sync = order_raw.get("fill_sync") if isinstance(order_raw.get("fill_sync"), dict) else {}
+        synced_trades = [
+            item for item in list(fill_sync.get("trades") or [])
+            if isinstance(item, dict)
+        ]
+        synced_refs = {
+            str(item.get("trade_ref") or item.get("vt_tradeid") or "").strip()
+            for item in synced_trades
+            if str(item.get("trade_ref") or item.get("vt_tradeid") or "").strip()
+        }
+        existing_trade_id = _safe_int(plan.get("trade_id"))
+        legacy_filled = str(plan.get("status") or "") == "filled" and existing_trade_id is not None and not synced_trades
+        if trade_ref in synced_refs or legacy_filled or str(plan.get("status") or "") == "filled":
+            return {
+                "accepted": True,
+                "status": str(plan.get("status") or "filled"),
+                "trade_id": existing_trade_id,
+                "account_id": self.get_settings().account_id,
+                "symbol": plan.get("symbol"),
+                "side": plan.get("side"),
+                "quantity": _safe_float(plan.get("submitted_quantity")),
+                "price": _safe_float(plan.get("submitted_price")),
+                "cash_amount": (
+                    (_safe_float(plan.get("submitted_quantity")) or 0.0)
+                    * (_safe_float(plan.get("submitted_price")) or 0.0)
+                ),
+                "source": "vnpy_main_engine",
+                "message": "vn.py trade callback already synced.",
+                "reason": None,
+                "raw": {
+                    **order_raw,
+                    "vt_orderid": order_id,
+                    "vt_tradeid": str(vt_tradeid or "").strip() or None,
+                    "duplicate_callback": True,
+                    **(raw or {}),
+                },
+            }
         cash_amount = round(float(trade_quantity) * float(trade_price), 6)
         fee_value = _safe_float(fee) or 0.0
         tax_value = _safe_float(tax) or 0.0
@@ -1620,45 +1635,89 @@ class VnpyPaperTradingService:
             )
 
         self._invalidate_status_snapshot_cache(account_id)
-        original_order = plan.get("order_result") if isinstance(plan.get("order_result"), dict) else {}
-        order_raw = original_order.get("raw") if isinstance(original_order, dict) else {}
-        if not isinstance(order_raw, dict):
-            order_raw = {}
+        previous_quantity = _safe_float(fill_sync.get("cumulative_quantity")) or 0.0
+        previous_notional = _safe_float(fill_sync.get("cumulative_notional"))
+        if previous_notional is None:
+            previous_notional = previous_quantity * (_safe_float(fill_sync.get("average_price")) or 0.0)
+        cumulative_quantity = previous_quantity + float(trade_quantity)
+        cumulative_notional = previous_notional + cash_amount
+        average_price = cumulative_notional / cumulative_quantity
+        target_quantity = (
+            _safe_float(plan.get("planned_quantity"))
+            or _safe_float(
+                order_raw.get("order_request_payload", {}).get("volume")
+                if isinstance(order_raw.get("order_request_payload"), dict)
+                else None
+            )
+            or _safe_float(plan.get("submitted_quantity"))
+            or cumulative_quantity
+        )
+        next_status = "filled" if cumulative_quantity + 1e-8 >= target_quantity else "part_filled"
+        next_reason = None if next_status == "filled" else "vnpy_trade_partially_filled"
+        synced_trades.append({
+            "trade_ref": trade_ref,
+            "vt_tradeid": str(vt_tradeid or "").strip() or None,
+            "local_trade_id": int(created["id"]),
+            "quantity": round(float(trade_quantity), 8),
+            "price": round(float(trade_price), 8),
+            "trade_date": trade_day.isoformat(),
+        })
+        fill_sync_payload = {
+            "target_quantity": round(float(target_quantity), 8),
+            "cumulative_quantity": round(cumulative_quantity, 8),
+            "cumulative_notional": round(cumulative_notional, 6),
+            "average_price": round(average_price, 8),
+            "remaining_quantity": round(max(0.0, target_quantity - cumulative_quantity), 8),
+            "trade_count": len(synced_trades),
+            "trades": synced_trades,
+            "updated_at": _utc_now_iso(),
+        }
         result = {
             "accepted": True,
-            "status": "filled",
+            "status": next_status,
             "trade_id": int(created["id"]),
             "account_id": account_id,
             "symbol": symbol_norm,
             "side": side_norm,
-            "quantity": round(float(trade_quantity), 8),
-            "price": round(float(trade_price), 8),
-            "cash_amount": cash_amount,
+            "quantity": round(cumulative_quantity, 8),
+            "price": round(average_price, 8),
+            "cash_amount": round(cumulative_notional, 6),
             "source": "vnpy_main_engine",
-            "message": "vn.py trade callback synced to local paper ledger.",
-            "reason": None,
+            "message": (
+                "vn.py trade callback completed the local paper fill."
+                if next_status == "filled"
+                else "vn.py partial trade callback synced; waiting for remaining fills."
+            ),
+            "reason": next_reason,
             "raw": {
                 **order_raw,
                 **callback_raw,
+                "fill_sync": fill_sync_payload,
             },
         }
+        result = self._preserve_trade_plan_retry_metadata(
+            plan=plan,
+            order=result,
+            status=next_status,
+            reason=next_reason,
+        )
         self.agent_repo.update_trade_plan_execution(
             plan_uid=str(plan["plan_uid"]),
-            status="filled",
-            submitted_quantity=float(trade_quantity),
-            submitted_price=float(trade_price),
+            status=next_status,
+            submitted_quantity=cumulative_quantity,
+            submitted_price=average_price,
             trade_id=int(created["id"]),
-            skip_reason=None,
+            skip_reason=next_reason,
             order_result=result,
         )
         decision_id = _safe_int(plan.get("decision_id"))
         if decision_id is not None:
             self.agent_repo.update_decision_execution(
                 decision_id=decision_id,
-                status="filled",
-                reason=None,
-                quantity=float(trade_quantity),
-                price=float(trade_price),
+                status=next_status,
+                reason=next_reason,
+                quantity=cumulative_quantity,
+                price=average_price,
                 trade_id=int(created["id"]),
                 order_result=result,
             )

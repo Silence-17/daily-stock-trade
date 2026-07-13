@@ -625,6 +625,62 @@ describe('vnpyPaperTradingApi', () => {
     });
   });
 
+  it('loads long-window task metrics and camelCases daily results', async () => {
+    get.mockResolvedValueOnce({
+      data: {
+        generated_at: '2026-07-13T10:00:00Z',
+        window_days: 30,
+        window_started_at: '2026-06-13T10:00:00',
+        window_ended_at: '2026-07-13T10:00:00',
+        event_count: 6,
+        run_count: 3,
+        started_count: 3,
+        completed_count: 2,
+        skipped_count: 0,
+        failed_count: 1,
+        success_rate_pct: 66.67,
+        skip_rate_pct: 0,
+        failure_rate_pct: 33.33,
+        avg_duration_seconds: 0.2,
+        p95_duration_seconds: 0.3,
+        current_failure_streak: 1,
+        truncated: false,
+        items: [{
+          name: 'vnpy_paper_auto_trade',
+          run_count: 3,
+          completed_count: 2,
+          skipped_count: 0,
+          failed_count: 1,
+          success_rate_pct: 66.67,
+          skip_rate_pct: 0,
+          failure_rate_pct: 33.33,
+        }],
+        daily: [{
+          date: '2026-07-13',
+          run_count: 1,
+          completed_count: 0,
+          skipped_count: 0,
+          failed_count: 1,
+          success_rate_pct: 0,
+          failure_rate_pct: 100,
+        }],
+      },
+    });
+
+    const result = await vnpyPaperTradingApi.getTaskMetrics(30);
+
+    expect(get).toHaveBeenCalledWith('/api/v1/vnpy-paper/task-metrics', {
+      params: { days: 30 },
+    });
+    expect(result).toMatchObject({
+      windowDays: 30,
+      runCount: 3,
+      successRatePct: 66.67,
+      currentFailureStreak: 1,
+    });
+    expect(result.daily[0]).toMatchObject({ date: '2026-07-13', failureRatePct: 100 });
+  });
+
   it('runs trade plan recovery scans', async () => {
     post.mockResolvedValueOnce({
       data: {
@@ -803,6 +859,49 @@ describe('vnpyPaperTradingApi', () => {
     expect(result.workflowStageCounts).toEqual({ execution: 1, candidateReview: 1 });
     expect(result.topSkipReasons[0].reason).toBe('position_exists');
     expect(result.topSymbols[0].symbol).toBe('600519');
+  });
+
+  it('loads cross-run Agent data quality trends', async () => {
+    get.mockResolvedValueOnce({
+      data: {
+        generated_at: '2026-07-13T16:00:00',
+        window_days: 30,
+        total: 3,
+        scanned_count: 3,
+        known_count: 2,
+        quality_counts: { ok: 1, partial: 1, unknown: 1 },
+        degraded_count: 1,
+        degraded_rate_pct: 33.33,
+        health: 'warning',
+        latest_quality: 'partial',
+        warning_counts: { daily_source_fallback: 1 },
+        source_error_counts: { snapshot_timeout: 1 },
+        truncated: false,
+        daily: [{
+          date: '2026-07-13',
+          run_count: 3,
+          quality_counts: { ok: 1, partial: 1, unknown: 1 },
+          degraded_count: 1,
+          degraded_rate_pct: 33.33,
+        }],
+        filters: { strategy: 'dual_low' },
+      },
+    });
+
+    const result = await vnpyPaperTradingApi.getAgentDataQualityTrends(30, {
+      strategy: 'dual_low',
+      market: 'cn',
+      status: 'completed',
+      createdFrom: '2026-07-01T09:00',
+    });
+
+    expect(get).toHaveBeenCalledWith('/api/v1/vnpy-paper/agent-runs/data-quality-trends', {
+      params: { days: 30, strategy: 'dual_low', market: 'cn', status: 'completed' },
+    });
+    expect(result.scannedCount).toBe(3);
+    expect(result.degradedRatePct).toBe(33.33);
+    expect(result.daily[0].runCount).toBe(3);
+    expect(result.sourceErrorCounts).toEqual({ snapshotTimeout: 1 });
   });
 
   it('generates an Agent run LLM recap', async () => {

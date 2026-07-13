@@ -427,10 +427,11 @@ class RuntimeSchedulerService:
         name: Optional[str] = None,
         status: Optional[str] = None,
         limit: int = 50,
+        started_at: Optional[datetime] = None,
     ) -> List[Dict[str, Any]]:
         """Return recent background task events with optional filters."""
         try:
-            safe_limit = max(1, min(100, int(limit)))
+            safe_limit = max(1, min(5000, int(limit)))
         except (TypeError, ValueError):
             safe_limit = 50
         name_filter = str(name or "").strip()
@@ -438,11 +439,14 @@ class RuntimeSchedulerService:
         repository = self._task_event_repository
         if repository is not None:
             try:
-                return repository.list_task_events(
-                    name=name_filter or None,
-                    status=status_filter or None,
-                    limit=safe_limit,
-                )
+                query = {
+                    "name": name_filter or None,
+                    "status": status_filter or None,
+                    "limit": safe_limit,
+                }
+                if started_at is not None:
+                    query["started_at"] = started_at
+                return repository.list_task_events(**query)
             except Exception as exc:  # pragma: no cover - defensive read fallback
                 logger.warning("Failed to read persisted runtime scheduler task events: %s", exc)
         with self._lock:
@@ -451,6 +455,9 @@ class RuntimeSchedulerService:
             events = [event for event in events if str(event.get("name") or "") == name_filter]
         if status_filter:
             events = [event for event in events if str(event.get("status") or "") == status_filter]
+        if started_at is not None:
+            cutoff = started_at.isoformat()
+            events = [event for event in events if str(event.get("timestamp") or "") >= cutoff]
         return events[-safe_limit:]
 
     def _instrument_background_task(self, name: str, task: Callable[[], Any]) -> Callable[[], Any]:

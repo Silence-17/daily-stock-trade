@@ -52,9 +52,10 @@ class RuntimeSchedulerRepository:
         name: Optional[str] = None,
         status: Optional[str] = None,
         limit: int = 50,
+        started_at: Optional[datetime] = None,
     ) -> List[Dict[str, Any]]:
         try:
-            safe_limit = max(1, min(100, int(limit)))
+            safe_limit = max(1, min(5000, int(limit)))
         except (TypeError, ValueError):
             safe_limit = 50
         name_filter = str(name or "").strip()
@@ -64,6 +65,8 @@ class RuntimeSchedulerRepository:
             query = query.where(RuntimeSchedulerTaskEvent.name == name_filter)
         if status_filter:
             query = query.where(RuntimeSchedulerTaskEvent.status == status_filter)
+        if started_at is not None:
+            query = query.where(RuntimeSchedulerTaskEvent.timestamp >= started_at)
         query = query.order_by(
             desc(RuntimeSchedulerTaskEvent.timestamp),
             desc(RuntimeSchedulerTaskEvent.id),

@@ -281,6 +281,55 @@ export type VnpyPaperTaskEventSummaryResponse = {
   items: VnpyPaperTaskEventSummaryItem[];
 };
 
+export type VnpyPaperTaskMetricsItem = {
+  name: string;
+  label?: string | null;
+  runCount: number;
+  completedCount: number;
+  skippedCount: number;
+  failedCount: number;
+  successRatePct: number;
+  skipRatePct: number;
+  failureRatePct: number;
+  avgDurationSeconds?: number | null;
+  p95DurationSeconds?: number | null;
+  lastRunAt?: string | null;
+  lastFailureAt?: string | null;
+};
+
+export type VnpyPaperTaskMetricsDailyItem = {
+  date: string;
+  runCount: number;
+  completedCount: number;
+  skippedCount: number;
+  failedCount: number;
+  successRatePct: number;
+  failureRatePct: number;
+  avgDurationSeconds?: number | null;
+};
+
+export type VnpyPaperTaskMetricsResponse = {
+  generatedAt?: string | null;
+  windowDays: number;
+  windowStartedAt?: string | null;
+  windowEndedAt?: string | null;
+  eventCount: number;
+  runCount: number;
+  startedCount: number;
+  completedCount: number;
+  skippedCount: number;
+  failedCount: number;
+  successRatePct: number;
+  skipRatePct: number;
+  failureRatePct: number;
+  avgDurationSeconds?: number | null;
+  p95DurationSeconds?: number | null;
+  currentFailureStreak: number;
+  truncated: boolean;
+  items: VnpyPaperTaskMetricsItem[];
+  daily: VnpyPaperTaskMetricsDailyItem[];
+};
+
 export type VnpyPaperStatusResponse = {
   available: boolean;
   enabled: boolean;
@@ -620,6 +669,34 @@ export type VnpyPaperAgentDailySummary = {
   topSkipReasons: Array<{ reason?: string; count: number; [key: string]: unknown }>;
   topSymbols: Array<{ symbol?: string; count: number; [key: string]: unknown }>;
   latestRun?: VnpyPaperAgentRunSummary | null;
+  filters?: Record<string, unknown>;
+};
+
+export type VnpyPaperAgentDataQualityDailyItem = {
+  date: string;
+  runCount: number;
+  qualityCounts: Record<string, number>;
+  degradedCount: number;
+  degradedRatePct: number;
+};
+
+export type VnpyPaperAgentDataQualityTrends = {
+  generatedAt?: string | null;
+  windowDays: number;
+  windowStartedAt?: string | null;
+  windowEndedAt?: string | null;
+  total: number;
+  scannedCount: number;
+  knownCount: number;
+  qualityCounts: Record<string, number>;
+  degradedCount: number;
+  degradedRatePct: number;
+  health: string;
+  latestQuality?: string | null;
+  warningCounts: Record<string, number>;
+  sourceErrorCounts: Record<string, number>;
+  truncated: boolean;
+  daily: VnpyPaperAgentDataQualityDailyItem[];
   filters?: Record<string, unknown>;
 };
 
@@ -973,6 +1050,13 @@ export const vnpyPaperTradingApi = {
     return toCamelCase<VnpyPaperTaskEventSummaryResponse>(response.data);
   },
 
+  async getTaskMetrics(days = 30): Promise<VnpyPaperTaskMetricsResponse> {
+    const response = await apiClient.get<Record<string, unknown>>('/api/v1/vnpy-paper/task-metrics', {
+      params: { days },
+    });
+    return toCamelCase<VnpyPaperTaskMetricsResponse>(response.data);
+  },
+
   async ensureAccount(options?: VnpyPaperStatusOptions): Promise<VnpyPaperStatusResponse> {
     const params = buildStatusParams(options);
     const response = params
@@ -1210,6 +1294,26 @@ export const vnpyPaperTradingApi = {
       },
     });
     return toCamelCase<VnpyPaperAgentDailySummary>(response.data);
+  },
+
+  async getAgentDataQualityTrends(
+    days = 30,
+    filters?: VnpyPaperAgentRunFilters,
+  ): Promise<VnpyPaperAgentDataQualityTrends> {
+    const params: Record<string, number | string> = { days };
+    const triggerSource = filters?.triggerSource?.trim();
+    const strategy = filters?.strategy?.trim();
+    const market = filters?.market?.trim();
+    const status = filters?.status?.trim();
+    if (triggerSource) params.trigger_source = triggerSource;
+    if (strategy) params.strategy = strategy;
+    if (market) params.market = market;
+    if (status) params.status = status;
+    const response = await apiClient.get<Record<string, unknown>>(
+      '/api/v1/vnpy-paper/agent-runs/data-quality-trends',
+      { params },
+    );
+    return toCamelCase<VnpyPaperAgentDataQualityTrends>(response.data);
   },
 
   async generateAgentRunRecap(

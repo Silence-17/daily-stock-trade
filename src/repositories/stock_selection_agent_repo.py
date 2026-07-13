@@ -734,6 +734,133 @@ class StockSelectionAgentRepository:
             },
         }
 
+    def summarize_data_quality_trends(
+        self,
+        *,
+        days: int = 30,
+        limit: int = 5000,
+        trigger_source: Optional[str] = None,
+        strategy: Optional[str] = None,
+        market: Optional[str] = None,
+        status: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        days = max(1, min(90, int(days or 30)))
+        limit = max(1, min(5000, int(limit or 5000)))
+        window_ended_at = datetime.now()
+        window_started_at = window_ended_at - timedelta(days=days)
+
+        with self.db.get_session() as session:
+            query = select(StockSelectionAgentRun).where(
+                StockSelectionAgentRun.created_at >= window_started_at,
+                StockSelectionAgentRun.created_at <= window_ended_at,
+            )
+            if trigger_source:
+                query = query.where(StockSelectionAgentRun.trigger_source == str(trigger_source).strip())
+            if strategy:
+                query = query.where(StockSelectionAgentRun.strategy == str(strategy).strip())
+            if market:
+                query = query.where(StockSelectionAgentRun.market == str(market).strip())
+            if status:
+                query = query.where(StockSelectionAgentRun.status == str(status).strip())
+            total = int(session.execute(select(func.count()).select_from(query.subquery())).scalar_one() or 0)
+            rows = session.execute(
+                query.order_by(StockSelectionAgentRun.created_at.asc(), StockSelectionAgentRun.id.asc())
+                .limit(limit)
+            ).scalars().all()
+
+        quality_counts: Counter[str] = Counter()
+        warning_counts: Counter[str] = Counter()
+        source_error_counts: Counter[str] = Counter()
+        daily: Dict[str, Dict[str, Any]] = {}
+        latest_quality = "unknown"
+        accepted_quality = {"ok", "partial", "stale", "unavailable"}
+
+        for row in rows:
+            run = self._run_to_dict(row)
+            diagnostics = run.get("diagnostics") if isinstance(run.get("diagnostics"), dict) else {}
+            agent_summary = diagnostics.get("agent_summary") if isinstance(diagnostics.get("agent_summary"), dict) else {}
+            quality = diagnostics.get("data_quality")
+            raw_quality = (
+                quality.get("status")
+                if isinstance(quality, dict)
+                else agent_summary.get("data_quality_status")
+            )
+            quality_status = str(raw_quality or "unknown").strip().lower()
+            if quality_status not in accepted_quality:
+                quality_status = "unknown"
+            latest_quality = quality_status
+            quality_counts[quality_status] += 1
+
+            created_at = run.get("created_at")
+            day_key = created_at.date().isoformat() if isinstance(created_at, datetime) else "unknown"
+            bucket = daily.setdefault(
+                day_key,
+                {"date": day_key, "run_count": 0, "quality_counts": Counter()},
+            )
+            bucket["run_count"] += 1
+            bucket["quality_counts"][quality_status] += 1
+
+            for item in list(diagnostics.get("warnings") or []):
+                text = str(item or "").strip()
+                if text:
+                    warning_counts[text] += 1
+            for item in list(diagnostics.get("source_errors") or []):
+                text = str(item or "").strip()
+                if text:
+                    source_error_counts[text] += 1
+
+        degraded_statuses = {"partial", "stale", "unavailable"}
+        degraded_count = sum(quality_counts.get(key, 0) for key in degraded_statuses)
+        known_count = len(rows) - quality_counts.get("unknown", 0)
+        unavailable_count = quality_counts.get("unavailable", 0)
+        stale_count = quality_counts.get("stale", 0)
+        if not rows:
+            health = "idle"
+        elif unavailable_count > 0 or stale_count > 0:
+            health = "error"
+        elif degraded_count > 0 or quality_counts.get("unknown", 0) > 0:
+            health = "warning"
+        else:
+            health = "ok"
+
+        daily_items: List[Dict[str, Any]] = []
+        for key in sorted(daily):
+            bucket = daily[key]
+            bucket_counts = bucket["quality_counts"]
+            bucket_degraded = sum(bucket_counts.get(item, 0) for item in degraded_statuses)
+            daily_items.append({
+                "date": bucket["date"],
+                "run_count": bucket["run_count"],
+                "quality_counts": dict(sorted(bucket_counts.items())),
+                "degraded_count": bucket_degraded,
+                "degraded_rate_pct": round(bucket_degraded / bucket["run_count"] * 100, 2),
+            })
+
+        return {
+            "generated_at": datetime.now().isoformat(timespec="seconds"),
+            "window_days": days,
+            "window_started_at": window_started_at.isoformat(timespec="seconds"),
+            "window_ended_at": window_ended_at.isoformat(timespec="seconds"),
+            "total": total,
+            "scanned_count": len(rows),
+            "known_count": known_count,
+            "quality_counts": dict(sorted(quality_counts.items())),
+            "degraded_count": degraded_count,
+            "degraded_rate_pct": round(degraded_count / len(rows) * 100, 2) if rows else 0.0,
+            "health": health,
+            "latest_quality": latest_quality if rows else None,
+            "warning_counts": dict(sorted(warning_counts.items(), key=lambda item: (-item[1], item[0]))[:20]),
+            "source_error_counts": dict(sorted(source_error_counts.items(), key=lambda item: (-item[1], item[0]))[:20]),
+            "truncated": total > len(rows),
+            "daily": daily_items,
+            "filters": {
+                "trigger_source": trigger_source,
+                "strategy": strategy,
+                "market": market,
+                "status": status,
+            },
+        }
+
     def get_run_detail(self, run_uid: str) -> Optional[Dict[str, Any]]:
         with self.db.get_session() as session:
             run = session.execute(

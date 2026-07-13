@@ -1197,6 +1197,11 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         daily_summary = self.service.agent_repo.summarize_daily_runs(target_date=date.today(), limit=5)
         self.assertEqual(daily_summary["review_quality_counts"], {"guarded": 1})
         self.assertEqual(daily_summary["health"], "warning")
+        quality_trends = self.service.agent_repo.summarize_data_quality_trends(days=7)
+        self.assertEqual(quality_trends["quality_counts"], {"ok": 1})
+        self.assertEqual(quality_trends["degraded_count"], 0)
+        self.assertEqual(quality_trends["degraded_rate_pct"], 0.0)
+        self.assertEqual(quality_trends["daily"][0]["quality_counts"], {"ok": 1})
         self.assertTrue(any(event["stage"] == "agent_summary" for event in audit["timeline"]))
         workflow = audit["diagnostics"]["agent_workflow"]
         self.assertEqual(workflow["schema_version"], 1)

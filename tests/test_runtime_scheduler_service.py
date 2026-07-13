@@ -118,12 +118,15 @@ class _FakeTaskEventRepository:
         self.cleanup_calls.append(older_than)
         return 0
 
-    def list_task_events(self, *, name=None, status=None, limit=50):
+    def list_task_events(self, *, name=None, status=None, limit=50, started_at=None):
         events = list(self.events)
         if name:
             events = [event for event in events if event["name"] == name]
         if status:
             events = [event for event in events if event["status"] == status]
+        if started_at is not None:
+            cutoff = started_at.isoformat()
+            events = [event for event in events if str(event.get("timestamp") or "") >= cutoff]
         return events[-limit:]
 
 

@@ -45,6 +45,7 @@ import {
   type VnpyPaperStatusResponse,
   type VnpyPaperTaskEventSummaryResponse,
   type VnpyPaperTaskHealthResponse,
+  type VnpyPaperTaskMetricsResponse,
   type VnpyPaperTradePlanRecoverySummary,
 } from '../api/vnpyPaperTrading';
 import { alertsApi } from '../api/alerts';
@@ -797,6 +798,11 @@ const VnpyPaperTradingPage: React.FC = () => {
   const [taskEventSummary, setTaskEventSummary] = useState<VnpyPaperTaskEventSummaryResponse | null>(null);
   const [taskEventSummaryLoading, setTaskEventSummaryLoading] = useState(false);
   const [taskEventSummaryError, setTaskEventSummaryError] = useState('');
+  const [taskMetrics, setTaskMetrics] = useState<VnpyPaperTaskMetricsResponse | null>(null);
+  const [taskMetricsDays, setTaskMetricsDays] = useState<7 | 30 | 90>(30);
+  const taskMetricsDaysRef = useRef<7 | 30 | 90>(30);
+  const [taskMetricsLoading, setTaskMetricsLoading] = useState(false);
+  const [taskMetricsError, setTaskMetricsError] = useState('');
   const [taskEventFilters, setTaskEventFilters] = useState<TaskEventFilterForm>(defaultTaskEventFilterForm);
   const taskEventFiltersRef = useRef<TaskEventFilterForm>(defaultTaskEventFilterForm);
   const [autoAlertTriggers, setAutoAlertTriggers] = useState<AlertTriggerItem[]>([]);
@@ -824,6 +830,10 @@ const VnpyPaperTradingPage: React.FC = () => {
   useEffect(() => {
     taskEventFiltersRef.current = taskEventFilters;
   }, [taskEventFilters]);
+
+  useEffect(() => {
+    taskMetricsDaysRef.current = taskMetricsDays;
+  }, [taskMetricsDays]);
 
   useEffect(() => {
     document.title = 'vn.py 模拟交易 - DSA';
@@ -970,6 +980,18 @@ const VnpyPaperTradingPage: React.FC = () => {
     }
   }, []);
 
+  const loadTaskMetrics = useCallback(async (days: 7 | 30 | 90 = 30) => {
+    setTaskMetricsLoading(true);
+    setTaskMetricsError('');
+    try {
+      setTaskMetrics(await vnpyPaperTradingApi.getTaskMetrics(days));
+    } catch (err) {
+      setTaskMetricsError(toApiErrorMessage(err, '后台任务长期指标加载失败'));
+    } finally {
+      setTaskMetricsLoading(false);
+    }
+  }, []);
+
   const loadTaskEvents = useCallback(async (filtersOverride?: TaskEventFilterForm) => {
     setTaskEventsLoading(true);
     setTaskEventsError('');
@@ -980,12 +1002,13 @@ const VnpyPaperTradingPage: React.FC = () => {
         : await vnpyPaperTradingApi.getTaskEvents(50);
       setTaskEvents(result.items);
       void loadTaskEventSummary();
+      void loadTaskMetrics(taskMetricsDaysRef.current);
     } catch (err) {
       setTaskEventsError(toApiErrorMessage(err, '后台任务日志加载失败'));
     } finally {
       setTaskEventsLoading(false);
     }
-  }, [loadTaskEventSummary]);
+  }, [loadTaskEventSummary, loadTaskMetrics]);
 
   const loadAutoAlertTriggers = useCallback(async () => {
     setAutoAlertTriggersLoading(true);
@@ -1201,6 +1224,7 @@ const VnpyPaperTradingPage: React.FC = () => {
   }, [schedulerStatus?.backgroundTasks, schedulerTaskEvents]);
   const taskEventSummaryItems = useMemo(() => taskEventSummary?.items ?? [], [taskEventSummary?.items]);
   const taskEventStatusCounts = taskEventSummary?.statusCounts ?? {};
+  const taskMetricsDaily = useMemo(() => taskMetrics?.daily ?? [], [taskMetrics?.daily]);
   const archivedPaperAccountCount = paperAccounts.filter((account) => account.archived).length;
   const currentPaperAccountCount = paperAccounts.filter((account) => account.isCurrent).length;
   const activeNonCurrentPaperAccountCount = paperAccounts.filter((account) => !account.archived && !account.isCurrent).length;
@@ -1232,6 +1256,7 @@ const VnpyPaperTradingPage: React.FC = () => {
   const vnpyRuntime = asRecord(status?.diagnostics?.vnpyRuntime);
   const tradingWindow = asRecord(status?.diagnostics?.tradingWindow);
   const failureFuse = asRecord(status?.diagnostics?.failureFuse);
+  const systemHealth = asRecord(status?.diagnostics?.systemHealth);
   const autoTradeReadiness = asRecord(status?.diagnostics?.autoTradeReadiness);
   const failureFuseEnabled = Boolean(failureFuse?.enabled);
   const failureFuseOpen = Boolean(failureFuse?.open);
@@ -1268,6 +1293,23 @@ const VnpyPaperTradingPage: React.FC = () => {
   const tradingWindowGatesExecution = settingsForm.autoTradeTimeGateEnabled
     && ['paper', 'vnpy_paper'].includes(autoExecutionMode);
   const availabilityDiagnostics = useMemo(() => {
+    const systemHealthComponents = asRecordList(systemHealth?.components);
+    if (systemHealthComponents.length > 0) {
+      return systemHealthComponents.map((item, index) => {
+        const itemStatus = item.status;
+        const itemTone = String(item.tone || '') as 'success' | 'warning' | 'danger' | 'info';
+        return {
+          key: String(item.key || `system-health-${index}`),
+          label: String(item.label || item.key || '-'),
+          status: diagnosticStatusLabel(itemStatus),
+          detail: String(item.detail || item.reason || '-'),
+          tone: ['success', 'warning', 'danger', 'info'].includes(itemTone)
+            ? itemTone
+            : diagnosticToneFromStatus(itemStatus),
+        };
+      });
+    }
+
     const readinessComponents = asRecordList(autoTradeReadiness?.components);
     if (readinessComponents.length > 0) {
       return readinessComponents.map((item, index) => {
@@ -1379,6 +1421,7 @@ const VnpyPaperTradingPage: React.FC = () => {
     schedulerStatus?.loopRunning,
     schedulerStatus?.nextRunAt,
     settingsForm.autoTradeEnabled,
+    systemHealth,
     status?.enabled,
     tradingWindowGatesExecution,
     tradingWindowMeta,
@@ -1856,6 +1899,7 @@ const VnpyPaperTradingPage: React.FC = () => {
       {taskHealthError ? <InlineAlert variant="warning" title="任务健康检查加载失败" message={taskHealthError} /> : null}
       {taskEventsError ? <InlineAlert variant="warning" title="后台任务日志加载失败" message={taskEventsError} /> : null}
       {taskEventSummaryError ? <InlineAlert variant="warning" title="后台任务趋势加载失败" message={taskEventSummaryError} /> : null}
+      {taskMetricsError ? <InlineAlert variant="warning" title="后台任务长期指标加载失败" message={taskMetricsError} /> : null}
       {paperAccountsError ? <InlineAlert variant="warning" title="账户历史加载失败" message={paperAccountsError} /> : null}
       {success ? <InlineAlert variant="success" message={success} /> : null}
       <InlineAlert
@@ -2397,6 +2441,130 @@ const VnpyPaperTradingPage: React.FC = () => {
               ) : (
                 <div className="mt-3 text-xs text-secondary-text">暂无任务趋势数据</div>
               )}
+            </div>
+          ) : null}
+          {taskMetrics || taskMetricsLoading ? (
+            <div className="border-b border-border px-4 py-3" data-testid="task-metrics">
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <h3 className="text-xs font-semibold uppercase tracking-wide text-secondary-text">
+                    长期稳定性
+                  </h3>
+                  <p className="mt-1 text-xs text-secondary-text">
+                    按终态运行统计，started 事件不计入成功率分母
+                  </p>
+                </div>
+                <div className="inline-flex w-fit border border-border bg-surface" aria-label="长期指标时间窗口">
+                  {([7, 30, 90] as const).map((days) => (
+                    <button
+                      key={days}
+                      type="button"
+                      className={`h-8 min-w-12 border-r border-border px-3 text-xs font-semibold last:border-r-0 ${
+                        taskMetricsDays === days ? 'bg-cyan text-background' : 'text-secondary-text hover:text-foreground'
+                      }`}
+                      aria-pressed={taskMetricsDays === days}
+                      onClick={() => {
+                        setTaskMetricsDays(days);
+                        taskMetricsDaysRef.current = days;
+                        void loadTaskMetrics(days);
+                      }}
+                    >
+                      {days}天
+                    </button>
+                  ))}
+                </div>
+              </div>
+              {taskMetricsLoading && !taskMetrics ? (
+                <div className="mt-3 text-xs text-secondary-text">加载长期指标...</div>
+              ) : taskMetrics ? (
+                <>
+                  {taskMetrics.truncated ? (
+                    <div className="mt-3 text-xs text-warning">事件超过 5000 条，当前窗口指标为截断结果。</div>
+                  ) : null}
+                  <div className="mt-3 grid gap-2 sm:grid-cols-3 lg:grid-cols-6">
+                    {[
+                      ['终态运行', formatNumber(taskMetrics.runCount, 0), 'text-foreground'],
+                      ['成功率', `${formatNumber(taskMetrics.successRatePct, 2)}%`, 'text-success'],
+                      ['失败率', `${formatNumber(taskMetrics.failureRatePct, 2)}%`, taskMetrics.failedCount > 0 ? 'text-danger' : 'text-success'],
+                      ['跳过率', `${formatNumber(taskMetrics.skipRatePct, 2)}%`, 'text-warning'],
+                      ['平均 / P95', `${formatNumber(taskMetrics.avgDurationSeconds, 2)}s / ${formatNumber(taskMetrics.p95DurationSeconds, 2)}s`, 'text-foreground'],
+                      ['连续失败', formatNumber(taskMetrics.currentFailureStreak, 0), taskMetrics.currentFailureStreak > 0 ? 'text-danger' : 'text-success'],
+                    ].map(([label, value, tone]) => (
+                      <div key={label} className="border-l border-border pl-3">
+                        <div className={`text-sm font-semibold ${tone}`}>{value}</div>
+                        <div className="mt-1 text-xs text-secondary-text">{label}</div>
+                      </div>
+                    ))}
+                  </div>
+                  {taskMetrics.items.length > 0 ? (
+                    <div className="mt-3 overflow-x-auto">
+                      <table className="min-w-full text-left text-xs">
+                        <thead className="text-secondary-text">
+                          <tr>
+                            <th className="py-2 pr-3 font-medium">任务</th>
+                            <th className="py-2 pr-3 font-medium">运行</th>
+                            <th className="py-2 pr-3 font-medium">成功 / 失败 / 跳过</th>
+                            <th className="py-2 pr-3 font-medium">平均 / P95</th>
+                            <th className="py-2 pr-3 font-medium">最近运行</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-border">
+                          {taskMetrics.items.map((item) => (
+                            <tr key={item.name}>
+                              <td className="py-2 pr-3">
+                                <div className="font-semibold text-foreground">{item.label || item.name}</div>
+                                <div className="mt-1 font-mono text-secondary-text">{item.name}</div>
+                              </td>
+                              <td className="py-2 pr-3 text-foreground">{formatNumber(item.runCount, 0)}</td>
+                              <td className="py-2 pr-3 text-secondary-text">
+                                <span className="text-success">{formatNumber(item.successRatePct, 2)}%</span>
+                                {' / '}
+                                <span className={item.failedCount > 0 ? 'text-danger' : 'text-success'}>{formatNumber(item.failureRatePct, 2)}%</span>
+                                {' / '}{formatNumber(item.skipRatePct, 2)}%
+                              </td>
+                              <td className="py-2 pr-3 text-secondary-text">
+                                {formatNumber(item.avgDurationSeconds, 2)}s / {formatNumber(item.p95DurationSeconds, 2)}s
+                              </td>
+                              <td className="py-2 pr-3 text-secondary-text">{formatDateTime(item.lastRunAt)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : (
+                    <div className="mt-3 text-xs text-secondary-text">当前窗口暂无终态运行</div>
+                  )}
+                  {taskMetricsDaily.length > 0 ? (
+                    <div className="mt-3 overflow-x-auto">
+                      <div className="mb-1 text-xs font-semibold text-secondary-text">最近逐日结果</div>
+                      <table className="min-w-full text-left text-xs">
+                        <thead className="text-secondary-text">
+                          <tr>
+                            <th className="py-2 pr-3 font-medium">日期</th>
+                            <th className="py-2 pr-3 font-medium">运行</th>
+                            <th className="py-2 pr-3 font-medium">成功</th>
+                            <th className="py-2 pr-3 font-medium">失败</th>
+                            <th className="py-2 pr-3 font-medium">平均耗时</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-border">
+                          {taskMetricsDaily.slice(-14).reverse().map((item) => (
+                            <tr key={item.date}>
+                              <td className="py-2 pr-3 text-foreground">{item.date}</td>
+                              <td className="py-2 pr-3 text-secondary-text">{formatNumber(item.runCount, 0)}</td>
+                              <td className="py-2 pr-3 text-success">{formatNumber(item.successRatePct, 2)}%</td>
+                              <td className={`py-2 pr-3 ${item.failedCount > 0 ? 'text-danger' : 'text-success'}`}>
+                                {formatNumber(item.failureRatePct, 2)}%
+                              </td>
+                              <td className="py-2 pr-3 text-secondary-text">{formatNumber(item.avgDurationSeconds, 2)}s</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : null}
+                </>
+              ) : null}
             </div>
           ) : null}
           <div className="divide-y divide-border" data-testid="scheduler-task-event-list">

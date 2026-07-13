@@ -14,6 +14,7 @@ import {
 import {
   vnpyPaperTradingApi,
   type VnpyPaperAgentDailySummary,
+  type VnpyPaperAgentDataQualityTrends,
   type VnpyPaperAgentDecision,
   type VnpyPaperAgentRunDetail,
   type VnpyPaperAgentRunFilters,
@@ -230,6 +231,9 @@ const AgentConsolePage: React.FC = () => {
   const [filters, setFilters] = useState<AgentRunFilterForm>(defaultFilters);
   const [runs, setRuns] = useState<VnpyPaperAgentRunSummary[]>([]);
   const [dailySummary, setDailySummary] = useState<VnpyPaperAgentDailySummary | null>(null);
+  const [dataQualityTrends, setDataQualityTrends] = useState<VnpyPaperAgentDataQualityTrends | null>(null);
+  const [dataQualityDays, setDataQualityDays] = useState<7 | 30 | 90>(30);
+  const dataQualityDaysRef = useRef<7 | 30 | 90>(30);
   const [selectedRun, setSelectedRun] = useState<VnpyPaperAgentRunDetail | null>(null);
   const [runOffset, setRunOffset] = useState(0);
   const [runTotal, setRunTotal] = useState(0);
@@ -263,16 +267,21 @@ const AgentConsolePage: React.FC = () => {
     setError('');
     try {
       const filterPayload = buildFilters(nextFilters);
-      const [payload, summary] = await Promise.all([
+      const [payload, summary, qualityTrends] = await Promise.all([
         vnpyPaperTradingApi.listAgentRuns(
           AGENT_RUN_PAGE_SIZE,
           nextOffset,
           filterPayload,
         ),
         vnpyPaperTradingApi.getAgentDailySummary(undefined, filterPayload).catch(() => null),
+        vnpyPaperTradingApi.getAgentDataQualityTrends(
+          dataQualityDaysRef.current,
+          filterPayload,
+        ).catch(() => null),
       ]);
       setRuns(payload.items);
       setDailySummary(summary);
+      setDataQualityTrends(qualityTrends);
       setRunOffset(payload.offset || nextOffset);
       setRunTotal(payload.total ?? payload.items.length);
       const preferred = String(preferredRunUid || '').trim();
@@ -285,6 +294,7 @@ const AgentConsolePage: React.FC = () => {
     } catch (err) {
       setRuns([]);
       setDailySummary(null);
+      setDataQualityTrends(null);
       setSelectedRun(null);
       setRunOffset(0);
       setRunTotal(0);
@@ -390,6 +400,17 @@ const AgentConsolePage: React.FC = () => {
 
   const handlePageChange = (nextOffset: number) => {
     void loadRuns(filters, undefined, Math.max(0, nextOffset));
+  };
+
+  const handleDataQualityWindow = async (days: 7 | 30 | 90) => {
+    setDataQualityDays(days);
+    dataQualityDaysRef.current = days;
+    try {
+      setDataQualityTrends(await vnpyPaperTradingApi.getAgentDataQualityTrends(days, buildFilters(filters)));
+    } catch (err) {
+      setDataQualityTrends(null);
+      setError(toApiErrorMessage(err, '数据质量趋势加载失败'));
+    }
   };
 
   const handleSelectRun = (runUid: string) => {
@@ -600,6 +621,83 @@ const AgentConsolePage: React.FC = () => {
         </div>
       </section>
 
+      <section className="space-y-3" data-testid="agent-data-quality-trends">
+        <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+          <div>
+            <h2 className="text-sm font-semibold text-foreground">跨 run 数据质量趋势</h2>
+            <p className="mt-1 text-xs text-secondary-text">
+              缺少质量快照的旧 run 计为 unknown，不会被当作健康数据。
+            </p>
+          </div>
+          <div className="inline-flex w-fit border border-border bg-surface" aria-label="数据质量趋势时间窗口">
+            {([7, 30, 90] as const).map((days) => (
+              <button
+                key={days}
+                type="button"
+                className={`h-8 min-w-12 border-r border-border px-3 text-xs font-semibold last:border-r-0 ${
+                  dataQualityDays === days ? 'bg-cyan text-background' : 'text-secondary-text hover:text-foreground'
+                }`}
+                aria-pressed={dataQualityDays === days}
+                onClick={() => void handleDataQualityWindow(days)}
+              >
+                {days}天
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          <StatTile
+            label="已扫描 run"
+            value={`${dataQualityTrends?.scannedCount ?? 0} / ${dataQualityTrends?.total ?? 0}`}
+            hint={dataQualityTrends?.truncated ? '结果已截断' : '窗口内完整结果'}
+          />
+          <StatTile
+            label="已知质量"
+            value={dataQualityTrends?.knownCount ?? 0}
+            hint={`latest ${dataQualityTrends?.latestQuality || '-'}`}
+          />
+          <StatTile
+            label="降级率"
+            value={`${formatNumber(dataQualityTrends?.degradedRatePct ?? 0, 2)}%`}
+            hint={`${dataQualityTrends?.degradedCount ?? 0} degraded runs`}
+          />
+          <StatTile
+            label="趋势健康"
+            value={dataQualityTrends?.health || 'idle'}
+            hint={`${dataQualityTrends?.daily.length ?? 0} active days`}
+          />
+        </div>
+        <div className="overflow-x-auto border-y border-border">
+          <table className="min-w-full text-left text-xs">
+            <thead className="text-secondary-text">
+              <tr>
+                <th className="py-2 pr-3 font-medium">日期</th>
+                <th className="py-2 pr-3 font-medium">run</th>
+                <th className="py-2 pr-3 font-medium">ok / partial / stale / unavailable / unknown</th>
+                <th className="py-2 pr-3 font-medium">降级率</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-border">
+              {(dataQualityTrends?.daily || []).slice(-14).reverse().map((item) => (
+                <tr key={item.date}>
+                  <td className="py-2 pr-3 text-foreground">{item.date}</td>
+                  <td className="py-2 pr-3 text-secondary-text">{item.runCount}</td>
+                  <td className="py-2 pr-3 text-secondary-text">
+                    {['ok', 'partial', 'stale', 'unavailable', 'unknown']
+                      .map((key) => item.qualityCounts[key] || 0)
+                      .join(' / ')}
+                  </td>
+                  <td className="py-2 pr-3 text-secondary-text">{formatNumber(item.degradedRatePct, 2)}%</td>
+                </tr>
+              ))}
+              {(dataQualityTrends?.daily.length ?? 0) === 0 ? (
+                <tr><td className="py-4 text-secondary-text" colSpan={4}>当前窗口暂无 Agent run</td></tr>
+              ) : null}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
       <section className="grid gap-3 md:grid-cols-4">
         <StatTile label="运行记录" value={runs.length} hint="当前筛选窗口" />
         <StatTile label="候选 / 计划" value={`${stats.candidates} / ${stats.planned}`} />
@@ -691,7 +789,7 @@ const AgentConsolePage: React.FC = () => {
       </form>
 
       <section className="grid gap-4 xl:grid-cols-[minmax(360px,0.9fr)_minmax(0,1.35fr)]">
-        <div className="rounded-xl border border-border bg-card/95">
+        <div className="min-w-0 rounded-xl border border-border bg-card/95">
           <div className="flex items-center justify-between border-b border-border px-4 py-3">
             <div>
               <h2 className="text-sm font-semibold text-foreground">运行历史</h2>
@@ -767,7 +865,7 @@ const AgentConsolePage: React.FC = () => {
           )}
         </div>
 
-        <div className="rounded-xl border border-border bg-card/95">
+        <div className="min-w-0 rounded-xl border border-border bg-card/95">
           <div className="flex items-center justify-between gap-3 border-b border-border px-4 py-3">
             <div className="min-w-0">
               <h2 className="text-sm font-semibold text-foreground">运行详情</h2>

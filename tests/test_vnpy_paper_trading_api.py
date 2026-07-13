@@ -515,6 +515,30 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
         self.assertIn("vnpy_runtime", payload["diagnostics"])
         self.assertFalse(payload["diagnostics"]["vnpy_runtime"]["enabled"])
         self.assertEqual(payload["diagnostics"]["vnpy_runtime"]["reason"], "disabled")
+        system_health = payload["diagnostics"]["system_health"]
+        self.assertEqual(system_health["schema_version"], 1)
+        self.assertEqual(system_health["status"], "disabled")
+        self.assertFalse(system_health["ready"])
+        self.assertEqual(system_health["next_action"], "enable_auto_trade")
+        health_components = {
+            item["key"]: item for item in system_health["components"]
+        }
+        self.assertTrue({
+            "paper_ledger",
+            "selection_source",
+            "automation_loop",
+            "scheduling_window",
+            "trading_window",
+            "valuation",
+            "vnpy_bridge",
+        }.issubset(health_components))
+        self.assertEqual(health_components["paper_ledger"]["status"], "ready")
+        self.assertEqual(health_components["selection_source"]["reason"], "auto_trade_disabled")
+        self.assertEqual(health_components["automation_loop"]["reason"], "auto_trade_disabled")
+        self.assertEqual(health_components["trading_window"]["reason"], "auto_trade_disabled")
+        self.assertEqual(health_components["valuation"]["status"], "disabled")
+        self.assertEqual(health_components["valuation"]["reason"], "snapshot_not_requested")
+        self.assertEqual(health_components["vnpy_bridge"]["reason"], "vnpy_bridge_not_required")
 
     def test_reset_account_returns_clean_new_paper_account(self) -> None:
         with patch(
@@ -729,11 +753,12 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
             )
 
         self.assertEqual(response.status_code, 200)
-        readiness = response.json()["diagnostics"]["auto_trade_readiness"]
+        payload = response.json()
+        readiness = payload["diagnostics"]["auto_trade_readiness"]
         self.assertEqual(readiness["status"], "ready")
         self.assertNotIn("scheduler_not_running", readiness["blockers"])
         self.assertNotIn("task_not_registered", readiness["blockers"])
-        self.assertEqual(response.json()["diagnostics"]["alphasift"]["strategy_count"], 8)
+        self.assertEqual(payload["diagnostics"]["alphasift"]["strategy_count"], 8)
         scheduler_component = next(
             item for item in readiness["components"] if item["key"] == "scheduler"
         )
@@ -744,6 +769,21 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
         )
         self.assertEqual(alphasift_component["status"], "ready")
         self.assertEqual(alphasift_component["reason"], "alphasift_available")
+        system_health = payload["diagnostics"]["system_health"]
+        self.assertEqual(system_health["status"], "ready")
+        self.assertTrue(system_health["ready"])
+        self.assertEqual(system_health["next_action"], "wait_for_next_scheduled_run")
+        self.assertEqual(system_health["required_blockers"], [])
+        health_components = {
+            item["key"]: item for item in system_health["components"]
+        }
+        self.assertEqual(health_components["selection_source"]["status"], "ready")
+        self.assertEqual(health_components["selection_source"]["reason"], "alphasift_ready")
+        self.assertEqual(health_components["automation_loop"]["status"], "ready")
+        self.assertEqual(health_components["automation_loop"]["reason"], "scheduler_loop_running")
+        self.assertEqual(health_components["scheduling_window"]["reason"], "time_gate_not_enforced")
+        self.assertEqual(health_components["trading_window"]["reason"], "time_gate_not_enforced")
+        self.assertEqual(health_components["valuation"]["reason"], "snapshot_not_requested")
 
     def test_readiness_warns_when_next_auto_run_is_outside_trading_window(self) -> None:
         scheduler = MagicMock()
@@ -1063,6 +1103,68 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
         self.assertEqual(items["vnpy_paper_auto_retry"]["last_failed_at"], "2026-07-02T09:33:00")
         scheduler.task_events.assert_called_once_with(name=None, status=None, limit=20)
 
+    def test_task_metrics_endpoint_aggregates_terminal_runs_over_time_window(self) -> None:
+        scheduler = MagicMock()
+        scheduler.task_events.return_value = [
+            {
+                "name": "vnpy_paper_auto_trade",
+                "status": "started",
+                "message": "start",
+                "timestamp": "2026-07-12T09:30:00",
+                "details": {},
+            },
+            {
+                "name": "vnpy_paper_auto_trade",
+                "status": "completed",
+                "message": "ok",
+                "timestamp": "2026-07-12T09:31:00",
+                "duration_seconds": 1.0,
+                "details": {},
+            },
+            {
+                "name": "vnpy_paper_auto_trade",
+                "status": "failed",
+                "message": "failed once",
+                "timestamp": "2026-07-13T09:31:00",
+                "duration_seconds": 3.0,
+                "details": {"error": "boom"},
+            },
+            {
+                "name": "vnpy_paper_auto_retry",
+                "status": "failed",
+                "message": "failed twice",
+                "timestamp": "2026-07-13T09:32:00",
+                "duration_seconds": 2.0,
+                "details": {"error": "boom"},
+            },
+        ]
+        self.client.app.state.runtime_scheduler_service = scheduler
+
+        response = self.client.get("/api/v1/vnpy-paper/task-metrics?days=7")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["window_days"], 7)
+        self.assertEqual(payload["event_count"], 4)
+        self.assertEqual(payload["started_count"], 1)
+        self.assertEqual(payload["run_count"], 3)
+        self.assertEqual(payload["completed_count"], 1)
+        self.assertEqual(payload["failed_count"], 2)
+        self.assertEqual(payload["success_rate_pct"], 33.33)
+        self.assertEqual(payload["failure_rate_pct"], 66.67)
+        self.assertEqual(payload["avg_duration_seconds"], 2.0)
+        self.assertEqual(payload["p95_duration_seconds"], 3.0)
+        self.assertEqual(payload["current_failure_streak"], 2)
+        self.assertEqual(len(payload["daily"]), 2)
+        self.assertEqual(payload["daily"][0]["success_rate_pct"], 100.0)
+        self.assertEqual(payload["daily"][1]["failure_rate_pct"], 100.0)
+        tasks = {item["name"]: item for item in payload["items"]}
+        self.assertEqual(tasks["vnpy_paper_auto_trade"]["run_count"], 2)
+        self.assertEqual(tasks["vnpy_paper_auto_trade"]["failure_rate_pct"], 50.0)
+        call = scheduler.task_events.call_args.kwargs
+        self.assertEqual(call["limit"], 5000)
+        self.assertIsInstance(call["started_at"], datetime)
+
     def test_auto_run_accepts_temporary_dry_run_override(self) -> None:
         service = MagicMock()
         service.run_auto_trade_once.return_value = {
@@ -1311,6 +1413,11 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
             min_score=50,
             skip_existing_positions=True,
             settings={"auto_trade_enabled": True},
+            diagnostics={
+                "data_quality": {"status": "ok"},
+                "warnings": ["daily_source_fallback"],
+                "source_errors": ["snapshot_timeout"],
+            },
         )
         decision = repo.record_decision(
             run_id=int(run["id"]),
@@ -1423,6 +1530,7 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
             max_results=1,
             cash_per_order=5000,
             settings={"auto_trade_enabled": True},
+            diagnostics={"data_quality": {"status": "unavailable"}},
         )
         repo.complete_run(
             run_id=int(other_run["id"]),
@@ -1447,6 +1555,14 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
             f"?date={date.today().isoformat()}&trigger_source=unit-test"
             "&strategy=dual_low&market=cn&status=completed"
         )
+        quality_trends_resp = self.client.get(
+            "/api/v1/vnpy-paper/agent-runs/data-quality-trends"
+            "?days=30&trigger_source=unit-test&strategy=dual_low&market=cn&status=completed"
+        )
+        all_quality_trends_resp = self.client.get(
+            "/api/v1/vnpy-paper/agent-runs/data-quality-trends"
+            "?days=30&trigger_source=unit-test&status=completed"
+        )
         future_list_resp = self.client.get(
             "/api/v1/vnpy-paper/agent-runs"
             "?limit=5&trigger_source=unit-test&created_from=2999-01-01T00:00:00"
@@ -1455,6 +1571,8 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
         self.assertEqual(filtered_list_resp.status_code, 200)
         self.assertEqual(filtered_export_resp.status_code, 200)
         self.assertEqual(daily_summary_resp.status_code, 200)
+        self.assertEqual(quality_trends_resp.status_code, 200)
+        self.assertEqual(all_quality_trends_resp.status_code, 200)
         self.assertEqual(future_list_resp.status_code, 200)
         self.assertEqual(
             [item["run_uid"] for item in filtered_list_resp.json()["items"]],
@@ -1476,6 +1594,21 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
         self.assertEqual(daily_summary["workflow_stage_counts"], {"execution": 1})
         self.assertEqual(daily_summary["trade_plan_status_counts"], {"filled": 1})
         self.assertEqual(daily_summary["top_symbols"][0]["symbol"], "600519")
+        quality_trends = quality_trends_resp.json()
+        self.assertEqual(quality_trends["window_days"], 30)
+        self.assertEqual(quality_trends["scanned_count"], 1)
+        self.assertEqual(quality_trends["known_count"], 1)
+        self.assertEqual(quality_trends["quality_counts"], {"ok": 1})
+        self.assertEqual(quality_trends["degraded_count"], 0)
+        self.assertEqual(quality_trends["degraded_rate_pct"], 0.0)
+        self.assertEqual(quality_trends["warning_counts"], {"daily_source_fallback": 1})
+        self.assertEqual(quality_trends["source_error_counts"], {"snapshot_timeout": 1})
+        self.assertEqual(quality_trends["daily"][0]["quality_counts"], {"ok": 1})
+        all_quality_trends = all_quality_trends_resp.json()
+        self.assertEqual(all_quality_trends["quality_counts"], {"ok": 1, "unavailable": 1})
+        self.assertEqual(all_quality_trends["degraded_count"], 1)
+        self.assertEqual(all_quality_trends["degraded_rate_pct"], 50.0)
+        self.assertEqual(all_quality_trends["health"], "error")
         self.assertEqual(future_list_resp.json()["items"], [])
         self.assertEqual(future_list_resp.json()["total"], 0)
 

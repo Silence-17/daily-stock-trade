@@ -8,6 +8,7 @@ const getStatus = vi.hoisted(() => vi.fn());
 const getTaskHealth = vi.hoisted(() => vi.fn());
 const getTaskEvents = vi.hoisted(() => vi.fn());
 const getTaskEventSummary = vi.hoisted(() => vi.fn());
+const getTaskMetrics = vi.hoisted(() => vi.fn());
 const ensureAccount = vi.hoisted(() => vi.fn());
 const resetAccount = vi.hoisted(() => vi.fn());
 const listAccounts = vi.hoisted(() => vi.fn());
@@ -34,6 +35,7 @@ vi.mock('../../api/vnpyPaperTrading', () => ({
     getTaskHealth,
     getTaskEvents,
     getTaskEventSummary,
+    getTaskMetrics,
     ensureAccount,
     resetAccount,
     listAccounts,
@@ -252,6 +254,74 @@ const statusResponse = {
       version: '0.2.0',
       contractVersion: '1',
       strategyCount: 8,
+    },
+    systemHealth: {
+      schemaVersion: 1,
+      generatedAt: '2026-07-02T09:31:00+08:00',
+      status: 'disabled',
+      ready: false,
+      nextAction: 'enable_auto_trade',
+      healthScore: 72.22,
+      requiredBlockers: [],
+      warnings: [],
+      disabled: ['auto_trade_disabled', 'snapshot_not_requested'],
+      components: [{
+        key: 'paper_ledger',
+        label: '本地账本',
+        status: 'ready',
+        reason: 'paper_ledger_ready',
+        detail: '本地 paper 账本可写入 Portfolio',
+        required: true,
+        tone: 'success',
+      }, {
+        key: 'selection_source',
+        label: '选股来源',
+        status: 'disabled',
+        reason: 'auto_trade_disabled',
+        detail: '自动买入关闭',
+        required: false,
+        tone: 'info',
+      }, {
+        key: 'automation_loop',
+        label: '自动化调度',
+        status: 'disabled',
+        reason: 'auto_trade_disabled',
+        detail: '自动买入关闭',
+        required: false,
+        tone: 'info',
+      }, {
+        key: 'scheduling_window',
+        label: '调度窗口',
+        status: 'disabled',
+        reason: 'auto_trade_disabled',
+        detail: '自动买入关闭',
+        required: false,
+        tone: 'info',
+      }, {
+        key: 'trading_window',
+        label: '交易窗口',
+        status: 'disabled',
+        reason: 'auto_trade_disabled',
+        detail: '自动买入关闭',
+        required: false,
+        tone: 'info',
+      }, {
+        key: 'valuation',
+        label: '持仓估值',
+        status: 'disabled',
+        reason: 'snapshot_not_requested',
+        detail: '轻量状态未拉取持仓估值',
+        required: false,
+        tone: 'info',
+      }, {
+        key: 'vnpy_bridge',
+        label: 'vn.py bridge',
+        status: 'ready',
+        reason: 'vnpy_bridge_not_required',
+        detail: 'paper 模式不要求 vn.py bridge',
+        required: false,
+        tone: 'success',
+      }],
     },
     autoTradeReadiness: {
       schemaVersion: 1,
@@ -713,12 +783,58 @@ const taskEventSummaryResponse = {
   }],
 };
 
+const taskMetricsResponse = {
+  generatedAt: '2026-07-13T10:00:00Z',
+  windowDays: 30,
+  windowStartedAt: '2026-06-13T10:00:00',
+  windowEndedAt: '2026-07-13T10:00:00',
+  eventCount: 6,
+  runCount: 3,
+  startedCount: 3,
+  completedCount: 2,
+  skippedCount: 0,
+  failedCount: 1,
+  successRatePct: 66.67,
+  skipRatePct: 0,
+  failureRatePct: 33.33,
+  avgDurationSeconds: 0.2,
+  p95DurationSeconds: 0.3,
+  currentFailureStreak: 1,
+  truncated: false,
+  items: [{
+    name: 'vnpy_paper_auto_trade',
+    label: '定时自动买入',
+    runCount: 3,
+    completedCount: 2,
+    skippedCount: 0,
+    failedCount: 1,
+    successRatePct: 66.67,
+    skipRatePct: 0,
+    failureRatePct: 33.33,
+    avgDurationSeconds: 0.2,
+    p95DurationSeconds: 0.3,
+    lastRunAt: '2026-07-13T09:31:00',
+    lastFailureAt: '2026-07-13T09:31:00',
+  }],
+  daily: [{
+    date: '2026-07-13',
+    runCount: 1,
+    completedCount: 0,
+    skippedCount: 0,
+    failedCount: 1,
+    successRatePct: 0,
+    failureRatePct: 100,
+    avgDurationSeconds: 0.3,
+  }],
+};
+
 describe('VnpyPaperTradingPage', () => {
   beforeEach(() => {
     getStatus.mockReset();
     getTaskHealth.mockReset();
     getTaskEvents.mockReset();
     getTaskEventSummary.mockReset();
+    getTaskMetrics.mockReset();
     ensureAccount.mockReset();
     resetAccount.mockReset();
     listAccounts.mockReset();
@@ -742,6 +858,7 @@ describe('VnpyPaperTradingPage', () => {
     getTaskHealth.mockResolvedValue(taskHealthResponse);
     getTaskEvents.mockResolvedValue(taskEventListResponse);
     getTaskEventSummary.mockResolvedValue(taskEventSummaryResponse);
+    getTaskMetrics.mockResolvedValue(taskMetricsResponse);
     ensureAccount.mockResolvedValue(statusResponse);
     resetFailureFuse.mockResolvedValue(statusResponse);
     listAccounts.mockResolvedValue(paperAccountListResponse);
@@ -1149,12 +1266,13 @@ describe('VnpyPaperTradingPage', () => {
     const availabilityDiagnostics = screen.getByTestId('paper-availability-diagnostics');
     expect(availabilityDiagnostics).toHaveTextContent('可用性诊断');
     expect(availabilityDiagnostics).toHaveTextContent('本地账本');
-    expect(availabilityDiagnostics).toHaveTextContent('后端 readiness: 自动买入关闭');
-    expect(availabilityDiagnostics).toHaveTextContent('AlphaSift');
-    expect(availabilityDiagnostics).toHaveTextContent('策略 8 个');
+    expect(availabilityDiagnostics).toHaveTextContent('选股来源');
+    expect(availabilityDiagnostics).toHaveTextContent('自动化调度');
     expect(availabilityDiagnostics).toHaveTextContent('调度窗口');
-    expect(availabilityDiagnostics).toHaveTextContent('等待 2026-07-03T09:30:00+08:00');
-    expect(availabilityDiagnostics).toHaveTextContent('paper 模式不需要 vn.py bridge');
+    expect(availabilityDiagnostics).toHaveTextContent('交易窗口');
+    expect(availabilityDiagnostics).toHaveTextContent('持仓估值');
+    expect(availabilityDiagnostics).toHaveTextContent('轻量状态未拉取持仓估值');
+    expect(availabilityDiagnostics).toHaveTextContent('paper 模式不要求 vn.py bridge');
     expect(screen.getByText('执行引擎')).toBeInTheDocument();
     expect(screen.getByText('Runtime')).toBeInTheDocument();
     expect(screen.getByText('vn.py adapter')).toBeInTheDocument();
@@ -1181,12 +1299,19 @@ describe('VnpyPaperTradingPage', () => {
     expect(screen.getAllByText('auto_trade_disabled').length).toBeGreaterThan(0);
     await waitFor(() => expect(getTaskEvents).toHaveBeenCalledWith(50));
     await waitFor(() => expect(getTaskEventSummary).toHaveBeenCalledWith(100));
+    await waitFor(() => expect(getTaskMetrics).toHaveBeenCalledWith(30));
     expect(screen.getByTestId('scheduler-task-events')).toBeInTheDocument();
     expect(screen.getByTestId('task-event-summary')).toBeInTheDocument();
+    expect(screen.getByTestId('task-metrics')).toBeInTheDocument();
+    expect(screen.getByTestId('task-metrics')).toHaveTextContent('长期稳定性');
+    expect(screen.getByTestId('task-metrics')).toHaveTextContent('66.67%');
+    expect(screen.getByTestId('task-metrics')).toHaveTextContent('连续失败');
     expect(screen.getAllByText('vnpy_paper_auto_trade').length).toBeGreaterThan(0);
     expect(screen.getAllByText('vnpy_paper_auto_retry').length).toBeGreaterThan(0);
     expect(screen.getAllByText('boom').length).toBeGreaterThan(0);
     expect(screen.getByTestId('task-event-summary')).toHaveTextContent('100.00%');
+    fireEvent.click(screen.getByRole('button', { name: '7天' }));
+    await waitFor(() => expect(getTaskMetrics).toHaveBeenCalledWith(7));
     expect(screen.getByText('submitted=1 / skipped=0')).toBeInTheDocument();
     expect(screen.getAllByText('下一交易日').length).toBeGreaterThan(0);
     expect(screen.getByText('累计收益')).toBeInTheDocument();

@@ -302,6 +302,55 @@ class VnpyPaperTaskEventSummaryResponse(BaseModel):
     items: List[VnpyPaperTaskEventSummaryItem] = Field(default_factory=list)
 
 
+class VnpyPaperTaskMetricsItem(BaseModel):
+    name: str
+    label: Optional[str] = None
+    run_count: int = 0
+    completed_count: int = 0
+    skipped_count: int = 0
+    failed_count: int = 0
+    success_rate_pct: float = 0.0
+    skip_rate_pct: float = 0.0
+    failure_rate_pct: float = 0.0
+    avg_duration_seconds: Optional[float] = None
+    p95_duration_seconds: Optional[float] = None
+    last_run_at: Optional[Any] = None
+    last_failure_at: Optional[Any] = None
+
+
+class VnpyPaperTaskMetricsDailyItem(BaseModel):
+    date: str
+    run_count: int = 0
+    completed_count: int = 0
+    skipped_count: int = 0
+    failed_count: int = 0
+    success_rate_pct: float = 0.0
+    failure_rate_pct: float = 0.0
+    avg_duration_seconds: Optional[float] = None
+
+
+class VnpyPaperTaskMetricsResponse(BaseModel):
+    generated_at: Optional[Any] = None
+    window_days: int = 30
+    window_started_at: Optional[Any] = None
+    window_ended_at: Optional[Any] = None
+    event_count: int = 0
+    run_count: int = 0
+    started_count: int = 0
+    completed_count: int = 0
+    skipped_count: int = 0
+    failed_count: int = 0
+    success_rate_pct: float = 0.0
+    skip_rate_pct: float = 0.0
+    failure_rate_pct: float = 0.0
+    avg_duration_seconds: Optional[float] = None
+    p95_duration_seconds: Optional[float] = None
+    current_failure_streak: int = 0
+    truncated: bool = False
+    items: List[VnpyPaperTaskMetricsItem] = Field(default_factory=list)
+    daily: List[VnpyPaperTaskMetricsDailyItem] = Field(default_factory=list)
+
+
 class VnpyPaperAccountListResponse(BaseModel):
     items: List[Dict[str, Any]] = Field(default_factory=list)
     count: int = 0
@@ -565,6 +614,34 @@ class VnpyPaperAgentDailySummaryResponse(BaseModel):
     top_skip_reasons: List[Dict[str, Any]] = Field(default_factory=list)
     top_symbols: List[Dict[str, Any]] = Field(default_factory=list)
     latest_run: Optional[VnpyPaperAgentRunSummary] = None
+    filters: Dict[str, Any] = Field(default_factory=dict)
+
+
+class VnpyPaperAgentDataQualityDailyItem(BaseModel):
+    date: str
+    run_count: int = 0
+    quality_counts: Dict[str, int] = Field(default_factory=dict)
+    degraded_count: int = 0
+    degraded_rate_pct: float = 0.0
+
+
+class VnpyPaperAgentDataQualityTrendsResponse(BaseModel):
+    generated_at: Optional[Any] = None
+    window_days: int = 30
+    window_started_at: Optional[Any] = None
+    window_ended_at: Optional[Any] = None
+    total: int = 0
+    scanned_count: int = 0
+    known_count: int = 0
+    quality_counts: Dict[str, int] = Field(default_factory=dict)
+    degraded_count: int = 0
+    degraded_rate_pct: float = 0.0
+    health: str = "idle"
+    latest_quality: Optional[str] = None
+    warning_counts: Dict[str, int] = Field(default_factory=dict)
+    source_error_counts: Dict[str, int] = Field(default_factory=dict)
+    truncated: bool = False
+    daily: List[VnpyPaperAgentDataQualityDailyItem] = Field(default_factory=list)
     filters: Dict[str, Any] = Field(default_factory=dict)
 
 

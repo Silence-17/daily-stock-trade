@@ -8,6 +8,7 @@ const listAgentRuns = vi.hoisted(() => vi.fn());
 const exportAgentRuns = vi.hoisted(() => vi.fn());
 const getAgentRun = vi.hoisted(() => vi.fn());
 const getAgentDailySummary = vi.hoisted(() => vi.fn());
+const getAgentDataQualityTrends = vi.hoisted(() => vi.fn());
 const generateAgentRunRecap = vi.hoisted(() => vi.fn());
 
 vi.mock('../../api/vnpyPaperTrading', () => ({
@@ -16,6 +17,7 @@ vi.mock('../../api/vnpyPaperTrading', () => ({
     exportAgentRuns,
     getAgentRun,
     getAgentDailySummary,
+    getAgentDataQualityTrends,
     generateAgentRunRecap,
   },
 }));
@@ -292,12 +294,37 @@ const dailySummary = {
   filters: {},
 };
 
+const dataQualityTrends = {
+  generatedAt: '2026-07-13T16:00:00',
+  windowDays: 30,
+  total: 3,
+  scannedCount: 3,
+  knownCount: 2,
+  qualityCounts: { ok: 1, partial: 1, unknown: 1 },
+  degradedCount: 1,
+  degradedRatePct: 33.33,
+  health: 'warning',
+  latestQuality: 'partial',
+  warningCounts: { dailySourceFallback: 1 },
+  sourceErrorCounts: { snapshotTimeout: 1 },
+  truncated: false,
+  daily: [{
+    date: '2026-07-13',
+    runCount: 3,
+    qualityCounts: { ok: 1, partial: 1, unknown: 1 },
+    degradedCount: 1,
+    degradedRatePct: 33.33,
+  }],
+  filters: {},
+};
+
 describe('AgentConsolePage', () => {
   beforeEach(() => {
     listAgentRuns.mockReset();
     exportAgentRuns.mockReset();
     getAgentRun.mockReset();
     getAgentDailySummary.mockReset();
+    getAgentDataQualityTrends.mockReset();
     generateAgentRunRecap.mockReset();
     listAgentRuns.mockResolvedValue({
       items: [runSummary, failedRunSummary],
@@ -306,6 +333,7 @@ describe('AgentConsolePage', () => {
       total: 2,
     });
     getAgentDailySummary.mockResolvedValue(dailySummary);
+    getAgentDataQualityTrends.mockResolvedValue(dataQualityTrends);
     exportAgentRuns.mockResolvedValue({
       generatedAt: '2026-07-02T00:00:00Z',
       limit: 50,
@@ -336,9 +364,15 @@ describe('AgentConsolePage', () => {
 
     await waitFor(() => expect(listAgentRuns).toHaveBeenCalledWith(25, 0, undefined));
     await waitFor(() => expect(getAgentDailySummary).toHaveBeenCalledWith(undefined, undefined));
+    await waitFor(() => expect(getAgentDataQualityTrends).toHaveBeenCalledWith(30, undefined));
     await waitFor(() => expect(getAgentRun).toHaveBeenCalledWith('ss-agent-test'));
     expect(screen.getByText('今日 Agent 总结')).toBeInTheDocument();
     expect(screen.getByText('2026-07-01 · 2/2 runs scanned')).toBeInTheDocument();
+    expect(screen.getByTestId('agent-data-quality-trends')).toHaveTextContent('跨 run 数据质量趋势');
+    expect(screen.getByTestId('agent-data-quality-trends')).toHaveTextContent('33.33%');
+    expect(screen.getByTestId('agent-data-quality-trends')).toHaveTextContent('1 / 1 / 0 / 0 / 1');
+    fireEvent.click(screen.getByRole('button', { name: '7天' }));
+    await waitFor(() => expect(getAgentDataQualityTrends).toHaveBeenCalledWith(7, undefined));
     expect(screen.getByText('LLM 复核')).toBeInTheDocument();
     expect(screen.getByText('passed 1')).toBeInTheDocument();
     expect(screen.getAllByText('复核质量').length).toBeGreaterThan(0);
