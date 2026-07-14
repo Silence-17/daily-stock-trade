@@ -365,6 +365,12 @@ describe('alphasiftApi', () => {
       targetWeights: { '600519': 60, '000001': 30 },
       minimumCommission: 5,
       sellTaxBps: 5,
+      corporateActions: [{
+        symbol: '600519',
+        effectiveDate: '2024-01-15',
+        actionType: 'cash_dividend',
+        cashDividendPerShare: 1.5,
+      }],
     });
 
     expect(post).toHaveBeenCalledWith('/api/v1/alphasift/replay/portfolio-backtest', {
@@ -383,6 +389,13 @@ describe('alphasiftApi', () => {
       enforce_tradeability: true,
       accounting_mode: 'cash_ledger',
       target_weights: { '600519': 60, '000001': 30 },
+      corporate_actions: [{
+        symbol: '600519',
+        effective_date: '2024-01-15',
+        action_type: 'cash_dividend',
+        cash_dividend_per_share: 1.5,
+        split_ratio: null,
+      }],
     });
     expect(result.metrics.excessReturnPct).toBe(5);
   });

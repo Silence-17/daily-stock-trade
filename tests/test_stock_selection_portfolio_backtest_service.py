@@ -448,6 +448,91 @@ class StockSelectionPortfolioBacktestServiceTestCase(unittest.TestCase):
         self.assertEqual(result["methodology"]["minimum_commission_per_trade"], 5)
         self.assertEqual(result["methodology"]["sell_tax_bps"], 100)
 
+    def test_cash_ledger_applies_dividend_and_split_before_final_exit(self) -> None:
+        with self.db.get_session() as session:
+            session.add_all([
+                StockDaily(code="600001", date=date(2024, 1, 2), open=10, close=10, volume=1000, pct_chg=0),
+                StockDaily(code="600001", date=date(2024, 1, 3), open=10, close=10, volume=1000, pct_chg=0),
+                StockDaily(code="600001", date=date(2024, 1, 4), open=5, close=5, volume=1000, pct_chg=0),
+            ])
+            session.commit()
+        self.repository.list_dates.return_value = [date(2024, 1, 1)]
+        self.replay.replay.return_value = {
+            "candidates": [{"symbol": "600001", "name": "actions", "screen_score": 90}],
+            "compatibility": {},
+        }
+
+        result = self.service.run(
+            strategy="dual_low",
+            market="cn",
+            date_from=date(2024, 1, 1),
+            date_to=date(2024, 1, 1),
+            final_holding_bars=3,
+            commission_bps=0,
+            slippage_bps=0,
+            accounting_mode="cash_ledger",
+            corporate_actions=[
+                {
+                    "symbol": "600001",
+                    "effective_date": date(2024, 1, 3),
+                    "action_type": "cash_dividend",
+                    "cash_dividend_per_share": 1,
+                },
+                {
+                    "symbol": "600001",
+                    "effective_date": date(2024, 1, 4),
+                    "action_type": "split_adjustment",
+                    "split_ratio": 2,
+                },
+            ],
+        )
+
+        actions = result["periods"][0]["corporate_actions"]
+        self.assertEqual([item["status"] for item in actions], ["applied", "applied"])
+        self.assertEqual(actions[0]["cash_effect"], 10_000)
+        self.assertEqual(actions[1]["quantity_before"], 10_000)
+        self.assertEqual(actions[1]["quantity_after"], 20_000)
+        sell = next(item for item in result["periods"][0]["trades"] if item["side"] == "sell")
+        self.assertEqual(sell["quantity"], 20_000)
+        self.assertEqual(result["metrics"]["cash_dividends_received"], 10_000)
+        self.assertEqual(result["metrics"]["applied_corporate_action_count"], 2)
+        self.assertEqual(result["final_equity"], 110_000)
+
+    def test_same_day_corporate_action_does_not_apply_to_new_position(self) -> None:
+        with self.db.get_session() as session:
+            session.add_all([
+                StockDaily(code="600001", date=date(2024, 1, 2), open=10, close=10, volume=1000, pct_chg=0),
+                StockDaily(code="600001", date=date(2024, 1, 3), open=10, close=10, volume=1000, pct_chg=0),
+            ])
+            session.commit()
+        self.repository.list_dates.return_value = [date(2024, 1, 1)]
+        self.replay.replay.return_value = {
+            "candidates": [{"symbol": "600001", "name": "same-day", "screen_score": 90}],
+            "compatibility": {},
+        }
+
+        result = self.service.run(
+            strategy="dual_low",
+            market="cn",
+            date_from=date(2024, 1, 1),
+            date_to=date(2024, 1, 1),
+            final_holding_bars=2,
+            commission_bps=0,
+            slippage_bps=0,
+            accounting_mode="cash_ledger",
+            corporate_actions=[{
+                "symbol": "600001",
+                "effective_date": date(2024, 1, 2),
+                "action_type": "cash_dividend",
+                "cash_dividend_per_share": 1,
+            }],
+        )
+
+        action = result["periods"][0]["corporate_actions"][0]
+        self.assertEqual(action["status"], "not_held")
+        self.assertEqual(result["metrics"]["cash_dividends_received"], 0)
+        self.assertEqual(result["final_equity"], 100_000)
+
     def test_rejects_invalid_target_weight_contracts(self) -> None:
         self.repository.list_dates.return_value = [date(2024, 1, 1)]
 
@@ -479,6 +564,42 @@ class StockSelectionPortfolioBacktestServiceTestCase(unittest.TestCase):
                 minimum_commission=5,
                 sell_tax_bps=5,
             )
+        with self.assertRaisesRegex(ValueError, "corporate_actions"):
+            self.service.run(
+                strategy="dual_low",
+                market="cn",
+                date_from=date(2024, 1, 1),
+                date_to=date(2024, 1, 1),
+                accounting_mode="equal_weight_approximation",
+                corporate_actions=[{
+                    "symbol": "600001",
+                    "effective_date": date(2024, 1, 1),
+                    "action_type": "cash_dividend",
+                    "cash_dividend_per_share": 1,
+                }],
+            )
+        actions = self.service._normalize_corporate_actions([{
+            "symbol": "600001",
+            "effective_date": date(2024, 1, 1),
+            "action_type": "split_adjustment",
+            "split_ratio": 1.5,
+        }])
+        with self.assertRaisesRegex(ValueError, "fractional shares"):
+            self.service._apply_corporate_actions(
+                cash=0,
+                positions={"600001": {"quantity": 1}},
+                corporate_actions=actions,
+                applied_indexes=set(),
+                through_dates={"600001": date(2024, 1, 1)},
+            )
+        with self.assertRaisesRegex(ValueError, "split_ratio is not allowed"):
+            self.service._normalize_corporate_actions([{
+                "symbol": "600001",
+                "effective_date": date(2024, 1, 1),
+                "action_type": "cash_dividend",
+                "cash_dividend_per_share": 1,
+                "split_ratio": 2,
+            }])
 
 
 if __name__ == "__main__":

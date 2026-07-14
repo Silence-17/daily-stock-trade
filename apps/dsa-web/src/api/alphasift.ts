@@ -322,6 +322,9 @@ export type AlphaSiftPortfolioBacktestResponse = {
     totalFees?: number;
     totalTaxes?: number;
     totalSlippageCost?: number;
+    processedCorporateActionCount?: number;
+    appliedCorporateActionCount?: number;
+    cashDividendsReceived?: number;
   };
   periods: Array<{
     signalDate: string;
@@ -347,8 +350,19 @@ export type AlphaSiftPortfolioBacktestResponse = {
     replayCandidateCount?: number;
     targetWeights?: Record<string, number>;
     configuredTargetsNotSelected?: string[];
+    processedCorporateActionCount?: number;
+    appliedCorporateActionCount?: number;
+    corporateActions?: Array<Record<string, unknown>>;
   }>;
   methodology: Record<string, unknown>;
+};
+
+export type AlphaSiftPortfolioCorporateActionInput = {
+  symbol: string;
+  effectiveDate: string;
+  actionType: 'cash_dividend' | 'split_adjustment';
+  cashDividendPerShare?: number;
+  splitRatio?: number;
 };
 
 export type AlphaSiftHistoricalUniverseResponse = {
@@ -566,6 +580,7 @@ export const alphasiftApi = {
     targetWeights?: Record<string, number>;
     minimumCommission?: number;
     sellTaxBps?: number;
+    corporateActions?: AlphaSiftPortfolioCorporateActionInput[];
   }): Promise<AlphaSiftPortfolioBacktestResponse> {
     const response = await apiClient.post<Record<string, unknown>>(
       '/api/v1/alphasift/replay/portfolio-backtest',
@@ -585,6 +600,13 @@ export const alphasiftApi = {
         enforce_tradeability: true,
         accounting_mode: 'cash_ledger',
         target_weights: payload.targetWeights ?? {},
+        corporate_actions: (payload.corporateActions ?? []).map((item) => ({
+          symbol: item.symbol,
+          effective_date: item.effectiveDate,
+          action_type: item.actionType,
+          cash_dividend_per_share: item.cashDividendPerShare ?? null,
+          split_ratio: item.splitRatio ?? null,
+        })),
       },
     );
     return toCamelCase<AlphaSiftPortfolioBacktestResponse>(response.data);
