@@ -449,6 +449,109 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertIn("agent_review", plan["expected_outputs"])
         self.assertTrue(any(event["stage"] == "agent_plan" for event in detail["timeline"]))
 
+    def test_cross_market_objective_tightens_rejected_us_run_without_widening_limits(self) -> None:
+        settings = replace(
+            self.service.get_settings(),
+            auto_market="us",
+            auto_max_results=4,
+            auto_cash_per_order=10000,
+            auto_min_score=70,
+        )
+
+        objective = self.service._build_cross_market_objective(
+            settings,
+            recent_run_context={
+                "current_failure_streak": 0,
+                "latest_human_feedback": {"verdict": "rejected"},
+            },
+            cross_run_quality={"state": "healthy"},
+        )
+        effective = self.service._apply_cross_market_objective(settings, objective)
+
+        self.assertEqual(objective["primary_objective"], "volatility_and_gap_control")
+        self.assertEqual(objective["mode"], "strict")
+        self.assertEqual(objective["status"], "tightened")
+        self.assertEqual(objective["market_risk_factor"], 0.75)
+        self.assertEqual(objective["effective"]["max_results"], 1)
+        self.assertEqual(objective["effective"]["cash_per_order"], 3750.0)
+        self.assertEqual(effective.auto_max_results, 1)
+        self.assertEqual(effective.auto_cash_per_order, 3750.0)
+        self.assertEqual(effective.auto_min_score, 70)
+
+        rejected_looser_values = self.service._apply_cross_market_objective(
+            settings,
+            {
+                "applied_overrides": {
+                    "auto_max_results": 8,
+                    "auto_cash_per_order": 20000,
+                    "auto_min_score": 60,
+                }
+            },
+        )
+        self.assertEqual(rejected_looser_values, settings)
+
+    def test_cross_market_objective_changes_screen_and_plan_execution_limits(self) -> None:
+        self.service.update_settings(
+            {
+                "auto_trade_enabled": True,
+                "auto_trade_time_gate_enabled": False,
+                "auto_market": "hk",
+                "auto_max_results": 4,
+                "auto_cash_per_order": 6000,
+            },
+            include_snapshot=False,
+            include_recent_trades=False,
+        )
+        previous = self.service.agent_repo.create_run(
+            run_uid="market-objective-needs-changes",
+            trigger_source="vnpy_paper_auto",
+            strategy="dual_low",
+            market="hk",
+        )
+        self.service.agent_repo.complete_run(
+            run_id=int(previous["id"]),
+            status="completed",
+            candidate_count=1,
+            planned_count=0,
+            submitted_count=0,
+            skipped_count=0,
+        )
+        self.service.agent_repo.upsert_run_feedback(
+            "market-objective-needs-changes",
+            verdict="needs_changes",
+            note="Reduce foreign-market exposure.",
+        )
+        fake_alphasift = MagicMock()
+        fake_alphasift.screen.return_value = {
+            "quality_status": "ok",
+            "candidates": [],
+            "warnings": [],
+            "source_errors": [],
+        }
+
+        with patch(
+            "src.services.vnpy_paper_trading_service.AlphaSiftService",
+            return_value=fake_alphasift,
+        ):
+            result = self.service.run_auto_trade_once(execution_mode_override="dry_run")
+
+        fake_alphasift.screen.assert_called_once_with(
+            strategy="dual_low",
+            market="hk",
+            max_results=2,
+            source_health_trends=[],
+        )
+        audit = self.service.agent_repo.get_run_detail(result["agent_run_uid"])
+        assert audit is not None
+        plan = audit["diagnostics"]["agent_plan"]
+        objective = plan["market_objective"]
+        self.assertEqual(plan["max_results"], 2)
+        self.assertEqual(plan["cash_per_order"], 3600.0)
+        self.assertEqual(objective["configured"]["max_results"], 4)
+        self.assertEqual(objective["configured"]["cash_per_order"], 6000.0)
+        self.assertEqual(objective["mode"], "guarded")
+        self.assertIn("latest_human_feedback_needs_changes", objective["reasons"])
+
     def test_auto_trade_llm_dynamic_plan_overrides_screen_parameters_for_run(self) -> None:
         self.service.update_settings(
             {

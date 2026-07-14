@@ -2175,6 +2175,12 @@ class VnpyPaperTradingService:
             recent_run_context=recent_run_context,
         )
         recent_run_context["cross_run_quality"] = cross_run_quality
+        market_objective = self._build_cross_market_objective(
+            settings,
+            recent_run_context=recent_run_context,
+            cross_run_quality=cross_run_quality,
+        )
+        settings = self._apply_cross_market_objective(settings, market_objective)
         llm_dynamic_plan = self._generate_llm_dynamic_agent_plan(
             settings=settings,
             run_uid=run_uid,
@@ -2194,8 +2200,10 @@ class VnpyPaperTradingService:
                 ignore_auto_trade_enabled=bool(ignore_auto_trade_enabled),
                 llm_dynamic_plan=llm_dynamic_plan,
                 recent_run_context=recent_run_context,
+                market_objective=market_objective,
             ),
             "llm_dynamic_plan": llm_dynamic_plan,
+            "market_objective": market_objective,
             "cross_run_quality": cross_run_quality,
         }
         run = self.agent_repo.create_run(
@@ -5023,6 +5031,7 @@ class VnpyPaperTradingService:
         ignore_auto_trade_enabled: bool,
         llm_dynamic_plan: Optional[Dict[str, Any]] = None,
         recent_run_context: Optional[Dict[str, Any]] = None,
+        market_objective: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         configured_layers = self._agent_plan_configured_layers(settings)
         execution_policy = self._agent_plan_execution_policy(settings)
@@ -5150,6 +5159,7 @@ class VnpyPaperTradingService:
                 "cross_run_max_decisions": settings.auto_cross_run_max_decisions,
             },
             "llm_dynamic_plan": llm_dynamic_plan,
+            "market_objective": market_objective,
             "recent_run_context": recent_run_context or self._recent_agent_run_context(settings),
             "adaptive_controls": {
                 "risk_level": risk_level,
@@ -5199,6 +5209,126 @@ class VnpyPaperTradingService:
                 "llm_review",
             ],
         }
+
+    @staticmethod
+    def _build_cross_market_objective(
+        settings: VnpyPaperSettings,
+        *,
+        recent_run_context: Optional[Dict[str, Any]] = None,
+        cross_run_quality: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        context = recent_run_context if isinstance(recent_run_context, dict) else {}
+        quality = cross_run_quality if isinstance(cross_run_quality, dict) else {}
+        market = str(settings.auto_market or "cn").strip().lower()
+        profiles = {
+            "cn": ("liquidity_and_momentum", 1.0),
+            "hk": ("liquidity_and_fx_preservation", 0.8),
+            "us": ("volatility_and_gap_control", 0.75),
+            "jp": ("liquidity_and_fx_preservation", 0.75),
+            "kr": ("liquidity_and_fx_preservation", 0.75),
+            "tw": ("liquidity_and_fx_preservation", 0.75),
+        }
+        primary_objective, market_risk_factor = profiles.get(
+            market,
+            ("capital_preservation", 0.75),
+        )
+        reasons: List[str] = []
+        severity = "baseline"
+        latest_feedback = (
+            context.get("latest_human_feedback")
+            if isinstance(context.get("latest_human_feedback"), dict)
+            else {}
+        )
+        feedback_verdict = str(latest_feedback.get("verdict") or "").strip().lower()
+        failure_streak = max(0, int(_safe_int(context.get("current_failure_streak")) or 0))
+        quality_state = str(quality.get("state") or "").strip().lower()
+
+        if feedback_verdict == "rejected":
+            severity = "strict"
+            reasons.append("latest_human_feedback_rejected")
+        elif feedback_verdict == "needs_changes":
+            severity = "guarded"
+            reasons.append("latest_human_feedback_needs_changes")
+        if failure_streak >= 2:
+            severity = "strict"
+            reasons.append("consecutive_run_failures")
+        elif failure_streak == 1:
+            if severity == "baseline":
+                severity = "guarded"
+            reasons.append("latest_run_failed")
+        if quality_state in {"blocked", "unavailable"}:
+            severity = "strict"
+            reasons.append(f"cross_run_quality_{quality_state}")
+        elif quality_state in {"guarded", "degraded"}:
+            if severity == "baseline":
+                severity = "guarded"
+            reasons.append(f"cross_run_quality_{quality_state}")
+
+        configured_max_results = max(1, int(settings.auto_max_results or 1))
+        configured_cash = max(0.0, float(settings.auto_cash_per_order or 0.0))
+        effective_max_results = configured_max_results
+        effective_cash = configured_cash
+        if severity == "guarded":
+            effective_max_results = min(configured_max_results, 2)
+            effective_cash = configured_cash * 0.75 * market_risk_factor
+        elif severity == "strict":
+            effective_max_results = 1
+            effective_cash = configured_cash * 0.5 * market_risk_factor
+        effective_cash = round(min(configured_cash, max(0.0, effective_cash)), 6)
+        applied_overrides: Dict[str, Any] = {}
+        if effective_max_results < configured_max_results:
+            applied_overrides["auto_max_results"] = effective_max_results
+        if effective_cash + PAPER_EPS < configured_cash:
+            applied_overrides["auto_cash_per_order"] = effective_cash
+
+        return {
+            "schema_version": 1,
+            "resolver": "cross_market_objective_v1",
+            "market": market,
+            "primary_objective": primary_objective,
+            "mode": severity,
+            "status": "tightened" if applied_overrides else "baseline",
+            "market_risk_factor": market_risk_factor,
+            "reasons": reasons,
+            "configured": {
+                "max_results": configured_max_results,
+                "cash_per_order": configured_cash,
+                "min_score": settings.auto_min_score,
+            },
+            "effective": {
+                "max_results": effective_max_results,
+                "cash_per_order": effective_cash,
+                "min_score": settings.auto_min_score,
+            },
+            "applied_overrides": applied_overrides,
+            "policy": "tighten_only_never_bypasses_configured_risk_gates",
+        }
+
+    @staticmethod
+    def _apply_cross_market_objective(
+        settings: VnpyPaperSettings,
+        objective: Optional[Dict[str, Any]],
+    ) -> VnpyPaperSettings:
+        raw_overrides = objective.get("applied_overrides") if isinstance(objective, dict) else None
+        if not isinstance(raw_overrides, dict):
+            return settings
+        overrides: Dict[str, Any] = {}
+        max_results = _safe_int(raw_overrides.get("auto_max_results"))
+        if max_results is not None and 1 <= max_results < settings.auto_max_results:
+            overrides["auto_max_results"] = max_results
+        cash_per_order = _safe_float(raw_overrides.get("auto_cash_per_order"))
+        if (
+            cash_per_order is not None
+            and cash_per_order > 0
+            and cash_per_order + PAPER_EPS < settings.auto_cash_per_order
+        ):
+            overrides["auto_cash_per_order"] = cash_per_order
+        min_score = _safe_float(raw_overrides.get("auto_min_score"))
+        if min_score is not None and (
+            settings.auto_min_score is None or min_score > settings.auto_min_score
+        ):
+            overrides["auto_min_score"] = min_score
+        return replace(settings, **overrides) if overrides else settings
 
     def _recent_agent_run_context(
         self,

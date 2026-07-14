@@ -132,6 +132,14 @@ const runSummary = {
         riskLevel: 'guarded',
         configuredLayers: ['time_gate', 'candidate_filters', 'portfolio_limits'],
       },
+      marketObjective: {
+        primaryObjective: 'liquidity_and_momentum',
+        mode: 'guarded',
+        status: 'tightened',
+        configured: { maxResults: 3, cashPerOrder: 10000 },
+        effective: { maxResults: 2, cashPerOrder: 7500 },
+        reasons: ['latest_run_failed'],
+      },
       recentRunContext: {
         runCount: 5,
         submissionRatePct: 40,
@@ -753,6 +761,9 @@ describe('AgentConsolePage', () => {
     expect(screen.getByTestId('cross-run-quality-state')).toHaveTextContent('healthy');
     expect(screen.getByTestId('cross-run-quality-state')).toHaveTextContent('20 个成熟样本');
     expect(screen.getByTestId('cross-run-quality-state')).toHaveTextContent('blocked->healthy');
+    expect(screen.getByTestId('cross-market-objective')).toHaveTextContent('liquidity_and_momentum');
+    expect(screen.getByTestId('cross-market-objective')).toHaveTextContent('3 → 2');
+    expect(screen.getByTestId('cross-market-objective')).toHaveTextContent('latest_run_failed');
     expect(screen.getByTestId('agent-source-routing')).toHaveTextContent('dynamic_health');
     expect(screen.getByTestId('agent-source-routing')).toHaveTextContent('efinance,sina');
     expect(screen.getByTestId('agent-source-routing')).toHaveTextContent('已按健康权重调整');
