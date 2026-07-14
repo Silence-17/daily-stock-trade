@@ -790,6 +790,37 @@ export type VnpyPaperAgentBacktestResponse = {
   items: Array<Record<string, unknown>>;
 };
 
+export type VnpyPaperAgentCrossRunQuality = {
+  schemaVersion: number;
+  generatedAt?: string | null;
+  state: string;
+  reason: string;
+  previousState?: string | null;
+  transition?: string | null;
+  changed: boolean;
+  strategy: string;
+  market: string;
+  horizonDays: number;
+  minMatureSamples: number;
+  minWinRatePct: number;
+  maxDecisions: number;
+  sampleCount: number;
+  matureSampleCount: number;
+  coveragePct?: number | null;
+  winRatePct?: number | null;
+  averageReturnPct?: number | null;
+  medianReturnPct?: number | null;
+  averageMaxAdverseExcursionPct?: number | null;
+  unableReasonCounts: Record<string, number>;
+  lookaheadProtection: boolean;
+  source: string;
+  truncated: boolean;
+  gateEnabled: boolean;
+  gateBlocked: boolean;
+  insufficientEvidenceBlocks: boolean;
+  error?: string | null;
+};
+
 export type VnpyPaperAgentRunExportResponse = {
   generatedAt?: string | null;
   limit: number;
@@ -1454,6 +1485,13 @@ export const vnpyPaperTradingApi = {
       },
     );
     return toCamelCase<VnpyPaperAgentBacktestResponse>(response.data);
+  },
+
+  async getAgentCrossRunQuality(): Promise<VnpyPaperAgentCrossRunQuality> {
+    const response = await apiClient.get<Record<string, unknown>>(
+      '/api/v1/vnpy-paper/agent-runs/cross-run-quality',
+    );
+    return toCamelCase<VnpyPaperAgentCrossRunQuality>(response.data);
   },
 
   async generateAgentRunRecap(

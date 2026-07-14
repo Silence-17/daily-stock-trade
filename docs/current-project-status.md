@@ -28,6 +28,7 @@ Snapshot date: 2026-07-14
 - Configured account drawdown now uses an observed equity peak persisted per paper account. A profitable account that falls from its peak can block new buys even while remaining above initial cash; full status, system health, alerts, and Agent run diagnostics expose the peak, current equity, drawdown, threshold, and calculation basis.
 - Every Agent plan now persists a deterministic summary of the five latest runs for the same trigger, strategy, and market. The optional LLM dynamic planner v2 consumes that exact context, while the Agent console displays recent-run count, historical submission rate, latest status, and failure streak even when LLM planning is disabled.
 - Every auto-selection run now derives a bounded cross-run forward-quality state from persisted candidates and strictly later local daily bars. The state audits mature samples, coverage, win rate, return metrics, previous state, and transitions. Its default-off gate blocks only new buys when mature performance is below threshold or evaluation is unavailable; insufficient evidence stays non-blocking and automated sell risk checks remain active.
+- The read-only `/agent-runs/cross-run-quality` endpoint and Agent console expose that current configured state before the next scheduled run, without creating audit rows, refreshing data, or placing orders.
 - The consecutive-failure fuse is now latched: runs skipped with `failure_fuse_open` preserve the open state instead of clearing the streak on the next interval. Only the explicit reset action advances the fuse baseline and re-enables buys.
 
 ## Verified Local Status
@@ -81,16 +82,16 @@ Local API: `http://127.0.0.1:8000`
   - `truncated=false`
 - `GET /paper-trading` returned HTTP 200.
 
-The latest post-change runtime smoke uses listener PID `23220`; vn.py runtime, built-in `DSA_SIM` gateway connection, MainEngine bridge, and EventEngine callbacks are available while the saved execution mode remains `paper`. The paper-trading and Agent-console pages both return HTTP 200. Portfolio allocation remains disabled by default; its persisted method resolves to `score_weighted`, with correlation defaults of 60 trailing bars, 20 overlapping returns, and a 0.85 pairwise cap ready for opt-in risk mode. The minimum data-quality score and cross-run quality gate are both disabled by default. The persisted cross-run defaults are a 5-trading-day horizon, 10 mature samples, 45% minimum win rate, and 200 decisions. A read-only live snapshot resolved to `insufficient_evidence` with 3 candidates, 0 mature samples, and no gate block. No auto-trade run or order was triggered during verification.
+The latest post-change runtime smoke uses listener PID `27388`; vn.py runtime, built-in `DSA_SIM` gateway connection, MainEngine bridge, and all four EventEngine callbacks are available while the saved execution mode remains `paper`. The Agent-console page returns HTTP 200. Portfolio allocation remains disabled by default; its persisted method resolves to `score_weighted`, with correlation defaults of 60 trailing bars, 20 overlapping returns, and a 0.85 pairwise cap ready for opt-in risk mode. The minimum data-quality score and cross-run quality gate are both disabled by default. The persisted cross-run defaults are a 5-trading-day horizon, 10 mature samples, 45% minimum win rate, and 200 decisions. The read-only `/agent-runs/cross-run-quality` smoke resolved to `insufficient_evidence` with 3 candidates, 0 mature samples, and no gate block. No auto-trade run or order was triggered during verification.
 
 The readiness and system health status are `warning` because the current time is outside the A-share trading session and the next action is to wait for the next session. There are no required blockers; the scheduling alignment itself is ready.
 
 ## Recent Validation
 
 - `python -m pytest tests/test_stock_selection_agent_backtest_service.py tests/test_vnpy_paper_trading_service.py tests/test_vnpy_paper_trading_api.py -q -p no:cacheprovider`
-  - 148 passed and 1 optional test skipped after adding cross-run forward-quality states plus correlation-capped risk allocation, insufficient-history fail-closed behavior, settings/API contracts, and sell-side preservation coverage.
+  - 150 passed and 1 optional test skipped after adding the read-only current-quality endpoint and prefixed/suffixed daily-code resolution to cross-run forward-quality states plus correlation-capped risk allocation.
 - `npm.cmd test -- --run src/api/__tests__/vnpyPaperTrading.test.ts src/pages/__tests__/VnpyPaperTradingPage.test.tsx src/pages/__tests__/AgentConsolePage.test.tsx`
-  - 66 passed after adding cross-run configuration mapping, settings controls, and Agent state/transition rendering.
+  - 67 passed after adding cross-run configuration mapping, settings controls, current-quality loading, and Agent state/transition rendering.
 - `npm.cmd run lint` and `npm.cmd run build`
   - Lint completed with zero errors and the pre-existing `SettingsPage.tsx:553` hook warning; the TypeScript and Vite production build passed.
 - `python -m pytest tests/test_vnpy_paper_trading_service.py -q -p no:cacheprovider -k "data_quality_score or auto_trade_records_audit"`

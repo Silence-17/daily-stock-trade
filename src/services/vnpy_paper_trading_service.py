@@ -32,6 +32,7 @@ from src.core import trading_calendar
 from src.repositories.stock_selection_agent_repo import StockSelectionAgentRepository
 from src.repositories.stock_repo import StockRepository
 from src.services.alphasift_service import AlphaSiftService
+from src.services.backtest_service import BacktestService
 from src.services.market_light_service import load_previous_snapshot
 from src.services.portfolio_service import (
     PortfolioConflictError,
@@ -654,6 +655,15 @@ class VnpyPaperTradingService:
             "last_auto_run": payload.get("last_auto_run") if isinstance(payload, dict) else None,
             "diagnostics": diagnostics,
         }
+
+    def get_cross_run_quality_status(self) -> Dict[str, Any]:
+        """Return the current configured strategy's read-only forward-quality gate state."""
+        settings = self.get_settings()
+        recent_run_context = self._recent_agent_run_context(settings)
+        return self._cross_run_quality_snapshot(
+            settings,
+            recent_run_context=recent_run_context,
+        )
 
     def _get_cached_status_snapshot(self, account_id: int) -> Tuple[Optional[Dict[str, Any]], bool]:
         cache_key = self._status_snapshot_cache_key(account_id)
@@ -6737,11 +6747,20 @@ class VnpyPaperTradingService:
         min_observations: int,
         max_pairwise_correlation: float,
     ) -> Tuple[Dict[str, Any], Optional[Dict[date, float]]]:
-        bars = StockRepository(self.agent_repo.db).get_trailing_bars(
-            code=symbol,
-            as_of=as_of,
-            limit=max(2, int(lookback_days) + 1),
-        )
+        stock_repo = StockRepository(self.agent_repo.db)
+        bars = []
+        matched_code = None
+        for code_candidate in BacktestService._build_daily_code_candidates(symbol):
+            candidate_bars = stock_repo.get_trailing_bars(
+                code=code_candidate,
+                as_of=as_of,
+                limit=max(2, int(lookback_days) + 1),
+            )
+            if len(candidate_bars) > len(bars):
+                bars = candidate_bars
+                matched_code = code_candidate
+            if len(candidate_bars) >= max(2, int(lookback_days) + 1):
+                break
         returns: Dict[date, float] = {}
         previous_close: Optional[float] = None
         for bar in bars:
@@ -6758,6 +6777,7 @@ class VnpyPaperTradingService:
         base = {
             "status": "available",
             "source": "stock_daily",
+            "daily_code": matched_code,
             "as_of": as_of.isoformat(),
             "lookback_days": int(lookback_days),
             "observation_count": len(returns),

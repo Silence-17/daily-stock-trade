@@ -1544,4 +1544,45 @@ describe('vnpyPaperTradingApi', () => {
     expect(result.methodology.lookaheadProtection).toBe(true);
     expect(result.matrix['1'].averageReturnPct).toBe(1.25);
   });
+
+  it('loads the current cross-run quality gate state', async () => {
+    get.mockResolvedValueOnce({
+      data: {
+        schema_version: 1,
+        generated_at: '2026-07-14T10:00:00',
+        state: 'blocked',
+        reason: 'forward_win_rate_below_threshold',
+        previous_state: 'healthy',
+        transition: 'healthy->blocked',
+        changed: true,
+        strategy: 'dual_low',
+        market: 'cn',
+        horizon_days: 5,
+        min_mature_samples: 10,
+        min_win_rate_pct: 45,
+        max_decisions: 200,
+        sample_count: 20,
+        mature_sample_count: 18,
+        coverage_pct: 90,
+        win_rate_pct: 40,
+        average_return_pct: -0.5,
+        median_return_pct: -0.2,
+        average_max_adverse_excursion_pct: -4,
+        unable_reason_counts: { insufficient_forward_bars: 2 },
+        lookahead_protection: true,
+        source: 'persisted_agent_decisions_and_stock_daily',
+        truncated: false,
+        gate_enabled: true,
+        gate_blocked: true,
+        insufficient_evidence_blocks: false,
+      },
+    });
+
+    const result = await vnpyPaperTradingApi.getAgentCrossRunQuality();
+
+    expect(get).toHaveBeenCalledWith('/api/v1/vnpy-paper/agent-runs/cross-run-quality');
+    expect(result.matureSampleCount).toBe(18);
+    expect(result.gateBlocked).toBe(true);
+    expect(result.transition).toBe('healthy->blocked');
+  });
 });

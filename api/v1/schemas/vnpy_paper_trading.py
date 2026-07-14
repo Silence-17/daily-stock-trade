@@ -641,6 +641,37 @@ class VnpyPaperAgentBacktestResponse(BaseModel):
     items: List[Dict[str, Any]] = Field(default_factory=list)
 
 
+class VnpyPaperAgentCrossRunQualityResponse(BaseModel):
+    schema_version: int = 1
+    generated_at: Optional[Any] = None
+    state: str
+    reason: str
+    previous_state: Optional[str] = None
+    transition: Optional[str] = None
+    changed: bool = False
+    strategy: str
+    market: str
+    horizon_days: int
+    min_mature_samples: int
+    min_win_rate_pct: float
+    max_decisions: int
+    sample_count: int = 0
+    mature_sample_count: int = 0
+    coverage_pct: Optional[float] = None
+    win_rate_pct: Optional[float] = None
+    average_return_pct: Optional[float] = None
+    median_return_pct: Optional[float] = None
+    average_max_adverse_excursion_pct: Optional[float] = None
+    unable_reason_counts: Dict[str, int] = Field(default_factory=dict)
+    lookahead_protection: bool = True
+    source: str
+    truncated: bool = False
+    gate_enabled: bool = False
+    gate_blocked: bool = False
+    insufficient_evidence_blocks: bool = False
+    error: Optional[str] = None
+
+
 class VnpyPaperAgentDailySummaryResponse(BaseModel):
     generated_at: Optional[Any] = None
     date: str

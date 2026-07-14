@@ -16,6 +16,7 @@ import {
   vnpyPaperTradingApi,
   type VnpyPaperAgentDailySummary,
   type VnpyPaperAgentBacktestResponse,
+  type VnpyPaperAgentCrossRunQuality,
   type VnpyPaperAgentDataQualityTrends,
   type VnpyPaperAgentDecision,
   type VnpyPaperAgentRunDetail,
@@ -267,6 +268,7 @@ const AgentConsolePage: React.FC = () => {
   const [backtestLoading, setBacktestLoading] = useState(false);
   const [backtestIncludeSkipped, setBacktestIncludeSkipped] = useState(true);
   const [backtestResult, setBacktestResult] = useState<VnpyPaperAgentBacktestResponse | null>(null);
+  const [crossRunQuality, setCrossRunQuality] = useState<VnpyPaperAgentCrossRunQuality | null>(null);
   const [replayDate, setReplayDate] = useState('');
   const [replayLoading, setReplayLoading] = useState(false);
   const [replayCompatibility, setReplayCompatibility] = useState<AlphaSiftReplayCompatibility | null>(null);
@@ -308,7 +310,7 @@ const AgentConsolePage: React.FC = () => {
     setError('');
     try {
       const filterPayload = buildFilters(nextFilters);
-      const [payload, summary, qualityTrends] = await Promise.all([
+      const [payload, summary, qualityTrends, currentCrossRunQuality] = await Promise.all([
         vnpyPaperTradingApi.listAgentRuns(
           AGENT_RUN_PAGE_SIZE,
           nextOffset,
@@ -319,10 +321,12 @@ const AgentConsolePage: React.FC = () => {
           dataQualityDaysRef.current,
           filterPayload,
         ).catch(() => null),
+        vnpyPaperTradingApi.getAgentCrossRunQuality().catch(() => null),
       ]);
       setRuns(payload.items);
       setDailySummary(summary);
       setDataQualityTrends(qualityTrends);
+      setCrossRunQuality(currentCrossRunQuality);
       setRunOffset(payload.offset || nextOffset);
       setRunTotal(payload.total ?? payload.items.length);
       const preferred = String(preferredRunUid || '').trim();
@@ -805,6 +809,55 @@ const AgentConsolePage: React.FC = () => {
 
       {error ? <InlineAlert variant="danger" title="Agent 控制台加载失败" message={error} /> : null}
       {success ? <InlineAlert variant="success" title="操作完成" message={success} /> : null}
+
+      {crossRunQuality ? (
+        <section className="border-y border-border py-4" data-testid="agent-current-cross-run-quality">
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+            <div>
+              <div className="flex flex-wrap items-center gap-2">
+                <ShieldAlert className="h-4 w-4 text-cyan" />
+                <h2 className="text-sm font-semibold text-foreground">当前跨运行前瞻状态</h2>
+                {renderStatusBadge(crossRunQuality.state)}
+                {crossRunQuality.gateEnabled
+                  ? renderStatusBadge(
+                    crossRunQuality.gateBlocked ? 'blocked' : 'passed',
+                    crossRunQuality.gateBlocked ? '买入门禁阻断' : '买入门禁放行',
+                  )
+                  : renderStatusBadge('idle', '仅审计')}
+              </div>
+              <p className="mt-2 text-xs text-secondary-text">
+                {crossRunQuality.strategy} / {crossRunQuality.market}
+                {' · '}{crossRunQuality.horizonDays} 日前瞻
+                {' · '}{crossRunQuality.reason}
+              </p>
+            </div>
+            <dl className="grid grid-cols-2 gap-x-6 gap-y-2 text-xs text-secondary-text sm:grid-cols-4">
+              <div>
+                <dt>成熟样本</dt>
+                <dd className="mt-1 font-semibold text-foreground">
+                  {crossRunQuality.matureSampleCount}/{crossRunQuality.sampleCount}
+                </dd>
+              </div>
+              <div>
+                <dt>覆盖率</dt>
+                <dd className="mt-1 font-semibold text-foreground">{formatPercent(crossRunQuality.coveragePct)}</dd>
+              </div>
+              <div>
+                <dt>胜率</dt>
+                <dd className="mt-1 font-semibold text-foreground">
+                  {formatPercent(crossRunQuality.winRatePct)} / 最低 {formatPercent(crossRunQuality.minWinRatePct)}
+                </dd>
+              </div>
+              <div>
+                <dt>平均收益</dt>
+                <dd className="mt-1 font-semibold text-foreground">
+                  {formatPercent(crossRunQuality.averageReturnPct)}
+                </dd>
+              </div>
+            </dl>
+          </div>
+        </section>
+      ) : null}
 
       <section className="space-y-3" data-testid="agent-backtest-panel">
         <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
