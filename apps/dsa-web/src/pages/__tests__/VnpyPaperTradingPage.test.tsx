@@ -1319,6 +1319,44 @@ describe('VnpyPaperTradingPage', () => {
     expect(await screen.findByText(valuationDetail)).toBeInTheDocument();
   });
 
+  it('shows the persisted last auto-run skip reason in availability diagnostics', async () => {
+    const lastRunDetail = '最近运行 2026-07-15T09:00:00Z 跳过：outside_trading_session（agent-last-skip）';
+    const lastRunStatus = {
+      ...statusResponse,
+      diagnostics: {
+        ...statusResponse.diagnostics,
+        systemHealth: {
+          ...statusResponse.diagnostics.systemHealth,
+          components: [
+            ...statusResponse.diagnostics.systemHealth.components,
+            {
+              key: 'last_auto_run',
+              label: '最近运行结果',
+              status: 'warning',
+              reason: 'outside_trading_session',
+              detail: lastRunDetail,
+              required: false,
+              tone: 'warning',
+            },
+          ],
+        },
+      },
+    };
+    getStatus
+      .mockResolvedValueOnce({ ...lastRunStatus, snapshot: null, recentTrades: [] })
+      .mockResolvedValueOnce(lastRunStatus);
+
+    render(
+      <UiLanguageProvider>
+        <VnpyPaperTradingPage />
+      </UiLanguageProvider>,
+    );
+
+    const availabilityDiagnostics = await screen.findByTestId('paper-availability-diagnostics');
+    expect(availabilityDiagnostics).toHaveTextContent('最近运行结果');
+    expect(availabilityDiagnostics).toHaveTextContent(lastRunDetail);
+  });
+
   it('renders paper account status, positions, and trades', async () => {
     render(
       <UiLanguageProvider>

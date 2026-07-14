@@ -433,6 +433,36 @@ def _system_health_payload(status_payload: Dict[str, Any]) -> Dict[str, Any]:
             "window_close_at": timing_alignment.get("window_close_at"),
         },
     )
+    readiness_components = [
+        item for item in list(readiness.get("components") or []) if isinstance(item, dict)
+    ]
+    last_run_component = next(
+        (item for item in readiness_components if item.get("key") == "last_auto_run"),
+        None,
+    )
+    last_auto_run = (
+        readiness.get("last_auto_run")
+        if isinstance(readiness.get("last_auto_run"), dict)
+        else {}
+    )
+    if last_run_component is not None:
+        add_component(
+            key="last_auto_run",
+            label="最近运行结果",
+            status=str(last_run_component.get("status") or "warning"),
+            reason=str(last_run_component.get("reason") or "last_auto_run_unknown"),
+            detail=str(last_run_component.get("detail") or "最近自动运行结果未知"),
+            required=False,
+            extra={
+                "ran_at": last_auto_run.get("ran_at"),
+                "agent_run_uid": last_auto_run.get("agent_run_uid"),
+                "agent_run_id": last_auto_run.get("agent_run_id"),
+                "accepted": last_auto_run.get("accepted"),
+                "skipped": last_auto_run.get("skipped"),
+                "candidate_count": last_auto_run.get("candidate_count"),
+                "submitted_count": last_auto_run.get("submitted_count"),
+            },
+        )
     add_component(
         key="trading_window",
         label="交易窗口",
@@ -769,6 +799,11 @@ def _auto_trade_readiness_payload(status_payload: Dict[str, Any]) -> Dict[str, A
         if auto_trade_event is not None and isinstance(auto_trade_event.get("details"), dict)
         else {}
     )
+    last_auto_run = (
+        status_payload.get("last_auto_run")
+        if isinstance(status_payload.get("last_auto_run"), dict)
+        else {}
+    )
 
     paper_enabled = bool(settings.get("enabled", status_payload.get("enabled", False)))
     local_available = bool(status_payload.get("available", paper_enabled))
@@ -922,6 +957,38 @@ def _auto_trade_readiness_payload(status_payload: Dict[str, Any]) -> Dict[str, A
             detail=str(auto_trade_event.get("message") or event_status),
             required=False,
         )
+    if last_auto_run:
+        last_run_reason = str(last_auto_run.get("reason") or "").strip()
+        last_run_skipped = bool(last_auto_run.get("skipped"))
+        last_run_accepted = bool(last_auto_run.get("accepted"))
+        last_run_at = str(last_auto_run.get("ran_at") or "-")
+        last_run_uid = str(last_auto_run.get("agent_run_uid") or "").strip()
+        submitted_count = int(last_auto_run.get("submitted_count") or 0)
+        candidate_count = int(last_auto_run.get("candidate_count") or 0)
+        if last_run_skipped:
+            last_run_status = "warning"
+            last_run_component_reason = last_run_reason or "last_auto_run_skipped"
+            last_run_detail = f"最近运行 {last_run_at} 跳过：{last_run_component_reason}"
+        elif last_run_accepted:
+            last_run_status = "ready"
+            last_run_component_reason = "last_auto_run_completed"
+            last_run_detail = (
+                f"最近运行 {last_run_at} 完成：候选 {candidate_count}，提交 {submitted_count}"
+            )
+        else:
+            last_run_status = "warning"
+            last_run_component_reason = last_run_reason or "last_auto_run_failed"
+            last_run_detail = f"最近运行 {last_run_at} 未完成：{last_run_component_reason}"
+        if last_run_uid:
+            last_run_detail = f"{last_run_detail}（{last_run_uid}）"
+        add_component(
+            key="last_auto_run",
+            label="最近运行结果",
+            status=last_run_status,
+            reason=last_run_component_reason,
+            detail=last_run_detail,
+            required=False,
+        )
     add_component(
         key="trading_window",
         label="交易窗口",
@@ -1006,6 +1073,7 @@ def _auto_trade_readiness_payload(status_payload: Dict[str, Any]) -> Dict[str, A
         "auto_trade_enabled": auto_trade_enabled,
         "auto_execution_mode": execution_mode,
         "timing_alignment": timing_alignment,
+        "last_auto_run": dict(last_auto_run) if last_auto_run else None,
         "blockers": blockers,
         "warnings": warnings,
         "disabled": disabled,
