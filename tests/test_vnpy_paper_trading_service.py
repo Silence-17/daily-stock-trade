@@ -31,7 +31,7 @@ from src.services.vnpy_paper_trading_service import (
     VnpyPaperTradingService,
     build_vnpy_paper_trading_background_tasks,
 )
-from src.storage import DatabaseManager, StockSelectionAgentTradePlan
+from src.storage import DatabaseManager, StockDaily, StockSelectionAgentTradePlan
 
 
 class _FakeDataFetcherManager:
@@ -114,6 +114,39 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         account_snapshot = status["snapshot"]["accounts"][0]
         self.assertEqual(account_snapshot["total_cash"], 99000.0)
         self.assertEqual(account_snapshot["positions"][0]["symbol"], "600519")
+
+    def test_cross_run_quality_gate_blocks_buys_but_preserves_sell_checks(self) -> None:
+        self.service.update_settings(
+            {
+                "auto_trade_enabled": True,
+                "auto_trade_time_gate_enabled": False,
+                "auto_cross_run_quality_gate_enabled": True,
+            },
+            include_snapshot=False,
+            include_recent_trades=False,
+        )
+        snapshot = {
+            "state": "blocked",
+            "reason": "forward_win_rate_below_threshold",
+            "gate_enabled": True,
+            "gate_blocked": True,
+            "win_rate_pct": 30.0,
+            "min_win_rate_pct": 45.0,
+        }
+        sell_order = {"accepted": True, "status": "filled", "side": "sell"}
+        with (
+            patch.object(self.service, "_cross_run_quality_snapshot", return_value=snapshot),
+            patch.object(self.service, "_run_auto_sell_checks", return_value=[sell_order]),
+            patch("src.services.vnpy_paper_trading_service.AlphaSiftService.screen") as screen,
+        ):
+            result = self.service.run_auto_trade_once()
+
+        screen.assert_not_called()
+        self.assertEqual(result["reason"], "cross_run_quality_gate_blocked")
+        self.assertEqual(result["orders"], [sell_order])
+        self.assertEqual(result["submitted_count"], 1)
+        audit = self.service.agent_repo.get_run_detail(result["agent_run_uid"])
+        self.assertEqual(audit["diagnostics"]["cross_run_quality"]["state"], "blocked")
 
     def test_cash_order_below_cn_lot_returns_actionable_skip_reason(self) -> None:
         result = self.service.submit_order(
@@ -1460,6 +1493,18 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertEqual(len(triggers), 1)
         self.assertEqual(triggers[0]["reason"], "failure_fuse_open")
         self.assertIn('"event_type": "failure_fuse_open"', triggers[0]["diagnostics"])
+
+        with patch(
+            "src.services.vnpy_paper_trading_service.AlphaSiftService.screen"
+        ) as screen_again:
+            repeated = self.service.run_auto_trade_once()
+        screen_again.assert_not_called()
+        self.assertEqual(repeated["reason"], "failure_fuse_open")
+        repeated_status = self.service.get_status(
+            include_snapshot=False,
+            include_recent_trades=False,
+        )["diagnostics"]["failure_fuse"]
+        self.assertTrue(repeated_status["open"])
         self.assertIn(result["agent_run_uid"], triggers[0]["diagnostics"])
 
     def test_auto_trade_alert_event_sends_alert_notification_and_records_attempt(self) -> None:
@@ -1653,6 +1698,7 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertEqual(decision_order["risk_review"]["status"], "passed")
         self.assertEqual(decision_order["risk_review"]["reason"], "dry_run")
         self.assertEqual(decision_order["risk_review"]["candidate_data_quality"]["status"], "partial")
+        self.assertEqual(decision_order["risk_review"]["candidate_data_quality"]["score"], 59.0)
         self.assertEqual(decision_order["agent_review"]["status"], "warning")
         self.assertEqual(decision_order["agent_review"]["reason"], "data_quality_missing_fields")
         self.assertEqual(decision_order["agent_review"]["reviewer"], "rule_agent_v1")
@@ -4094,6 +4140,87 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertEqual(position_plan["sizing_method"], "score_weighted_allocation")
         self.assertEqual(position_plan["portfolio_allocation"]["score_weight"], 0.8)
 
+    def test_screen_data_quality_score_is_complete_with_healthy_observed_sources(self) -> None:
+        candidates = [{
+            "code": "600519",
+            "data_quality": "ok",
+            "missing_fields": [],
+            "data_sources": ["snapshot", "daily"],
+        }]
+        screen = {
+            "quality_status": "ok",
+            "candidates": candidates,
+            "source_health": {
+                "snapshot": {"sina": {"successes": 1, "failures": 0, "last_rows": 5000}},
+                "daily": {"eastmoney": {"successes": 1, "failures": 0, "last_rows": 120}},
+            },
+        }
+
+        quality = self.service._screen_data_quality(screen, candidates)
+        quality.update(self.service._screen_data_quality_score(screen, candidates, quality))
+
+        self.assertEqual(quality["score"], 100.0)
+        self.assertEqual(quality["grade"], "excellent")
+        self.assertEqual(quality["components"]["source_health"]["provider_count"], 2)
+        self.assertFalse(quality["methodology"]["uses_llm"])
+
+    def test_auto_trade_data_quality_score_gate_blocks_partial_run_below_threshold(self) -> None:
+        self.service.update_settings(
+            {
+                "auto_trade_enabled": True,
+                "auto_trade_time_gate_enabled": False,
+                "auto_execution_mode": "dry_run",
+                "auto_min_data_quality_score": 75,
+                "auto_max_results": 1,
+                "auto_cash_per_order": 10000,
+            }
+        )
+        fake_alphasift = MagicMock()
+        fake_alphasift.screen.return_value = {
+            "quality_status": "partial",
+            "candidates": [{
+                "code": "600519",
+                "score": 80,
+                "price": 10.0,
+                "data_quality": "partial",
+                "missing_fields": ["industry", "trading_status"],
+                "data_sources": ["snapshot"],
+            }],
+            "source_health": {
+                "snapshot": {"sina": {"successes": 0, "failures": 2, "last_rows": 0}},
+            },
+            "warnings": [],
+            "source_errors": [],
+        }
+
+        with patch(
+            "src.services.vnpy_paper_trading_service.AlphaSiftService",
+            return_value=fake_alphasift,
+        ), patch.object(
+            self.service,
+            "_record_auto_trade_alert_event",
+        ) as record_alert:
+            result = self.service.run_auto_trade_once()
+
+        self.assertEqual(result["reason"], "data_quality_score_below_threshold")
+        self.assertEqual(result["planned_count"], 0)
+        self.assertEqual(result["orders"][0]["reason"], "data_quality_score_below_threshold")
+        audit = self.service.agent_repo.get_run_detail(result["agent_run_uid"])
+        assert audit is not None
+        quality = audit["diagnostics"]["data_quality"]
+        self.assertEqual(quality["score"], 60.15)
+        self.assertEqual(quality["grade"], "guarded")
+        self.assertEqual(
+            audit["diagnostics"]["agent_plan"]["gates"]["min_data_quality_score"],
+            75.0,
+        )
+        record_alert.assert_called_once()
+        alert_args, alert_kwargs = record_alert.call_args
+        self.assertEqual(alert_args[0], "data_quality_score_below_threshold")
+        self.assertEqual(alert_kwargs["reason"], "data_quality_score_below_threshold")
+        self.assertEqual(alert_kwargs["observed_value"], 60.15)
+        self.assertEqual(alert_kwargs["threshold"], 75.0)
+
     def test_auto_trade_score_weighted_allocation_redistributes_candidate_cap(self) -> None:
         self.service.update_settings(
             {
@@ -4284,6 +4411,248 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertEqual(result["skipped_count"], 1)
         self.assertEqual(result["orders"][0]["cash_amount"], 10000.0)
         self.assertEqual(result["orders"][1]["reason"], "daily_order_limit_reached")
+
+    def test_auto_trade_inverse_volatility_allocation_prefers_lower_risk_at_equal_score(self) -> None:
+        self.service.update_settings(
+            {
+                "auto_trade_enabled": True,
+                "auto_trade_time_gate_enabled": False,
+                "auto_execution_mode": "dry_run",
+                "auto_score_weighted_allocation_enabled": True,
+                "auto_allocation_method": "score_inverse_volatility_20d",
+                "auto_allocation_budget": 10000,
+                "auto_cash_per_order": 10000,
+                "auto_max_results": 2,
+            }
+        )
+        fake_alphasift = MagicMock()
+        fake_alphasift.screen.return_value = {
+            "candidates": [
+                {"code": "600519", "score": 80, "price": 10.0, "volatility_20d_pct": 10},
+                {"code": "000001", "score": 80, "price": 10.0, "volatility_20d_pct": 40},
+            ],
+            "warnings": [],
+        }
+
+        with patch(
+            "src.services.vnpy_paper_trading_service.AlphaSiftService",
+            return_value=fake_alphasift,
+        ):
+            result = self.service.run_auto_trade_once()
+
+        self.assertEqual([item["cash_amount"] for item in result["orders"]], [8000.0, 2000.0])
+        allocation = result["orders"][0]["raw"]["portfolio_allocation"]
+        self.assertEqual(allocation["method"], "score_inverse_volatility_20d_capped")
+        self.assertEqual(allocation["risk_input"]["volatility_20d_pct"], 10.0)
+        self.assertEqual(allocation["risk_input"]["source"], "candidate.volatility_20d_pct")
+        self.assertEqual(allocation["score_weight"], 0.8)
+        audit = self.service.agent_repo.get_run_detail(result["agent_run_uid"])
+        assert audit is not None
+        self.assertEqual(
+            audit["diagnostics"]["portfolio_allocation"]["risk_model"]["name"],
+            "inverse_volatility_20d",
+        )
+        self.assertEqual(
+            audit["decisions"][0]["order_result"]["position_plan"]["sizing_method"],
+            "score_inverse_volatility_20d_allocation",
+        )
+
+    def test_auto_trade_inverse_volatility_allocation_fails_closed_without_risk_input(self) -> None:
+        self.service.update_settings(
+            {
+                "auto_trade_enabled": True,
+                "auto_trade_time_gate_enabled": False,
+                "auto_execution_mode": "dry_run",
+                "auto_score_weighted_allocation_enabled": True,
+                "auto_allocation_method": "score_inverse_volatility_20d",
+                "auto_allocation_budget": 10000,
+                "auto_cash_per_order": 10000,
+                "auto_max_results": 2,
+            }
+        )
+        fake_alphasift = MagicMock()
+        fake_alphasift.screen.return_value = {
+            "candidates": [
+                {"code": "600519", "score": 80, "price": 10.0},
+                {
+                    "code": "000001",
+                    "score": 80,
+                    "price": 10.0,
+                    "raw": {"volatility_20d_pct": 20},
+                },
+            ],
+            "warnings": [],
+        }
+
+        with patch(
+            "src.services.vnpy_paper_trading_service.AlphaSiftService",
+            return_value=fake_alphasift,
+        ):
+            result = self.service.run_auto_trade_once()
+
+        self.assertEqual(result["planned_count"], 1)
+        self.assertEqual(result["skipped_count"], 1)
+        self.assertEqual(result["orders"][0]["reason"], "portfolio_allocation_risk_unavailable")
+        self.assertEqual(result["orders"][1]["cash_amount"], 10000.0)
+        risk_input = result["orders"][0]["raw"]["portfolio_allocation"]["risk_input"]
+        self.assertEqual(risk_input["status"], "unavailable")
+        self.assertEqual(risk_input["reason"], "missing_or_invalid_volatility_20d_pct")
+        planned_risk = result["orders"][1]["raw"]["portfolio_allocation"]["risk_input"]
+        self.assertEqual(planned_risk["source"], "candidate.raw.volatility_20d_pct")
+
+    def test_auto_trade_inverse_volatility_allocation_applies_configured_floor(self) -> None:
+        self.service.update_settings(
+            {
+                "auto_trade_enabled": True,
+                "auto_trade_time_gate_enabled": False,
+                "auto_execution_mode": "dry_run",
+                "auto_score_weighted_allocation_enabled": True,
+                "auto_allocation_method": "score_inverse_volatility_20d",
+                "auto_risk_volatility_floor_pct": 5,
+                "auto_allocation_budget": 9000,
+                "auto_cash_per_order": 9000,
+                "auto_max_results": 2,
+            }
+        )
+        fake_alphasift = MagicMock()
+        fake_alphasift.screen.return_value = {
+            "candidates": [
+                {"code": "600519", "score": 80, "price": 10.0, "volatility_20d_pct": 0},
+                {"code": "000001", "score": 80, "price": 10.0, "volatility_20d_pct": 10},
+            ],
+            "warnings": [],
+        }
+
+        with patch(
+            "src.services.vnpy_paper_trading_service.AlphaSiftService",
+            return_value=fake_alphasift,
+        ):
+            result = self.service.run_auto_trade_once()
+
+        self.assertEqual([item["cash_amount"] for item in result["orders"]], [6000.0, 3000.0])
+        first = result["orders"][0]["raw"]["portfolio_allocation"]
+        self.assertTrue(first["risk_input"]["floor_applied"])
+        self.assertEqual(first["risk_input"]["effective_volatility_pct"], 5.0)
+        self.assertAlmostEqual(first["score_weight"], 2 / 3, places=6)
+
+    def test_auto_trade_inverse_volatility_allocation_redistributes_candidate_cap(self) -> None:
+        self.service.update_settings(
+            {
+                "auto_trade_enabled": True,
+                "auto_trade_time_gate_enabled": False,
+                "auto_execution_mode": "dry_run",
+                "auto_score_weighted_allocation_enabled": True,
+                "auto_allocation_method": "score_inverse_volatility_20d",
+                "auto_allocation_budget": 10000,
+                "auto_cash_per_order": 10000,
+                "auto_max_single_position_value": 6000,
+                "auto_max_results": 2,
+            }
+        )
+        fake_alphasift = MagicMock()
+        fake_alphasift.screen.return_value = {
+            "candidates": [
+                {"code": "600519", "score": 80, "price": 10.0, "volatility_20d_pct": 10},
+                {"code": "000001", "score": 80, "price": 10.0, "volatility_20d_pct": 40},
+            ],
+            "warnings": [],
+        }
+
+        with patch(
+            "src.services.vnpy_paper_trading_service.AlphaSiftService",
+            return_value=fake_alphasift,
+        ):
+            result = self.service.run_auto_trade_once()
+
+        self.assertEqual([item["cash_amount"] for item in result["orders"]], [6000.0, 4000.0])
+
+    def test_auto_trade_correlation_cap_excludes_lower_ranked_high_correlation_candidate(self) -> None:
+        self.service.update_settings(
+            {
+                "auto_trade_enabled": True,
+                "auto_trade_time_gate_enabled": False,
+                "auto_execution_mode": "dry_run",
+                "auto_score_weighted_allocation_enabled": True,
+                "auto_allocation_method": "score_inverse_volatility_20d_correlation_capped",
+                "auto_allocation_budget": 10000,
+                "auto_cash_per_order": 10000,
+                "auto_max_results": 3,
+                "auto_correlation_lookback_days": 20,
+                "auto_correlation_min_observations": 5,
+                "auto_max_pairwise_correlation": 0.8,
+            }
+        )
+        prices = {"600519": 100.0, "000001": 50.0, "300750": 80.0}
+        with DatabaseManager.get_instance().get_session() as session:
+            for offset in range(21):
+                move = 1.01 if offset % 2 else 0.99
+                inverse_move = 0.99 if offset % 2 else 1.01
+                if offset:
+                    prices["600519"] *= move
+                    prices["000001"] *= move
+                    prices["300750"] *= inverse_move
+                bar_date = date.today() - timedelta(days=20 - offset)
+                for symbol, close in prices.items():
+                    session.add(StockDaily(code=symbol, date=bar_date, close=close))
+            session.commit()
+        fake_alphasift = MagicMock()
+        fake_alphasift.screen.return_value = {
+            "candidates": [
+                {"code": "600519", "score": 80, "price": 10.0, "volatility_20d_pct": 20},
+                {"code": "000001", "score": 79, "price": 10.0, "volatility_20d_pct": 20},
+                {"code": "300750", "score": 78, "price": 10.0, "volatility_20d_pct": 20},
+            ],
+            "warnings": [],
+        }
+
+        with patch(
+            "src.services.vnpy_paper_trading_service.AlphaSiftService",
+            return_value=fake_alphasift,
+        ):
+            result = self.service.run_auto_trade_once()
+
+        self.assertEqual(result["planned_count"], 2)
+        self.assertEqual(result["skipped_count"], 1)
+        self.assertEqual(result["orders"][1]["reason"], "portfolio_allocation_correlation_limit_reached")
+        correlation = result["orders"][1]["raw"]["portfolio_allocation"]["risk_input"]["correlation"]
+        self.assertTrue(correlation["limit_breached"])
+        self.assertEqual(correlation["breached_by_symbol"], "600519")
+        self.assertGreater(correlation["observed_correlation"], 0.99)
+        self.assertEqual(
+            [item["cash_amount"] for item in (result["orders"][0], result["orders"][2])],
+            [5000.0, 4000.0],
+        )
+
+    def test_auto_trade_correlation_cap_fails_closed_without_trailing_history(self) -> None:
+        self.service.update_settings(
+            {
+                "auto_trade_enabled": True,
+                "auto_trade_time_gate_enabled": False,
+                "auto_execution_mode": "dry_run",
+                "auto_score_weighted_allocation_enabled": True,
+                "auto_allocation_method": "score_inverse_volatility_20d_correlation_capped",
+                "auto_max_results": 1,
+                "auto_correlation_min_observations": 5,
+            }
+        )
+        fake_alphasift = MagicMock()
+        fake_alphasift.screen.return_value = {
+            "candidates": [
+                {"code": "600519", "score": 80, "price": 10.0, "volatility_20d_pct": 20},
+            ],
+            "warnings": [],
+        }
+        with patch(
+            "src.services.vnpy_paper_trading_service.AlphaSiftService",
+            return_value=fake_alphasift,
+        ):
+            result = self.service.run_auto_trade_once()
+
+        self.assertEqual(result["planned_count"], 0)
+        self.assertEqual(
+            result["orders"][0]["reason"],
+            "portfolio_allocation_correlation_data_unavailable",
+        )
 
     def test_auto_trade_respects_max_positions_risk_limit(self) -> None:
         self.service.submit_order(

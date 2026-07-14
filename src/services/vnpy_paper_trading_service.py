@@ -24,16 +24,22 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import numpy as np
+
 from data_provider.base import DataFetcherManager
 from src.config import get_config
 from src.core import trading_calendar
 from src.repositories.stock_selection_agent_repo import StockSelectionAgentRepository
+from src.repositories.stock_repo import StockRepository
 from src.services.alphasift_service import AlphaSiftService
 from src.services.market_light_service import load_previous_snapshot
 from src.services.portfolio_service import (
     PortfolioConflictError,
     PortfolioOversellError,
     PortfolioService,
+)
+from src.services.stock_selection_agent_backtest_service import (
+    StockSelectionAgentBacktestService,
 )
 from src.services.vnpy_adapter import (
     VnpyAdapterError,
@@ -122,6 +128,11 @@ class VnpyPaperSettings:
     auto_cash_per_order: float = 10000.0
     auto_score_weighted_allocation_enabled: bool = False
     auto_allocation_budget: Optional[float] = None
+    auto_allocation_method: str = "score_weighted"
+    auto_risk_volatility_floor_pct: float = 5.0
+    auto_correlation_lookback_days: int = 60
+    auto_correlation_min_observations: int = 20
+    auto_max_pairwise_correlation: float = 0.85
     auto_interval_minutes: int = 1440
     auto_min_score: Optional[float] = None
     auto_skip_existing_positions: bool = True
@@ -140,6 +151,12 @@ class VnpyPaperSettings:
     auto_exclude_suspended: bool = True
     auto_exclude_price_limit: bool = True
     auto_min_turnover: Optional[float] = None
+    auto_min_data_quality_score: Optional[float] = None
+    auto_cross_run_quality_gate_enabled: bool = False
+    auto_cross_run_horizon_days: int = 5
+    auto_cross_run_min_mature_samples: int = 10
+    auto_cross_run_min_win_rate_pct: float = 45.0
+    auto_cross_run_max_decisions: int = 200
     auto_min_cash_balance: Optional[float] = None
     auto_max_drawdown_pct: Optional[float] = None
     auto_market_light_gate_enabled: bool = False
@@ -2125,6 +2142,11 @@ class VnpyPaperTradingService:
             settings = replace(settings, auto_trade_enabled=True)
         run_uid = f"ss-agent-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:8]}"
         recent_run_context = self._recent_agent_run_context(settings)
+        cross_run_quality = self._cross_run_quality_snapshot(
+            settings,
+            recent_run_context=recent_run_context,
+        )
+        recent_run_context["cross_run_quality"] = cross_run_quality
         llm_dynamic_plan = self._generate_llm_dynamic_agent_plan(
             settings=settings,
             run_uid=run_uid,
@@ -2146,6 +2168,7 @@ class VnpyPaperTradingService:
                 recent_run_context=recent_run_context,
             ),
             "llm_dynamic_plan": llm_dynamic_plan,
+            "cross_run_quality": cross_run_quality,
         }
         run = self.agent_repo.create_run(
             run_uid=run_uid,
@@ -2279,6 +2302,56 @@ class VnpyPaperTradingService:
 
         orders: List[Dict[str, Any]] = self._run_auto_sell_checks(settings, run_id=run_id)
 
+        if cross_run_quality.get("gate_blocked"):
+            reason = "cross_run_quality_gate_blocked"
+            planned_count = sum(1 for item in orders if item.get("status") == "planned")
+            submitted_count = sum(1 for item in orders if item.get("accepted"))
+            skipped_count = sum(
+                1 for item in orders if not item.get("accepted") and item.get("status") != "planned"
+            )
+            result = {
+                "accepted": bool(submitted_count),
+                "skipped": not bool(orders),
+                "reason": reason,
+                "agent_run_uid": run_uid,
+                "agent_run_id": run_id,
+                "strategy": settings.auto_strategy,
+                "market": settings.auto_market,
+                "candidate_count": 0,
+                "planned_count": planned_count,
+                "submitted_count": submitted_count,
+                "skipped_count": skipped_count,
+                "orders": orders,
+                "messages": [reason],
+            }
+            self.agent_repo.complete_run(
+                run_id=run_id,
+                status="skipped",
+                candidate_count=0,
+                planned_count=planned_count,
+                submitted_count=submitted_count,
+                skipped_count=skipped_count,
+                message_count=1,
+                error=reason,
+                diagnostics={**run_diagnostics, "reason": reason},
+            )
+            self._record_auto_trade_alert_event(
+                reason,
+                status="triggered",
+                reason=str(cross_run_quality.get("reason") or reason),
+                observed_value=cross_run_quality.get("win_rate_pct"),
+                threshold=cross_run_quality.get("min_win_rate_pct"),
+                diagnostics={
+                    "agent_run_uid": run_uid,
+                    "agent_run_id": run_id,
+                    "strategy": settings.auto_strategy,
+                    "market": settings.auto_market,
+                    "cross_run_quality": cross_run_quality,
+                },
+            )
+            self._record_last_auto_run(result)
+            return result
+
         config = get_config()
         try:
             screen = AlphaSiftService(config=config).screen(
@@ -2319,8 +2392,19 @@ class VnpyPaperTradingService:
             raise
         candidates = list(screen.get("candidates") or [])
         data_quality = self._screen_data_quality(screen, candidates)
-        if data_quality["status"] in {"stale", "unavailable"}:
-            reason = f"data_quality_{data_quality['status']}"
+        data_quality.update(self._screen_data_quality_score(screen, candidates, data_quality))
+        quality_score = _safe_float(data_quality.get("score"))
+        quality_threshold_blocked = bool(
+            settings.auto_min_data_quality_score is not None
+            and quality_score is not None
+            and quality_score + PAPER_EPS < settings.auto_min_data_quality_score
+        )
+        if data_quality["status"] in {"stale", "unavailable"} or quality_threshold_blocked:
+            reason = (
+                f"data_quality_{data_quality['status']}"
+                if data_quality["status"] in {"stale", "unavailable"}
+                else "data_quality_score_below_threshold"
+            )
             for index, candidate in enumerate(candidates[: settings.auto_max_results], start=1):
                 candidate_payload = candidate if isinstance(candidate, dict) else {"candidate": str(candidate)}
                 symbol = self._normalize_symbol(
@@ -2387,9 +2471,18 @@ class VnpyPaperTradingService:
             )
             self._record_auto_trade_alert_event(
                 reason,
-                status="degraded" if data_quality["status"] == "stale" else "failed",
+                status=(
+                    "degraded"
+                    if data_quality["status"] == "stale" or quality_threshold_blocked
+                    else "failed"
+                ),
                 reason=reason,
-                observed_value=len(candidates),
+                observed_value=(quality_score if quality_threshold_blocked else len(candidates)),
+                threshold=(
+                    settings.auto_min_data_quality_score
+                    if quality_threshold_blocked
+                    else None
+                ),
                 diagnostics={
                     "agent_run_uid": run_uid,
                     "agent_run_id": run_id,
@@ -4166,6 +4259,23 @@ class VnpyPaperTradingService:
         auto_max_results = _safe_int(raw.get("auto_max_results"))
         auto_cash_per_order = _safe_float(raw.get("auto_cash_per_order"))
         auto_allocation_budget = _safe_float(raw.get("auto_allocation_budget"))
+        auto_allocation_method = str(
+            raw.get("auto_allocation_method") or defaults.auto_allocation_method
+        ).strip().lower()
+        if auto_allocation_method not in {
+            "score_weighted",
+            "score_inverse_volatility_20d",
+            "score_inverse_volatility_20d_correlation_capped",
+        }:
+            auto_allocation_method = defaults.auto_allocation_method
+        auto_risk_volatility_floor_pct = _safe_float(
+            raw.get("auto_risk_volatility_floor_pct")
+        )
+        auto_correlation_lookback_days = _safe_int(raw.get("auto_correlation_lookback_days"))
+        auto_correlation_min_observations = _safe_int(
+            raw.get("auto_correlation_min_observations")
+        )
+        auto_max_pairwise_correlation = _safe_float(raw.get("auto_max_pairwise_correlation"))
         auto_interval_minutes = _safe_int(raw.get("auto_interval_minutes"))
         auto_min_score = _safe_float(raw.get("auto_min_score"))
         auto_max_positions = _safe_int(raw.get("auto_max_positions"))
@@ -4177,6 +4287,15 @@ class VnpyPaperTradingService:
         auto_daily_max_orders = _safe_int(raw.get("auto_daily_max_orders"))
         auto_daily_budget = _safe_float(raw.get("auto_daily_budget"))
         auto_min_turnover = _safe_float(raw.get("auto_min_turnover"))
+        auto_min_data_quality_score = _safe_float(raw.get("auto_min_data_quality_score"))
+        auto_cross_run_horizon_days = _safe_int(raw.get("auto_cross_run_horizon_days"))
+        auto_cross_run_min_mature_samples = _safe_int(
+            raw.get("auto_cross_run_min_mature_samples")
+        )
+        auto_cross_run_min_win_rate_pct = _safe_float(
+            raw.get("auto_cross_run_min_win_rate_pct")
+        )
+        auto_cross_run_max_decisions = _safe_int(raw.get("auto_cross_run_max_decisions"))
         auto_min_cash_balance = _safe_float(raw.get("auto_min_cash_balance"))
         auto_max_drawdown_pct = _safe_float(raw.get("auto_max_drawdown_pct"))
         auto_failure_fuse_threshold = _safe_int(raw.get("auto_failure_fuse_threshold"))
@@ -4230,6 +4349,37 @@ class VnpyPaperTradingService:
                 auto_allocation_budget
                 if auto_allocation_budget is not None and auto_allocation_budget > 0
                 else None
+            ),
+            auto_allocation_method=auto_allocation_method,
+            auto_risk_volatility_floor_pct=(
+                min(1000.0, auto_risk_volatility_floor_pct)
+                if auto_risk_volatility_floor_pct is not None
+                and auto_risk_volatility_floor_pct > 0
+                else defaults.auto_risk_volatility_floor_pct
+            ),
+            auto_correlation_lookback_days=max(
+                20,
+                min(
+                    252,
+                    auto_correlation_lookback_days or defaults.auto_correlation_lookback_days,
+                ),
+            ),
+            auto_correlation_min_observations=max(
+                5,
+                min(
+                    120,
+                    auto_correlation_min_observations
+                    or defaults.auto_correlation_min_observations,
+                ),
+            ),
+            auto_max_pairwise_correlation=min(
+                1.0,
+                max(
+                    -1.0,
+                    auto_max_pairwise_correlation
+                    if auto_max_pairwise_correlation is not None
+                    else defaults.auto_max_pairwise_correlation,
+                ),
             ),
             auto_interval_minutes=max(1, min(10080, auto_interval_minutes or defaults.auto_interval_minutes)),
             auto_min_score=auto_min_score,
@@ -4286,6 +4436,45 @@ class VnpyPaperTradingService:
                 auto_min_turnover
                 if auto_min_turnover is not None and auto_min_turnover > 0
                 else None
+            ),
+            auto_min_data_quality_score=(
+                min(100.0, max(0.0, auto_min_data_quality_score))
+                if auto_min_data_quality_score is not None
+                else None
+            ),
+            auto_cross_run_quality_gate_enabled=bool(
+                raw.get(
+                    "auto_cross_run_quality_gate_enabled",
+                    defaults.auto_cross_run_quality_gate_enabled,
+                )
+            ),
+            auto_cross_run_horizon_days=max(
+                1,
+                min(60, auto_cross_run_horizon_days or defaults.auto_cross_run_horizon_days),
+            ),
+            auto_cross_run_min_mature_samples=max(
+                1,
+                min(
+                    500,
+                    auto_cross_run_min_mature_samples
+                    or defaults.auto_cross_run_min_mature_samples,
+                ),
+            ),
+            auto_cross_run_min_win_rate_pct=min(
+                100.0,
+                max(
+                    0.0,
+                    auto_cross_run_min_win_rate_pct
+                    if auto_cross_run_min_win_rate_pct is not None
+                    else defaults.auto_cross_run_min_win_rate_pct,
+                ),
+            ),
+            auto_cross_run_max_decisions=max(
+                1,
+                min(
+                    2000,
+                    auto_cross_run_max_decisions or defaults.auto_cross_run_max_decisions,
+                ),
             ),
             auto_min_cash_balance=(
                 auto_min_cash_balance
@@ -4719,10 +4908,21 @@ class VnpyPaperTradingService:
             },
             "sizing_plan": {
                 "method": (
-                    "score_weighted_capped"
+                    self._portfolio_allocation_method(settings)
                     if settings.auto_score_weighted_allocation_enabled
                     else "fixed_cash_per_candidate"
                 ),
+                "risk_volatility_floor_pct": (
+                    settings.auto_risk_volatility_floor_pct
+                    if settings.auto_allocation_method in {
+                        "score_inverse_volatility_20d",
+                        "score_inverse_volatility_20d_correlation_capped",
+                    }
+                    else None
+                ),
+                "correlation_lookback_days": settings.auto_correlation_lookback_days,
+                "correlation_min_observations": settings.auto_correlation_min_observations,
+                "max_pairwise_correlation": settings.auto_max_pairwise_correlation,
                 "cash_per_order": settings.auto_cash_per_order,
                 "allocation_budget": allocation_budget,
                 "max_results": settings.auto_max_results,
@@ -4769,6 +4969,12 @@ class VnpyPaperTradingService:
                 "llm_review_enabled": settings.auto_llm_review_enabled,
                 "llm_review_fail_closed": settings.auto_llm_review_enabled,
                 "acceptable_data_quality": ["ok", "partial"],
+                "min_data_quality_score": settings.auto_min_data_quality_score,
+                "cross_run_quality_gate_enabled": settings.auto_cross_run_quality_gate_enabled,
+                "cross_run_horizon_days": settings.auto_cross_run_horizon_days,
+                "cross_run_min_mature_samples": settings.auto_cross_run_min_mature_samples,
+                "cross_run_min_win_rate_pct": settings.auto_cross_run_min_win_rate_pct,
+                "cross_run_max_decisions": settings.auto_cross_run_max_decisions,
             },
             "llm_dynamic_plan": llm_dynamic_plan,
             "recent_run_context": recent_run_context or self._recent_agent_run_context(settings),
@@ -4848,6 +5054,11 @@ class VnpyPaperTradingService:
                 failure_streak += 1
             diagnostics = item.get("diagnostics") if isinstance(item.get("diagnostics"), dict) else {}
             data_quality = diagnostics.get("data_quality") if isinstance(diagnostics.get("data_quality"), dict) else {}
+            cross_run_quality = (
+                diagnostics.get("cross_run_quality")
+                if isinstance(diagnostics.get("cross_run_quality"), dict)
+                else {}
+            )
             quality = str(data_quality.get("status") or "unknown").strip().lower() or "unknown"
             quality_counts[quality] += 1
             item_candidates = int(item.get("candidate_count") or 0)
@@ -4863,6 +5074,7 @@ class VnpyPaperTradingService:
                 "created_at": item.get("created_at"),
                 "status": status,
                 "data_quality": quality,
+                "cross_run_quality_state": cross_run_quality.get("state"),
                 "candidate_count": item_candidates,
                 "planned_count": item_planned,
                 "submitted_count": item_submitted,
@@ -4892,6 +5104,66 @@ class VnpyPaperTradingService:
             "latest_status": compact_runs[0]["status"] if compact_runs else None,
             "runs": compact_runs,
         }
+
+    def _cross_run_quality_snapshot(
+        self,
+        settings: VnpyPaperSettings,
+        *,
+        recent_run_context: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        recent_runs = list(recent_run_context.get("runs") or [])
+        previous_state = None
+        for item in recent_runs:
+            if not isinstance(item, dict):
+                continue
+            value = str(item.get("cross_run_quality_state") or "").strip().lower()
+            if value:
+                previous_state = value
+                break
+        try:
+            snapshot = StockSelectionAgentBacktestService(
+                self.agent_repo.db
+            ).build_quality_snapshot(
+                strategy=settings.auto_strategy,
+                market=settings.auto_market,
+                horizon_days=settings.auto_cross_run_horizon_days,
+                min_mature_samples=settings.auto_cross_run_min_mature_samples,
+                min_win_rate_pct=settings.auto_cross_run_min_win_rate_pct,
+                max_decisions=settings.auto_cross_run_max_decisions,
+                previous_state=previous_state,
+            )
+        except Exception as exc:  # noqa: BLE001 - enabled gate must fail closed.
+            logger.warning("Failed to build cross-run Agent quality snapshot: %s", exc)
+            snapshot = {
+                "schema_version": 1,
+                "generated_at": _utc_now_iso(),
+                "state": "unavailable",
+                "reason": "forward_evaluation_failed",
+                "previous_state": previous_state,
+                "transition": (
+                    f"{previous_state}->unavailable"
+                    if previous_state and previous_state != "unavailable"
+                    else None
+                ),
+                "changed": bool(previous_state and previous_state != "unavailable"),
+                "strategy": settings.auto_strategy,
+                "market": settings.auto_market,
+                "horizon_days": settings.auto_cross_run_horizon_days,
+                "min_mature_samples": settings.auto_cross_run_min_mature_samples,
+                "min_win_rate_pct": settings.auto_cross_run_min_win_rate_pct,
+                "max_decisions": settings.auto_cross_run_max_decisions,
+                "error": str(exc)[:240],
+                "lookahead_protection": True,
+                "source": "persisted_agent_decisions_and_stock_daily",
+            }
+        state = str(snapshot.get("state") or "unavailable").strip().lower()
+        snapshot["gate_enabled"] = bool(settings.auto_cross_run_quality_gate_enabled)
+        snapshot["gate_blocked"] = bool(
+            settings.auto_cross_run_quality_gate_enabled
+            and state in {"blocked", "unavailable"}
+        )
+        snapshot["insufficient_evidence_blocks"] = False
+        return snapshot
 
     @staticmethod
     def _agent_plan_mode(settings: VnpyPaperSettings) -> str:
@@ -4945,7 +5217,16 @@ class VnpyPaperTradingService:
         if cls._position_exposure_configured(settings) or settings.auto_max_positions > 0:
             layers.append("portfolio_limits")
         if settings.auto_score_weighted_allocation_enabled:
-            layers.append("score_weighted_allocation")
+            if settings.auto_allocation_method == "score_inverse_volatility_20d_correlation_capped":
+                layers.append("correlation_capped_risk_allocation")
+            elif settings.auto_allocation_method == "score_inverse_volatility_20d":
+                layers.append("risk_adjusted_allocation")
+            else:
+                layers.append("score_weighted_allocation")
+        if settings.auto_min_data_quality_score is not None:
+            layers.append("data_quality_score_gate")
+        if settings.auto_cross_run_quality_gate_enabled:
+            layers.append("cross_run_quality_gate")
         if settings.auto_daily_max_orders is not None or settings.auto_daily_budget is not None:
             layers.append("daily_limits")
         if settings.auto_min_cash_balance is not None or settings.auto_max_drawdown_pct is not None:
@@ -5797,7 +6078,6 @@ class VnpyPaperTradingService:
             "non_trading_day",
             "outside_trading_session",
             "market_phase_unknown",
-            "failure_fuse_open",
         }
         return error not in benign_errors
 
@@ -5977,12 +6257,52 @@ class VnpyPaperTradingService:
             or settings.auto_cash_per_order
             or 0.0
         )
+        allocation_method = self._portfolio_allocation_method(settings)
         result: Dict[str, Any] = {
             "enabled": bool(settings.auto_score_weighted_allocation_enabled),
             "method": (
-                "score_weighted_capped"
+                allocation_method
                 if settings.auto_score_weighted_allocation_enabled
                 else "fixed_cash_per_candidate"
+            ),
+            "risk_model": (
+                {
+                    "name": (
+                        "inverse_volatility_20d_with_correlation_cap"
+                        if allocation_method
+                        == "score_inverse_volatility_20d_correlation_capped"
+                        else "inverse_volatility_20d"
+                    ),
+                    "input_field": "volatility_20d_pct",
+                    "volatility_floor_pct": round(
+                        max(PAPER_EPS, float(settings.auto_risk_volatility_floor_pct)),
+                        6,
+                    ),
+                    "missing_input_policy": "exclude_candidate",
+                    "correlation_lookback_days": (
+                        settings.auto_correlation_lookback_days
+                        if allocation_method
+                        == "score_inverse_volatility_20d_correlation_capped"
+                        else None
+                    ),
+                    "correlation_min_observations": (
+                        settings.auto_correlation_min_observations
+                        if allocation_method
+                        == "score_inverse_volatility_20d_correlation_capped"
+                        else None
+                    ),
+                    "max_pairwise_correlation": (
+                        settings.auto_max_pairwise_correlation
+                        if allocation_method
+                        == "score_inverse_volatility_20d_correlation_capped"
+                        else None
+                    ),
+                }
+                if allocation_method in {
+                    "score_inverse_volatility_20d_capped",
+                    "score_inverse_volatility_20d_correlation_capped",
+                }
+                else None
             ),
             "configured_budget": round(max(0.0, configured_budget), 6),
             "resolved_budget": 0.0,
@@ -6064,15 +6384,24 @@ class VnpyPaperTradingService:
         records: List[Dict[str, Any]] = []
         industry_caps: Dict[str, float] = {}
 
-        def exclude(symbol: Optional[str], reason: str) -> None:
-            result["excluded"].append({"symbol": symbol, "reason": reason})
+        def exclude(
+            symbol: Optional[str],
+            reason: str,
+            *,
+            risk_input: Optional[Dict[str, Any]] = None,
+        ) -> None:
+            excluded = {"symbol": symbol, "reason": reason}
+            if risk_input is not None:
+                excluded["risk_input"] = risk_input
+            result["excluded"].append(excluded)
             if symbol and symbol not in result["allocations_by_symbol"]:
                 result["allocations_by_symbol"][symbol] = {
                     "enabled": True,
-                    "method": "score_weighted_capped",
+                    "method": allocation_method,
                     "symbol": symbol,
                     "allocated_base_amount": 0.0,
                     "reason": reason,
+                    "risk_input": risk_input,
                 }
 
         for index, candidate in enumerate(candidates, start=1):
@@ -6168,14 +6497,62 @@ class VnpyPaperTradingService:
             if cap <= PAPER_EPS:
                 exclude(symbol, "portfolio_allocation_candidate_cap_reached")
                 continue
+            risk_input: Optional[Dict[str, Any]] = None
+            weight = max(0.0, float(score))
+            correlation_returns: Optional[Dict[date, float]] = None
+            if allocation_method in {
+                "score_inverse_volatility_20d_capped",
+                "score_inverse_volatility_20d_correlation_capped",
+            }:
+                risk_input = self._candidate_volatility_20d_input(
+                    candidate,
+                    volatility_floor_pct=settings.auto_risk_volatility_floor_pct,
+                )
+                if risk_input.get("status") != "available":
+                    exclude(
+                        symbol,
+                        "portfolio_allocation_risk_unavailable",
+                        risk_input=risk_input,
+                    )
+                    continue
+                effective_volatility = float(risk_input["effective_volatility_pct"])
+                weight = weight / effective_volatility
+                risk_input["risk_adjusted_weight"] = round(weight, 10)
+                if allocation_method == "score_inverse_volatility_20d_correlation_capped":
+                    correlation_input, correlation_returns = self._candidate_correlation_input(
+                        symbol=symbol,
+                        accepted_records=records,
+                        as_of=date.today(),
+                        lookback_days=settings.auto_correlation_lookback_days,
+                        min_observations=settings.auto_correlation_min_observations,
+                        max_pairwise_correlation=settings.auto_max_pairwise_correlation,
+                    )
+                    risk_input["correlation"] = correlation_input
+                    if correlation_input.get("status") != "available":
+                        exclude(
+                            symbol,
+                            "portfolio_allocation_correlation_data_unavailable",
+                            risk_input=risk_input,
+                        )
+                        continue
+                    if correlation_input.get("limit_breached"):
+                        exclude(
+                            symbol,
+                            "portfolio_allocation_correlation_limit_reached",
+                            risk_input=risk_input,
+                        )
+                        continue
+
             records.append({
                 "rank": index,
                 "symbol": symbol,
                 "score": float(score),
-                "weight": max(0.0, float(score)),
+                "weight": weight,
                 "cap": cap,
                 "industry": industry,
                 "constraints": cap_constraints,
+                "risk_input": risk_input,
+                "_correlation_returns": correlation_returns,
             })
             if is_new_position:
                 remaining_new_slots -= 1
@@ -6255,7 +6632,7 @@ class VnpyPaperTradingService:
             amount = max(0.0, allocations[symbol])
             row = {
                 "enabled": True,
-                "method": "score_weighted_capped",
+                "method": allocation_method,
                 "rank": record["rank"],
                 "symbol": symbol,
                 "score": round(float(record["score"]), 6),
@@ -6267,10 +6644,19 @@ class VnpyPaperTradingService:
                     ),
                     8,
                 ),
+                "allocation_weight": round(
+                    (
+                        float(record["weight"]) / total_score_weight
+                        if total_score_weight > PAPER_EPS
+                        else 1.0 / len(records)
+                    ),
+                    8,
+                ),
                 "candidate_cap": round(float(record["cap"]), 6),
                 "allocated_base_amount": round(amount, 6),
                 "industry": record.get("industry"),
                 "constraints": record["constraints"],
+                "risk_input": record.get("risk_input"),
                 "reason": None if amount > PAPER_EPS else "portfolio_allocation_budget_exhausted",
             }
             allocation_rows.append(row)
@@ -6282,6 +6668,146 @@ class VnpyPaperTradingService:
         if allocated_budget <= PAPER_EPS:
             result["reason"] = "portfolio_allocation_budget_exhausted"
         return result
+
+    @staticmethod
+    def _portfolio_allocation_method(settings: VnpyPaperSettings) -> str:
+        if settings.auto_allocation_method == "score_inverse_volatility_20d_correlation_capped":
+            return "score_inverse_volatility_20d_correlation_capped"
+        if settings.auto_allocation_method == "score_inverse_volatility_20d":
+            return "score_inverse_volatility_20d_capped"
+        return "score_weighted_capped"
+
+    @classmethod
+    def _candidate_volatility_20d_input(
+        cls,
+        candidate: Dict[str, Any],
+        *,
+        volatility_floor_pct: float,
+    ) -> Dict[str, Any]:
+        containers: List[Tuple[str, Any]] = [
+            ("candidate.volatility_20d_pct", candidate),
+            ("candidate.raw.volatility_20d_pct", candidate.get("raw")),
+            ("candidate.factors.volatility_20d_pct", candidate.get("factors")),
+        ]
+        raw = candidate.get("raw")
+        if isinstance(raw, dict):
+            containers.append(("candidate.raw.factors.volatility_20d_pct", raw.get("factors")))
+
+        source = None
+        volatility = None
+        raw_value = None
+        for candidate_source, container in containers:
+            if not isinstance(container, dict) or "volatility_20d_pct" not in container:
+                continue
+            raw_value = container.get("volatility_20d_pct")
+            parsed = _safe_float(raw_value)
+            source = candidate_source
+            if parsed is not None and parsed >= 0:
+                volatility = parsed
+            break
+
+        floor = max(PAPER_EPS, float(volatility_floor_pct))
+        if volatility is None:
+            return {
+                "status": "unavailable",
+                "field": "volatility_20d_pct",
+                "source": source,
+                "raw_value": raw_value,
+                "volatility_floor_pct": round(floor, 6),
+                "reason": "missing_or_invalid_volatility_20d_pct",
+            }
+        return {
+            "status": "available",
+            "field": "volatility_20d_pct",
+            "source": source,
+            "volatility_20d_pct": round(volatility, 6),
+            "volatility_floor_pct": round(floor, 6),
+            "effective_volatility_pct": round(max(volatility, floor), 6),
+            "floor_applied": volatility < floor,
+            "lookback_trading_days": 20,
+        }
+
+    def _candidate_correlation_input(
+        self,
+        *,
+        symbol: str,
+        accepted_records: List[Dict[str, Any]],
+        as_of: date,
+        lookback_days: int,
+        min_observations: int,
+        max_pairwise_correlation: float,
+    ) -> Tuple[Dict[str, Any], Optional[Dict[date, float]]]:
+        bars = StockRepository(self.agent_repo.db).get_trailing_bars(
+            code=symbol,
+            as_of=as_of,
+            limit=max(2, int(lookback_days) + 1),
+        )
+        returns: Dict[date, float] = {}
+        previous_close: Optional[float] = None
+        for bar in bars:
+            close = _safe_float(getattr(bar, "close", None))
+            bar_date = getattr(bar, "date", None)
+            if close is None or close <= 0 or not isinstance(bar_date, date):
+                previous_close = None
+                continue
+            if previous_close is not None and previous_close > 0:
+                returns[bar_date] = close / previous_close - 1.0
+            previous_close = close
+
+        required = max(5, int(min_observations))
+        base = {
+            "status": "available",
+            "source": "stock_daily",
+            "as_of": as_of.isoformat(),
+            "lookback_days": int(lookback_days),
+            "observation_count": len(returns),
+            "min_observations": required,
+            "max_pairwise_correlation": round(float(max_pairwise_correlation), 6),
+            "pairwise": [],
+            "limit_breached": False,
+        }
+        if len(returns) < required:
+            base.update({
+                "status": "unavailable",
+                "reason": "insufficient_trailing_returns",
+            })
+            return base, None
+
+        for record in accepted_records:
+            peer_returns = record.get("_correlation_returns")
+            if not isinstance(peer_returns, dict):
+                continue
+            common_dates = sorted(set(returns).intersection(peer_returns))
+            pair = {
+                "symbol": record.get("symbol"),
+                "overlap_count": len(common_dates),
+                "correlation": None,
+            }
+            if len(common_dates) < required:
+                pair["reason"] = "insufficient_overlap"
+                base["pairwise"].append(pair)
+                base.update({
+                    "status": "unavailable",
+                    "reason": "insufficient_pairwise_overlap",
+                })
+                return base, None
+            left = np.asarray([returns[item] for item in common_dates], dtype=float)
+            right = np.asarray([peer_returns[item] for item in common_dates], dtype=float)
+            correlation = float(np.corrcoef(left, right)[0, 1])
+            if not math.isfinite(correlation):
+                pair["reason"] = "non_finite_correlation"
+                base["pairwise"].append(pair)
+                base.update({"status": "unavailable", "reason": "correlation_unavailable"})
+                return base, None
+            pair["correlation"] = round(correlation, 6)
+            pair["limit_breached"] = correlation > float(max_pairwise_correlation) + PAPER_EPS
+            base["pairwise"].append(pair)
+            if pair["limit_breached"]:
+                base["limit_breached"] = True
+                base["breached_by_symbol"] = record.get("symbol")
+                base["observed_correlation"] = pair["correlation"]
+                break
+        return base, returns
 
     @staticmethod
     def _position_exposure_configured(settings: VnpyPaperSettings) -> bool:
@@ -7698,6 +8224,179 @@ class VnpyPaperTradingService:
             "stale_age_hours": screen.get("stale_age_hours"),
         }
 
+    @classmethod
+    def _screen_data_quality_score(
+        cls,
+        screen: Dict[str, Any],
+        candidates: List[Any],
+        data_quality: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        status = str(data_quality.get("status") or "unknown").strip().lower()
+        status_scores = {
+            "ok": 100.0,
+            "partial": 70.0,
+            "stale": 25.0,
+            "unavailable": 0.0,
+        }
+        warnings = list(data_quality.get("warnings") or [])
+        source_errors = list(data_quality.get("source_errors") or [])
+        screen_penalty = min(
+            50.0,
+            len(warnings) * 5.0
+            + len(source_errors) * 12.5
+            + (10.0 if data_quality.get("fallback_used") else 0.0),
+        )
+        screen_score = max(0.0, status_scores.get(status, 60.0) - screen_penalty)
+
+        candidate_rows = [
+            cls._candidate_data_quality_score(item)
+            for item in candidates
+            if isinstance(item, dict)
+        ]
+        candidate_score = (
+            sum(float(item["score"]) for item in candidate_rows) / len(candidate_rows)
+            if candidate_rows
+            else (100.0 if not candidates and not source_errors else 0.0)
+        )
+        source_component = cls._source_health_quality_score(screen.get("source_health"))
+        source_score = float(source_component["score"])
+        score = round(
+            screen_score * 0.45 + candidate_score * 0.35 + source_score * 0.20,
+            2,
+        )
+        if score >= 90:
+            grade = "excellent"
+        elif score >= 75:
+            grade = "good"
+        elif score >= 60:
+            grade = "guarded"
+        elif score >= 40:
+            grade = "poor"
+        else:
+            grade = "critical"
+        return {
+            "score": score,
+            "grade": grade,
+            "components": {
+                "screen_integrity": {
+                    "score": round(screen_score, 2),
+                    "weight": 0.45,
+                    "status": status,
+                    "penalty": round(screen_penalty, 2),
+                },
+                "candidate_coverage": {
+                    "score": round(candidate_score, 2),
+                    "weight": 0.35,
+                    "candidate_count": len(candidate_rows),
+                    "items": candidate_rows,
+                },
+                "source_health": {
+                    **source_component,
+                    "weight": 0.20,
+                },
+            },
+            "methodology": {
+                "version": "deterministic_quality_v1",
+                "weights": {
+                    "screen_integrity": 0.45,
+                    "candidate_coverage": 0.35,
+                    "source_health": 0.20,
+                },
+                "unobserved_source_score": 70.0,
+                "uses_llm": False,
+            },
+        }
+
+    @staticmethod
+    def _candidate_data_quality_score(candidate: Dict[str, Any]) -> Dict[str, Any]:
+        status = str(
+            candidate.get("data_quality")
+            or candidate.get("quality_status")
+            or candidate.get("dataQuality")
+            or "unknown"
+        ).strip().lower()
+        base_scores = {
+            "ok": 100.0,
+            "complete": 100.0,
+            "partial": 75.0,
+            "degraded": 65.0,
+            "stale": 25.0,
+            "unavailable": 0.0,
+            "failed": 0.0,
+            "error": 0.0,
+            "unknown": 60.0,
+        }
+        missing_fields = VnpyPaperTradingService._candidate_quality_text_list(
+            candidate.get("missing_fields")
+        )
+        data_sources = VnpyPaperTradingService._candidate_quality_text_list(
+            candidate.get("data_sources")
+        )
+        missing_penalty = min(50.0, len(missing_fields) * 8.0)
+        source_penalty = 0.0 if data_sources else 10.0
+        score = max(0.0, base_scores.get(status, 60.0) - missing_penalty - source_penalty)
+        return {
+            "symbol": VnpyPaperTradingService._normalize_symbol(
+                candidate.get("code") or candidate.get("symbol") or ""
+            ) or None,
+            "score": round(score, 2),
+            "status": status,
+            "missing_field_count": len(missing_fields),
+            "source_count": len(data_sources),
+        }
+
+    @classmethod
+    def _source_health_quality_score(cls, source_health: Any) -> Dict[str, Any]:
+        providers: List[Dict[str, Any]] = []
+
+        def visit(value: Any, path: str) -> None:
+            if not isinstance(value, dict):
+                return
+            health_keys = {"failures", "disabled", "successes", "last_rows", "status"}
+            if health_keys.intersection(value):
+                failures = max(0.0, _safe_float(value.get("failures")) or 0.0)
+                disabled = bool(value.get("disabled"))
+                explicit = str(value.get("status") or "").strip().lower()
+                if disabled or explicit in {"failed", "error", "unavailable"}:
+                    score = 0.0
+                elif explicit in {"stale"}:
+                    score = 25.0
+                elif failures > 0:
+                    score = max(10.0, 100.0 - failures * 30.0)
+                elif (
+                    (_safe_float(value.get("successes")) or 0.0) > 0
+                    or (_safe_float(value.get("last_rows")) or 0.0) > 0
+                    or explicit in {"ok", "healthy", "available"}
+                ):
+                    score = 100.0
+                else:
+                    score = 70.0
+                providers.append({
+                    "source": path,
+                    "score": round(score, 2),
+                    "failures": failures,
+                    "disabled": disabled,
+                })
+                return
+            for key, nested in value.items():
+                visit(nested, f"{path}.{key}" if path else str(key))
+
+        visit(source_health, "")
+        if not providers:
+            return {
+                "score": 70.0,
+                "status": "unobserved",
+                "provider_count": 0,
+                "providers": [],
+            }
+        score = sum(float(item["score"]) for item in providers) / len(providers)
+        return {
+            "score": round(score, 2),
+            "status": "observed",
+            "provider_count": len(providers),
+            "providers": providers,
+        }
+
     @staticmethod
     def _normalize_symbol(symbol: Any) -> str:
         return str(symbol or "").strip().upper()
@@ -8619,6 +9318,7 @@ class VnpyPaperTradingService:
             or candidate.get("dataQuality")
             or "unknown"
         ).strip() or "unknown"
+        candidate_quality_score = self._candidate_data_quality_score(candidate)
         risk_review = {
             "status": review_status,
             "reason": resolved_reason_text or None,
@@ -8627,6 +9327,7 @@ class VnpyPaperTradingService:
             "reviewed_at": _utc_now_iso(),
             "candidate_data_quality": {
                 "status": candidate_quality_status,
+                "score": candidate_quality_score["score"],
                 "missing_fields": candidate_missing_fields,
                 "data_sources": candidate_data_sources,
             },
@@ -8667,7 +9368,11 @@ class VnpyPaperTradingService:
             "sizing_method": (
                 "position_pct"
                 if side == "sell" and position_quantity is not None
-                else "score_weighted_allocation"
+                else (
+                    "score_inverse_volatility_20d_allocation"
+                    if settings.auto_allocation_method == "score_inverse_volatility_20d"
+                    else "score_weighted_allocation"
+                )
                 if side == "buy" and portfolio_allocation
                 else "cash_per_order"
             ),

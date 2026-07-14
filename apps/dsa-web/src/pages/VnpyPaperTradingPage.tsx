@@ -33,6 +33,7 @@ import {
   type VnpyPaperAgentTradePlan,
   type VnpyPaperAgentRunDetail,
   type VnpyPaperAgentRunSummary,
+  type VnpyPaperAllocationMethod,
   type VnpyPaperAccount,
   type VnpyPaperAutoRunResponse,
   type VnpyPaperExecutionMode,
@@ -70,6 +71,11 @@ type SettingsForm = {
   autoCashPerOrder: string;
   autoScoreWeightedAllocationEnabled: boolean;
   autoAllocationBudget: string;
+  autoAllocationMethod: VnpyPaperAllocationMethod;
+  autoRiskVolatilityFloorPct: string;
+  autoCorrelationLookbackDays: string;
+  autoCorrelationMinObservations: string;
+  autoMaxPairwiseCorrelation: string;
   autoIntervalMinutes: string;
   autoMinScore: string;
   autoSkipExistingPositions: boolean;
@@ -88,6 +94,12 @@ type SettingsForm = {
   autoExcludeSuspended: boolean;
   autoExcludePriceLimit: boolean;
   autoMinTurnover: string;
+  autoMinDataQualityScore: string;
+  autoCrossRunQualityGateEnabled: boolean;
+  autoCrossRunHorizonDays: string;
+  autoCrossRunMinMatureSamples: string;
+  autoCrossRunMinWinRatePct: string;
+  autoCrossRunMaxDecisions: string;
   autoMinCashBalance: string;
   autoMaxDrawdownPct: string;
   autoMarketLightGateEnabled: boolean;
@@ -152,6 +164,11 @@ const defaultSettingsForm: SettingsForm = {
   autoCashPerOrder: '10000',
   autoScoreWeightedAllocationEnabled: false,
   autoAllocationBudget: '',
+  autoAllocationMethod: 'score_weighted',
+  autoRiskVolatilityFloorPct: '5',
+  autoCorrelationLookbackDays: '60',
+  autoCorrelationMinObservations: '20',
+  autoMaxPairwiseCorrelation: '0.85',
   autoIntervalMinutes: '1440',
   autoMinScore: '',
   autoSkipExistingPositions: true,
@@ -170,6 +187,12 @@ const defaultSettingsForm: SettingsForm = {
   autoExcludeSuspended: true,
   autoExcludePriceLimit: true,
   autoMinTurnover: '',
+  autoMinDataQualityScore: '',
+  autoCrossRunQualityGateEnabled: false,
+  autoCrossRunHorizonDays: '5',
+  autoCrossRunMinMatureSamples: '10',
+  autoCrossRunMinWinRatePct: '45',
+  autoCrossRunMaxDecisions: '200',
   autoMinCashBalance: '',
   autoMaxDrawdownPct: '',
   autoMarketLightGateEnabled: false,
@@ -457,6 +480,14 @@ function settingsToForm(status: VnpyPaperStatusResponse): SettingsForm {
     autoAllocationBudget: settings.autoAllocationBudget == null
       ? ''
       : String(settings.autoAllocationBudget),
+    autoAllocationMethod: (
+      settings.autoAllocationMethod === 'score_inverse_volatility_20d'
+      || settings.autoAllocationMethod === 'score_inverse_volatility_20d_correlation_capped'
+    ) ? settings.autoAllocationMethod : 'score_weighted',
+    autoRiskVolatilityFloorPct: String(settings.autoRiskVolatilityFloorPct ?? 5),
+    autoCorrelationLookbackDays: String(settings.autoCorrelationLookbackDays ?? 60),
+    autoCorrelationMinObservations: String(settings.autoCorrelationMinObservations ?? 20),
+    autoMaxPairwiseCorrelation: String(settings.autoMaxPairwiseCorrelation ?? 0.85),
     autoIntervalMinutes: String(settings.autoIntervalMinutes ?? 1440),
     autoMinScore: settings.autoMinScore == null ? '' : String(settings.autoMinScore),
     autoSkipExistingPositions: Boolean(settings.autoSkipExistingPositions),
@@ -485,6 +516,14 @@ function settingsToForm(status: VnpyPaperStatusResponse): SettingsForm {
     autoExcludeSuspended: Boolean(settings.autoExcludeSuspended ?? true),
     autoExcludePriceLimit: Boolean(settings.autoExcludePriceLimit ?? true),
     autoMinTurnover: settings.autoMinTurnover == null ? '' : String(settings.autoMinTurnover),
+    autoMinDataQualityScore: settings.autoMinDataQualityScore == null
+      ? ''
+      : String(settings.autoMinDataQualityScore),
+    autoCrossRunQualityGateEnabled: Boolean(settings.autoCrossRunQualityGateEnabled),
+    autoCrossRunHorizonDays: String(settings.autoCrossRunHorizonDays ?? 5),
+    autoCrossRunMinMatureSamples: String(settings.autoCrossRunMinMatureSamples ?? 10),
+    autoCrossRunMinWinRatePct: String(settings.autoCrossRunMinWinRatePct ?? 45),
+    autoCrossRunMaxDecisions: String(settings.autoCrossRunMaxDecisions ?? 200),
     autoMinCashBalance: settings.autoMinCashBalance == null ? '' : String(settings.autoMinCashBalance),
     autoMaxDrawdownPct: settings.autoMaxDrawdownPct == null ? '' : String(settings.autoMaxDrawdownPct),
     autoMarketLightGateEnabled: Boolean(settings.autoMarketLightGateEnabled),
@@ -526,6 +565,11 @@ function buildSettingsUpdate(settingsForm: SettingsForm): VnpyPaperSettingsUpdat
     autoAllocationBudget: settingsForm.autoAllocationBudget.trim()
       ? parseNumber(settingsForm.autoAllocationBudget)
       : null,
+    autoAllocationMethod: settingsForm.autoAllocationMethod,
+    autoRiskVolatilityFloorPct: parseNumber(settingsForm.autoRiskVolatilityFloorPct) ?? 5,
+    autoCorrelationLookbackDays: parseNumber(settingsForm.autoCorrelationLookbackDays) ?? 60,
+    autoCorrelationMinObservations: parseNumber(settingsForm.autoCorrelationMinObservations) ?? 20,
+    autoMaxPairwiseCorrelation: parseNumber(settingsForm.autoMaxPairwiseCorrelation) ?? 0.85,
     autoIntervalMinutes: parseNumber(settingsForm.autoIntervalMinutes) ?? 1440,
     autoMinScore: settingsForm.autoMinScore.trim() ? parseNumber(settingsForm.autoMinScore) : null,
     autoSkipExistingPositions: settingsForm.autoSkipExistingPositions,
@@ -560,6 +604,14 @@ function buildSettingsUpdate(settingsForm: SettingsForm): VnpyPaperSettingsUpdat
     autoMinTurnover: settingsForm.autoMinTurnover.trim()
       ? parseNumber(settingsForm.autoMinTurnover)
       : null,
+    autoMinDataQualityScore: settingsForm.autoMinDataQualityScore.trim()
+      ? parseNumber(settingsForm.autoMinDataQualityScore)
+      : null,
+    autoCrossRunQualityGateEnabled: settingsForm.autoCrossRunQualityGateEnabled,
+    autoCrossRunHorizonDays: parseNumber(settingsForm.autoCrossRunHorizonDays) ?? 5,
+    autoCrossRunMinMatureSamples: parseNumber(settingsForm.autoCrossRunMinMatureSamples) ?? 10,
+    autoCrossRunMinWinRatePct: parseNumber(settingsForm.autoCrossRunMinWinRatePct) ?? 45,
+    autoCrossRunMaxDecisions: parseNumber(settingsForm.autoCrossRunMaxDecisions) ?? 200,
     autoMinCashBalance: settingsForm.autoMinCashBalance.trim()
       ? parseNumber(settingsForm.autoMinCashBalance)
       : null,
@@ -3370,6 +3422,18 @@ const VnpyPaperTradingPage: React.FC = () => {
               />
               连续失败熔断
             </label>
+            <label className="flex items-center gap-2 text-sm text-foreground">
+              <input
+                type="checkbox"
+                className={CHECKBOX_CLASS}
+                checked={settingsForm.autoCrossRunQualityGateEnabled}
+                onChange={(event) => setSettingsForm((prev) => ({
+                  ...prev,
+                  autoCrossRunQualityGateEnabled: event.target.checked,
+                }))}
+              />
+              跨运行前瞻门禁
+            </label>
             <label className="space-y-1 text-xs text-secondary-text">
               初始资金
               <input
@@ -3704,6 +3768,89 @@ const VnpyPaperTradingPage: React.FC = () => {
               />
             </label>
             <label className="space-y-1 text-xs text-secondary-text">
+              组合分配方法
+              <select
+                className={SELECT_CLASS}
+                value={settingsForm.autoAllocationMethod}
+                disabled={!settingsForm.autoScoreWeightedAllocationEnabled}
+                onChange={(event) => setSettingsForm((prev) => ({
+                  ...prev,
+                  autoAllocationMethod: event.target.value as VnpyPaperAllocationMethod,
+                }))}
+              >
+                <option value="score_weighted">评分加权</option>
+                <option value="score_inverse_volatility_20d">评分 / 20日波动率</option>
+                <option value="score_inverse_volatility_20d_correlation_capped">
+                  评分 / 波动率 + 相关性上限
+                </option>
+              </select>
+            </label>
+            <label className="space-y-1 text-xs text-secondary-text">
+              波动率下限（%）
+              <input
+                className={INPUT_CLASS}
+                type="number"
+                min={0.01}
+                max={1000}
+                step="0.1"
+                value={settingsForm.autoRiskVolatilityFloorPct}
+                disabled={
+                  !settingsForm.autoScoreWeightedAllocationEnabled
+                  || settingsForm.autoAllocationMethod === 'score_weighted'
+                }
+                onChange={(event) => setSettingsForm((prev) => ({
+                  ...prev,
+                  autoRiskVolatilityFloorPct: event.target.value,
+                }))}
+              />
+            </label>
+            <label className="space-y-1 text-xs text-secondary-text">
+              相关性回看日数
+              <input
+                className={INPUT_CLASS}
+                type="number"
+                min={20}
+                max={252}
+                value={settingsForm.autoCorrelationLookbackDays}
+                disabled={settingsForm.autoAllocationMethod !== 'score_inverse_volatility_20d_correlation_capped'}
+                onChange={(event) => setSettingsForm((prev) => ({
+                  ...prev,
+                  autoCorrelationLookbackDays: event.target.value,
+                }))}
+              />
+            </label>
+            <label className="space-y-1 text-xs text-secondary-text">
+              最少重叠收益数
+              <input
+                className={INPUT_CLASS}
+                type="number"
+                min={5}
+                max={120}
+                value={settingsForm.autoCorrelationMinObservations}
+                disabled={settingsForm.autoAllocationMethod !== 'score_inverse_volatility_20d_correlation_capped'}
+                onChange={(event) => setSettingsForm((prev) => ({
+                  ...prev,
+                  autoCorrelationMinObservations: event.target.value,
+                }))}
+              />
+            </label>
+            <label className="space-y-1 text-xs text-secondary-text">
+              最大两两相关性
+              <input
+                className={INPUT_CLASS}
+                type="number"
+                min={-1}
+                max={1}
+                step="0.01"
+                value={settingsForm.autoMaxPairwiseCorrelation}
+                disabled={settingsForm.autoAllocationMethod !== 'score_inverse_volatility_20d_correlation_capped'}
+                onChange={(event) => setSettingsForm((prev) => ({
+                  ...prev,
+                  autoMaxPairwiseCorrelation: event.target.value,
+                }))}
+              />
+            </label>
+            <label className="space-y-1 text-xs text-secondary-text">
               间隔分钟
               <input
                 className={INPUT_CLASS}
@@ -3750,6 +3897,79 @@ const VnpyPaperTradingPage: React.FC = () => {
                 onChange={(event) => setSettingsForm((prev) => ({
                   ...prev,
                   autoFailureFuseThreshold: event.target.value,
+                }))}
+              />
+            </label>
+            <label className="space-y-1 text-xs text-secondary-text">
+              最低数据质量分
+              <input
+                className={INPUT_CLASS}
+                type="number"
+                min={0}
+                max={100}
+                step="0.1"
+                value={settingsForm.autoMinDataQualityScore}
+                onChange={(event) => setSettingsForm((prev) => ({
+                  ...prev,
+                  autoMinDataQualityScore: event.target.value,
+                }))}
+                placeholder="留空仅审计"
+              />
+            </label>
+            <label className="space-y-1 text-xs text-secondary-text">
+              前瞻周期（交易日）
+              <input
+                className={INPUT_CLASS}
+                type="number"
+                min={1}
+                max={60}
+                value={settingsForm.autoCrossRunHorizonDays}
+                onChange={(event) => setSettingsForm((prev) => ({
+                  ...prev,
+                  autoCrossRunHorizonDays: event.target.value,
+                }))}
+              />
+            </label>
+            <label className="space-y-1 text-xs text-secondary-text">
+              最少成熟样本
+              <input
+                className={INPUT_CLASS}
+                type="number"
+                min={1}
+                max={500}
+                value={settingsForm.autoCrossRunMinMatureSamples}
+                onChange={(event) => setSettingsForm((prev) => ({
+                  ...prev,
+                  autoCrossRunMinMatureSamples: event.target.value,
+                }))}
+              />
+            </label>
+            <label className="space-y-1 text-xs text-secondary-text">
+              最低前瞻胜率%
+              <input
+                className={INPUT_CLASS}
+                type="number"
+                min={0}
+                max={100}
+                step="0.1"
+                value={settingsForm.autoCrossRunMinWinRatePct}
+                onChange={(event) => setSettingsForm((prev) => ({
+                  ...prev,
+                  autoCrossRunMinWinRatePct: event.target.value,
+                }))}
+              />
+            </label>
+            <label className="space-y-1 text-xs text-secondary-text">
+              前瞻扫描上限
+              <input
+                className={INPUT_CLASS}
+                type="number"
+                min={1}
+                max={2000}
+                value={settingsForm.autoCrossRunMaxDecisions}
+                onChange={(event) => setSettingsForm((prev) => ({
+                  ...prev,
+                  autoCrossRunMaxDecisions: event.target.value,
                 }))}
               />
             </label>

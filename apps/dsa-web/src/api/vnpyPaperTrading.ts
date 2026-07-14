@@ -5,6 +5,10 @@ export type VnpyPaperMarket = 'cn' | 'hk' | 'us' | 'jp' | 'kr' | 'tw';
 export type VnpyPaperSide = 'buy' | 'sell';
 export type VnpyPaperExecutionMode = 'paper' | 'vnpy_paper' | 'dry_run' | 'manual_approval';
 export type VnpyPaperExecutionRoute = 'local_paper' | 'vnpy_bridge';
+export type VnpyPaperAllocationMethod =
+  | 'score_weighted'
+  | 'score_inverse_volatility_20d'
+  | 'score_inverse_volatility_20d_correlation_capped';
 
 export type VnpyPaperSettings = {
   enabled: boolean;
@@ -17,6 +21,11 @@ export type VnpyPaperSettings = {
   autoCashPerOrder: number;
   autoScoreWeightedAllocationEnabled: boolean;
   autoAllocationBudget?: number | null;
+  autoAllocationMethod: VnpyPaperAllocationMethod | string;
+  autoRiskVolatilityFloorPct: number;
+  autoCorrelationLookbackDays: number;
+  autoCorrelationMinObservations: number;
+  autoMaxPairwiseCorrelation: number;
   autoIntervalMinutes: number;
   autoMinScore?: number | null;
   autoSkipExistingPositions: boolean;
@@ -35,6 +44,12 @@ export type VnpyPaperSettings = {
   autoExcludeSuspended: boolean;
   autoExcludePriceLimit: boolean;
   autoMinTurnover?: number | null;
+  autoMinDataQualityScore?: number | null;
+  autoCrossRunQualityGateEnabled: boolean;
+  autoCrossRunHorizonDays: number;
+  autoCrossRunMinMatureSamples: number;
+  autoCrossRunMinWinRatePct: number;
+  autoCrossRunMaxDecisions: number;
   autoMinCashBalance?: number | null;
   autoMaxDrawdownPct?: number | null;
   autoMarketLightGateEnabled: boolean;
@@ -891,6 +906,21 @@ function buildSettingsPayload(payload: VnpyPaperSettingsUpdate): Record<string, 
   if (hasOwn(payload, 'autoAllocationBudget')) {
     body.auto_allocation_budget = payload.autoAllocationBudget;
   }
+  if (hasOwn(payload, 'autoAllocationMethod')) {
+    body.auto_allocation_method = payload.autoAllocationMethod;
+  }
+  if (hasOwn(payload, 'autoRiskVolatilityFloorPct')) {
+    body.auto_risk_volatility_floor_pct = payload.autoRiskVolatilityFloorPct;
+  }
+  if (hasOwn(payload, 'autoCorrelationLookbackDays')) {
+    body.auto_correlation_lookback_days = payload.autoCorrelationLookbackDays;
+  }
+  if (hasOwn(payload, 'autoCorrelationMinObservations')) {
+    body.auto_correlation_min_observations = payload.autoCorrelationMinObservations;
+  }
+  if (hasOwn(payload, 'autoMaxPairwiseCorrelation')) {
+    body.auto_max_pairwise_correlation = payload.autoMaxPairwiseCorrelation;
+  }
   if (hasOwn(payload, 'autoIntervalMinutes')) body.auto_interval_minutes = payload.autoIntervalMinutes;
   if (hasOwn(payload, 'autoMinScore')) body.auto_min_score = payload.autoMinScore ?? null;
   if (hasOwn(payload, 'autoSkipExistingPositions')) {
@@ -923,6 +953,24 @@ function buildSettingsPayload(payload: VnpyPaperSettingsUpdate): Record<string, 
   if (hasOwn(payload, 'autoExcludeSuspended')) body.auto_exclude_suspended = payload.autoExcludeSuspended;
   if (hasOwn(payload, 'autoExcludePriceLimit')) body.auto_exclude_price_limit = payload.autoExcludePriceLimit;
   if (hasOwn(payload, 'autoMinTurnover')) body.auto_min_turnover = payload.autoMinTurnover ?? null;
+  if (hasOwn(payload, 'autoMinDataQualityScore')) {
+    body.auto_min_data_quality_score = payload.autoMinDataQualityScore ?? null;
+  }
+  if (hasOwn(payload, 'autoCrossRunQualityGateEnabled')) {
+    body.auto_cross_run_quality_gate_enabled = payload.autoCrossRunQualityGateEnabled;
+  }
+  if (hasOwn(payload, 'autoCrossRunHorizonDays')) {
+    body.auto_cross_run_horizon_days = payload.autoCrossRunHorizonDays;
+  }
+  if (hasOwn(payload, 'autoCrossRunMinMatureSamples')) {
+    body.auto_cross_run_min_mature_samples = payload.autoCrossRunMinMatureSamples;
+  }
+  if (hasOwn(payload, 'autoCrossRunMinWinRatePct')) {
+    body.auto_cross_run_min_win_rate_pct = payload.autoCrossRunMinWinRatePct;
+  }
+  if (hasOwn(payload, 'autoCrossRunMaxDecisions')) {
+    body.auto_cross_run_max_decisions = payload.autoCrossRunMaxDecisions;
+  }
   if (hasOwn(payload, 'autoMinCashBalance')) body.auto_min_cash_balance = payload.autoMinCashBalance ?? null;
   if (hasOwn(payload, 'autoMaxDrawdownPct')) body.auto_max_drawdown_pct = payload.autoMaxDrawdownPct ?? null;
   if (hasOwn(payload, 'autoMarketLightGateEnabled')) {

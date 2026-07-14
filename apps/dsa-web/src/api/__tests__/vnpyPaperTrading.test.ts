@@ -35,6 +35,11 @@ describe('vnpyPaperTradingApi', () => {
           auto_cash_per_order: 10000,
           auto_score_weighted_allocation_enabled: true,
           auto_allocation_budget: 25000,
+          auto_allocation_method: 'score_inverse_volatility_20d',
+          auto_risk_volatility_floor_pct: 7.5,
+          auto_correlation_lookback_days: 90,
+          auto_correlation_min_observations: 30,
+          auto_max_pairwise_correlation: 0.75,
           auto_interval_minutes: 1440,
           auto_min_score: null,
           auto_skip_existing_positions: true,
@@ -55,6 +60,12 @@ describe('vnpyPaperTradingApi', () => {
           auto_exclude_suspended: true,
           auto_exclude_price_limit: true,
           auto_min_turnover: 100000000,
+          auto_min_data_quality_score: 72.5,
+          auto_cross_run_quality_gate_enabled: true,
+          auto_cross_run_horizon_days: 10,
+          auto_cross_run_min_mature_samples: 20,
+          auto_cross_run_min_win_rate_pct: 48,
+          auto_cross_run_max_decisions: 300,
           auto_min_cash_balance: 5000,
           auto_max_drawdown_pct: 12,
           auto_market_light_gate_enabled: true,
@@ -117,12 +128,23 @@ describe('vnpyPaperTradingApi', () => {
     expect(result.settings.autoCashPerOrder).toBe(10000);
     expect(result.settings.autoScoreWeightedAllocationEnabled).toBe(true);
     expect(result.settings.autoAllocationBudget).toBe(25000);
+    expect(result.settings.autoAllocationMethod).toBe('score_inverse_volatility_20d');
+    expect(result.settings.autoRiskVolatilityFloorPct).toBe(7.5);
+    expect(result.settings.autoCorrelationLookbackDays).toBe(90);
+    expect(result.settings.autoCorrelationMinObservations).toBe(30);
+    expect(result.settings.autoMaxPairwiseCorrelation).toBe(0.75);
     expect(result.settings.autoExecutionMode).toBe('paper');
     expect(result.settings.autoMaxSinglePositionValue).toBe(20000);
     expect(result.settings.autoMaxTotalPositionValue).toBe(80000);
     expect(result.settings.autoMaxTotalPositionPct).toBe(80);
     expect(result.settings.autoMaxIndustryPositionValue).toBe(40000);
     expect(result.settings.autoMaxIndustryPositionPct).toBe(40);
+    expect(result.settings.autoMinDataQualityScore).toBe(72.5);
+    expect(result.settings.autoCrossRunQualityGateEnabled).toBe(true);
+    expect(result.settings.autoCrossRunHorizonDays).toBe(10);
+    expect(result.settings.autoCrossRunMinMatureSamples).toBe(20);
+    expect(result.settings.autoCrossRunMinWinRatePct).toBe(48);
+    expect(result.settings.autoCrossRunMaxDecisions).toBe(300);
     expect(result.settings.autoTargetPositionWeights).toEqual({ '600519': 2.5 });
     expect(result.settings.autoTargetIndustryWeights).toEqual({ 白酒: 8 });
     expect(result.settings.autoSymbolBlacklist).toEqual(['600519']);
@@ -966,6 +988,11 @@ describe('vnpyPaperTradingApi', () => {
       autoCashPerOrder: 12000,
       autoScoreWeightedAllocationEnabled: true,
       autoAllocationBudget: 25000,
+      autoAllocationMethod: 'score_inverse_volatility_20d',
+      autoRiskVolatilityFloorPct: 7.5,
+      autoCorrelationLookbackDays: 90,
+      autoCorrelationMinObservations: 30,
+      autoMaxPairwiseCorrelation: 0.75,
       autoIntervalMinutes: 5,
       autoMinScore: null,
       autoSkipExistingPositions: false,
@@ -986,6 +1013,12 @@ describe('vnpyPaperTradingApi', () => {
       autoExcludeSuspended: true,
       autoExcludePriceLimit: true,
       autoMinTurnover: 100000000,
+      autoMinDataQualityScore: 72.5,
+      autoCrossRunQualityGateEnabled: true,
+      autoCrossRunHorizonDays: 10,
+      autoCrossRunMinMatureSamples: 20,
+      autoCrossRunMinWinRatePct: 48,
+      autoCrossRunMaxDecisions: 300,
       autoMinCashBalance: 5000,
       autoMaxDrawdownPct: 12,
       autoMarketLightGateEnabled: true,
@@ -1013,6 +1046,11 @@ describe('vnpyPaperTradingApi', () => {
       auto_cash_per_order: 12000,
       auto_score_weighted_allocation_enabled: true,
       auto_allocation_budget: 25000,
+      auto_allocation_method: 'score_inverse_volatility_20d',
+      auto_risk_volatility_floor_pct: 7.5,
+      auto_correlation_lookback_days: 90,
+      auto_correlation_min_observations: 30,
+      auto_max_pairwise_correlation: 0.75,
       auto_interval_minutes: 5,
       auto_min_score: null,
       auto_skip_existing_positions: false,
@@ -1033,6 +1071,12 @@ describe('vnpyPaperTradingApi', () => {
       auto_exclude_suspended: true,
       auto_exclude_price_limit: true,
       auto_min_turnover: 100000000,
+      auto_min_data_quality_score: 72.5,
+      auto_cross_run_quality_gate_enabled: true,
+      auto_cross_run_horizon_days: 10,
+      auto_cross_run_min_mature_samples: 20,
+      auto_cross_run_min_win_rate_pct: 48,
+      auto_cross_run_max_decisions: 300,
       auto_min_cash_balance: 5000,
       auto_max_drawdown_pct: 12,
       auto_market_light_gate_enabled: true,

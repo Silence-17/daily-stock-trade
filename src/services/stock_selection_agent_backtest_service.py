@@ -21,6 +21,79 @@ class StockSelectionAgentBacktestService:
     ENGINE_VERSION = "agent-forward-v1"
     DEFAULT_WINDOWS = (1, 5, 10, 20)
 
+    def build_quality_snapshot(
+        self,
+        *,
+        strategy: str,
+        market: str,
+        horizon_days: int = 5,
+        min_mature_samples: int = 10,
+        min_win_rate_pct: float = 45.0,
+        max_decisions: int = 200,
+        previous_state: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Build a deterministic rolling quality state from mature persisted candidates."""
+
+        horizon = int(horizon_days)
+        minimum = max(1, int(min_mature_samples))
+        threshold = float(min_win_rate_pct)
+        result = self.evaluate(
+            strategy=strategy,
+            market=market,
+            eval_windows=[horizon],
+            include_skipped=True,
+            max_decisions=max_decisions,
+            refresh_missing=False,
+        )
+        metrics = dict(result["matrix"].get(str(horizon)) or {})
+        completed_count = int(metrics.get("completed_count") or 0)
+        win_rate = self._finite_float(metrics.get("win_rate_pct"))
+        average_return = self._finite_float(metrics.get("average_return_pct"))
+        if completed_count < minimum:
+            state = "insufficient_evidence"
+            reason = "mature_sample_count_below_threshold"
+        elif win_rate is None:
+            state = "unavailable"
+            reason = "win_rate_unavailable"
+        elif win_rate < threshold:
+            state = "blocked"
+            reason = "forward_win_rate_below_threshold"
+        elif average_return is not None and average_return < 0:
+            state = "guarded"
+            reason = "average_forward_return_negative"
+        else:
+            state = "healthy"
+            reason = "forward_quality_thresholds_met"
+        previous = str(previous_state or "").strip().lower() or None
+        return {
+            "schema_version": 1,
+            "generated_at": result.get("generated_at"),
+            "state": state,
+            "reason": reason,
+            "previous_state": previous,
+            "transition": f"{previous}->{state}" if previous and previous != state else None,
+            "changed": bool(previous and previous != state),
+            "strategy": strategy,
+            "market": market,
+            "horizon_days": horizon,
+            "min_mature_samples": minimum,
+            "min_win_rate_pct": threshold,
+            "max_decisions": max(1, min(2000, int(max_decisions))),
+            "sample_count": int(metrics.get("sample_count") or 0),
+            "mature_sample_count": completed_count,
+            "coverage_pct": metrics.get("coverage_pct"),
+            "win_rate_pct": metrics.get("win_rate_pct"),
+            "average_return_pct": metrics.get("average_return_pct"),
+            "median_return_pct": metrics.get("median_return_pct"),
+            "average_max_adverse_excursion_pct": metrics.get(
+                "average_max_adverse_excursion_pct"
+            ),
+            "unable_reason_counts": dict(metrics.get("unable_reason_counts") or {}),
+            "lookahead_protection": True,
+            "source": "persisted_agent_decisions_and_stock_daily",
+            "truncated": bool(result.get("truncated")),
+        }
+
     def __init__(self, db_manager: Optional[DatabaseManager] = None) -> None:
         self.db = db_manager or DatabaseManager.get_instance()
         self.agent_repo = StockSelectionAgentRepository(self.db)
