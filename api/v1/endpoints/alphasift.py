@@ -116,6 +116,7 @@ class AlphaSiftPortfolioCorporateAction(BaseModel):
     action_type: str = Field(..., pattern="^(cash_dividend|split_adjustment)$")
     cash_dividend_per_share: Optional[float] = Field(None, gt=0)
     split_ratio: Optional[float] = Field(None, gt=0)
+    cash_in_lieu_price: Optional[float] = Field(None, gt=0)
 
 
 class AlphaSiftPortfolioBacktestRequest(BaseModel):

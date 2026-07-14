@@ -583,6 +583,7 @@ describe('AgentConsolePage', () => {
         endingCash: 12000,
         totalFees: 20,
         totalTaxes: 10,
+        cashInLieuReceived: 4,
         totalSlippageCost: 30,
       },
       periods: [{
@@ -604,9 +605,11 @@ describe('AgentConsolePage', () => {
         corporateActions: [{
           symbol: '600519',
           effectiveDate: '2024-01-15',
-          actionType: 'cash_dividend',
+          actionType: 'split_adjustment',
           status: 'applied',
-          cashEffect: 150,
+          fractionalQuantity: 0.5,
+          cashInLieuEffect: 4,
+          cashEffect: 4,
         }],
       }],
       methodology: {
@@ -866,7 +869,7 @@ describe('AgentConsolePage', () => {
     });
     fireEvent.change(screen.getByTestId('agent-portfolio-corporate-actions'), {
       target: {
-        value: '[{"symbol":"600519","effective_date":"2024-01-15","action_type":"cash_dividend","cash_dividend_per_share":1.5}]',
+        value: '[{"symbol":"600519","effective_date":"2024-01-15","action_type":"cash_dividend","cash_dividend_per_share":1.5},{"symbol":"000001","effective_date":"2024-01-20","action_type":"split_adjustment","split_ratio":1.5,"cash_in_lieu_price":9.8}]',
       },
     });
     fireEvent.click(screen.getByTestId('agent-portfolio-backtest-run'));
@@ -886,6 +889,12 @@ describe('AgentConsolePage', () => {
         effectiveDate: '2024-01-15',
         actionType: 'cash_dividend',
         cashDividendPerShare: 1.5,
+      }, {
+        symbol: '000001',
+        effectiveDate: '2024-01-20',
+        actionType: 'split_adjustment',
+        splitRatio: 1.5,
+        cashInLieuPrice: 9.8,
       }],
       includePersistedCorporateActions: true,
     }));
@@ -897,13 +906,32 @@ describe('AgentConsolePage', () => {
     expect(results).toHaveTextContent('延续');
     expect(results).toHaveTextContent('被动');
     expect(results).toHaveTextContent('期末未平 1');
+    expect(results).toHaveTextContent('零碎股补偿 ¥4.00');
+    expect(screen.getByTestId('agent-portfolio-corporate-action-audit')).toHaveTextContent('补偿 ¥4.00');
     expect(screen.getByTestId('agent-portfolio-target-audit')).toHaveTextContent('600519 60.0%');
     expect(screen.getByTestId('agent-portfolio-target-audit')).toHaveTextContent('000001 30.0%');
     expect(results).toHaveTextContent('成本费用');
     expect(results).toHaveTextContent('¥60.00');
     expect(screen.getByTestId('agent-portfolio-corporate-action-audit')).toHaveTextContent(
-      '600519 cash_dividend applied',
+      '600519 split_adjustment applied',
     );
+  });
+
+  it('rejects a cash-in-lieu price on a cash dividend before submitting replay', async () => {
+    renderPage();
+
+    await waitFor(() => expect(listAgentRuns).toHaveBeenCalled());
+    fireEvent.change(screen.getByTestId('agent-portfolio-date-from'), { target: { value: '2024-01-01' } });
+    fireEvent.change(screen.getByTestId('agent-portfolio-date-to'), { target: { value: '2024-02-01' } });
+    fireEvent.change(screen.getByTestId('agent-portfolio-corporate-actions'), {
+      target: {
+        value: '[{"symbol":"600519","effective_date":"2024-01-15","action_type":"cash_dividend","cash_dividend_per_share":1.5,"cash_in_lieu_price":10}]',
+      },
+    });
+    fireEvent.click(screen.getByTestId('agent-portfolio-backtest-run'));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('第 1 个现金分红不能配置零碎股补偿价');
+    expect(runPortfolioBacktest).not.toHaveBeenCalled();
   });
 
   it('submits and observes bounded historical factor ingestion', async () => {

@@ -150,6 +150,12 @@ class AlphaSiftReplayApiTestCase(unittest.TestCase):
                         "effective_date": "2024-01-15",
                         "action_type": "cash_dividend",
                         "cash_dividend_per_share": 1.5,
+                    }, {
+                        "symbol": "000001",
+                        "effective_date": "2024-01-20",
+                        "action_type": "split_adjustment",
+                        "split_ratio": 1.5,
+                        "cash_in_lieu_price": 9.8,
                     }],
                     "include_persisted_corporate_actions": False,
                 },
@@ -169,6 +175,8 @@ class AlphaSiftReplayApiTestCase(unittest.TestCase):
         self.assertEqual(call["corporate_actions"][0]["symbol"], "600519")
         self.assertEqual(call["corporate_actions"][0]["effective_date"], date(2024, 1, 15))
         self.assertEqual(call["corporate_actions"][0]["cash_dividend_per_share"], 1.5)
+        self.assertEqual(call["corporate_actions"][1]["effective_date"], date(2024, 1, 20))
+        self.assertEqual(call["corporate_actions"][1]["cash_in_lieu_price"], 9.8)
         self.assertFalse(call["include_persisted_corporate_actions"])
 
     def test_historical_factor_ingestion_runs_as_background_task(self) -> None:
