@@ -216,6 +216,44 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
         self.assertEqual(valuation["oldest_price_date"], "2026-07-14")
         self.assertEqual(valuation["latest_price_date"], "2026-07-15")
 
+    def test_system_health_blocks_latched_drawdown_until_recovery_threshold(self) -> None:
+        health = _system_health_payload({
+            "enabled": True,
+            "available": True,
+            "settings": {
+                "enabled": True,
+                "auto_trade_enabled": True,
+                "auto_execution_mode": "paper",
+                "auto_max_drawdown_pct": 10,
+                "auto_drawdown_recovery_hysteresis_pct": 2,
+            },
+            "diagnostics": {
+                "account_drawdown": {
+                    "configured": True,
+                    "status": "recovery_pending",
+                    "basis": "observed_equity_peak",
+                    "equity": 91000,
+                    "peak_equity": 100000,
+                    "drawdown_pct": 9,
+                    "threshold_pct": 10,
+                    "recovery_hysteresis_pct": 2,
+                    "recovery_threshold_pct": 8,
+                    "drawdown_guard_latched": True,
+                    "drawdown_guard_opened_at": "2026-07-15T09:30:00Z",
+                },
+            },
+        })
+
+        drawdown = {
+            item["key"]: item for item in health["components"]
+        }["account_drawdown"]
+        self.assertEqual(drawdown["status"], "blocked")
+        self.assertEqual(drawdown["reason"], "account_drawdown_recovery_pending")
+        self.assertTrue(drawdown["drawdown_guard_latched"])
+        self.assertEqual(drawdown["recovery_threshold_pct"], 8)
+        self.assertIn("8%", drawdown["detail"])
+        self.assertIn("account_drawdown_recovery_pending", health["required_blockers"])
+
     def test_status_and_manual_order_use_local_paper_account(self) -> None:
         with patch(
             "api.v1.endpoints.vnpy_paper_trading.VnpyPaperTradingService",
@@ -603,6 +641,7 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
                     "auto_cross_run_max_decisions": 300,
                     "auto_min_cash_balance": 5000,
                     "auto_max_drawdown_pct": 12,
+                    "auto_drawdown_recovery_hysteresis_pct": 2,
                     "auto_max_single_position_value": 20000,
                     "auto_max_total_position_value": 80000,
                     "auto_max_total_position_pct": 80,
@@ -646,6 +685,10 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
         self.assertEqual(response.json()["settings"]["auto_cross_run_max_decisions"], 300)
         self.assertEqual(response.json()["settings"]["auto_min_cash_balance"], 5000)
         self.assertEqual(response.json()["settings"]["auto_max_drawdown_pct"], 12)
+        self.assertEqual(
+            response.json()["settings"]["auto_drawdown_recovery_hysteresis_pct"],
+            2,
+        )
         self.assertEqual(response.json()["settings"]["auto_max_single_position_value"], 20000)
         self.assertEqual(response.json()["settings"]["auto_max_total_position_value"], 80000)
         self.assertEqual(response.json()["settings"]["auto_max_total_position_pct"], 80)

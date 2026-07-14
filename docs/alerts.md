@@ -69,7 +69,7 @@
 | `data_source` | 数据源或 provider |
 | `data_timestamp` | 数据时间；缺失时不得伪造为当前时间 |
 | `triggered_at` | 触发时间 |
-| `status` | 触发状态，例如 triggered、skipped、degraded、failed |
+| `status` | 事件状态，例如 triggered、skipped、degraded、failed、resolved |
 | `diagnostics` | 脱敏后的诊断信息 |
 
 ### `alert_notification`
@@ -424,7 +424,7 @@ Desktop 不新增原生告警管理界面；桌面用户复用内置或外部 We
 
 ### 状态、通知与回滚
 
-worker 会把 `triggered`、`skipped`、`degraded`、`failed` 写入 `alert_triggers` 作为评估历史；正常未触发不写历史。`skipped` 表示规则本轮没有可评估条件，例如 market 非交易日或缺少上一交易日基线；`degraded` 表示数据源、持仓快照、历史快照或解析过程出现异常，结果不可用于触发通知。
+worker 会把 `triggered`、`skipped`、`degraded`、`failed` 写入 `alert_triggers` 作为评估历史；正常未触发不写历史。非规则系统事件还可写入 `resolved`，表示之前的风控或运行异常已恢复。`skipped` 表示规则本轮没有可评估条件，例如 market 非交易日或缺少上一交易日基线；`degraded` 表示数据源、持仓快照、历史快照或解析过程出现异常，结果不可用于触发通知。
 
 真实触发后会写入 `alert_notifications` 和 `alert_cooldowns`；DB 持久化规则按 `rule_id + target + data_source + data_timestamp` 对同一数据点做 best-effort 去重。legacy JSON 规则继续只使用进程内 fingerprint，不写持久化冷却。
 

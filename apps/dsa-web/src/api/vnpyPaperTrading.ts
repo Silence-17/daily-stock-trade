@@ -54,6 +54,7 @@ export type VnpyPaperSettings = {
   autoCrossRunMaxDecisions: number;
   autoMinCashBalance?: number | null;
   autoMaxDrawdownPct?: number | null;
+  autoDrawdownRecoveryHysteresisPct: number;
   autoMarketLightGateEnabled: boolean;
   autoMarketLightBlockStatuses: string[];
   autoFailureFuseEnabled: boolean;
@@ -1011,6 +1012,9 @@ function buildSettingsPayload(payload: VnpyPaperSettingsUpdate): Record<string, 
   }
   if (hasOwn(payload, 'autoMinCashBalance')) body.auto_min_cash_balance = payload.autoMinCashBalance ?? null;
   if (hasOwn(payload, 'autoMaxDrawdownPct')) body.auto_max_drawdown_pct = payload.autoMaxDrawdownPct ?? null;
+  if (hasOwn(payload, 'autoDrawdownRecoveryHysteresisPct')) {
+    body.auto_drawdown_recovery_hysteresis_pct = payload.autoDrawdownRecoveryHysteresisPct;
+  }
   if (hasOwn(payload, 'autoMarketLightGateEnabled')) {
     body.auto_market_light_gate_enabled = payload.autoMarketLightGateEnabled;
   }

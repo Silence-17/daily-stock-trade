@@ -23,7 +23,7 @@ export type PortfolioStopLossMode = 'near' | 'breach';
 export type MarketRegion = 'cn' | 'hk' | 'us';
 export type MarketLightStatus = 'yellow' | 'red';
 export type AlertDryRunStatus = 'triggered' | 'not_triggered' | 'evaluation_error';
-export type AlertTriggerStatus = 'triggered' | 'skipped' | 'degraded' | 'failed';
+export type AlertTriggerStatus = 'triggered' | 'skipped' | 'degraded' | 'failed' | 'resolved';
 
 export interface AlertRuleParameters {
   direction?: AlertDirection;

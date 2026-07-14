@@ -227,6 +227,27 @@ class AlertApiTestCase(unittest.TestCase):
         self.assertEqual(item["threshold"], 2.0)
         self.assertIn('"event_type": "failure_fuse_open"', item["diagnostics"])
 
+        resolved = AlertService().record_system_event(
+            target="vnpy_paper",
+            event_type="failure_fuse_auto_recovered",
+            status="resolved",
+            reason="failure_fuse_auto_recovered",
+            data_source="vnpy_paper_auto",
+            observed_value=0,
+            threshold=2,
+        )
+        self.assertEqual(resolved["status"], "resolved")
+
+        resolved_resp = self.client.get(
+            "/api/v1/alerts/triggers?target=vnpy_paper&status=resolved"
+        )
+        self.assertEqual(resolved_resp.status_code, 200, resolved_resp.text)
+        self.assertEqual(resolved_resp.json()["total"], 1)
+        self.assertEqual(
+            resolved_resp.json()["items"][0]["reason"],
+            "failure_fuse_auto_recovered",
+        )
+
     def test_rule_update_allows_null_for_reserved_policy_fields(self) -> None:
         rule = self._create_rule(
             {
