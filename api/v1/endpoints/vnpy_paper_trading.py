@@ -18,6 +18,7 @@ from api.v1.schemas.vnpy_paper_trading import (
     VnpyPaperArchivedAccountCleanupResponse,
     VnpyPaperAgentBacktestRequest,
     VnpyPaperAgentBacktestResponse,
+    VnpyPaperAgentCrossRunQualityResponse,
     VnpyPaperAgentDailySummaryResponse,
     VnpyPaperAgentDataQualityTrendsResponse,
     VnpyPaperAgentRunRecapRequest,
@@ -2121,6 +2122,23 @@ def run_vnpy_paper_agent_backtest(
         raise _bad_request(exc) from exc
     except Exception as exc:
         raise _internal_error("Run Agent forward evaluation failed", exc)
+
+
+@router.get(
+    "/agent-runs/cross-run-quality",
+    response_model=VnpyPaperAgentCrossRunQualityResponse,
+    responses={500: {"model": ErrorResponse}},
+    summary="Get current cross-run forward-quality gate state",
+)
+def get_vnpy_paper_agent_cross_run_quality(
+    request: Request,
+) -> VnpyPaperAgentCrossRunQualityResponse:
+    try:
+        return VnpyPaperAgentCrossRunQualityResponse.model_validate(
+            _service(request).get_cross_run_quality_status()
+        )
+    except Exception as exc:
+        raise _internal_error("Get Agent cross-run quality failed", exc)
 
 
 @router.post(

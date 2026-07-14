@@ -1972,6 +1972,48 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["error"], "validation_error")
 
+    def test_agent_cross_run_quality_endpoint_returns_current_gate_state(self) -> None:
+        service = MagicMock()
+        service.get_cross_run_quality_status.return_value = {
+            "schema_version": 1,
+            "generated_at": datetime(2026, 7, 14, 10, 0),
+            "state": "insufficient_evidence",
+            "reason": "mature_sample_count_below_threshold",
+            "previous_state": None,
+            "transition": None,
+            "changed": False,
+            "strategy": "dual_low",
+            "market": "cn",
+            "horizon_days": 5,
+            "min_mature_samples": 10,
+            "min_win_rate_pct": 45.0,
+            "max_decisions": 200,
+            "sample_count": 3,
+            "mature_sample_count": 0,
+            "coverage_pct": 0.0,
+            "win_rate_pct": None,
+            "average_return_pct": None,
+            "median_return_pct": None,
+            "average_max_adverse_excursion_pct": None,
+            "unable_reason_counts": {"insufficient_forward_bars": 3},
+            "lookahead_protection": True,
+            "source": "persisted_agent_decisions_and_stock_daily",
+            "truncated": False,
+            "gate_enabled": False,
+            "gate_blocked": False,
+            "insufficient_evidence_blocks": False,
+        }
+        with patch(
+            "api.v1.endpoints.vnpy_paper_trading.VnpyPaperTradingService",
+            return_value=service,
+        ):
+            response = self.client.get("/api/v1/vnpy-paper/agent-runs/cross-run-quality")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["state"], "insufficient_evidence")
+        self.assertFalse(response.json()["gate_blocked"])
+        service.get_cross_run_quality_status.assert_called_once_with()
+
 
 def _install_fake_vnpy_modules() -> dict[str, object]:
     names = [

@@ -9,6 +9,7 @@ const exportAgentRuns = vi.hoisted(() => vi.fn());
 const getAgentRun = vi.hoisted(() => vi.fn());
 const getAgentDailySummary = vi.hoisted(() => vi.fn());
 const getAgentDataQualityTrends = vi.hoisted(() => vi.fn());
+const getAgentCrossRunQuality = vi.hoisted(() => vi.fn());
 const runAgentBacktest = vi.hoisted(() => vi.fn());
 const generateAgentRunRecap = vi.hoisted(() => vi.fn());
 const getReplayCompatibility = vi.hoisted(() => vi.fn());
@@ -29,6 +30,7 @@ vi.mock('../../api/vnpyPaperTrading', () => ({
     getAgentRun,
     getAgentDailySummary,
     getAgentDataQualityTrends,
+    getAgentCrossRunQuality,
     runAgentBacktest,
     generateAgentRunRecap,
   },
@@ -410,6 +412,7 @@ describe('AgentConsolePage', () => {
     getAgentRun.mockReset();
     getAgentDailySummary.mockReset();
     getAgentDataQualityTrends.mockReset();
+    getAgentCrossRunQuality.mockReset();
     runAgentBacktest.mockReset();
     generateAgentRunRecap.mockReset();
     getReplayCompatibility.mockReset();
@@ -431,6 +434,35 @@ describe('AgentConsolePage', () => {
     });
     getAgentDailySummary.mockResolvedValue(dailySummary);
     getAgentDataQualityTrends.mockResolvedValue(dataQualityTrends);
+    getAgentCrossRunQuality.mockResolvedValue({
+      schemaVersion: 1,
+      generatedAt: '2026-07-14T10:00:00',
+      state: 'insufficient_evidence',
+      reason: 'mature_sample_count_below_threshold',
+      previousState: null,
+      transition: null,
+      changed: false,
+      strategy: 'dual_low',
+      market: 'cn',
+      horizonDays: 5,
+      minMatureSamples: 10,
+      minWinRatePct: 45,
+      maxDecisions: 200,
+      sampleCount: 3,
+      matureSampleCount: 0,
+      coveragePct: 0,
+      winRatePct: null,
+      averageReturnPct: null,
+      medianReturnPct: null,
+      averageMaxAdverseExcursionPct: null,
+      unableReasonCounts: { insufficient_forward_bars: 3 },
+      lookaheadProtection: true,
+      source: 'persisted_agent_decisions_and_stock_daily',
+      truncated: false,
+      gateEnabled: false,
+      gateBlocked: false,
+      insufficientEvidenceBlocks: false,
+    });
     runAgentBacktest.mockResolvedValue({
       generatedAt: '2026-07-14T10:00:00',
       methodology: {
@@ -615,6 +647,9 @@ describe('AgentConsolePage', () => {
     await waitFor(() => expect(getAgentDataQualityTrends).toHaveBeenCalledWith(30, undefined));
     await waitFor(() => expect(getAgentRun).toHaveBeenCalledWith('ss-agent-test'));
     expect(screen.getByText('今日 Agent 总结')).toBeInTheDocument();
+    expect(screen.getByTestId('agent-current-cross-run-quality')).toHaveTextContent('insufficient_evidence');
+    expect(screen.getByTestId('agent-current-cross-run-quality')).toHaveTextContent('0/3');
+    expect(screen.getByTestId('agent-current-cross-run-quality')).toHaveTextContent('仅审计');
     expect(screen.getByText('2026-07-01 · 2/2 runs scanned')).toBeInTheDocument();
     expect(screen.getByTestId('agent-data-quality-trends')).toHaveTextContent('跨 run 数据质量趋势');
     expect(screen.getByTestId('agent-data-quality-trends')).toHaveTextContent('33.33%');

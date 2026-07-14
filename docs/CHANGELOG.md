@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 - [修复] 连续失败熔断触发后保持锁存，不再因 `failure_fuse_open` 跳过记录而隔轮自动放行；只有显式“恢复熔断”重置基线后才重新允许买入。
+- [修复] 相关性分配的 trailing returns 查询兼容裸代码、市场前缀和市场后缀格式，并审计最终命中的 `stock_daily` 代码，避免本地行情存在但被误判为历史不足。
+- [新功能] 新增只读 `GET /api/v1/vnpy-paper/agent-runs/cross-run-quality`，Agent 控制台可在触发下一轮任务前展示当前前瞻状态、成熟样本、胜率和买入门禁结论。
 - [新功能] 组合分配新增 `score_inverse_volatility_20d_correlation_capped`，按评分/20 日波动率分配前使用本地 trailing returns 限制候选两两相关性。
 - [改进] 相关性方法只读取运行日及之前的 `stock_daily`，按候选排名保留更高排名标的；历史或重叠收益不足时逐票 fail-closed，并审计样本数、相关系数、阈值和冲突标的。
 - [改进] 模拟交易页新增相关性回看、最少重叠收益和最大相关性设置，Agent 控制台展示候选相关性输入与逐对结果。

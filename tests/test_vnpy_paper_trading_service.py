@@ -4654,6 +4654,50 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
             "portfolio_allocation_correlation_data_unavailable",
         )
 
+    def test_auto_trade_correlation_cap_resolves_prefixed_daily_code_variant(self) -> None:
+        self.service.update_settings(
+            {
+                "auto_trade_enabled": True,
+                "auto_trade_time_gate_enabled": False,
+                "auto_execution_mode": "dry_run",
+                "auto_score_weighted_allocation_enabled": True,
+                "auto_allocation_method": "score_inverse_volatility_20d_correlation_capped",
+                "auto_max_results": 1,
+                "auto_correlation_lookback_days": 20,
+                "auto_correlation_min_observations": 5,
+            }
+        )
+        close = 100.0
+        with DatabaseManager.get_instance().get_session() as session:
+            for offset in range(21):
+                if offset:
+                    close *= 1.01 if offset % 2 else 0.99
+                session.add(
+                    StockDaily(
+                        code="600519.SH",
+                        date=date.today() - timedelta(days=20 - offset),
+                        close=close,
+                    )
+                )
+            session.commit()
+        fake_alphasift = MagicMock()
+        fake_alphasift.screen.return_value = {
+            "candidates": [
+                {"code": "600519", "score": 80, "price": 10.0, "volatility_20d_pct": 20},
+            ],
+            "warnings": [],
+        }
+        with patch(
+            "src.services.vnpy_paper_trading_service.AlphaSiftService",
+            return_value=fake_alphasift,
+        ):
+            result = self.service.run_auto_trade_once()
+
+        self.assertEqual(result["planned_count"], 1)
+        correlation = result["orders"][0]["raw"]["portfolio_allocation"]["risk_input"]["correlation"]
+        self.assertEqual(correlation["daily_code"], "600519.SH")
+        self.assertGreaterEqual(correlation["observation_count"], 20)
+
     def test_auto_trade_respects_max_positions_risk_limit(self) -> None:
         self.service.submit_order(
             symbol="600519",
