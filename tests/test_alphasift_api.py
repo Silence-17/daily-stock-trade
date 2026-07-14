@@ -193,6 +193,59 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
 
         self.assertEqual(payload["source_health"]["snapshot"]["sina"]["failures"], 2)
 
+    def test_snapshot_source_routing_demotes_persistently_degraded_source(self) -> None:
+        config = self._config(enabled=True)
+        with patch.dict(alphasift_service.os.environ, {"SNAPSHOT_SOURCE_PRIORITY": ""}, clear=False):
+            routing = alphasift_service.build_alphasift_snapshot_source_routing(
+                config,
+                source_health={
+                    "snapshot": {
+                        "sina": {"failures": 0, "disabled": False},
+                        "efinance": {"failures": 0, "disabled": False},
+                    }
+                },
+                source_health_items=[
+                    {
+                        "group": "snapshot",
+                        "source": "sina",
+                        "observation_count": 10,
+                        "degraded_observation_count": 8,
+                    }
+                ],
+            )
+
+        self.assertEqual(routing["mode"], "dynamic_health")
+        self.assertTrue(routing["adjusted"])
+        self.assertNotEqual(routing["effective_priority"].split(",")[0], "sina")
+        sina = next(item for item in routing["sources"] if item["source"] == "sina")
+        self.assertLess(sina["weight"], 0.5)
+        self.assertEqual(sina["observation_count"], 10)
+
+    def test_snapshot_source_routing_preserves_explicit_priority(self) -> None:
+        config = self._config(enabled=True)
+        with patch.dict(
+            alphasift_service.os.environ,
+            {"SNAPSHOT_SOURCE_PRIORITY": "em_datacenter,sina"},
+            clear=False,
+        ):
+            routing = alphasift_service.build_alphasift_snapshot_source_routing(
+                config,
+                source_health={"snapshot": {"em_datacenter": {"failures": 9, "disabled": True}}},
+                source_health_items=[
+                    {
+                        "group": "snapshot",
+                        "source": "em_datacenter",
+                        "observation_count": 10,
+                        "degraded_observation_count": 10,
+                    }
+                ],
+            )
+
+        self.assertEqual(routing["mode"], "explicit")
+        self.assertFalse(routing["adjusted"])
+        self.assertEqual(routing["effective_priority"], "em_datacenter,sina")
+        self.assertEqual(routing["reason"], "explicit_priority_preserved")
+
     def test_status_preserves_adapter_available_false_without_diagnostics(self) -> None:
         config = self._config(enabled=False)
 
@@ -1993,7 +2046,7 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
                 json.dumps(
                     {
                         "schema_version": 1,
-                        "cached_at": "2026-07-03T00:00:00Z",
+                        "cached_at": alphasift_service._utc_now_iso(),
                         "payload": {
                             "strategy": "dual_low",
                             "market": "cn",
@@ -2053,7 +2106,7 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
                 json.dumps(
                     {
                         "schema_version": 1,
-                        "cached_at": "2026-07-03T00:00:00Z",
+                        "cached_at": alphasift_service._utc_now_iso(),
                         "payload": {
                             "strategy": "dual_low",
                             "market": "cn",
