@@ -978,9 +978,13 @@ class AlphaSiftService:
             "version": adapter_status.get("version"),
             "strategy_count": adapter_status.get("strategy_count"),
         }
-        source_health = _get_alphasift_source_health_snapshot()
+        source_health = _get_alphasift_source_health_snapshot(self.config)
         if source_health:
             payload["source_health"] = source_health
+        payload["source_routing"] = build_alphasift_snapshot_source_routing(
+            self.config,
+            source_health=source_health,
+        )
         if diagnostics:
             payload["diagnostics"] = diagnostics
         return payload
@@ -1231,7 +1235,14 @@ class AlphaSiftService:
         _write_alphasift_hotspot_detail_cache(provider=provider_name, topic=topic_text, payload=cleaned)
         return cleaned
 
-    def screen(self, *, strategy: str, market: str, max_results: int) -> Dict[str, Any]:
+    def screen(
+        self,
+        *,
+        strategy: str,
+        market: str,
+        max_results: int,
+        source_health_trends: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
         _ensure_alphasift_enabled(self.config)
         _ensure_alphasift_available_for_use()
         _ensure_supported_market(market)
@@ -1239,8 +1250,21 @@ class AlphaSiftService:
 
         adapter = _get_dsa_adapter()
         screen = _get_adapter_callable(adapter, "screen", "screen() 不可调用。")
+        source_health_before = _get_alphasift_source_health_snapshot(self.config)
+        source_routing = build_alphasift_snapshot_source_routing(
+            self.config,
+            source_health=source_health_before,
+            source_health_items=source_health_trends,
+        )
         try:
-            raw = _call_alphasift_screen(screen, strategy, market, max_results, self.config)
+            raw = _call_alphasift_screen(
+                screen,
+                strategy,
+                market,
+                max_results,
+                self.config,
+                snapshot_source_priority=str(source_routing["effective_priority"]),
+            )
         except ValueError as exc:
             raise HTTPException(
                 status_code=400,
@@ -1261,6 +1285,8 @@ class AlphaSiftService:
                 source_error=f"alphasift_screen_failed: {exc}",
             )
             if cached is not None:
+                cached["source_health"] = _get_alphasift_source_health_snapshot(self.config)
+                cached["source_routing"] = source_routing
                 return cached
             raise HTTPException(
                 status_code=424,
@@ -1305,6 +1331,8 @@ class AlphaSiftService:
             "risk_enabled": raw_data.get("risk_enabled"),
             "portfolio_diversity_enabled": raw_data.get("portfolio_diversity_enabled"),
             "portfolio_concentration_notes": raw_data.get("portfolio_concentration_notes") or [],
+            "source_health": _get_alphasift_source_health_snapshot(self.config),
+            "source_routing": source_routing,
         }
         if not selected and payload["source_errors"]:
             cached = _load_alphasift_screen_cache(
@@ -1314,6 +1342,8 @@ class AlphaSiftService:
                 source_error="; ".join(payload["source_errors"]),
             )
             if cached is not None:
+                cached["source_health"] = payload["source_health"]
+                cached["source_routing"] = source_routing
                 return cached
 
         _write_alphasift_screen_cache(strategy=strategy, market=market, payload=payload)
@@ -1629,7 +1659,7 @@ def _get_alphasift_status_snapshot() -> Tuple[Dict[str, Any], bool, Optional[Dic
     return adapter_status, _is_adapter_available(adapter_status), None
 
 
-def _get_alphasift_source_health_snapshot() -> Dict[str, Any]:
+def _get_alphasift_source_health_snapshot(config: Optional[Config] = None) -> Dict[str, Any]:
     health: Dict[str, Any] = {}
     for module_name, key, function_name in (
         ("alphasift.snapshot", "snapshot", "snapshot_source_health_snapshot"),
@@ -1639,7 +1669,19 @@ def _get_alphasift_source_health_snapshot() -> Dict[str, Any]:
             module = importlib.import_module(module_name)
             snapshot_func = getattr(module, function_name, None)
             if callable(snapshot_func):
-                snapshot = _remove_non_finite_json_values(_to_plain(snapshot_func()))
+                if key == "snapshot":
+                    priority = (
+                        _env_text(os.getenv("SNAPSHOT_SOURCE_PRIORITY"))
+                        or _resolve_alphasift_snapshot_source_priority(config)
+                    )
+                    sources = [item for item in priority.split(",") if item]
+                    try:
+                        raw_snapshot = snapshot_func(sources)
+                    except TypeError:
+                        raw_snapshot = snapshot_func()
+                else:
+                    raw_snapshot = snapshot_func()
+                snapshot = _remove_non_finite_json_values(_to_plain(raw_snapshot))
                 if snapshot:
                     health[key] = snapshot
         except Exception as exc:
@@ -1933,7 +1975,15 @@ def _ensure_supported_strategy(strategy: str) -> None:
     # 策略由适配层进行最终校验，因此在列表外仍保持透传。
 
 
-def _call_alphasift_screen(screen: Any, strategy: str, market: str, max_results: int, config: Config) -> Any:
+def _call_alphasift_screen(
+    screen: Any,
+    strategy: str,
+    market: str,
+    max_results: int,
+    config: Config,
+    *,
+    snapshot_source_priority: Optional[str] = None,
+) -> Any:
     signature = inspect.signature(screen)
     params = signature.parameters
     supports_var_kwargs = any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in params.values())
@@ -1963,7 +2013,11 @@ def _call_alphasift_screen(screen: Any, strategy: str, market: str, max_results:
         kwargs["context"] = _build_alphasift_context(config, max_results=max_results)
 
     with (
-        _alphasift_runtime_env(config, max_results=max_results),
+        _alphasift_runtime_env(
+            config,
+            max_results=max_results,
+            snapshot_source_priority=snapshot_source_priority,
+        ),
         _alphasift_dsa_daily_history_provider(),
         _alphasift_litellm_headers(config),
     ):
@@ -1989,8 +2043,17 @@ def _call_alphasift_screen(screen: Any, strategy: str, market: str, max_results:
 
 
 @contextmanager
-def _alphasift_runtime_env(config: Config, *, max_results: Optional[int] = None) -> Iterator[None]:
-    updates = _build_alphasift_runtime_env(config, max_results=max_results)
+def _alphasift_runtime_env(
+    config: Config,
+    *,
+    max_results: Optional[int] = None,
+    snapshot_source_priority: Optional[str] = None,
+) -> Iterator[None]:
+    updates = _build_alphasift_runtime_env(
+        config,
+        max_results=max_results,
+        snapshot_source_priority=snapshot_source_priority,
+    )
     if not updates:
         yield
         return
@@ -2052,14 +2115,104 @@ def _alphasift_dsa_daily_history_provider() -> Iterator[None]:
             setattr(daily_module, "fetch_daily_history", original_fetch)
 
 
-def _resolve_alphasift_snapshot_source_priority(config: Config) -> str:
+def _resolve_alphasift_snapshot_source_priority(config: Optional[Config]) -> str:
     token = _env_text(getattr(config, "tushare_token", None) or os.getenv("TUSHARE_TOKEN"))
     if token:
         return DSA_ALPHASIFT_SNAPSHOT_SOURCE_PRIORITY_WITH_TUSHARE
     return DSA_ALPHASIFT_SNAPSHOT_SOURCE_PRIORITY
 
 
-def _build_alphasift_runtime_env(config: Config, *, max_results: Optional[int] = None) -> Dict[str, str]:
+def build_alphasift_snapshot_source_routing(
+    config: Config,
+    *,
+    source_health: Optional[Dict[str, Any]] = None,
+    source_health_items: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """Build an auditable, bounded source order from current and persisted health."""
+    explicit_priority = _env_text(os.getenv("SNAPSHOT_SOURCE_PRIORITY"))
+    base_priority = explicit_priority or _resolve_alphasift_snapshot_source_priority(config)
+    sources = [item.strip() for item in base_priority.split(",") if item.strip()]
+    if not sources:
+        sources = [item for item in DSA_ALPHASIFT_SNAPSHOT_SOURCE_PRIORITY.split(",") if item]
+
+    current_snapshot = (source_health or {}).get("snapshot")
+    current_by_source = current_snapshot if isinstance(current_snapshot, dict) else {}
+    trend_by_source: Dict[str, Dict[str, Any]] = {}
+    for raw_item in source_health_items or []:
+        if not isinstance(raw_item, dict) or str(raw_item.get("group") or "") != "snapshot":
+            continue
+        source = _env_text(raw_item.get("source"))
+        if source:
+            trend_by_source[source] = raw_item
+
+    weighted: List[Dict[str, Any]] = []
+    for base_rank, source in enumerate(sources):
+        current = current_by_source.get(source)
+        current = current if isinstance(current, dict) else {}
+        trend = trend_by_source.get(source, {})
+        observations = max(0, int(_safe_float(trend.get("observation_count")) or 0))
+        degraded_observations = max(
+            0,
+            min(observations, int(_safe_float(trend.get("degraded_observation_count")) or 0)),
+        )
+        healthy_observations = observations - degraded_observations
+        historical_weight = (healthy_observations + 4.0) / (observations + 5.0)
+        current_failures = max(0.0, _safe_float(current.get("failures")) or 0.0)
+        disabled = bool(current.get("disabled"))
+        current_weight = 0.0 if disabled else 1.0 / (1.0 + current_failures)
+        effective_weight = historical_weight * current_weight
+        weighted.append(
+            {
+                "source": source,
+                "base_rank": base_rank + 1,
+                "weight": round(effective_weight, 4),
+                "historical_weight": round(historical_weight, 4),
+                "current_weight": round(current_weight, 4),
+                "observation_count": observations,
+                "degraded_observation_count": degraded_observations,
+                "current_failures": current_failures,
+                "disabled": disabled,
+            }
+        )
+
+    if explicit_priority:
+        ranked = list(weighted)
+        mode = "explicit"
+    else:
+        ranked = sorted(
+            weighted,
+            key=lambda item: (
+                bool(item["disabled"]),
+                -float(item["weight"]),
+                int(item["base_rank"]),
+            ),
+        )
+        mode = "dynamic_health"
+    for effective_rank, item in enumerate(ranked, start=1):
+        item["effective_rank"] = effective_rank
+
+    effective_priority = ",".join(str(item["source"]) for item in ranked)
+    adjusted = effective_priority != ",".join(sources)
+    return {
+        "schema_version": 1,
+        "mode": mode,
+        "base_priority": ",".join(sources),
+        "effective_priority": effective_priority,
+        "adjusted": adjusted,
+        "reason": "explicit_priority_preserved" if explicit_priority else (
+            "health_weighted_priority_adjusted" if adjusted else "base_priority_retained"
+        ),
+        "lookback_days": 30,
+        "sources": ranked,
+    }
+
+
+def _build_alphasift_runtime_env(
+    config: Config,
+    *,
+    max_results: Optional[int] = None,
+    snapshot_source_priority: Optional[str] = None,
+) -> Dict[str, str]:
     # Bridge runtime only: only inject resolved DSA values for this request/process scope.
     # User .env/config is never rewritten here; unset channels/models are not silently migrated.
     # 与 LiteLLM provider/model、openai-compatible `api_base` 与 headers 注入语义保持一致，
@@ -2133,7 +2286,10 @@ def _build_alphasift_runtime_env(config: Config, *, max_results: Optional[int] =
     put_default("LLM_CANDIDATE_CONTEXT_PROVIDERS", DSA_ALPHASIFT_CANDIDATE_CONTEXT_PROVIDERS)
     put_default("LLM_CANDIDATE_MULTIPLIER", str(DSA_ALPHASIFT_LLM_CANDIDATE_MULTIPLIER))
     put_default("LLM_MAX_CANDIDATES", str(_resolve_dsa_llm_max_candidates(max_results)))
-    put_default("SNAPSHOT_SOURCE_PRIORITY", _resolve_alphasift_snapshot_source_priority(config))
+    put_default(
+        "SNAPSHOT_SOURCE_PRIORITY",
+        snapshot_source_priority or _resolve_alphasift_snapshot_source_priority(config),
+    )
     alphasift_data_dir = _resolve_alphasift_data_dir()
     put_default("ALPHASIFT_DATA_DIR", str(alphasift_data_dir))
     put_default("ALPHASIFT_FALLBACK_SNAPSHOT_PATH", str(alphasift_data_dir / "snapshot.last_good.json"))

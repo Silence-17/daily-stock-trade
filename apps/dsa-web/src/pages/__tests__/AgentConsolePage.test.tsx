@@ -91,6 +91,16 @@ const runSummary = {
       resolvedBudget: 10000,
       allocatedBudget: 10000,
     },
+    sourceRouting: {
+      mode: 'dynamic_health',
+      basePriority: 'sina,efinance',
+      effectivePriority: 'efinance,sina',
+      adjusted: true,
+      sources: [
+        { source: 'efinance', weight: 1, effectiveRank: 1 },
+        { source: 'sina', weight: 0.38, effectiveRank: 2 },
+      ],
+    },
     crossRunQuality: {
       state: 'healthy',
       reason: 'forward_quality_thresholds_met',
@@ -685,6 +695,9 @@ describe('AgentConsolePage', () => {
     expect(screen.getByTestId('cross-run-quality-state')).toHaveTextContent('healthy');
     expect(screen.getByTestId('cross-run-quality-state')).toHaveTextContent('20 个成熟样本');
     expect(screen.getByTestId('cross-run-quality-state')).toHaveTextContent('blocked->healthy');
+    expect(screen.getByTestId('agent-source-routing')).toHaveTextContent('dynamic_health');
+    expect(screen.getByTestId('agent-source-routing')).toHaveTextContent('efinance,sina');
+    expect(screen.getByTestId('agent-source-routing')).toHaveTextContent('已按健康权重调整');
     expect(screen.getAllByText('score 85.0').length).toBeGreaterThan(0);
     expect(screen.getByText('建议人工确认')).toBeInTheDocument();
     expect(screen.getByText('100.0%')).toBeInTheDocument();

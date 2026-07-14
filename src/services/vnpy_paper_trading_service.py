@@ -2363,11 +2363,22 @@ class VnpyPaperTradingService:
             return result
 
         config = get_config()
+        source_health_trends: List[Dict[str, Any]] = []
+        try:
+            trend_summary = self.agent_repo.summarize_data_quality_trends(
+                days=30,
+                strategy=settings.auto_strategy,
+                market=settings.auto_market,
+            )
+            source_health_trends = list(trend_summary.get("source_health_items") or [])
+        except Exception as exc:  # noqa: BLE001 - routing trends must degrade to the base source order.
+            logger.warning("Failed to load AlphaSift source-health trends: %s", exc)
         try:
             screen = AlphaSiftService(config=config).screen(
                 strategy=settings.auto_strategy,
                 market=settings.auto_market,
                 max_results=settings.auto_max_results,
+                source_health_trends=source_health_trends,
             )
         except Exception as exc:
             planned_count = sum(1 for item in orders if item.get("status") == "planned")
@@ -2477,6 +2488,7 @@ class VnpyPaperTradingService:
                     "warnings": list(screen.get("warnings") or []),
                     "source_errors": list(screen.get("source_errors") or []),
                     "source_health": screen.get("source_health") if isinstance(screen, dict) else None,
+                    "source_routing": screen.get("source_routing") if isinstance(screen, dict) else None,
                 },
             )
             self._record_auto_trade_alert_event(
@@ -2503,6 +2515,7 @@ class VnpyPaperTradingService:
                     "warnings": list(screen.get("warnings") or []),
                     "source_errors": list(screen.get("source_errors") or []),
                     "source_health": screen.get("source_health") if isinstance(screen, dict) else None,
+                    "source_routing": screen.get("source_routing") if isinstance(screen, dict) else None,
                 },
             )
             self._record_last_auto_run(result)
@@ -3083,6 +3096,7 @@ class VnpyPaperTradingService:
                 "warnings": list(screen.get("warnings") or []),
                 "source_errors": list(screen.get("source_errors") or []),
                 "source_health": screen.get("source_health") if isinstance(screen, dict) else None,
+                "source_routing": screen.get("source_routing") if isinstance(screen, dict) else None,
             },
         )
         self._record_last_auto_run(result)

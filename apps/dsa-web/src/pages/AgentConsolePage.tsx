@@ -418,6 +418,11 @@ const AgentConsolePage: React.FC = () => {
     asRecord(selectedDiagnostics?.portfolioAllocation)
     ?? asRecord(selectedDiagnostics?.portfolio_allocation)
   );
+  const selectedSourceRouting = (
+    asRecord(selectedDiagnostics?.sourceRouting)
+    ?? asRecord(selectedDiagnostics?.source_routing)
+  );
+  const selectedSourceRoutingItems = asRecordList(selectedSourceRouting?.sources);
   const selectedPlanProfile = asRecord(selectedPlan?.planProfile) ?? asRecord(selectedPlan?.plan_profile);
   const selectedAdaptiveControls = (
     asRecord(selectedPlan?.adaptiveControls)
@@ -1807,6 +1812,30 @@ const AgentConsolePage: React.FC = () => {
                                   : ''}
                                 {selectedCrossRunQuality.gateBlocked || selectedCrossRunQuality.gate_blocked
                                   ? ' · 买入已阻断'
+                                  : ''}
+                              </div>
+                            </dd>
+                          </div>
+                        ) : null}
+                        {selectedSourceRouting ? (
+                          <div className="sm:col-span-2" data-testid="agent-source-routing">
+                            <dt>数据源动态路由</dt>
+                            <dd className="mt-1 space-y-1 font-semibold text-foreground">
+                              <span>
+                                {String(selectedSourceRouting.mode || '-')}
+                                {' · '}
+                                {String(
+                                  selectedSourceRouting.effectivePriority
+                                  ?? selectedSourceRouting.effective_priority
+                                  ?? '-',
+                                )}
+                              </span>
+                              <div className="text-xs font-normal text-secondary-text">
+                                {selectedSourceRouting.adjusted ? '已按健康权重调整' : '保持基础顺序'}
+                                {selectedSourceRoutingItems.length > 0
+                                  ? ` · ${selectedSourceRoutingItems
+                                    .map((item) => `${String(item.source || '-')}:${formatNumber(item.weight, 2)}`)
+                                    .join(' / ')}`
                                   : ''}
                               </div>
                             </dd>

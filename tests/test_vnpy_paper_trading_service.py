@@ -475,6 +475,13 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
             ],
             "warnings": [],
             "source_errors": [],
+            "source_health": {"snapshot": {"sina": {"failures": 1, "disabled": False}}},
+            "source_routing": {
+                "mode": "dynamic_health",
+                "base_priority": "sina,efinance",
+                "effective_priority": "efinance,sina",
+                "adjusted": True,
+            },
         }
         fake_analyzer = MagicMock()
         fake_analyzer.is_available.return_value = True
@@ -495,13 +502,30 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
             {"total_tokens": 42},
         )
 
+        trend_items = [
+            {
+                "group": "snapshot",
+                "source": "sina",
+                "observation_count": 10,
+                "degraded_observation_count": 8,
+            }
+        ]
         with patch(
             "src.services.vnpy_paper_trading_service.AlphaSiftService",
             return_value=fake_alphasift,
-        ), patch("src.analyzer.GeminiAnalyzer", return_value=fake_analyzer):
+        ), patch("src.analyzer.GeminiAnalyzer", return_value=fake_analyzer), patch.object(
+            self.service.agent_repo,
+            "summarize_data_quality_trends",
+            return_value={"source_health_items": trend_items},
+        ):
             result = self.service.run_auto_trade_once(execution_mode_override="dry_run")
 
-        fake_alphasift.screen.assert_called_once_with(strategy="capital_heat", market="cn", max_results=1)
+        fake_alphasift.screen.assert_called_once_with(
+            strategy="capital_heat",
+            market="cn",
+            max_results=1,
+            source_health_trends=trend_items,
+        )
         self.assertTrue(result["accepted"])
         self.assertEqual(result["strategy"], "capital_heat")
         self.assertEqual(result["planned_count"], 1)
@@ -514,6 +538,10 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertEqual(plan["strategy"], "capital_heat")
         self.assertEqual(plan["max_results"], 1)
         self.assertEqual(plan["cash_per_order"], 1200.0)
+        self.assertEqual(
+            audit["diagnostics"]["source_routing"]["effective_priority"],
+            "efinance,sina",
+        )
         self.assertTrue(plan["gates"]["llm_dynamic_plan_enabled"])
         self.assertTrue(plan["gates"]["llm_dynamic_plan_applied"])
         self.assertEqual(dynamic_plan["status"], "accepted")

@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [新功能] 自动选股 Agent 会按最近 30 天同策略/市场的持久化来源健康观测和当前连续失败状态计算有边界的 AlphaSift 快照源权重，并在未显式配置优先级时动态调整来源顺序。
+- [改进] AlphaSift screen 结果与 Agent run 诊断新增 `source_health` 和 `source_routing` 审计；Agent 控制台展示本轮有效来源顺序及各来源权重，显式 `SNAPSHOT_SOURCE_PRIORITY` 始终保持不变。
+- [测试] 新增历史降级源降权、显式优先级保护、趋势传入、运行审计和 Agent 来源路由展示回归，并修复有效 screen 缓存夹具使用固定日期导致的时效性失败。
 - [修复] 连续失败熔断触发后保持锁存，不再因 `failure_fuse_open` 跳过记录而隔轮自动放行；只有显式“恢复熔断”重置基线后才重新允许买入。
 - [修复] 相关性分配的 trailing returns 查询兼容裸代码、市场前缀和市场后缀格式，并审计最终命中的 `stock_daily` 代码，避免本地行情存在但被误判为历史不足。
 - [新功能] 新增只读 `GET /api/v1/vnpy-paper/agent-runs/cross-run-quality`，Agent 控制台可在触发下一轮任务前展示当前前瞻状态、成熟样本、胜率和买入门禁结论。
