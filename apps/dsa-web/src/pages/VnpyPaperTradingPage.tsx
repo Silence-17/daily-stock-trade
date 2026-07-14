@@ -60,6 +60,15 @@ const SELECT_CLASS = `${INPUT_CLASS} appearance-none`;
 const TEXTAREA_CLASS =
   'min-h-20 w-full rounded-xl border border-border bg-surface px-3 py-2 text-sm text-foreground outline-none transition-colors focus:border-cyan disabled:cursor-not-allowed disabled:opacity-60';
 const CHECKBOX_CLASS = 'h-4 w-4 rounded border-border bg-surface text-cyan focus:ring-cyan/30';
+const EXPECTED_VNPY_PAPER_CONTRACT_VERSION = 3;
+
+type AvailabilityDiagnostic = {
+  key: string;
+  label: string;
+  status: string;
+  detail: string;
+  tone: 'success' | 'warning' | 'danger' | 'info';
+};
 
 type SettingsForm = {
   enabled: boolean;
@@ -1335,6 +1344,10 @@ const VnpyPaperTradingPage: React.FC = () => {
   const failureFuse = asRecord(status?.diagnostics?.failureFuse);
   const systemHealth = asRecord(status?.diagnostics?.systemHealth);
   const autoTradeReadiness = asRecord(status?.diagnostics?.autoTradeReadiness);
+  const backendRuntime = asRecord(status?.diagnostics?.backend);
+  const backendApiVersion = String(backendRuntime?.apiVersion || '').trim();
+  const backendBuildId = String(backendRuntime?.buildId || '').trim();
+  const backendContractVersion = Number(backendRuntime?.vnpyPaperContractVersion || 0);
   const failureFuseEnabled = Boolean(failureFuse?.enabled);
   const failureFuseOpen = Boolean(failureFuse?.open);
   const failureFuseCount = Number(failureFuse?.consecutiveFailureCount ?? 0);
@@ -1372,9 +1385,23 @@ const VnpyPaperTradingPage: React.FC = () => {
   const tradingWindowGatesExecution = settingsForm.autoTradeTimeGateEnabled
     && ['paper', 'vnpy_paper'].includes(autoExecutionMode);
   const availabilityDiagnostics = useMemo(() => {
+    const withBackendVersion = (items: AvailabilityDiagnostic[]): AvailabilityDiagnostic[] => {
+      const compatible = backendContractVersion >= EXPECTED_VNPY_PAPER_CONTRACT_VERSION;
+      const detail = backendContractVersion > 0
+        ? `API ${backendApiVersion || '-'} · contract ${backendContractVersion} · build ${backendBuildId.slice(0, 16) || 'local'}`
+        : `未报告版本，可能仍是旧后端进程；页面需要 contract ${EXPECTED_VNPY_PAPER_CONTRACT_VERSION}`;
+      const backendItem: AvailabilityDiagnostic = {
+        key: 'backend_version',
+        label: '后端版本',
+        status: compatible ? '兼容' : '需更新',
+        detail,
+        tone: compatible ? 'success' : 'warning',
+      };
+      return [backendItem, ...items.filter((item) => item.key !== 'backend_version')];
+    };
     const systemHealthComponents = asRecordList(systemHealth?.components);
     if (systemHealthComponents.length > 0) {
-      return systemHealthComponents.map((item, index) => {
+      return withBackendVersion(systemHealthComponents.map((item, index) => {
         const itemStatus = item.status;
         const itemTone = String(item.tone || '') as 'success' | 'warning' | 'danger' | 'info';
         return {
@@ -1386,12 +1413,12 @@ const VnpyPaperTradingPage: React.FC = () => {
             ? itemTone
             : diagnosticToneFromStatus(itemStatus),
         };
-      });
+      }));
     }
 
     const readinessComponents = asRecordList(autoTradeReadiness?.components);
     if (readinessComponents.length > 0) {
-      return readinessComponents.map((item, index) => {
+      return withBackendVersion(readinessComponents.map((item, index) => {
         const itemStatus = item.status;
         const itemTone = String(item.tone || '') as 'success' | 'warning' | 'danger' | 'info';
         return {
@@ -1403,16 +1430,10 @@ const VnpyPaperTradingPage: React.FC = () => {
             ? itemTone
             : diagnosticToneFromStatus(itemStatus),
         };
-      });
+      }));
     }
 
-    const items: Array<{
-      key: string;
-      label: string;
-      status: string;
-      detail: string;
-      tone: 'success' | 'warning' | 'danger' | 'info';
-    }> = [];
+    const items: AvailabilityDiagnostic[] = [];
 
     items.push({
       key: 'local-paper',
@@ -1486,11 +1507,14 @@ const VnpyPaperTradingPage: React.FC = () => {
         : 'info',
     });
 
-    return items;
+    return withBackendVersion(items);
   }, [
     autoTradeReadiness,
     autoExecutionMode,
     autoTradeTask,
+    backendApiVersion,
+    backendBuildId,
+    backendContractVersion,
     failureFuseCount,
     failureFuseEnabled,
     failureFuseOpen,

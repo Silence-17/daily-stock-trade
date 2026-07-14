@@ -27,6 +27,7 @@
 - 完整状态的 `diagnostics.industry_exposure` 返回行业归属解析状态、持仓总数、已解析/缺失数量、覆盖率、缺失代码和按行业汇总的持仓市值。未配置行业风控时使用 `snapshot_only` 模式，只统计快照已有字段且不发起逐股网络请求；配置行业金额/比例上限或目标行业权重后切换到 `risk_guard` 模式，该组件属于必需风控条件，覆盖不完整会 fail closed。轻量状态只返回 `snapshot_not_requested`，不会拉取持仓或行业数据。
 - 配置 `auto_max_drawdown_pct` 后，账户回撤按账户 ID 持久化的已观测权益峰值计算，峰值至少为初始资金。`diagnostics.account_drawdown` 和 Agent run 的 `diagnostics.account_risk` 返回 `basis=observed_equity_peak`、当前权益、峰值权益、回撤比例和阈值；恢复旧账户会继续使用该账户的峰值，新建/重置账户使用新账户 ID 独立计算。达到阈值时系统健康的“账户回撤”组件阻断新买入，卖出风险处置不受影响。当前不会自动解除回撤门禁。
 - Web 模拟交易页“可用性诊断”摘要会优先使用 `diagnostics.system_health.components`，旧后端无该字段时回退到 `diagnostics.auto_trade_readiness`，再无 readiness 时才基于现有状态字段本地推导，帮助快速判断为何不可用或为何本轮不会自动提交。
+- 状态接口的 `diagnostics.backend` 返回 API 版本、vn.py paper contract 版本、可选 build id、Python 版本和进程启动时间；统一系统健康包含“后端版本”组件。当前 Web 以 contract `3` 为兼容基线：字段缺失或低于基线时显示“需更新”，可直接识别页面已更新但 API 仍是旧进程。部署可选设置 `DSA_BUILD_ID`；未设置时兼容 `GITHUB_SHA`、`RENDER_GIT_COMMIT` 和 `RAILWAY_GIT_COMMIT_SHA`，本地运行无需配置。
 - Web 模拟交易页的首屏状态加载失败时会区分常见排障原因：`/api/v1/vnpy-paper/status` 返回 404 时提示后端可能仍是旧进程或未加载 vn.py paper 路由；请求超时时提示优先检查轻量状态接口和行情/估值数据源；本地连接失败时提示检查 Web/API 服务和 `API_BASE_URL`。
 - Web 模拟交易页会根据状态诊断、Portfolio 快照 `limitations` 和持仓级 `price_available` / `price_stale` 展示“持仓估值降级”提示；当前持仓表同步显示价格源，缺价时标记为“缺价”，避免市值或浮盈显示为 0 时缺少解释。
 - 状态接口的完整持仓快照使用进程内 10 秒短 TTL 缓存，减少页面刷新时重复重放 Portfolio 和拉取行情估值；本地成交、vn.py 成交回调、账户重置或账户恢复后会主动失效缓存。`diagnostics.snapshot_cache_hit` 和 `diagnostics.snapshot_cache_ttl_seconds` 可用于判断本次状态是否来自缓存。

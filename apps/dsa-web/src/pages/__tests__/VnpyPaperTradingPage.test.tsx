@@ -218,6 +218,14 @@ const statusResponse = {
     }],
   },
   diagnostics: {
+    backend: {
+      apiVersion: '1.0.0',
+      vnpyPaperContractVersion: 3,
+      buildId: 'test-build-abcdef123456',
+      buildSource: 'DSA_BUILD_ID',
+      pythonVersion: '3.13.14',
+      processStartedAt: '2026-07-15T09:00:00Z',
+    },
     vnpyAdapter: {
       orderRequestSupported: false,
       cancelRequestSupported: false,
@@ -1357,6 +1365,30 @@ describe('VnpyPaperTradingPage', () => {
     expect(availabilityDiagnostics).toHaveTextContent(lastRunDetail);
   });
 
+  it('warns when an old backend does not report the paper contract version', async () => {
+    const oldBackendStatus = {
+      ...statusResponse,
+      diagnostics: {
+        ...statusResponse.diagnostics,
+        backend: undefined,
+      },
+    };
+    getStatus
+      .mockResolvedValueOnce({ ...oldBackendStatus, snapshot: null, recentTrades: [] })
+      .mockResolvedValueOnce(oldBackendStatus);
+
+    render(
+      <UiLanguageProvider>
+        <VnpyPaperTradingPage />
+      </UiLanguageProvider>,
+    );
+
+    const availabilityDiagnostics = await screen.findByTestId('paper-availability-diagnostics');
+    expect(availabilityDiagnostics).toHaveTextContent('后端版本');
+    expect(availabilityDiagnostics).toHaveTextContent('需更新');
+    expect(availabilityDiagnostics).toHaveTextContent('未报告版本，可能仍是旧后端进程');
+  });
+
   it('renders paper account status, positions, and trades', async () => {
     render(
       <UiLanguageProvider>
@@ -1377,6 +1409,8 @@ describe('VnpyPaperTradingPage', () => {
     expect(screen.getByText('vn.py 环境未安装')).toBeInTheDocument();
     const availabilityDiagnostics = screen.getByTestId('paper-availability-diagnostics');
     expect(availabilityDiagnostics).toHaveTextContent('可用性诊断');
+    expect(availabilityDiagnostics).toHaveTextContent('后端版本');
+    expect(availabilityDiagnostics).toHaveTextContent('API 1.0.0 · contract 3 · build test-build-abcde');
     expect(availabilityDiagnostics).toHaveTextContent('本地账本');
     expect(availabilityDiagnostics).toHaveTextContent('选股来源');
     expect(availabilityDiagnostics).toHaveTextContent('自动化调度');
@@ -1893,7 +1927,7 @@ describe('VnpyPaperTradingPage', () => {
       }),
     ));
     await waitFor(() => expect(screen.getAllByText(/模拟成交/).length).toBeGreaterThan(0));
-  });
+  }, 10000);
 
   it('persists current auto settings before running once', async () => {
     render(

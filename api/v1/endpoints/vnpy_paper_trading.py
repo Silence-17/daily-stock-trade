@@ -4,11 +4,14 @@
 from __future__ import annotations
 
 import logging
+import os
+import sys
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query, Request
 
+from api import __version__ as API_VERSION
 from api.deps import get_runtime_scheduler_service
 from api.v1.errors import api_error
 from api.v1.schemas.common import ErrorResponse
@@ -54,6 +57,30 @@ from src.services.vnpy_paper_trading_service import VnpyPaperTradingService
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+VNPY_PAPER_STATUS_CONTRACT_VERSION = 3
+_PROCESS_STARTED_AT = datetime.now(timezone.utc).isoformat()
+
+
+def _backend_runtime_status() -> Dict[str, Any]:
+    build_sources = (
+        ("DSA_BUILD_ID", os.getenv("DSA_BUILD_ID")),
+        ("GITHUB_SHA", os.getenv("GITHUB_SHA")),
+        ("RENDER_GIT_COMMIT", os.getenv("RENDER_GIT_COMMIT")),
+        ("RAILWAY_GIT_COMMIT_SHA", os.getenv("RAILWAY_GIT_COMMIT_SHA")),
+    )
+    build_source, build_id = next(
+        ((source, str(value).strip()) for source, value in build_sources if str(value or "").strip()),
+        (None, None),
+    )
+    return {
+        "api_version": API_VERSION,
+        "vnpy_paper_contract_version": VNPY_PAPER_STATUS_CONTRACT_VERSION,
+        "build_id": build_id,
+        "build_source": build_source,
+        "python_version": ".".join(str(item) for item in sys.version_info[:3]),
+        "process_started_at": _PROCESS_STARTED_AT,
+    }
 
 
 def _service(request: Optional[Request] = None) -> VnpyPaperTradingService:
@@ -112,6 +139,14 @@ def _with_system_health(payload: Dict[str, Any]) -> Dict[str, Any]:
     diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), dict) else {}
     diagnostics = dict(diagnostics)
     diagnostics["system_health"] = _system_health_payload(payload)
+    payload["diagnostics"] = diagnostics
+    return payload
+
+
+def _with_backend_status(payload: Dict[str, Any]) -> Dict[str, Any]:
+    diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), dict) else {}
+    diagnostics = dict(diagnostics)
+    diagnostics["backend"] = _backend_runtime_status()
     payload["diagnostics"] = diagnostics
     return payload
 
@@ -323,6 +358,7 @@ def _system_health_payload(status_payload: Dict[str, Any]) -> Dict[str, Any]:
     trading_window = diagnostics.get("trading_window") if isinstance(diagnostics.get("trading_window"), dict) else {}
     vnpy_bridge = diagnostics.get("vnpy_bridge") if isinstance(diagnostics.get("vnpy_bridge"), dict) else {}
     vnpy_runtime = diagnostics.get("vnpy_runtime") if isinstance(diagnostics.get("vnpy_runtime"), dict) else {}
+    backend = diagnostics.get("backend") if isinstance(diagnostics.get("backend"), dict) else {}
 
     auto_trade_enabled = bool(settings.get("auto_trade_enabled"))
     execution_mode = str(settings.get("auto_execution_mode") or status_payload.get("mode") or "paper")
@@ -361,6 +397,30 @@ def _system_health_payload(status_payload: Dict[str, Any]) -> Dict[str, Any]:
         status="ready" if paper_enabled and paper_available else "blocked",
         reason="paper_ledger_ready" if paper_enabled and paper_available else "paper_ledger_unavailable",
         detail="本地 paper 账本可写入 Portfolio" if paper_enabled and paper_available else "模拟交易关闭或本地账本不可用",
+    )
+
+    backend_contract_version = int(backend.get("vnpy_paper_contract_version") or 0)
+    backend_build_id = str(backend.get("build_id") or "local").strip()
+    backend_compatible = backend_contract_version >= VNPY_PAPER_STATUS_CONTRACT_VERSION
+    add_component(
+        key="backend_version",
+        label="后端版本",
+        status="ready" if backend_compatible else "warning",
+        reason="backend_contract_compatible" if backend_compatible else "backend_contract_unknown",
+        detail=(
+            f"API {backend.get('api_version') or '-'} · contract {backend_contract_version or '-'} · "
+            f"build {backend_build_id[:16]} · Python {backend.get('python_version') or '-'}"
+        ),
+        required=False,
+        extra={
+            "api_version": backend.get("api_version"),
+            "contract_version": backend_contract_version or None,
+            "expected_contract_version": VNPY_PAPER_STATUS_CONTRACT_VERSION,
+            "build_id": backend.get("build_id"),
+            "build_source": backend.get("build_source"),
+            "python_version": backend.get("python_version"),
+            "process_started_at": backend.get("process_started_at"),
+        },
     )
 
     alphasift_enabled = bool(alphasift.get("enabled", True)) if alphasift else True
@@ -1440,6 +1500,7 @@ def _with_status_dependencies(
     scheduler: RuntimeSchedulerService,
     request: Request,
 ) -> Dict[str, Any]:
+    payload = _with_backend_status(payload)
     payload = _with_alphasift_status(payload)
     payload = _with_scheduler_status(payload, scheduler)
     payload = _with_vnpy_runtime_status(payload, request)

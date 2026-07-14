@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [改进] vn.py paper 状态新增 API/contract/build/Python/进程启动诊断，Web 以 contract 3 检测旧后端进程并在可用性诊断中显示兼容或需更新；可选 `DSA_BUILD_ID` 同步加入配置模板。
+- [测试] 新增后端版本契约、Web 当前/旧后端显示和高交互设置保存用例的稳定时限回归。
 - [改进] vn.py paper readiness、统一系统健康和 Web 可用性诊断新增持久化最近自动运行结果，展示 run id、时间、原始跳过/失败原因和候选/提交计数，不再依赖 scheduler task event 保留期。
 - [测试] 新增最近自动运行 reason 的持久化、API 诊断和 Web 展示回归，确认历史非成功结果仅作为 warning。
 - [改进] vn.py paper 完整系统健康新增持仓价格覆盖率、新鲜率、来源/provider 分布、缺失/陈旧/状态未知代码和价格日期范围，Web 可用性诊断直接展示来源健康摘要且不增加行情请求。
