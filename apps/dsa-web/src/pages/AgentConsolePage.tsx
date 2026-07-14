@@ -502,6 +502,8 @@ const AgentConsolePage: React.FC = () => {
   const crossRunReviewMetric = asRecord(
     crossRunReviewHorizons?.[String(crossRunQuality?.horizonDays || '')],
   );
+  const crossRunReturnRiskObjective = asRecord(crossRunQuality?.returnRiskObjective);
+  const crossRunReturnRiskMetrics = asRecord(crossRunReturnRiskObjective?.metrics);
 
   const selectedSummary = runAgentSummary(selectedRun);
   const selectedReviewQuality = runReviewQuality(selectedRun);
@@ -1001,6 +1003,14 @@ const AgentConsolePage: React.FC = () => {
                   {crossRunQuality.reviewQualityApplied ? ' · 已作用于当前状态' : ''}
                 </p>
               ) : null}
+              {crossRunQuality.returnRiskObjectiveState ? (
+                <p className="mt-1 text-xs text-secondary-text" data-testid="agent-return-risk-objective-state">
+                  收益风险目标 {crossRunQuality.returnRiskObjectiveState}
+                  {' · '}{crossRunQuality.returnRiskObjectiveReason || '-'}
+                  {crossRunQuality.returnRiskObjectiveApplied ? ' · 已作用于当前状态' : ''}
+                  {' · 版本 '}{String(crossRunReturnRiskObjective?.version || '-')}
+                </p>
+              ) : null}
             </div>
             <dl className="grid grid-cols-2 gap-x-6 gap-y-2 text-xs text-secondary-text sm:grid-cols-4">
               <div>
@@ -1023,6 +1033,35 @@ const AgentConsolePage: React.FC = () => {
                 <dt>平均收益</dt>
                 <dd className="mt-1 font-semibold text-foreground">
                   {formatPercent(crossRunQuality.averageReturnPct)}
+                </dd>
+              </div>
+              <div data-testid="agent-return-risk-objective-metrics">
+                <dt>收益风险效用</dt>
+                <dd className="mt-1 font-semibold text-foreground">
+                  {formatPercent(
+                    crossRunQuality.returnRiskUtilityPct
+                    ?? crossRunReturnRiskMetrics?.returnRiskUtilityPct
+                    ?? crossRunReturnRiskMetrics?.return_risk_utility_pct,
+                  )}
+                </dd>
+              </div>
+              <div>
+                <dt>日波动 / 下行偏差</dt>
+                <dd className="mt-1 font-semibold text-foreground">
+                  {formatPercent(crossRunQuality.dailyReturnVolatilityPct)}
+                  {' / '}{formatPercent(crossRunQuality.downsideDeviationPct)}
+                </dd>
+              </div>
+              <div>
+                <dt>逐日收益覆盖</dt>
+                <dd className="mt-1 font-semibold text-foreground">
+                  {formatPercent(crossRunQuality.dailyReturnCoveragePct)}
+                </dd>
+              </div>
+              <div>
+                <dt>日度尾部收益 20%</dt>
+                <dd className="mt-1 font-semibold text-foreground">
+                  {formatPercent(crossRunQuality.dailyExpectedShortfall20Pct)}
                 </dd>
               </div>
               {crossRunReviewMetric ? (
@@ -1103,6 +1142,8 @@ const AgentConsolePage: React.FC = () => {
                       <span>中位 {formatPercent(metric.medianReturnPct)}</span>
                       <span>样本 {metric.completedCount}/{metric.sampleCount}</span>
                       <span>最大不利均值 {formatPercent(metric.averageMaxAdverseExcursionPct)}</span>
+                      <span>风险效用 {formatPercent(metric.returnRiskUtilityPct)}</span>
+                      <span>尾部收益 {formatPercent(metric.dailyExpectedShortfall20Pct)}</span>
                     </div>
                   </div>
                 ))}

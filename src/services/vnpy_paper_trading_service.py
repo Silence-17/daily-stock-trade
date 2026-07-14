@@ -5243,6 +5243,9 @@ class VnpyPaperTradingService:
         failure_streak = max(0, int(_safe_int(context.get("current_failure_streak")) or 0))
         quality_state = str(quality.get("state") or "").strip().lower()
         review_quality_state = str(quality.get("review_quality_state") or "").strip().lower()
+        return_risk_state = str(
+            quality.get("return_risk_objective_state") or ""
+        ).strip().lower()
 
         if feedback_verdict == "rejected":
             severity = "strict"
@@ -5266,6 +5269,8 @@ class VnpyPaperTradingService:
             reasons.append(f"cross_run_quality_{quality_state}")
         if quality.get("review_quality_applied") and review_quality_state:
             reasons.append(f"review_quality_{review_quality_state}")
+        if quality.get("return_risk_objective_applied") and return_risk_state:
+            reasons.append(f"return_risk_objective_{return_risk_state}")
 
         configured_max_results = max(1, int(settings.auto_max_results or 1))
         configured_cash = max(0.0, float(settings.auto_cash_per_order or 0.0))
@@ -5475,7 +5480,7 @@ class VnpyPaperTradingService:
         except Exception as exc:  # noqa: BLE001 - enabled gate must fail closed.
             logger.warning("Failed to build cross-run Agent quality snapshot: %s", exc)
             snapshot = {
-                "schema_version": 1,
+                "schema_version": 3,
                 "generated_at": _utc_now_iso(),
                 "state": "unavailable",
                 "reason": "forward_evaluation_failed",

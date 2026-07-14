@@ -497,10 +497,13 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
                 "state": "blocked",
                 "review_quality_state": "blocked",
                 "review_quality_applied": True,
+                "return_risk_objective_state": "guarded",
+                "return_risk_objective_applied": True,
             },
         )
         self.assertEqual(review_guarded["mode"], "strict")
         self.assertIn("review_quality_blocked", review_guarded["reasons"])
+        self.assertIn("return_risk_objective_guarded", review_guarded["reasons"])
 
     def test_cross_market_objective_changes_screen_and_plan_execution_limits(self) -> None:
         self.service.update_settings(

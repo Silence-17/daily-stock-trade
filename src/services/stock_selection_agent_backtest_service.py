@@ -19,6 +19,9 @@ class StockSelectionAgentBacktestService:
     """Evaluate recorded Agent buy candidates against strictly later daily bars."""
 
     ENGINE_VERSION = "agent-forward-v1"
+    RETURN_RISK_OBJECTIVE_VERSION = "candidate-return-risk-v1"
+    RETURN_RISK_DOWNSIDE_WEIGHT = 0.5
+    RETURN_RISK_ADVERSE_EXCURSION_WEIGHT = 0.25
     DEFAULT_WINDOWS = (1, 5, 10, 20)
 
     def build_quality_snapshot(
@@ -71,6 +74,12 @@ class StockSelectionAgentBacktestService:
             min_mature_samples=minimum,
             min_accuracy_pct=threshold,
         )
+        return_risk_objective = self._return_risk_objective_state(
+            metrics,
+            min_mature_samples=minimum,
+        )
+        objective_state = str(return_risk_objective["state"])
+        objective_reason = str(return_risk_objective["reason"])
         severity = {
             "insufficient_evidence": 0,
             "healthy": 1,
@@ -78,12 +87,19 @@ class StockSelectionAgentBacktestService:
             "blocked": 3,
             "unavailable": 4,
         }
-        review_quality_applied = severity.get(review_state, 0) > severity.get(selection_state, 0)
-        state = review_state if review_quality_applied else selection_state
-        reason = review_reason if review_quality_applied else selection_reason
+        state = selection_state
+        reason = selection_reason
+        return_risk_objective_applied = severity.get(objective_state, 0) > severity.get(state, 0)
+        if return_risk_objective_applied:
+            state = objective_state
+            reason = objective_reason
+        review_quality_applied = severity.get(review_state, 0) > severity.get(state, 0)
+        if review_quality_applied:
+            state = review_state
+            reason = review_reason
         previous = str(previous_state or "").strip().lower() or None
         return {
-            "schema_version": 2,
+            "schema_version": 3,
             "generated_at": result.get("generated_at"),
             "state": state,
             "reason": reason,
@@ -94,6 +110,10 @@ class StockSelectionAgentBacktestService:
             "market": market,
             "selection_quality_state": selection_state,
             "selection_quality_reason": selection_reason,
+            "return_risk_objective_state": objective_state,
+            "return_risk_objective_reason": objective_reason,
+            "return_risk_objective_applied": return_risk_objective_applied,
+            "return_risk_objective": return_risk_objective,
             "review_quality_state": review_state,
             "review_quality_reason": review_reason,
             "review_quality_applied": review_quality_applied,
@@ -111,10 +131,80 @@ class StockSelectionAgentBacktestService:
             "average_max_adverse_excursion_pct": metrics.get(
                 "average_max_adverse_excursion_pct"
             ),
+            "average_daily_return_pct": metrics.get("average_daily_return_pct"),
+            "daily_return_coverage_pct": metrics.get("daily_return_coverage_pct"),
+            "daily_return_volatility_pct": metrics.get("daily_return_volatility_pct"),
+            "downside_deviation_pct": metrics.get("downside_deviation_pct"),
+            "daily_expected_shortfall_20_pct": metrics.get(
+                "daily_expected_shortfall_20_pct"
+            ),
+            "return_risk_utility_pct": metrics.get("return_risk_utility_pct"),
             "unable_reason_counts": dict(metrics.get("unable_reason_counts") or {}),
             "lookahead_protection": True,
             "source": "persisted_agent_decisions_and_stock_daily",
             "truncated": bool(result.get("truncated")),
+        }
+
+    @classmethod
+    def _return_risk_objective_state(
+        cls,
+        metrics: Dict[str, Any],
+        *,
+        min_mature_samples: int,
+    ) -> Dict[str, Any]:
+        minimum = max(1, int(min_mature_samples))
+        completed_count = int(metrics.get("completed_count") or 0)
+        average_return = cls._finite_float(metrics.get("average_return_pct"))
+        utility = cls._finite_float(metrics.get("return_risk_utility_pct"))
+        if completed_count < minimum:
+            state = "insufficient_evidence"
+            reason = "return_risk_mature_sample_count_below_threshold"
+        elif utility is None:
+            state = "unavailable"
+            reason = "return_risk_utility_unavailable"
+        elif utility < 0 and average_return is not None and average_return < 0:
+            state = "blocked"
+            reason = "return_risk_negative_return_and_utility"
+        elif utility < 0:
+            state = "guarded"
+            reason = "return_risk_utility_below_zero"
+        else:
+            state = "healthy"
+            reason = "return_risk_objective_met"
+        return {
+            "schema_version": 1,
+            "version": cls.RETURN_RISK_OBJECTIVE_VERSION,
+            "state": state,
+            "reason": reason,
+            "min_mature_samples": minimum,
+            "formula": (
+                "average_forward_return_pct"
+                " - 0.5 * horizon_downside_deviation_pct"
+                " - 0.25 * abs(average_max_adverse_excursion_pct)"
+            ),
+            "weights": {
+                "horizon_downside_deviation": cls.RETURN_RISK_DOWNSIDE_WEIGHT,
+                "average_max_adverse_excursion": cls.RETURN_RISK_ADVERSE_EXCURSION_WEIGHT,
+            },
+            "metrics": {
+                "completed_count": completed_count,
+                "daily_observation_count": int(metrics.get("daily_observation_count") or 0),
+                "daily_return_coverage_pct": metrics.get("daily_return_coverage_pct"),
+                "average_forward_return_pct": average_return,
+                "average_daily_return_pct": metrics.get("average_daily_return_pct"),
+                "daily_return_volatility_pct": metrics.get("daily_return_volatility_pct"),
+                "downside_deviation_pct": metrics.get("downside_deviation_pct"),
+                "horizon_downside_deviation_pct": metrics.get(
+                    "horizon_downside_deviation_pct"
+                ),
+                "daily_expected_shortfall_20_pct": metrics.get(
+                    "daily_expected_shortfall_20_pct"
+                ),
+                "average_max_adverse_excursion_pct": metrics.get(
+                    "average_max_adverse_excursion_pct"
+                ),
+                "return_risk_utility_pct": utility,
+            },
         }
 
     @classmethod
@@ -255,6 +345,10 @@ class StockSelectionAgentBacktestService:
                             if min_low is not None and start_price
                             else None
                         )
+                        evaluation["daily_returns_pct"] = self._daily_return_series(
+                            start_price=start_price,
+                            bars=bars[:window],
+                        )
                 horizons[str(window)] = evaluation
 
             order_result = (
@@ -316,6 +410,12 @@ class StockSelectionAgentBacktestService:
                 "review_grouping": "source_model_prompt_evaluator_version",
                 "passed_precision_rule": "completed_passed_reviews_with_hit_or_win_outcome",
                 "blocked_avoidance_rule": "completed_blocked_reviews_with_miss_or_loss_outcome",
+                "return_risk_objective_version": self.RETURN_RISK_OBJECTIVE_VERSION,
+                "return_risk_objective_formula": (
+                    "average_forward_return_pct"
+                    " - 0.5 * horizon_downside_deviation_pct"
+                    " - 0.25 * abs(average_max_adverse_excursion_pct)"
+                ),
             },
             "filters": {
                 "strategy": strategy,
@@ -586,6 +686,44 @@ class StockSelectionAgentBacktestService:
             for value in (cls._finite_float(item.get("max_adverse_excursion_pct")) for item in completed)
             if value is not None
         ]
+        daily_returns = [
+            value
+            for item in completed
+            for value in (
+                cls._finite_float(raw_value)
+                for raw_value in item.get("daily_returns_pct") or []
+            )
+            if value is not None
+        ]
+        expected_daily_observations = len(completed) * window
+        daily_return_coverage_pct = cls._pct(
+            len(daily_returns),
+            expected_daily_observations,
+        )
+        daily_returns_complete = bool(
+            completed and len(daily_returns) == expected_daily_observations
+        )
+        average_return = cls._average(returns)
+        average_adverse = cls._average(adverse)
+        downside_deviation = cls._downside_deviation(daily_returns)
+        horizon_downside = (
+            round(downside_deviation * math.sqrt(window), 6)
+            if downside_deviation is not None
+            else None
+        )
+        return_risk_utility = (
+            round(
+                average_return
+                - cls.RETURN_RISK_DOWNSIDE_WEIGHT * horizon_downside
+                - cls.RETURN_RISK_ADVERSE_EXCURSION_WEIGHT * abs(average_adverse),
+                6,
+            )
+            if daily_returns_complete
+            and average_return is not None
+            and horizon_downside is not None
+            and average_adverse is not None
+            else None
+        )
         outcome_counts = Counter(str(item.get("outcome") or "unknown") for item in completed)
         win_count = outcome_counts.get("hit", 0) + outcome_counts.get("win", 0)
         loss_count = outcome_counts.get("miss", 0) + outcome_counts.get("loss", 0)
@@ -608,13 +746,55 @@ class StockSelectionAgentBacktestService:
                 sum(1 for item in completed if item.get("direction_correct") is True),
                 len(completed),
             ),
-            "average_return_pct": cls._average(returns),
+            "average_return_pct": average_return,
             "median_return_pct": round(statistics.median(returns), 6) if returns else None,
             "average_max_favorable_excursion_pct": cls._average(favorable),
-            "average_max_adverse_excursion_pct": cls._average(adverse),
+            "average_max_adverse_excursion_pct": average_adverse,
+            "daily_observation_count": len(daily_returns),
+            "expected_daily_observation_count": expected_daily_observations,
+            "daily_return_coverage_pct": daily_return_coverage_pct,
+            "average_daily_return_pct": cls._average(daily_returns),
+            "daily_return_volatility_pct": (
+                round(statistics.pstdev(daily_returns), 6) if daily_returns else None
+            ),
+            "downside_deviation_pct": downside_deviation,
+            "horizon_downside_deviation_pct": horizon_downside,
+            "daily_expected_shortfall_20_pct": cls._expected_shortfall(
+                daily_returns,
+                fraction=0.2,
+            ),
+            "return_risk_utility_pct": return_risk_utility,
+            "return_risk_objective_version": cls.RETURN_RISK_OBJECTIVE_VERSION,
             "neutral_band_pct": neutral_band_pct,
             "unable_reason_counts": dict(unable_reasons),
         }
+
+    @classmethod
+    def _daily_return_series(cls, *, start_price: float, bars: List[Any]) -> List[float]:
+        previous = cls._positive_float(start_price)
+        if previous is None:
+            return []
+        result: List[float] = []
+        for bar in bars:
+            close = cls._positive_float(getattr(bar, "close", None))
+            if close is None:
+                return []
+            result.append(round((close - previous) / previous * 100.0, 6))
+            previous = close
+        return result
+
+    @staticmethod
+    def _downside_deviation(values: List[float]) -> Optional[float]:
+        if not values:
+            return None
+        return round(math.sqrt(sum(min(0.0, value) ** 2 for value in values) / len(values)), 6)
+
+    @staticmethod
+    def _expected_shortfall(values: List[float], *, fraction: float) -> Optional[float]:
+        if not values:
+            return None
+        count = max(1, math.ceil(len(values) * fraction))
+        return round(sum(sorted(values)[:count]) / count, 6)
 
     @staticmethod
     def _pct(numerator: int, denominator: int) -> Optional[float]:

@@ -1579,6 +1579,16 @@ describe('vnpyPaperTradingApi', () => {
             median_return_pct: 1.25,
             average_max_favorable_excursion_pct: 3,
             average_max_adverse_excursion_pct: -2,
+            daily_observation_count: 2,
+            expected_daily_observation_count: 2,
+            daily_return_coverage_pct: 100,
+            average_daily_return_pct: 0.62,
+            daily_return_volatility_pct: 1.4,
+            downside_deviation_pct: 0.8,
+            horizon_downside_deviation_pct: 0.8,
+            daily_expected_shortfall_20_pct: -1.1,
+            return_risk_utility_pct: 0.35,
+            return_risk_objective_version: 'candidate-return-risk-v1',
             neutral_band_pct: 2,
             unable_reason_counts: {},
           },
@@ -1641,6 +1651,8 @@ describe('vnpyPaperTradingApi', () => {
     expect(result.scannedCount).toBe(2);
     expect(result.methodology.lookaheadProtection).toBe(true);
     expect(result.matrix['1'].averageReturnPct).toBe(1.25);
+    expect(result.matrix['1'].returnRiskUtilityPct).toBe(0.35);
+    expect(result.matrix['1'].dailyExpectedShortfall20Pct).toBe(-1.1);
     expect(result.reviewQualityMatrix[0].model).toBe('openai/model-a');
     expect(result.reviewQualityMatrix[0].horizons['1'].blockedAvoidanceRatePct).toBe(100);
     expect(result.reviewPolicyQuality?.policy).toBe('llm_review_then_rule_agent');
@@ -1649,7 +1661,7 @@ describe('vnpyPaperTradingApi', () => {
   it('loads the current cross-run quality gate state', async () => {
     get.mockResolvedValueOnce({
       data: {
-        schema_version: 1,
+        schema_version: 3,
         generated_at: '2026-07-14T10:00:00',
         state: 'blocked',
         reason: 'forward_win_rate_below_threshold',
@@ -1660,6 +1672,14 @@ describe('vnpyPaperTradingApi', () => {
         market: 'cn',
         selection_quality_state: 'healthy',
         selection_quality_reason: 'forward_quality_thresholds_met',
+        return_risk_objective_state: 'blocked',
+        return_risk_objective_reason: 'return_risk_negative_return_and_utility',
+        return_risk_objective_applied: true,
+        return_risk_objective: {
+          version: 'candidate-return-risk-v1',
+          state: 'blocked',
+          metrics: { return_risk_utility_pct: -1.5 },
+        },
         review_quality_state: 'blocked',
         review_quality_reason: 'review_passed_precision_below_threshold',
         review_quality_applied: true,
@@ -1678,6 +1698,12 @@ describe('vnpyPaperTradingApi', () => {
         average_return_pct: -0.5,
         median_return_pct: -0.2,
         average_max_adverse_excursion_pct: -4,
+        average_daily_return_pct: -0.1,
+        daily_return_coverage_pct: 100,
+        daily_return_volatility_pct: 2.1,
+        downside_deviation_pct: 1.8,
+        daily_expected_shortfall_20_pct: -3.2,
+        return_risk_utility_pct: -1.5,
         unable_reason_counts: { insufficient_forward_bars: 2 },
         lookahead_protection: true,
         source: 'persisted_agent_decisions_and_stock_daily',
@@ -1696,6 +1722,11 @@ describe('vnpyPaperTradingApi', () => {
     expect(result.transition).toBe('healthy->blocked');
     expect(result.reviewQualityState).toBe('blocked');
     expect(result.reviewQualityApplied).toBe(true);
+    expect(result.returnRiskObjectiveState).toBe('blocked');
+    expect(result.returnRiskObjectiveApplied).toBe(true);
+    expect(result.returnRiskUtilityPct).toBe(-1.5);
+    expect(result.dailyReturnCoveragePct).toBe(100);
+    expect(result.returnRiskObjective?.version).toBe('candidate-return-risk-v1');
     expect(result.reviewPolicyQuality?.horizons).toEqual({ 5: { passedPrecisionPct: 40 } });
   });
 });
