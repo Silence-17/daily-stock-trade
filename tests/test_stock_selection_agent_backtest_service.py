@@ -182,6 +182,11 @@ class StockSelectionAgentBacktestServiceTestCase(unittest.TestCase):
         self.assertEqual(rule["horizons"]["2"]["return_spread_pct"], 30.0)
         self.assertIn("llm:openai/model-a:prompt-v2/eval-v1", groups)
         self.assertIn("llm:openai/model-b:prompt-v2/eval-v1", groups)
+        effective = result["review_policy_quality"]
+        self.assertEqual(effective["policy"], "llm_review_then_rule_agent")
+        self.assertEqual(effective["source_counts"], {"llm": 2})
+        self.assertEqual(effective["horizons"]["1"]["passed_precision_pct"], 100.0)
+        self.assertEqual(effective["horizons"]["1"]["blocked_avoidance_rate_pct"], 100.0)
         self.assertEqual(
             result["items"][0]["reviews"][0]["source"],
             "rule_agent",
@@ -327,6 +332,71 @@ class StockSelectionAgentBacktestServiceTestCase(unittest.TestCase):
             )
         self.assertEqual(healthy["state"], "healthy")
         self.assertEqual(healthy["transition"], "blocked->healthy")
+
+    def test_quality_snapshot_uses_mature_effective_review_as_fail_closed_gate_evidence(self) -> None:
+        result = {
+            "generated_at": datetime(2024, 1, 31, 12, 0),
+            "truncated": False,
+            "matrix": {
+                "5": {
+                    "sample_count": 20,
+                    "completed_count": 20,
+                    "coverage_pct": 100.0,
+                    "win_rate_pct": 60.0,
+                    "average_return_pct": 1.0,
+                    "median_return_pct": 0.5,
+                    "average_max_adverse_excursion_pct": -2.0,
+                    "unable_reason_counts": {},
+                }
+            },
+            "review_policy_quality": {
+                "policy": "llm_review_then_rule_agent",
+                "sample_count": 20,
+                "source_counts": {"llm": 20},
+                "horizons": {
+                    "5": {
+                        "sample_count": 20,
+                        "completed_count": 20,
+                        "passed_completed_count": 10,
+                        "blocked_completed_count": 10,
+                        "passed_precision_pct": 40.0,
+                        "blocked_avoidance_rate_pct": 60.0,
+                        "passed_average_return_pct": 0.5,
+                        "blocked_average_return_pct": -0.5,
+                        "return_spread_pct": 1.0,
+                    }
+                },
+            },
+        }
+        with patch.object(self.service, "evaluate", return_value=result):
+            snapshot = self.service.build_quality_snapshot(
+                strategy="dual_low",
+                market="cn",
+                horizon_days=5,
+                min_mature_samples=10,
+                min_win_rate_pct=45,
+                previous_state="healthy",
+            )
+
+        self.assertEqual(snapshot["schema_version"], 2)
+        self.assertEqual(snapshot["selection_quality_state"], "healthy")
+        self.assertEqual(snapshot["review_quality_state"], "blocked")
+        self.assertEqual(snapshot["state"], "blocked")
+        self.assertEqual(snapshot["reason"], "review_passed_precision_below_threshold")
+        self.assertTrue(snapshot["review_quality_applied"])
+        self.assertEqual(snapshot["transition"], "healthy->blocked")
+
+        blocked_state = self.service._review_policy_state(
+            {
+                "passed_completed_count": 10,
+                "passed_precision_pct": 60,
+                "blocked_completed_count": 10,
+                "blocked_avoidance_rate_pct": 30,
+            },
+            min_mature_samples=10,
+            min_accuracy_pct=45,
+        )
+        self.assertEqual(blocked_state, ("blocked", "review_blocked_avoidance_below_threshold"))
 
 
 if __name__ == "__main__":

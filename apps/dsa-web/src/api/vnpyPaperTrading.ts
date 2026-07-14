@@ -846,6 +846,7 @@ export type VnpyPaperAgentBacktestResponse = {
   matrix: Record<string, VnpyPaperAgentBacktestMetric>;
   strategyMatrix: Record<string, Record<string, VnpyPaperAgentBacktestMetric>>;
   reviewQualityMatrix: VnpyPaperAgentReviewQualityGroup[];
+  reviewPolicyQuality?: Record<string, unknown>;
   items: Array<Record<string, unknown>>;
 };
 
@@ -859,6 +860,12 @@ export type VnpyPaperAgentCrossRunQuality = {
   changed: boolean;
   strategy: string;
   market: string;
+  selectionQualityState?: string | null;
+  selectionQualityReason?: string | null;
+  reviewQualityState?: string | null;
+  reviewQualityReason?: string | null;
+  reviewQualityApplied?: boolean;
+  reviewPolicyQuality?: Record<string, unknown>;
   horizonDays: number;
   minMatureSamples: number;
   minWinRatePct: number;

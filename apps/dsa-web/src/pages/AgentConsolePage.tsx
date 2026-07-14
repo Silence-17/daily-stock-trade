@@ -497,6 +497,11 @@ const AgentConsolePage: React.FC = () => {
     .join(' / ') || '-';
   const dailyWorkflowStages = Object.entries(dailySummary?.workflowStageCounts || {});
   const dailyTopSymbols = dailySummary?.topSymbols || [];
+  const crossRunReviewPolicy = asRecord(crossRunQuality?.reviewPolicyQuality);
+  const crossRunReviewHorizons = asRecord(crossRunReviewPolicy?.horizons);
+  const crossRunReviewMetric = asRecord(
+    crossRunReviewHorizons?.[String(crossRunQuality?.horizonDays || '')],
+  );
 
   const selectedSummary = runAgentSummary(selectedRun);
   const selectedReviewQuality = runReviewQuality(selectedRun);
@@ -988,6 +993,14 @@ const AgentConsolePage: React.FC = () => {
                 {' · '}{crossRunQuality.horizonDays} 日前瞻
                 {' · '}{crossRunQuality.reason}
               </p>
+              {crossRunQuality.reviewQualityState ? (
+                <p className="mt-1 text-xs text-secondary-text" data-testid="agent-review-quality-gate-state">
+                  候选质量 {crossRunQuality.selectionQualityState || '-'}
+                  {' · 最终复核质量 '}{crossRunQuality.reviewQualityState}
+                  {' · '}{crossRunQuality.reviewQualityReason || '-'}
+                  {crossRunQuality.reviewQualityApplied ? ' · 已作用于当前状态' : ''}
+                </p>
+              ) : null}
             </div>
             <dl className="grid grid-cols-2 gap-x-6 gap-y-2 text-xs text-secondary-text sm:grid-cols-4">
               <div>
@@ -1012,6 +1025,25 @@ const AgentConsolePage: React.FC = () => {
                   {formatPercent(crossRunQuality.averageReturnPct)}
                 </dd>
               </div>
+              {crossRunReviewMetric ? (
+                <div data-testid="agent-review-quality-gate-metrics">
+                  <dt>复核通过精度</dt>
+                  <dd className="mt-1 font-semibold text-foreground">
+                    {formatPercent(crossRunReviewMetric.passedPrecisionPct ?? crossRunReviewMetric.passed_precision_pct)}
+                  </dd>
+                </div>
+              ) : null}
+              {crossRunReviewMetric ? (
+                <div>
+                  <dt>阻断避损率</dt>
+                  <dd className="mt-1 font-semibold text-foreground">
+                    {formatPercent(
+                      crossRunReviewMetric.blockedAvoidanceRatePct
+                      ?? crossRunReviewMetric.blocked_avoidance_rate_pct,
+                    )}
+                  </dd>
+                </div>
+              ) : null}
             </dl>
           </div>
         </section>

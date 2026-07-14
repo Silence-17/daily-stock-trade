@@ -676,6 +676,7 @@ class VnpyPaperAgentBacktestResponse(BaseModel):
     matrix: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
     strategy_matrix: Dict[str, Dict[str, Dict[str, Any]]] = Field(default_factory=dict)
     review_quality_matrix: List[Dict[str, Any]] = Field(default_factory=list)
+    review_policy_quality: Dict[str, Any] = Field(default_factory=dict)
     items: List[Dict[str, Any]] = Field(default_factory=list)
 
 
@@ -689,6 +690,12 @@ class VnpyPaperAgentCrossRunQualityResponse(BaseModel):
     changed: bool = False
     strategy: str
     market: str
+    selection_quality_state: Optional[str] = None
+    selection_quality_reason: Optional[str] = None
+    review_quality_state: Optional[str] = None
+    review_quality_reason: Optional[str] = None
+    review_quality_applied: bool = False
+    review_policy_quality: Dict[str, Any] = Field(default_factory=dict)
     horizon_days: int
     min_mature_samples: int
     min_win_rate_pct: float

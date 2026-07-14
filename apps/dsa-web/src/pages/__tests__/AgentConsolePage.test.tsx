@@ -479,6 +479,20 @@ describe('AgentConsolePage', () => {
       changed: false,
       strategy: 'dual_low',
       market: 'cn',
+      selectionQualityState: 'insufficient_evidence',
+      selectionQualityReason: 'mature_sample_count_below_threshold',
+      reviewQualityState: 'insufficient_evidence',
+      reviewQualityReason: 'review_mature_sample_count_below_threshold',
+      reviewQualityApplied: false,
+      reviewPolicyQuality: {
+        policy: 'llm_review_then_rule_agent',
+        horizons: {
+          5: {
+            passedPrecisionPct: null,
+            blockedAvoidanceRatePct: null,
+          },
+        },
+      },
       horizonDays: 5,
       minMatureSamples: 10,
       minWinRatePct: 45,
@@ -755,6 +769,8 @@ describe('AgentConsolePage', () => {
     expect(screen.getByTestId('agent-current-cross-run-quality')).toHaveTextContent('insufficient_evidence');
     expect(screen.getByTestId('agent-current-cross-run-quality')).toHaveTextContent('0/3');
     expect(screen.getByTestId('agent-current-cross-run-quality')).toHaveTextContent('仅审计');
+    expect(screen.getByTestId('agent-review-quality-gate-state')).toHaveTextContent('最终复核质量 insufficient_evidence');
+    expect(screen.getByTestId('agent-review-quality-gate-metrics')).toHaveTextContent('复核通过精度');
     expect(screen.getByText('2026-07-01 · 2/2 runs scanned')).toBeInTheDocument();
     expect(screen.getByTestId('agent-data-quality-trends')).toHaveTextContent('跨 run 数据质量趋势');
     expect(screen.getByTestId('agent-data-quality-trends')).toHaveTextContent('33.33%');
