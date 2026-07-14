@@ -21,6 +21,7 @@
 - 自动模拟成交默认启用交易时段限制；市场非交易日、盘前、午休、盘后或日历未知时不会提交 paper 订单，并记录 `non_trading_day`、`outside_trading_session` 或 `market_phase_unknown`。`dry_run` 和 `manual_approval` 仍允许在任意时间生成计划。
 - 状态接口会返回 `diagnostics.trading_window`；Web 模拟交易页展示“可交易窗口”，可区分当前开市、今日稍后开市、下一交易日、交易日历不可用、时间窗关闭或当前执行模式不强制拦截，并显示对应的下次开盘/收盘时间。
 - 状态接口新增 `diagnostics.auto_trade_readiness`，结构化返回自动交易 readiness：总状态、下一步建议、阻断原因、关注项和本地账本、自动交易开关、runtime scheduler、自动任务、AlphaSift 选股依赖、调度窗口、交易窗口、连续失败熔断、vn.py bridge 等组件状态。`diagnostics.auto_trade_readiness.timing_alignment` 会把自动任务下次触发时间与交易窗口开收盘时间对齐展示；`diagnostics.alphasift` 会轻量返回自动交易依赖的 AlphaSift 启用状态、可用性、版本和策略数量；异常只写入诊断，不会拖垮本地 paper 状态接口。
+- readiness 还会把配置文件中持久化的 `last_auto_run` 映射为“最近运行结果”，返回运行时间、Agent run id、是否接受/跳过、原始 reason code 和候选/提交计数；统一 `system_health` 与 Web“可用性诊断”复用该组件。成功运行显示 ready，最近跳过或未完成显示非必需 warning，不会仅凭历史结果制造当前硬阻断；因此即使 scheduler task event 已清理或缺失，页面仍能解释上一轮为什么没有交易。
 - 状态接口新增 `diagnostics.system_health`，把本地账本、选股来源、自动化调度、调度窗口、交易窗口、持仓估值、行业归属和 vn.py bridge 合并为跨模块健康视图。`required_blockers` 表示会阻断自动执行的必需组件，`warnings` 表示需要关注但不一定阻断的降级，`disabled` 表示因配置或轻量查询暂未启用的组件。
 - 完整状态的 `diagnostics.system_health.components[key=valuation]` 会基于已经加载的 Portfolio 快照汇总持仓估值健康，不新增行情请求。字段包括可用/新鲜/缺失/陈旧/状态未知数量、价格覆盖率、新鲜覆盖率、`price_source` / `price_provider` 分布、受影响代码以及最早/最新价格日期；Web“可用性诊断”直接展示覆盖率和来源摘要，轻量状态仍以 `snapshot_not_requested` 返回。
 - 完整状态的 `diagnostics.industry_exposure` 返回行业归属解析状态、持仓总数、已解析/缺失数量、覆盖率、缺失代码和按行业汇总的持仓市值。未配置行业风控时使用 `snapshot_only` 模式，只统计快照已有字段且不发起逐股网络请求；配置行业金额/比例上限或目标行业权重后切换到 `risk_guard` 模式，该组件属于必需风控条件，覆盖不完整会 fail closed。轻量状态只返回 `snapshot_not_requested`，不会拉取持仓或行业数据。

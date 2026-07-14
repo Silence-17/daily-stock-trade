@@ -973,6 +973,80 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
         self.assertEqual(health_components["trading_window"]["reason"], "time_gate_not_enforced")
         self.assertEqual(health_components["valuation"]["reason"], "snapshot_not_requested")
 
+    def test_readiness_exposes_persisted_last_auto_run_skip_reason(self) -> None:
+        scheduler = MagicMock()
+        scheduler.status.return_value = {
+            "enabled": True,
+            "running": False,
+            "loop_running": True,
+            "next_run_at": "2026-07-16T09:30:00+08:00",
+            "background_tasks": [{
+                "name": "vnpy_paper_auto_trade",
+                "interval_seconds": 86400,
+                "running": False,
+                "next_run_at": "2026-07-16T09:30:00+08:00",
+            }],
+            "task_events": [],
+        }
+        self.client.app.state.runtime_scheduler_service = scheduler
+        service = self._service()
+        service.update_settings(
+            {
+                "auto_trade_enabled": True,
+                "auto_trade_time_gate_enabled": False,
+            },
+            include_snapshot=False,
+            include_recent_trades=False,
+        )
+        service._record_last_auto_run({
+            "accepted": False,
+            "skipped": True,
+            "reason": "outside_trading_session",
+            "agent_run_uid": "agent-last-skip",
+            "agent_run_id": 42,
+            "strategy": "dual_low",
+            "market": "cn",
+            "candidate_count": 0,
+            "planned_count": 0,
+            "submitted_count": 0,
+            "skipped_count": 0,
+        })
+
+        with patch(
+            "api.v1.endpoints.vnpy_paper_trading.VnpyPaperTradingService",
+            return_value=service,
+        ), patch("src.services.alphasift_service.AlphaSiftService") as alphasift_service:
+            alphasift_service.return_value.status.return_value = {
+                "enabled": True,
+                "available": True,
+                "strategy_count": 8,
+            }
+            response = self.client.get(
+                "/api/v1/vnpy-paper/status?include_snapshot=false&include_recent_trades=false"
+            )
+
+        self.assertEqual(response.status_code, 200)
+        readiness = response.json()["diagnostics"]["auto_trade_readiness"]
+        self.assertEqual(readiness["status"], "warning")
+        self.assertEqual(readiness["next_action"], "outside_trading_session")
+        self.assertEqual(readiness["last_auto_run"]["agent_run_uid"], "agent-last-skip")
+        self.assertEqual(readiness["last_auto_run"]["agent_run_id"], 42)
+        component = next(
+            item for item in readiness["components"] if item["key"] == "last_auto_run"
+        )
+        self.assertEqual(component["status"], "warning")
+        self.assertEqual(component["reason"], "outside_trading_session")
+        self.assertIn("agent-last-skip", component["detail"])
+        health_component = next(
+            item
+            for item in response.json()["diagnostics"]["system_health"]["components"]
+            if item["key"] == "last_auto_run"
+        )
+        self.assertEqual(health_component["status"], "warning")
+        self.assertEqual(health_component["reason"], "outside_trading_session")
+        self.assertEqual(health_component["agent_run_uid"], "agent-last-skip")
+        self.assertEqual(health_component["agent_run_id"], 42)
+
     def test_readiness_warns_when_next_auto_run_is_outside_trading_window(self) -> None:
         scheduler = MagicMock()
         scheduler.status.return_value = {

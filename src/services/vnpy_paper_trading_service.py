@@ -4286,6 +4286,8 @@ class VnpyPaperTradingService:
             payload = self._read_config_payload()
             payload["last_auto_run"] = {
                 "ran_at": _utc_now_iso(),
+                "agent_run_uid": result.get("agent_run_uid"),
+                "agent_run_id": result.get("agent_run_id"),
                 "accepted": bool(result.get("accepted")),
                 "skipped": bool(result.get("skipped")),
                 "reason": result.get("reason"),

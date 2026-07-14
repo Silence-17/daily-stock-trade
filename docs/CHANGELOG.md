@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [改进] vn.py paper readiness、统一系统健康和 Web 可用性诊断新增持久化最近自动运行结果，展示 run id、时间、原始跳过/失败原因和候选/提交计数，不再依赖 scheduler task event 保留期。
+- [测试] 新增最近自动运行 reason 的持久化、API 诊断和 Web 展示回归，确认历史非成功结果仅作为 warning。
 - [改进] vn.py paper 完整系统健康新增持仓价格覆盖率、新鲜率、来源/provider 分布、缺失/陈旧/状态未知代码和价格日期范围，Web 可用性诊断直接展示来源健康摘要且不增加行情请求。
 - [测试] 新增估值来源健康聚合与 Web 展示回归，覆盖实时价、日线收盘价、陈旧价格和缺价混合场景。
 - [改进] 自动模拟交易连续失败熔断新增默认关闭的持久化冷却自动恢复；冷却到期只放行单轮探测，再次失败重新熔断，Web 展示预计恢复时间并保留手动恢复入口。
