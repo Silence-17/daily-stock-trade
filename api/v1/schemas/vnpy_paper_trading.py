@@ -793,6 +793,40 @@ class VnpyPaperAgentDataQualityTrendsResponse(BaseModel):
     filters: Dict[str, Any] = Field(default_factory=dict)
 
 
+class VnpyPaperAgentReturnRiskCalibrationTrendsResponse(BaseModel):
+    schema_version: int = 1
+    generated_at: Optional[Any] = None
+    window_days: int = 30
+    window_started_at: Optional[Any] = None
+    window_ended_at: Optional[Any] = None
+    total: int = 0
+    scanned_count: int = 0
+    observed_count: int = 0
+    unknown_count: int = 0
+    observation_rate_pct: float = 0.0
+    health: str = "idle"
+    state_counts: Dict[str, int] = Field(default_factory=dict)
+    version_counts: Dict[str, int] = Field(default_factory=dict)
+    market_counts: Dict[str, int] = Field(default_factory=dict)
+    strategy_counts: Dict[str, int] = Field(default_factory=dict)
+    transition_counts: Dict[str, int] = Field(default_factory=dict)
+    applied_count: int = 0
+    applied_rate_pct: float = 0.0
+    gate_blocked_count: int = 0
+    utility_observation_count: int = 0
+    average_utility_pct: Optional[float] = None
+    minimum_utility_pct: Optional[float] = None
+    maximum_utility_pct: Optional[float] = None
+    latest_mature_sample_count: int = 0
+    max_mature_sample_count: int = 0
+    latest: Optional[Dict[str, Any]] = None
+    groups: List[Dict[str, Any]] = Field(default_factory=list)
+    daily: List[Dict[str, Any]] = Field(default_factory=list)
+    truncated: bool = False
+    methodology: Dict[str, Any] = Field(default_factory=dict)
+    filters: Dict[str, Any] = Field(default_factory=dict)
+
+
 class VnpyPaperAgentRunExportResponse(BaseModel):
     generated_at: Optional[Any] = None
     limit: int

@@ -30,6 +30,7 @@ import {
 import {
   vnpyPaperTradingApi,
   type VnpyPaperAgentRunFilters,
+  type VnpyPaperAgentReturnRiskCalibrationTrends,
   type VnpyPaperAgentTradePlan,
   type VnpyPaperAgentRunDetail,
   type VnpyPaperAgentRunSummary,
@@ -879,6 +880,13 @@ const VnpyPaperTradingPage: React.FC = () => {
   const [selectedAgentRun, setSelectedAgentRun] = useState<VnpyPaperAgentRunDetail | null>(null);
   const [agentRunsLoading, setAgentRunsLoading] = useState(false);
   const [agentRunsError, setAgentRunsError] = useState('');
+  const [returnRiskCalibrationTrends, setReturnRiskCalibrationTrends] = useState<
+    VnpyPaperAgentReturnRiskCalibrationTrends | null
+  >(null);
+  const [returnRiskCalibrationDays, setReturnRiskCalibrationDays] = useState<7 | 30 | 90>(30);
+  const returnRiskCalibrationDaysRef = useRef<7 | 30 | 90>(30);
+  const [returnRiskCalibrationLoading, setReturnRiskCalibrationLoading] = useState(false);
+  const [returnRiskCalibrationError, setReturnRiskCalibrationError] = useState('');
   const [exportingAgentRuns, setExportingAgentRuns] = useState(false);
   const [approvingPlanUid, setApprovingPlanUid] = useState<string | null>(null);
   const [retryingPlanUid, setRetryingPlanUid] = useState<string | null>(null);
@@ -928,6 +936,10 @@ const VnpyPaperTradingPage: React.FC = () => {
   useEffect(() => {
     agentRunFiltersRef.current = agentRunFilters;
   }, [agentRunFilters]);
+
+  useEffect(() => {
+    returnRiskCalibrationDaysRef.current = returnRiskCalibrationDays;
+  }, [returnRiskCalibrationDays]);
 
   useEffect(() => {
     performanceFiltersRef.current = performanceFilters;
@@ -1003,9 +1015,30 @@ const VnpyPaperTradingPage: React.FC = () => {
     }
   }, []);
 
+  const loadReturnRiskCalibrationTrends = useCallback(async (
+    daysOverride?: 7 | 30 | 90,
+    filtersOverride?: AgentRunFilterForm,
+  ) => {
+    setReturnRiskCalibrationLoading(true);
+    setReturnRiskCalibrationError('');
+    try {
+      const filters = buildAgentRunFilters(filtersOverride ?? agentRunFiltersRef.current);
+      setReturnRiskCalibrationTrends(await vnpyPaperTradingApi.getAgentReturnRiskCalibrationTrends(
+        daysOverride ?? returnRiskCalibrationDaysRef.current,
+        filters,
+      ));
+    } catch (err) {
+      setReturnRiskCalibrationTrends(null);
+      setReturnRiskCalibrationError(toApiErrorMessage(err, '收益/风险长期校准加载失败'));
+    } finally {
+      setReturnRiskCalibrationLoading(false);
+    }
+  }, []);
+
   const loadAgentRuns = useCallback(async (filtersOverride?: AgentRunFilterForm) => {
     setAgentRunsLoading(true);
     setAgentRunsError('');
+    void loadReturnRiskCalibrationTrends(undefined, filtersOverride);
     try {
       const filters = buildAgentRunFilters(filtersOverride ?? agentRunFiltersRef.current);
       const result = filters
@@ -1022,7 +1055,13 @@ const VnpyPaperTradingPage: React.FC = () => {
     } finally {
       setAgentRunsLoading(false);
     }
-  }, [loadAgentRunDetail]);
+  }, [loadAgentRunDetail, loadReturnRiskCalibrationTrends]);
+
+  const handleReturnRiskCalibrationWindow = useCallback((days: 7 | 30 | 90) => {
+    returnRiskCalibrationDaysRef.current = days;
+    setReturnRiskCalibrationDays(days);
+    void loadReturnRiskCalibrationTrends(days);
+  }, [loadReturnRiskCalibrationTrends]);
 
   const loadPaperAccounts = useCallback(async () => {
     setPaperAccountsError('');
@@ -4493,6 +4532,113 @@ const VnpyPaperTradingPage: React.FC = () => {
           </Button>
         </div>
         {agentRunsError ? <InlineAlert variant="warning" message={agentRunsError} /> : null}
+        <div
+          className="mb-4 border-y border-border bg-surface/40 py-4"
+          data-testid="agent-return-risk-calibration-trends"
+        >
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-2 text-sm font-semibold text-foreground">
+              <LineChart className="h-4 w-4 text-cyan" />
+              收益/风险长期校准
+            </div>
+            <div className="flex items-center gap-1" aria-label="收益风险校准窗口">
+              {([7, 30, 90] as const).map((days) => (
+                <Button
+                  key={days}
+                  size="xsm"
+                  variant={returnRiskCalibrationDays === days ? 'primary' : 'outline'}
+                  disabled={returnRiskCalibrationLoading}
+                  onClick={() => handleReturnRiskCalibrationWindow(days)}
+                >
+                  {days} 天
+                </Button>
+              ))}
+            </div>
+          </div>
+          {returnRiskCalibrationError ? (
+            <InlineAlert variant="warning" message={returnRiskCalibrationError} />
+          ) : null}
+          {returnRiskCalibrationTrends ? (
+            <>
+              <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
+                <div className="border-l-2 border-cyan px-3 py-2">
+                  <div className="text-xs text-secondary-text">已观测快照</div>
+                  <div className="mt-1 text-lg font-semibold text-foreground">
+                    {returnRiskCalibrationTrends.observedCount} / {returnRiskCalibrationTrends.scannedCount}
+                  </div>
+                </div>
+                <div className="border-l-2 border-success px-3 py-2">
+                  <div className="text-xs text-secondary-text">观测覆盖率</div>
+                  <div className="mt-1 text-lg font-semibold text-foreground">
+                    {formatNumber(returnRiskCalibrationTrends.observationRatePct)}%
+                  </div>
+                </div>
+                <div className="border-l-2 border-warning px-3 py-2">
+                  <div className="text-xs text-secondary-text">平均效用</div>
+                  <div className="mt-1 text-lg font-semibold text-foreground">
+                    {returnRiskCalibrationTrends.averageUtilityPct == null
+                      ? '-'
+                      : `${formatNumber(returnRiskCalibrationTrends.averageUtilityPct)}%`}
+                  </div>
+                </div>
+                <div className="border-l-2 border-border px-3 py-2">
+                  <div className="text-xs text-secondary-text">最新成熟样本</div>
+                  <div className="mt-1 text-lg font-semibold text-foreground">
+                    {returnRiskCalibrationTrends.latestMatureSampleCount}
+                  </div>
+                </div>
+                <div className="border-l-2 border-border px-3 py-2">
+                  <div className="text-xs text-secondary-text">目标已应用</div>
+                  <div className="mt-1 text-lg font-semibold text-foreground">
+                    {formatNumber(returnRiskCalibrationTrends.appliedRatePct)}%
+                  </div>
+                </div>
+              </div>
+              <div className="mt-3 overflow-x-auto border border-border">
+                <table className="w-full min-w-[780px] border-collapse text-xs">
+                  <thead className="bg-surface text-left text-secondary-text">
+                    <tr>
+                      <th className="px-3 py-2 font-semibold">市场 / 策略</th>
+                      <th className="px-3 py-2 font-semibold">目标版本</th>
+                      <th className="px-3 py-2 font-semibold">快照</th>
+                      <th className="px-3 py-2 font-semibold">状态分布</th>
+                      <th className="px-3 py-2 font-semibold">平均效用</th>
+                      <th className="px-3 py-2 font-semibold">最新状态</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {returnRiskCalibrationTrends.groups.length > 0 ? (
+                      returnRiskCalibrationTrends.groups.map((item) => (
+                        <tr key={item.key} className="border-t border-border">
+                          <td className="px-3 py-2 font-semibold text-foreground">
+                            {item.market} / {item.strategy}
+                          </td>
+                          <td className="px-3 py-2 font-mono text-secondary-text">{item.version}</td>
+                          <td className="px-3 py-2 text-secondary-text">{item.runSnapshotCount}</td>
+                          <td className="px-3 py-2 text-secondary-text">
+                            {Object.entries(item.stateCounts).map(([state, count]) => `${state} ${count}`).join(' · ') || '-'}
+                          </td>
+                          <td className="px-3 py-2 text-secondary-text">
+                            {item.averageUtilityPct == null ? '-' : `${formatNumber(item.averageUtilityPct)}%`}
+                          </td>
+                          <td className="px-3 py-2 text-secondary-text">{item.latestState || '-'}</td>
+                        </tr>
+                      ))
+                    ) : (
+                      <tr className="border-t border-border">
+                        <td className="px-3 py-4 text-center text-secondary-text" colSpan={6}>
+                          暂无校准快照
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          ) : returnRiskCalibrationLoading ? (
+            <div className="py-5 text-center text-sm text-secondary-text">加载中...</div>
+          ) : null}
+        </div>
         {agentRuns.length === 0 ? (
           <div className="rounded-lg border border-dashed border-border bg-surface/70 px-4 py-8 text-center text-sm text-secondary-text">
             暂无自动选股 Agent 运行记录

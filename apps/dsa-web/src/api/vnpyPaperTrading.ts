@@ -766,6 +766,64 @@ export type VnpyPaperAgentDataQualityTrends = {
   filters?: Record<string, unknown>;
 };
 
+export type VnpyPaperAgentReturnRiskCalibrationDailyItem = {
+  date: string;
+  runSnapshotCount: number;
+  stateCounts: Record<string, number>;
+  averageUtilityPct?: number | null;
+};
+
+export type VnpyPaperAgentReturnRiskCalibrationGroup = {
+  key: string;
+  market: string;
+  strategy: string;
+  version: string;
+  runSnapshotCount: number;
+  stateCounts: Record<string, number>;
+  utilityObservationCount: number;
+  averageUtilityPct?: number | null;
+  minimumUtilityPct?: number | null;
+  maximumUtilityPct?: number | null;
+  latestState?: string | null;
+  latestUtilityPct?: number | null;
+  latestRunUid?: string | null;
+  latestAt?: string | null;
+};
+
+export type VnpyPaperAgentReturnRiskCalibrationTrends = {
+  schemaVersion: number;
+  generatedAt?: string | null;
+  windowDays: number;
+  windowStartedAt?: string | null;
+  windowEndedAt?: string | null;
+  total: number;
+  scannedCount: number;
+  observedCount: number;
+  unknownCount: number;
+  observationRatePct: number;
+  health: string;
+  stateCounts: Record<string, number>;
+  versionCounts: Record<string, number>;
+  marketCounts: Record<string, number>;
+  strategyCounts: Record<string, number>;
+  transitionCounts: Record<string, number>;
+  appliedCount: number;
+  appliedRatePct: number;
+  gateBlockedCount: number;
+  utilityObservationCount: number;
+  averageUtilityPct?: number | null;
+  minimumUtilityPct?: number | null;
+  maximumUtilityPct?: number | null;
+  latestMatureSampleCount: number;
+  maxMatureSampleCount: number;
+  latest?: Record<string, unknown> | null;
+  groups: VnpyPaperAgentReturnRiskCalibrationGroup[];
+  daily: VnpyPaperAgentReturnRiskCalibrationDailyItem[];
+  truncated: boolean;
+  methodology: Record<string, unknown>;
+  filters?: Record<string, unknown>;
+};
+
 export type VnpyPaperAgentRunFilters = {
   triggerSource?: string;
   strategy?: string;
@@ -1569,6 +1627,26 @@ export const vnpyPaperTradingApi = {
       { params },
     );
     return toCamelCase<VnpyPaperAgentDataQualityTrends>(response.data);
+  },
+
+  async getAgentReturnRiskCalibrationTrends(
+    days = 30,
+    filters?: VnpyPaperAgentRunFilters,
+  ): Promise<VnpyPaperAgentReturnRiskCalibrationTrends> {
+    const params: Record<string, number | string> = { days };
+    const triggerSource = filters?.triggerSource?.trim();
+    const strategy = filters?.strategy?.trim();
+    const market = filters?.market?.trim();
+    const status = filters?.status?.trim();
+    if (triggerSource) params.trigger_source = triggerSource;
+    if (strategy) params.strategy = strategy;
+    if (market) params.market = market;
+    if (status) params.status = status;
+    const response = await apiClient.get<Record<string, unknown>>(
+      '/api/v1/vnpy-paper/agent-runs/return-risk-calibration-trends',
+      { params },
+    );
+    return toCamelCase<VnpyPaperAgentReturnRiskCalibrationTrends>(response.data);
   },
 
   async runAgentBacktest(

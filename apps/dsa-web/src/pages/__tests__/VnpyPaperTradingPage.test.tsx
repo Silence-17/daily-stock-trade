@@ -22,6 +22,7 @@ const resetFailureFuse = vi.hoisted(() => vi.fn());
 const submitOrder = vi.hoisted(() => vi.fn());
 const runAutoOnce = vi.hoisted(() => vi.fn());
 const listAgentRuns = vi.hoisted(() => vi.fn());
+const getAgentReturnRiskCalibrationTrends = vi.hoisted(() => vi.fn());
 const exportAgentRuns = vi.hoisted(() => vi.fn());
 const getAgentRun = vi.hoisted(() => vi.fn());
 const approveTradePlan = vi.hoisted(() => vi.fn());
@@ -49,6 +50,7 @@ vi.mock('../../api/vnpyPaperTrading', () => ({
     submitOrder,
     runAutoOnce,
     listAgentRuns,
+    getAgentReturnRiskCalibrationTrends,
     exportAgentRuns,
     getAgentRun,
     approveTradePlan,
@@ -882,6 +884,60 @@ const taskMetricsResponse = {
   }],
 };
 
+const returnRiskCalibrationTrendsResponse = {
+  schemaVersion: 1,
+  generatedAt: '2026-07-15T10:00:00',
+  windowDays: 30,
+  windowStartedAt: '2026-06-15T10:00:00',
+  windowEndedAt: '2026-07-15T10:00:00',
+  total: 2,
+  scannedCount: 2,
+  observedCount: 2,
+  unknownCount: 0,
+  observationRatePct: 100,
+  health: 'ok',
+  stateCounts: { healthy: 1, guarded: 1 },
+  versionCounts: { 'candidate-return-risk-v1': 2 },
+  marketCounts: { cn: 2 },
+  strategyCounts: { dual_low: 2 },
+  transitionCounts: {},
+  appliedCount: 1,
+  appliedRatePct: 50,
+  gateBlockedCount: 0,
+  utilityObservationCount: 2,
+  averageUtilityPct: 0.2,
+  minimumUtilityPct: -0.1,
+  maximumUtilityPct: 0.5,
+  latestMatureSampleCount: 8,
+  maxMatureSampleCount: 9,
+  latest: { state: 'healthy' },
+  groups: [{
+    key: 'cn/dual_low/candidate-return-risk-v1',
+    market: 'cn',
+    strategy: 'dual_low',
+    version: 'candidate-return-risk-v1',
+    runSnapshotCount: 2,
+    stateCounts: { healthy: 1, guarded: 1 },
+    utilityObservationCount: 2,
+    averageUtilityPct: 0.2,
+    minimumUtilityPct: -0.1,
+    maximumUtilityPct: 0.5,
+    latestState: 'healthy',
+    latestUtilityPct: 0.5,
+    latestRunUid: 'ss-agent-test',
+    latestAt: '2026-07-15T10:00:00',
+  }],
+  daily: [{
+    date: '2026-07-15',
+    runSnapshotCount: 2,
+    stateCounts: { healthy: 1, guarded: 1 },
+    averageUtilityPct: 0.2,
+  }],
+  truncated: false,
+  methodology: { overlappingRollingSamples: true, independentSampleCountClaimed: false },
+  filters: {},
+};
+
 describe('VnpyPaperTradingPage', () => {
   beforeEach(() => {
     getStatus.mockReset();
@@ -902,6 +958,7 @@ describe('VnpyPaperTradingPage', () => {
     submitOrder.mockReset();
     runAutoOnce.mockReset();
     listAgentRuns.mockReset();
+    getAgentReturnRiskCalibrationTrends.mockReset();
     exportAgentRuns.mockReset();
     getAgentRun.mockReset();
     approveTradePlan.mockReset();
@@ -1166,6 +1223,7 @@ describe('VnpyPaperTradingPage', () => {
       messages: [],
     });
     listAgentRuns.mockResolvedValue({ items: [agentRunSummary], limit: 10, offset: 0 });
+    getAgentReturnRiskCalibrationTrends.mockResolvedValue(returnRiskCalibrationTrendsResponse);
     listAlertTriggers.mockResolvedValue({
       items: [{
         id: 1,
@@ -1518,6 +1576,13 @@ describe('VnpyPaperTradingPage', () => {
     expect(screen.getAllByText('SH600519').length).toBeGreaterThan(0);
     expect(screen.getByText('近期成交')).toBeInTheDocument();
     expect(await screen.findByText('自动选股 Agent 记录')).toBeInTheDocument();
+    expect(screen.getByTestId('agent-return-risk-calibration-trends')).toBeInTheDocument();
+    expect(screen.getByText('收益/风险长期校准')).toBeInTheDocument();
+    expect(screen.getByText('candidate-return-risk-v1')).toBeInTheDocument();
+    expect(screen.getByText('healthy 1 · guarded 1')).toBeInTheDocument();
+    expect(getAgentReturnRiskCalibrationTrends).toHaveBeenCalledWith(30, undefined);
+    fireEvent.click(screen.getByRole('button', { name: '7 天' }));
+    await waitFor(() => expect(getAgentReturnRiskCalibrationTrends).toHaveBeenCalledWith(7, undefined));
     expect(screen.getByText('贵州茅台')).toBeInTheDocument();
     expect(screen.getByText('交易计划')).toBeInTheDocument();
     expect(screen.getByText('Agent 计划')).toBeInTheDocument();
