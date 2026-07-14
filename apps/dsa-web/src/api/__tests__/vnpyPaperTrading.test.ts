@@ -40,6 +40,7 @@ describe('vnpyPaperTradingApi', () => {
           auto_correlation_lookback_days: 90,
           auto_correlation_min_observations: 30,
           auto_max_pairwise_correlation: 0.75,
+          auto_covariance_risk_penalty: 0.4,
           auto_interval_minutes: 1440,
           auto_min_score: null,
           auto_skip_existing_positions: true,
@@ -133,6 +134,7 @@ describe('vnpyPaperTradingApi', () => {
     expect(result.settings.autoCorrelationLookbackDays).toBe(90);
     expect(result.settings.autoCorrelationMinObservations).toBe(30);
     expect(result.settings.autoMaxPairwiseCorrelation).toBe(0.75);
+    expect(result.settings.autoCovarianceRiskPenalty).toBe(0.4);
     expect(result.settings.autoExecutionMode).toBe('paper');
     expect(result.settings.autoMaxSinglePositionValue).toBe(20000);
     expect(result.settings.autoMaxTotalPositionValue).toBe(80000);
@@ -993,6 +995,7 @@ describe('vnpyPaperTradingApi', () => {
       autoCorrelationLookbackDays: 90,
       autoCorrelationMinObservations: 30,
       autoMaxPairwiseCorrelation: 0.75,
+      autoCovarianceRiskPenalty: 0.4,
       autoIntervalMinutes: 5,
       autoMinScore: null,
       autoSkipExistingPositions: false,
@@ -1051,6 +1054,7 @@ describe('vnpyPaperTradingApi', () => {
       auto_correlation_lookback_days: 90,
       auto_correlation_min_observations: 30,
       auto_max_pairwise_correlation: 0.75,
+      auto_covariance_risk_penalty: 0.4,
       auto_interval_minutes: 5,
       auto_min_score: null,
       auto_skip_existing_positions: false,

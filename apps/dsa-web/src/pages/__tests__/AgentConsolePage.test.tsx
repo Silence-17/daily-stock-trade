@@ -90,6 +90,11 @@ const runSummary = {
       configuredBudget: 10000,
       resolvedBudget: 10000,
       allocatedBudget: 10000,
+      optimizer: {
+        model: 'target_tracking_min_variance_20d_v1',
+        observationCount: 20,
+        riskPenalty: 0.25,
+      },
     },
     sourceRouting: {
       mode: 'dynamic_health',
@@ -237,6 +242,8 @@ const runDetail = {
           enabled: true,
           method: 'score_inverse_volatility_20d_capped',
           scoreWeight: 0.8,
+          allocationWeight: 0.75,
+          optimizerTargetWeight: 0.8,
           candidateCap: 10000,
           allocatedBaseAmount: 8000,
         riskInput: {
@@ -249,6 +256,10 @@ const runDetail = {
             observationCount: 60,
             maxPairwiseCorrelation: 0.85,
             pairwise: [{ symbol: '000001', correlation: 0.42 }],
+          },
+          covarianceHistory: {
+            status: 'available',
+            observationCount: 20,
           },
           },
         },
@@ -709,6 +720,8 @@ describe('AgentConsolePage', () => {
     expect(screen.getByText('prompt=vnpy_paper_dynamic_agent_plan_v2 / eval=dynamic_plan_guardrails_v1')).toBeInTheDocument();
     expect(screen.getByTestId('portfolio-allocation-summary')).toHaveTextContent('score_inverse_volatility_20d_capped');
     expect(screen.getByTestId('portfolio-allocation-summary')).toHaveTextContent('10,000');
+    expect(screen.getByTestId('portfolio-optimizer-summary')).toHaveTextContent('target_tracking_min_variance_20d_v1');
+    expect(screen.getByTestId('portfolio-optimizer-summary')).toHaveTextContent('样本 20');
     expect(screen.getByText('partial / 82.5')).toBeInTheDocument();
     expect(screen.getByTestId('portfolio-allocation-1')).toHaveTextContent('80.0%');
     expect(screen.getByTestId('portfolio-allocation-1')).toHaveTextContent('10,000');
@@ -716,6 +729,9 @@ describe('AgentConsolePage', () => {
     expect(screen.getByTestId('portfolio-risk-input-1')).toHaveTextContent('6.4000');
     expect(screen.getByTestId('portfolio-correlation-input-1')).toHaveTextContent('60');
     expect(screen.getByTestId('portfolio-correlation-input-1')).toHaveTextContent('000001=0.42');
+    expect(screen.getByTestId('portfolio-optimizer-input-1')).toHaveTextContent('目标权重 80.0%');
+    expect(screen.getByTestId('portfolio-optimizer-input-1')).toHaveTextContent('优化权重 75.0%');
+    expect(screen.getByTestId('portfolio-covariance-input-1')).toHaveTextContent('协方差样本 20');
     expect(screen.getByTestId('agent-llm-recap')).toHaveTextContent('LLM recap generated');
     expect(screen.getByTestId('agent-review-1')).toHaveTextContent('Agent 复核 passed');
     expect(screen.getByText('Pre-trade Agent review passed')).toBeInTheDocument();

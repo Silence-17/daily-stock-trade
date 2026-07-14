@@ -4726,6 +4726,137 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertEqual(correlation["daily_code"], "600519.SH")
         self.assertGreaterEqual(correlation["observation_count"], 20)
 
+    def test_auto_trade_covariance_optimizer_tracks_arbitrary_position_targets(self) -> None:
+        self.service.update_settings(
+            {
+                "auto_trade_enabled": True,
+                "auto_trade_time_gate_enabled": False,
+                "auto_execution_mode": "dry_run",
+                "auto_score_weighted_allocation_enabled": True,
+                "auto_allocation_method": "target_tracking_min_variance_20d",
+                "auto_allocation_budget": 10000,
+                "auto_cash_per_order": 10000,
+                "auto_max_results": 2,
+                "auto_correlation_lookback_days": 20,
+                "auto_correlation_min_observations": 5,
+                "auto_covariance_risk_penalty": 0,
+                "auto_target_position_weights": {"600519": 8, "000001": 2},
+            }
+        )
+        prices = {"600519": 100.0, "000001": 50.0}
+        with DatabaseManager.get_instance().get_session() as session:
+            for offset in range(21):
+                if offset:
+                    move = 1.01 if offset % 2 else 0.99
+                    prices = {symbol: close * move for symbol, close in prices.items()}
+                bar_date = date.today() - timedelta(days=20 - offset)
+                for symbol, close in prices.items():
+                    session.add(StockDaily(code=symbol, date=bar_date, close=close))
+            session.commit()
+        fake_alphasift = MagicMock()
+        fake_alphasift.screen.return_value = {
+            "candidates": [
+                {"code": "600519", "score": 50, "price": 10.0},
+                {"code": "000001", "score": 99, "price": 10.0},
+            ],
+            "warnings": [],
+        }
+
+        with patch(
+            "src.services.vnpy_paper_trading_service.AlphaSiftService",
+            return_value=fake_alphasift,
+        ):
+            result = self.service.run_auto_trade_once()
+
+        self.assertEqual([item["cash_amount"] for item in result["orders"]], [8000.0, 2000.0])
+        audit = self.service.agent_repo.get_run_detail(result["agent_run_uid"])
+        optimizer = audit["diagnostics"]["portfolio_allocation"]["optimizer"]
+        self.assertEqual(optimizer["model"], "target_tracking_min_variance_20d_v1")
+        self.assertEqual(optimizer["target_source"], "remaining_position_target_gaps")
+        self.assertEqual(optimizer["weights_by_symbol"], {"600519": 0.8, "000001": 0.2})
+        self.assertGreaterEqual(optimizer["observation_count"], 20)
+
+    def test_auto_trade_covariance_optimizer_penalizes_high_variance_candidate(self) -> None:
+        self.service.update_settings(
+            {
+                "auto_trade_enabled": True,
+                "auto_trade_time_gate_enabled": False,
+                "auto_execution_mode": "dry_run",
+                "auto_score_weighted_allocation_enabled": True,
+                "auto_allocation_method": "target_tracking_min_variance_20d",
+                "auto_allocation_budget": 10000,
+                "auto_cash_per_order": 10000,
+                "auto_max_results": 2,
+                "auto_correlation_lookback_days": 20,
+                "auto_correlation_min_observations": 5,
+                "auto_covariance_risk_penalty": 1,
+            }
+        )
+        prices = {"600519": 100.0, "000001": 50.0}
+        with DatabaseManager.get_instance().get_session() as session:
+            for offset in range(21):
+                if offset:
+                    low_move = 1.005 if offset % 2 else 0.995
+                    high_move = 1.05 if offset % 2 else 0.95
+                    prices["600519"] *= low_move
+                    prices["000001"] *= high_move
+                bar_date = date.today() - timedelta(days=20 - offset)
+                for symbol, close in prices.items():
+                    session.add(StockDaily(code=symbol, date=bar_date, close=close))
+            session.commit()
+        fake_alphasift = MagicMock()
+        fake_alphasift.screen.return_value = {
+            "candidates": [
+                {"code": "600519", "score": 80, "price": 10.0},
+                {"code": "000001", "score": 80, "price": 10.0},
+            ],
+            "warnings": [],
+        }
+
+        with patch(
+            "src.services.vnpy_paper_trading_service.AlphaSiftService",
+            return_value=fake_alphasift,
+        ):
+            result = self.service.run_auto_trade_once()
+
+        audit = self.service.agent_repo.get_run_detail(result["agent_run_uid"])
+        optimizer = audit["diagnostics"]["portfolio_allocation"]["optimizer"]
+        self.assertGreater(
+            optimizer["weights_by_symbol"]["600519"],
+            optimizer["weights_by_symbol"]["000001"],
+        )
+        self.assertGreater(result["orders"][0]["cash_amount"], result["orders"][1]["cash_amount"])
+
+    def test_auto_trade_covariance_optimizer_fails_closed_without_history(self) -> None:
+        self.service.update_settings(
+            {
+                "auto_trade_enabled": True,
+                "auto_trade_time_gate_enabled": False,
+                "auto_execution_mode": "dry_run",
+                "auto_score_weighted_allocation_enabled": True,
+                "auto_allocation_method": "target_tracking_min_variance_20d",
+                "auto_max_results": 1,
+                "auto_correlation_min_observations": 5,
+            }
+        )
+        fake_alphasift = MagicMock()
+        fake_alphasift.screen.return_value = {
+            "candidates": [{"code": "600519", "score": 80, "price": 10.0}],
+            "warnings": [],
+        }
+
+        with patch(
+            "src.services.vnpy_paper_trading_service.AlphaSiftService",
+            return_value=fake_alphasift,
+        ):
+            result = self.service.run_auto_trade_once()
+
+        self.assertEqual(result["planned_count"], 0)
+        self.assertEqual(
+            result["orders"][0]["reason"],
+            "portfolio_allocation_covariance_data_unavailable",
+        )
+
     def test_auto_trade_respects_max_positions_risk_limit(self) -> None:
         self.service.submit_order(
             symbol="600519",

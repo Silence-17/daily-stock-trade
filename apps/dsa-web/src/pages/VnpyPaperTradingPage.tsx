@@ -76,6 +76,7 @@ type SettingsForm = {
   autoCorrelationLookbackDays: string;
   autoCorrelationMinObservations: string;
   autoMaxPairwiseCorrelation: string;
+  autoCovarianceRiskPenalty: string;
   autoIntervalMinutes: string;
   autoMinScore: string;
   autoSkipExistingPositions: boolean;
@@ -169,6 +170,7 @@ const defaultSettingsForm: SettingsForm = {
   autoCorrelationLookbackDays: '60',
   autoCorrelationMinObservations: '20',
   autoMaxPairwiseCorrelation: '0.85',
+  autoCovarianceRiskPenalty: '0.25',
   autoIntervalMinutes: '1440',
   autoMinScore: '',
   autoSkipExistingPositions: true,
@@ -483,11 +485,13 @@ function settingsToForm(status: VnpyPaperStatusResponse): SettingsForm {
     autoAllocationMethod: (
       settings.autoAllocationMethod === 'score_inverse_volatility_20d'
       || settings.autoAllocationMethod === 'score_inverse_volatility_20d_correlation_capped'
+      || settings.autoAllocationMethod === 'target_tracking_min_variance_20d'
     ) ? settings.autoAllocationMethod : 'score_weighted',
     autoRiskVolatilityFloorPct: String(settings.autoRiskVolatilityFloorPct ?? 5),
     autoCorrelationLookbackDays: String(settings.autoCorrelationLookbackDays ?? 60),
     autoCorrelationMinObservations: String(settings.autoCorrelationMinObservations ?? 20),
     autoMaxPairwiseCorrelation: String(settings.autoMaxPairwiseCorrelation ?? 0.85),
+    autoCovarianceRiskPenalty: String(settings.autoCovarianceRiskPenalty ?? 0.25),
     autoIntervalMinutes: String(settings.autoIntervalMinutes ?? 1440),
     autoMinScore: settings.autoMinScore == null ? '' : String(settings.autoMinScore),
     autoSkipExistingPositions: Boolean(settings.autoSkipExistingPositions),
@@ -570,6 +574,7 @@ function buildSettingsUpdate(settingsForm: SettingsForm): VnpyPaperSettingsUpdat
     autoCorrelationLookbackDays: parseNumber(settingsForm.autoCorrelationLookbackDays) ?? 60,
     autoCorrelationMinObservations: parseNumber(settingsForm.autoCorrelationMinObservations) ?? 20,
     autoMaxPairwiseCorrelation: parseNumber(settingsForm.autoMaxPairwiseCorrelation) ?? 0.85,
+    autoCovarianceRiskPenalty: parseNumber(settingsForm.autoCovarianceRiskPenalty) ?? 0.25,
     autoIntervalMinutes: parseNumber(settingsForm.autoIntervalMinutes) ?? 1440,
     autoMinScore: settingsForm.autoMinScore.trim() ? parseNumber(settingsForm.autoMinScore) : null,
     autoSkipExistingPositions: settingsForm.autoSkipExistingPositions,
@@ -3783,6 +3788,9 @@ const VnpyPaperTradingPage: React.FC = () => {
                 <option value="score_inverse_volatility_20d_correlation_capped">
                   评分 / 波动率 + 相关性上限
                 </option>
+                <option value="target_tracking_min_variance_20d">
+                  目标缺口 + 20日最小方差
+                </option>
               </select>
             </label>
             <label className="space-y-1 text-xs text-secondary-text">
@@ -3796,7 +3804,10 @@ const VnpyPaperTradingPage: React.FC = () => {
                 value={settingsForm.autoRiskVolatilityFloorPct}
                 disabled={
                   !settingsForm.autoScoreWeightedAllocationEnabled
-                  || settingsForm.autoAllocationMethod === 'score_weighted'
+                  || ![
+                    'score_inverse_volatility_20d',
+                    'score_inverse_volatility_20d_correlation_capped',
+                  ].includes(settingsForm.autoAllocationMethod)
                 }
                 onChange={(event) => setSettingsForm((prev) => ({
                   ...prev,
@@ -3812,7 +3823,10 @@ const VnpyPaperTradingPage: React.FC = () => {
                 min={20}
                 max={252}
                 value={settingsForm.autoCorrelationLookbackDays}
-                disabled={settingsForm.autoAllocationMethod !== 'score_inverse_volatility_20d_correlation_capped'}
+                disabled={![
+                  'score_inverse_volatility_20d_correlation_capped',
+                  'target_tracking_min_variance_20d',
+                ].includes(settingsForm.autoAllocationMethod)}
                 onChange={(event) => setSettingsForm((prev) => ({
                   ...prev,
                   autoCorrelationLookbackDays: event.target.value,
@@ -3827,7 +3841,10 @@ const VnpyPaperTradingPage: React.FC = () => {
                 min={5}
                 max={120}
                 value={settingsForm.autoCorrelationMinObservations}
-                disabled={settingsForm.autoAllocationMethod !== 'score_inverse_volatility_20d_correlation_capped'}
+                disabled={![
+                  'score_inverse_volatility_20d_correlation_capped',
+                  'target_tracking_min_variance_20d',
+                ].includes(settingsForm.autoAllocationMethod)}
                 onChange={(event) => setSettingsForm((prev) => ({
                   ...prev,
                   autoCorrelationMinObservations: event.target.value,
@@ -3847,6 +3864,22 @@ const VnpyPaperTradingPage: React.FC = () => {
                 onChange={(event) => setSettingsForm((prev) => ({
                   ...prev,
                   autoMaxPairwiseCorrelation: event.target.value,
+                }))}
+              />
+            </label>
+            <label className="space-y-1 text-xs text-secondary-text">
+              协方差风险惩罚
+              <input
+                className={INPUT_CLASS}
+                type="number"
+                min={0}
+                max={10}
+                step="0.05"
+                value={settingsForm.autoCovarianceRiskPenalty}
+                disabled={settingsForm.autoAllocationMethod !== 'target_tracking_min_variance_20d'}
+                onChange={(event) => setSettingsForm((prev) => ({
+                  ...prev,
+                  autoCovarianceRiskPenalty: event.target.value,
                 }))}
               />
             </label>

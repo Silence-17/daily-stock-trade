@@ -20,11 +20,12 @@ class VnpyPaperSettings(BaseModel):
     auto_cash_per_order: float = Field(10000.0, gt=0)
     auto_score_weighted_allocation_enabled: bool = False
     auto_allocation_budget: Optional[float] = Field(None, gt=0)
-    auto_allocation_method: Literal["score_weighted", "score_inverse_volatility_20d", "score_inverse_volatility_20d_correlation_capped"] = "score_weighted"
+    auto_allocation_method: Literal["score_weighted", "score_inverse_volatility_20d", "score_inverse_volatility_20d_correlation_capped", "target_tracking_min_variance_20d"] = "score_weighted"
     auto_risk_volatility_floor_pct: float = Field(5.0, gt=0, le=1000)
     auto_correlation_lookback_days: int = Field(60, ge=20, le=252)
     auto_correlation_min_observations: int = Field(20, ge=5, le=120)
     auto_max_pairwise_correlation: float = Field(0.85, ge=-1, le=1)
+    auto_covariance_risk_penalty: float = Field(0.25, ge=0, le=10)
     auto_interval_minutes: int = Field(1440, ge=1, le=10080)
     auto_min_score: Optional[float] = None
     auto_skip_existing_positions: bool = True
@@ -83,11 +84,12 @@ class VnpyPaperSettingsUpdate(BaseModel):
     auto_cash_per_order: Optional[float] = Field(None, gt=0)
     auto_score_weighted_allocation_enabled: Optional[bool] = None
     auto_allocation_budget: Optional[float] = Field(None, gt=0)
-    auto_allocation_method: Optional[Literal["score_weighted", "score_inverse_volatility_20d", "score_inverse_volatility_20d_correlation_capped"]] = None
+    auto_allocation_method: Optional[Literal["score_weighted", "score_inverse_volatility_20d", "score_inverse_volatility_20d_correlation_capped", "target_tracking_min_variance_20d"]] = None
     auto_risk_volatility_floor_pct: Optional[float] = Field(None, gt=0, le=1000)
     auto_correlation_lookback_days: Optional[int] = Field(None, ge=20, le=252)
     auto_correlation_min_observations: Optional[int] = Field(None, ge=5, le=120)
     auto_max_pairwise_correlation: Optional[float] = Field(None, ge=-1, le=1)
+    auto_covariance_risk_penalty: Optional[float] = Field(None, ge=0, le=10)
     auto_interval_minutes: Optional[int] = Field(None, ge=1, le=10080)
     auto_min_score: Optional[float] = None
     auto_skip_existing_positions: Optional[bool] = None

@@ -423,6 +423,7 @@ const AgentConsolePage: React.FC = () => {
     ?? asRecord(selectedDiagnostics?.source_routing)
   );
   const selectedSourceRoutingItems = asRecordList(selectedSourceRouting?.sources);
+  const selectedPortfolioOptimizer = asRecord(selectedPortfolioAllocation?.optimizer);
   const selectedPlanProfile = asRecord(selectedPlan?.planProfile) ?? asRecord(selectedPlan?.plan_profile);
   const selectedAdaptiveControls = (
     asRecord(selectedPlan?.adaptiveControls)
@@ -1724,6 +1725,26 @@ const AgentConsolePage: React.FC = () => {
                             </dd>
                           </div>
                         ) : null}
+                        {selectedPortfolioOptimizer ? (
+                          <div className="sm:col-span-2" data-testid="portfolio-optimizer-summary">
+                            <dt>协方差优化器</dt>
+                            <dd className="mt-1 font-semibold text-foreground">
+                              {String(selectedPortfolioOptimizer.model || '-')}
+                              {' · 样本 '}
+                              {String(
+                                selectedPortfolioOptimizer.observationCount
+                                ?? selectedPortfolioOptimizer.observation_count
+                                ?? 0,
+                              )}
+                              {' · 风险惩罚 '}
+                              {formatNumber(
+                                selectedPortfolioOptimizer.riskPenalty
+                                ?? selectedPortfolioOptimizer.risk_penalty,
+                                2,
+                              )}
+                            </dd>
+                          </div>
+                        ) : null}
                         <div>
                           <dt>最大候选</dt>
                           <dd className="mt-1 font-semibold text-foreground">
@@ -2104,6 +2125,10 @@ function DecisionTable({ decisions }: { decisions: VnpyPaperAgentDecision[] }) {
                   ?? asRecord(portfolioAllocation?.risk_input)
                 );
                 const allocationCorrelation = asRecord(allocationRiskInput?.correlation);
+                const allocationCovarianceHistory = (
+                  asRecord(allocationRiskInput?.covarianceHistory)
+                  ?? asRecord(allocationRiskInput?.covariance_history)
+                );
                 const correlationPairs = asRecordList(allocationCorrelation?.pairwise);
                 return (
                   <tr key={item.id} className="border-t border-border align-top">
@@ -2127,7 +2152,9 @@ function DecisionTable({ decisions }: { decisions: VnpyPaperAgentDecision[] }) {
                           评分权重 {formatPercent(Number(portfolioAllocation.scoreWeight ?? portfolioAllocation.score_weight) * 100)}
                           {' · 上限 '}
                           {formatMoney(portfolioAllocation.candidateCap ?? portfolioAllocation.candidate_cap)}
-                          {allocationRiskInput?.status === 'available' ? (
+                          {allocationRiskInput?.status === 'available'
+                            && (allocationRiskInput.volatility20dPct != null
+                              || allocationRiskInput.volatility_20d_pct != null) ? (
                             <div data-testid={`portfolio-risk-input-${item.id}`}>
                               20日波动率 {formatPercent(
                                 allocationRiskInput.volatility20dPct
@@ -2143,6 +2170,33 @@ function DecisionTable({ decisions }: { decisions: VnpyPaperAgentDecision[] }) {
                                 allocationRiskInput.riskAdjustedWeight
                                 ?? allocationRiskInput.risk_adjusted_weight,
                                 4,
+                              )}
+                            </div>
+                          ) : null}
+                          {portfolioAllocation.optimizerTargetWeight != null
+                            || portfolioAllocation.optimizer_target_weight != null ? (
+                              <div data-testid={`portfolio-optimizer-input-${item.id}`}>
+                                目标权重 {formatPercent(
+                                  Number(
+                                    portfolioAllocation.optimizerTargetWeight
+                                    ?? portfolioAllocation.optimizer_target_weight,
+                                  ) * 100,
+                                )}
+                                {' · 优化权重 '}
+                                {formatPercent(
+                                  Number(
+                                    portfolioAllocation.allocationWeight
+                                    ?? portfolioAllocation.allocation_weight,
+                                  ) * 100,
+                                )}
+                              </div>
+                            ) : null}
+                          {allocationCovarianceHistory ? (
+                            <div data-testid={`portfolio-covariance-input-${item.id}`}>
+                              协方差样本 {String(
+                                allocationCovarianceHistory.observationCount
+                                ?? allocationCovarianceHistory.observation_count
+                                ?? 0,
                               )}
                             </div>
                           ) : null}
