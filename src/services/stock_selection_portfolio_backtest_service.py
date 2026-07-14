@@ -53,6 +53,7 @@ class StockSelectionPortfolioBacktestService:
         enforce_tradeability: bool = True,
         accounting_mode: str = "equal_weight_approximation",
         target_weights: Optional[Dict[str, float]] = None,
+        corporate_actions: Optional[List[Dict[str, Any]]] = None,
         min_hard_coverage: float = 0.95,
         min_score_coverage: float = 0.80,
     ) -> Dict[str, Any]:
@@ -72,8 +73,11 @@ class StockSelectionPortfolioBacktestService:
             raise ValueError("no point-in-time factor snapshots exist in the requested range")
 
         normalized_target_weights = self._normalize_target_weights(target_weights)
+        normalized_corporate_actions = self._normalize_corporate_actions(corporate_actions)
         if normalized_target_weights and accounting_mode != "cash_ledger":
             raise ValueError("target_weights are supported only in cash_ledger mode")
+        if normalized_corporate_actions and accounting_mode != "cash_ledger":
+            raise ValueError("corporate_actions are supported only in cash_ledger mode")
         if (minimum_commission > 0 or sell_tax_bps > 0) and accounting_mode != "cash_ledger":
             raise ValueError("minimum_commission and sell_tax_bps are supported only in cash_ledger mode")
         if accounting_mode == "cash_ledger":
@@ -95,6 +99,7 @@ class StockSelectionPortfolioBacktestService:
                 date_from=date_from,
                 date_to=date_to,
                 target_weights=normalized_target_weights,
+                corporate_actions=normalized_corporate_actions,
             )
         if accounting_mode != "equal_weight_approximation":
             raise ValueError("accounting_mode must be cash_ledger or equal_weight_approximation")
@@ -314,6 +319,7 @@ class StockSelectionPortfolioBacktestService:
         date_from: date,
         date_to: date,
         target_weights: Dict[str, float],
+        corporate_actions: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
         cash = float(initial_capital)
         equity = float(initial_capital)
@@ -329,6 +335,8 @@ class StockSelectionPortfolioBacktestService:
         total_fees = 0.0
         total_taxes = 0.0
         total_slippage_cost = 0.0
+        total_dividend_cash = 0.0
+        applied_corporate_actions: set[int] = set()
         first_entry_date: Optional[date] = None
         last_exit_date: Optional[date] = None
         commission = commission_bps / 10_000
@@ -377,6 +385,18 @@ class StockSelectionPortfolioBacktestService:
                 bar = bars[0] if bars else None
                 trade_bars[symbol] = bar
                 trade_prices[symbol] = self._positive(getattr(bar, "open", None)) if bar else None
+
+            cash, period_corporate_actions = self._apply_corporate_actions(
+                cash=cash,
+                positions=positions,
+                corporate_actions=corporate_actions,
+                applied_indexes=applied_corporate_actions,
+                through_dates={
+                    symbol: bar.date
+                    for symbol, bar in trade_bars.items()
+                    if bar is not None
+                },
+            )
 
             pretrade_market_value = sum(
                 float(position["quantity"])
@@ -555,6 +575,14 @@ class StockSelectionPortfolioBacktestService:
                     mark_mode = "last_available_price"
                 else:
                     mark_date = mark_bar.date
+                cash, mark_actions = self._apply_corporate_actions(
+                    cash=cash,
+                    positions=positions,
+                    corporate_actions=corporate_actions,
+                    applied_indexes=applied_corporate_actions,
+                    through_dates={symbol: mark_date},
+                )
+                period_corporate_actions.extend(mark_actions)
                 position["last_price"] = mark_price
                 marks.append({
                     "symbol": symbol,
@@ -635,6 +663,11 @@ class StockSelectionPortfolioBacktestService:
             total_fees += period_fees
             total_taxes += period_taxes
             total_slippage_cost += period_slippage_cost
+            total_dividend_cash += sum(
+                float(item.get("cash_effect") or 0.0)
+                for item in period_corporate_actions
+                if item.get("status") == "applied" and item.get("action_type") == "cash_dividend"
+            )
 
             benchmark = self._evaluate_benchmark(
                 symbol=benchmark_symbol,
@@ -668,6 +701,11 @@ class StockSelectionPortfolioBacktestService:
                 "fees": round(period_fees, 4),
                 "taxes": round(period_taxes, 4),
                 "slippage_cost": round(period_slippage_cost, 4),
+                "corporate_actions": period_corporate_actions,
+                "processed_corporate_action_count": len(period_corporate_actions),
+                "applied_corporate_action_count": sum(
+                    item.get("status") == "applied" for item in period_corporate_actions
+                ),
                 "position_count": len(positions),
                 "trade_count": len(trades),
                 "blocked_trade_count": len(blocked),
@@ -696,6 +734,18 @@ class StockSelectionPortfolioBacktestService:
             "total_fees": round(total_fees, 4),
             "total_taxes": round(total_taxes, 4),
             "total_slippage_cost": round(total_slippage_cost, 4),
+            "processed_corporate_action_count": sum(
+                1
+                for item in corporate_actions
+                if int(item["event_index"]) in applied_corporate_actions
+            ),
+            "applied_corporate_action_count": sum(
+                1
+                for period in periods
+                for item in period.get("corporate_actions", [])
+                if item.get("status") == "applied"
+            ),
+            "cash_dividends_received": round(total_dividend_cash, 4),
             "ending_open_position_count": len(positions),
             "ending_cash": round(cash, 4),
             "ending_market_value": round(
@@ -728,6 +778,14 @@ class StockSelectionPortfolioBacktestService:
                 ),
                 "target_weight_mode": "explicit_symbol_weights" if target_weights else "equal_weight",
                 "configured_target_weights": dict(target_weights),
+                "corporate_action_source": "explicit_request_unadjusted_price_ledger",
+                "configured_corporate_action_count": len(corporate_actions),
+                "unprocessed_corporate_actions": [
+                    self._public_corporate_action(item)
+                    for item in corporate_actions
+                    if int(item["event_index"]) not in applied_corporate_actions
+                ],
+                "same_day_event_order": "corporate_action_before_trade",
                 "lot_size": lot_size,
                 "cash_constraint": "buys_capped_by_available_cash",
                 "commission_bps_per_side": commission_bps,
@@ -758,6 +816,115 @@ class StockSelectionPortfolioBacktestService:
         if total > 100 + 1e-9:
             raise ValueError("target_weights total must not exceed 100 percent")
         return normalized
+
+    @classmethod
+    def _normalize_corporate_actions(
+        cls,
+        raw_actions: Optional[List[Dict[str, Any]]],
+    ) -> List[Dict[str, Any]]:
+        normalized: List[Dict[str, Any]] = []
+        seen = set()
+        for raw in list(raw_actions or []):
+            if not isinstance(raw, dict):
+                raise ValueError("each corporate action must be an object")
+            symbol = str(raw.get("symbol") or "").strip().upper()
+            if not symbol:
+                raise ValueError("corporate action symbol is required")
+            raw_date = raw.get("effective_date")
+            if isinstance(raw_date, date):
+                effective_date = raw_date
+            else:
+                try:
+                    effective_date = date.fromisoformat(str(raw_date or ""))
+                except ValueError as exc:
+                    raise ValueError(f"invalid corporate action effective_date for {symbol}") from exc
+            action_type = str(raw.get("action_type") or "").strip().lower()
+            if action_type not in {"cash_dividend", "split_adjustment"}:
+                raise ValueError(f"unsupported corporate action type for {symbol}")
+            key = (symbol, effective_date, action_type)
+            if key in seen:
+                raise ValueError(f"duplicate corporate action for {symbol} on {effective_date.isoformat()}")
+            seen.add(key)
+            item: Dict[str, Any] = {
+                "event_index": len(normalized),
+                "symbol": symbol,
+                "effective_date": effective_date,
+                "action_type": action_type,
+            }
+            if action_type == "cash_dividend":
+                if raw.get("split_ratio") is not None:
+                    raise ValueError(f"split_ratio is not allowed for cash_dividend {symbol}")
+                value = cls._positive(raw.get("cash_dividend_per_share"))
+                if value is None:
+                    raise ValueError(f"cash_dividend_per_share must be positive for {symbol}")
+                item["cash_dividend_per_share"] = value
+            else:
+                if raw.get("cash_dividend_per_share") is not None:
+                    raise ValueError(f"cash_dividend_per_share is not allowed for split_adjustment {symbol}")
+                value = cls._positive(raw.get("split_ratio"))
+                if value is None:
+                    raise ValueError(f"split_ratio must be positive for {symbol}")
+                item["split_ratio"] = value
+            normalized.append(item)
+        normalized.sort(key=lambda item: (item["effective_date"], item["event_index"]))
+        return normalized
+
+    @classmethod
+    def _apply_corporate_actions(
+        cls,
+        *,
+        cash: float,
+        positions: Dict[str, Dict[str, Any]],
+        corporate_actions: List[Dict[str, Any]],
+        applied_indexes: set[int],
+        through_dates: Dict[str, date],
+    ) -> tuple[float, List[Dict[str, Any]]]:
+        records: List[Dict[str, Any]] = []
+        for action in corporate_actions:
+            event_index = int(action["event_index"])
+            symbol = str(action["symbol"])
+            through_date = through_dates.get(symbol)
+            if event_index in applied_indexes or through_date is None:
+                continue
+            effective_date = action["effective_date"]
+            if effective_date > through_date:
+                continue
+            applied_indexes.add(event_index)
+            position = positions.get(symbol)
+            quantity_before = int(position.get("quantity") or 0) if position else 0
+            record = {
+                **cls._public_corporate_action(action),
+                "status": "not_held" if quantity_before <= 0 else "applied",
+                "quantity_before": quantity_before,
+                "quantity_after": quantity_before,
+                "cash_effect": 0.0,
+            }
+            if quantity_before <= 0:
+                records.append(record)
+                continue
+            if action["action_type"] == "cash_dividend":
+                cash_effect = quantity_before * float(action["cash_dividend_per_share"])
+                cash += cash_effect
+                record["cash_effect"] = round(cash_effect, 4)
+            else:
+                adjusted_quantity = quantity_before * float(action["split_ratio"])
+                rounded_quantity = round(adjusted_quantity)
+                if abs(adjusted_quantity - rounded_quantity) > 1e-9:
+                    raise ValueError(
+                        f"split adjustment for {symbol} produces fractional shares; cash-in-lieu is unsupported"
+                    )
+                position["quantity"] = int(rounded_quantity)
+                record["quantity_after"] = int(rounded_quantity)
+            records.append(record)
+        return cash, records
+
+    @staticmethod
+    def _public_corporate_action(action: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            key: (value.isoformat() if isinstance(value, date) else value)
+            for key, value in action.items()
+            if key != "event_index"
+        }
 
     @staticmethod
     def _floor_lot(quantity: float, lot_size: int) -> int:

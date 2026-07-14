@@ -110,6 +110,14 @@ class AlphaSiftReplayRequest(BaseModel):
     min_score_coverage: float = Field(0.80, gt=0, le=1)
 
 
+class AlphaSiftPortfolioCorporateAction(BaseModel):
+    symbol: str = Field(..., min_length=1, max_length=16)
+    effective_date: date
+    action_type: str = Field(..., pattern="^(cash_dividend|split_adjustment)$")
+    cash_dividend_per_share: Optional[float] = Field(None, gt=0)
+    split_ratio: Optional[float] = Field(None, gt=0)
+
+
 class AlphaSiftPortfolioBacktestRequest(BaseModel):
     strategy: str = Field("dual_low", min_length=1, max_length=64)
     market: str = Field("cn", min_length=1, max_length=16)
@@ -126,6 +134,7 @@ class AlphaSiftPortfolioBacktestRequest(BaseModel):
     enforce_tradeability: bool = True
     accounting_mode: str = Field("cash_ledger", pattern="^(cash_ledger|equal_weight_approximation)$")
     target_weights: Dict[str, float] = Field(default_factory=dict)
+    corporate_actions: List[AlphaSiftPortfolioCorporateAction] = Field(default_factory=list, max_length=500)
     min_hard_coverage: float = Field(0.95, gt=0, le=1)
     min_score_coverage: float = Field(0.80, gt=0, le=1)
 
@@ -415,6 +424,7 @@ def alphasift_run_portfolio_backtest(
             enforce_tradeability=payload.enforce_tradeability,
             accounting_mode=payload.accounting_mode,
             target_weights=payload.target_weights,
+            corporate_actions=[item.model_dump() for item in payload.corporate_actions],
             min_hard_coverage=payload.min_hard_coverage,
             min_score_coverage=payload.min_score_coverage,
         )

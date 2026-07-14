@@ -31,6 +31,7 @@ import {
   type AlphaSiftFullMarketIngestionJob,
   type AlphaSiftHistoricalUniverseResponse,
   type AlphaSiftPortfolioBacktestResponse,
+  type AlphaSiftPortfolioCorporateActionInput,
   type AlphaSiftReplayCompatibility,
   type AlphaSiftReplayResponse,
 } from '../api/alphasift';
@@ -143,6 +144,45 @@ function parsePortfolioTargetWeights(value: string): Record<string, number> {
     throw new Error('目标权重总和不能超过 100%');
   }
   return result;
+}
+
+function parsePortfolioCorporateActions(value: string): AlphaSiftPortfolioCorporateActionInput[] {
+  if (!value.trim()) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new Error('公司行动必须是有效的 JSON 数组');
+  }
+  if (!Array.isArray(parsed)) {
+    throw new Error('公司行动必须是 JSON 数组');
+  }
+  return parsed.map((raw, index) => {
+    const item = asRecord(raw);
+    const symbol = String(item?.symbol || '').trim().toUpperCase();
+    const effectiveDate = String(item?.effectiveDate ?? item?.effective_date ?? '').trim();
+    const actionType = String(item?.actionType ?? item?.action_type ?? '').trim();
+    if (!symbol || !/^\d{4}-\d{2}-\d{2}$/.test(effectiveDate)) {
+      throw new Error(`第 ${index + 1} 个公司行动缺少代码或有效日期`);
+    }
+    if (actionType === 'cash_dividend') {
+      const cashDividendPerShare = Number(
+        item?.cashDividendPerShare ?? item?.cash_dividend_per_share,
+      );
+      if (!Number.isFinite(cashDividendPerShare) || cashDividendPerShare <= 0) {
+        throw new Error(`第 ${index + 1} 个现金分红缺少有效的每股金额`);
+      }
+      return { symbol, effectiveDate, actionType, cashDividendPerShare };
+    }
+    if (actionType === 'split_adjustment') {
+      const splitRatio = Number(item?.splitRatio ?? item?.split_ratio);
+      if (!Number.isFinite(splitRatio) || splitRatio <= 0) {
+        throw new Error(`第 ${index + 1} 个拆并股事件缺少有效比例`);
+      }
+      return { symbol, effectiveDate, actionType, splitRatio };
+    }
+    throw new Error(`第 ${index + 1} 个公司行动类型无效`);
+  });
 }
 
 function runDataQuality(run: VnpyPaperAgentRunSummary | VnpyPaperAgentRunDetail | null): string {
@@ -297,6 +337,7 @@ const AgentConsolePage: React.FC = () => {
   const [portfolioTargetWeights, setPortfolioTargetWeights] = useState('');
   const [portfolioMinimumCommission, setPortfolioMinimumCommission] = useState('');
   const [portfolioSellTaxBps, setPortfolioSellTaxBps] = useState('');
+  const [portfolioCorporateActions, setPortfolioCorporateActions] = useState('');
   const [portfolioBacktest, setPortfolioBacktest] = useState<AlphaSiftPortfolioBacktestResponse | null>(null);
   const [ingestionDates, setIngestionDates] = useState('');
   const [ingestionUniverse, setIngestionUniverse] = useState('');
@@ -655,6 +696,7 @@ const AgentConsolePage: React.FC = () => {
         targetWeights: parsePortfolioTargetWeights(portfolioTargetWeights),
         minimumCommission,
         sellTaxBps,
+        corporateActions: parsePortfolioCorporateActions(portfolioCorporateActions),
       });
       setPortfolioBacktest(payload);
       setSuccess(`组合回测完成，覆盖 ${payload.snapshotCount} 个快照日期`);
@@ -1231,6 +1273,14 @@ const AgentConsolePage: React.FC = () => {
               </Button>
             </div>
           </div>
+          <textarea
+            data-testid="agent-portfolio-corporate-actions"
+            className="mt-2 min-h-20 w-full resize-y rounded-xl border border-border bg-surface px-3 py-2 font-mono text-xs text-foreground outline-none transition-colors focus:border-cyan"
+            value={portfolioCorporateActions}
+            onChange={(event) => setPortfolioCorporateActions(event.target.value)}
+            aria-label="组合回测公司行动 JSON"
+            placeholder='[{"symbol":"600519","effective_date":"2024-06-14","action_type":"cash_dividend","cash_dividend_per_share":1.5}]'
+          />
           {portfolioBacktest ? (
             <div className="mt-3 space-y-3" data-testid="agent-portfolio-backtest-results">
               {Object.keys(
@@ -1246,6 +1296,15 @@ const AgentConsolePage: React.FC = () => {
                   ).map(([symbol, weight]) => (
                     <span key={symbol} className="border border-border bg-surface px-2 py-1 text-secondary-text">
                       {symbol} {formatPercent(weight)}
+                    </span>
+                  ))}
+                </div>
+              ) : null}
+              {portfolioBacktest.periods.some((period) => (period.corporateActions?.length ?? 0) > 0) ? (
+                <div className="flex flex-wrap gap-2 text-xs" data-testid="agent-portfolio-corporate-action-audit">
+                  {portfolioBacktest.periods.flatMap((period) => period.corporateActions ?? []).map((item, index) => (
+                    <span key={`${String(item.symbol)}-${String(item.effectiveDate)}-${index}`} className="border border-border bg-surface px-2 py-1 text-secondary-text">
+                      {String(item.symbol)} {String(item.actionType)} {String(item.status)}
                     </span>
                   ))}
                 </div>

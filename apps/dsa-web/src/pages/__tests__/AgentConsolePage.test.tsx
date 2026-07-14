@@ -599,6 +599,15 @@ describe('AgentConsolePage', () => {
         cash: 12000,
         positionCount: 4,
         equity: 104000,
+        processedCorporateActionCount: 1,
+        appliedCorporateActionCount: 1,
+        corporateActions: [{
+          symbol: '600519',
+          effectiveDate: '2024-01-15',
+          actionType: 'cash_dividend',
+          status: 'applied',
+          cashEffect: 150,
+        }],
       }],
       methodology: {
         lookaheadProtection: true,
@@ -855,6 +864,11 @@ describe('AgentConsolePage', () => {
     fireEvent.change(screen.getByTestId('agent-portfolio-sell-tax-bps'), {
       target: { value: '5' },
     });
+    fireEvent.change(screen.getByTestId('agent-portfolio-corporate-actions'), {
+      target: {
+        value: '[{"symbol":"600519","effective_date":"2024-01-15","action_type":"cash_dividend","cash_dividend_per_share":1.5}]',
+      },
+    });
     fireEvent.click(screen.getByTestId('agent-portfolio-backtest-run'));
 
     await waitFor(() => expect(runPortfolioBacktest).toHaveBeenCalledWith({
@@ -867,6 +881,12 @@ describe('AgentConsolePage', () => {
       targetWeights: { '600519': 60, '000001': 30 },
       minimumCommission: 5,
       sellTaxBps: 5,
+      corporateActions: [{
+        symbol: '600519',
+        effectiveDate: '2024-01-15',
+        actionType: 'cash_dividend',
+        cashDividendPerShare: 1.5,
+      }],
     }));
     const results = await screen.findByTestId('agent-portfolio-backtest-results');
     expect(results).toHaveTextContent('8.0%');
@@ -880,6 +900,9 @@ describe('AgentConsolePage', () => {
     expect(screen.getByTestId('agent-portfolio-target-audit')).toHaveTextContent('000001 30.0%');
     expect(results).toHaveTextContent('成本费用');
     expect(results).toHaveTextContent('¥60.00');
+    expect(screen.getByTestId('agent-portfolio-corporate-action-audit')).toHaveTextContent(
+      '600519 cash_dividend applied',
+    );
   });
 
   it('submits and observes bounded historical factor ingestion', async () => {
