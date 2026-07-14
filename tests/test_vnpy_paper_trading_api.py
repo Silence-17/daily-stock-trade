@@ -144,6 +144,78 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
         self.assertEqual(drawdown["peak_equity"], 120000)
         self.assertIn("account_drawdown_limit_reached", health["required_blockers"])
 
+    def test_system_health_reports_valuation_source_health(self) -> None:
+        health = _system_health_payload({
+            "enabled": True,
+            "available": True,
+            "settings": {
+                "enabled": True,
+                "auto_trade_enabled": False,
+                "auto_execution_mode": "paper",
+            },
+            "diagnostics": {"snapshot_requested": True},
+            "snapshot": {
+                "accounts": [{
+                    "positions": [
+                        {
+                            "symbol": "600519",
+                            "price_available": True,
+                            "price_stale": False,
+                            "price_source": "realtime",
+                            "price_provider": "tencent",
+                            "price_date": "2026-07-15",
+                        },
+                        {
+                            "symbol": "000001",
+                            "price_available": True,
+                            "price_stale": True,
+                            "price_source": "daily_close",
+                            "price_provider": "stock_daily",
+                            "price_date": "2026-07-14",
+                        },
+                        {
+                            "symbol": "300750",
+                            "price_available": False,
+                            "price_stale": False,
+                            "price_source": "unavailable",
+                            "price_provider": None,
+                        },
+                        {
+                            "symbol": "688981",
+                            "price_available": None,
+                            "price_stale": False,
+                            "price_source": None,
+                            "price_provider": None,
+                        },
+                    ],
+                }],
+            },
+        })
+
+        valuation = {
+            item["key"]: item for item in health["components"]
+        }["valuation"]
+        self.assertEqual(valuation["status"], "warning")
+        self.assertEqual(valuation["reason"], "valuation_degraded")
+        self.assertEqual(valuation["coverage_pct"], 50.0)
+        self.assertEqual(valuation["fresh_coverage_pct"], 25.0)
+        self.assertEqual(valuation["available_count"], 2)
+        self.assertEqual(valuation["fresh_count"], 1)
+        self.assertEqual(valuation["missing_symbols"], ["300750"])
+        self.assertEqual(valuation["stale_symbols"], ["000001"])
+        self.assertEqual(valuation["unknown_symbols"], ["688981"])
+        self.assertEqual(valuation["unknown_count"], 1)
+        self.assertEqual(
+            valuation["source_counts"],
+            {"daily_close": 1, "realtime": 1, "unavailable": 1, "unknown": 1},
+        )
+        self.assertEqual(
+            valuation["provider_counts"],
+            {"stock_daily": 1, "tencent": 1, "unknown": 2},
+        )
+        self.assertEqual(valuation["oldest_price_date"], "2026-07-14")
+        self.assertEqual(valuation["latest_price_date"], "2026-07-15")
+
     def test_status_and_manual_order_use_local_paper_account(self) -> None:
         with patch(
             "api.v1.endpoints.vnpy_paper_trading.VnpyPaperTradingService",

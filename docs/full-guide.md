@@ -752,6 +752,7 @@ python main.py --schedule --no-run-immediately
 > Web 模拟交易页还会读取 `GET /api/v1/vnpy-paper/task-health` 展示“任务健康检查”，按自动买入与自动恢复扫描聚合任务是否注册、运行、停用、持久化最近失败/跳过原因和下次运行时间。
 > 暂停“定时自动买入”只会注销新增买入任务；只要模拟交易总开关仍开启，`vnpy_paper_auto_retry` 会在服务注册时立即扫描一次并继续按 1 至 5 分钟周期恢复已有委托，暂停期间只对账和超时归档，不重提失败计划。API lifespan 创建或注入的 MainEngine/EventEngine 会绑定到 scheduler 后台 service，Web 手动桥接和后台自动任务复用同一 runtime。
 > `GET /api/v1/vnpy-paper/status` 的完整持仓快照会使用进程内 10 秒短 TTL 缓存，减少频繁刷新时重复重放 Portfolio 和拉取行情估值；成交、vn.py 成交回调、账户重置或账户恢复后会主动失效缓存，响应诊断包含 `snapshot_cache_hit` 和 `snapshot_cache_ttl_seconds`。
+> 完整状态的系统健康视图还会汇总持仓价格覆盖率、新鲜率、价格来源/provider 分布、缺失/陈旧/状态未知代码和价格日期范围；这些指标只归纳当前 Portfolio 快照，不会额外请求行情。Web“可用性诊断”会显示相同的覆盖率与来源摘要。
 > Web 模拟交易页还会读取 `GET /api/v1/vnpy-paper/task-event-summary` 展示“任务趋势”，按最近持久化事件聚合 completed/skipped/failed/started 分布、任务级失败率、平均耗时和最近失败/跳过时间。
 >
 > “长期稳定性”通过 `GET /api/v1/vnpy-paper/task-metrics` 提供 7/30/90 天窗口，按 completed/skipped/failed 终态运行计算成功率、失败率、跳过率、平均/P95 耗时和连续失败，并展示任务级与逐日趋势；started 事件不计入成功率分母。

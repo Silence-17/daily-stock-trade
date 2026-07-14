@@ -1281,6 +1281,44 @@ describe('VnpyPaperTradingPage', () => {
     expect(screen.getByText('缺价')).toBeInTheDocument();
   });
 
+  it('shows structured valuation source coverage from system health', async () => {
+    const valuationDetail = '覆盖 2/3（66.67%），新鲜 1/3（33.33%）；缺价 1 笔；陈旧价格 1 笔；来源 daily_close=1、realtime=1、unavailable=1';
+    const sourceHealthStatus = {
+      ...statusResponse,
+      diagnostics: {
+        ...statusResponse.diagnostics,
+        systemHealth: {
+          ...statusResponse.diagnostics.systemHealth,
+          components: statusResponse.diagnostics.systemHealth.components.map((item) => (
+            item.key === 'valuation'
+              ? {
+                ...item,
+                status: 'warning',
+                reason: 'valuation_degraded',
+                detail: valuationDetail,
+                tone: 'warning',
+                coveragePct: 66.67,
+                freshCoveragePct: 33.33,
+                sourceCounts: { daily_close: 1, realtime: 1, unavailable: 1 },
+              }
+              : item
+          )),
+        },
+      },
+    };
+    getStatus
+      .mockResolvedValueOnce({ ...statusResponse, snapshot: null, recentTrades: [] })
+      .mockResolvedValueOnce(sourceHealthStatus);
+
+    render(
+      <UiLanguageProvider>
+        <VnpyPaperTradingPage />
+      </UiLanguageProvider>,
+    );
+
+    expect(await screen.findByText(valuationDetail)).toBeInTheDocument();
+  });
+
   it('renders paper account status, positions, and trades', async () => {
     render(
       <UiLanguageProvider>
