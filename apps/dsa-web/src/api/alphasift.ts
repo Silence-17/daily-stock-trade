@@ -338,6 +338,9 @@ export type AlphaSiftPortfolioBacktestResponse = {
     positionCount?: number;
     tradeCount?: number;
     blockedTradeCount?: number;
+    replayCandidateCount?: number;
+    targetWeights?: Record<string, number>;
+    configuredTargetsNotSelected?: string[];
   }>;
   methodology: Record<string, unknown>;
 };
@@ -554,6 +557,7 @@ export const alphasiftApi = {
     dateTo: string;
     topK?: number;
     benchmarkSymbol?: string;
+    targetWeights?: Record<string, number>;
   }): Promise<AlphaSiftPortfolioBacktestResponse> {
     const response = await apiClient.post<Record<string, unknown>>(
       '/api/v1/alphasift/replay/portfolio-backtest',
@@ -570,6 +574,7 @@ export const alphasiftApi = {
         benchmark_symbol: payload.benchmarkSymbol || null,
         enforce_tradeability: true,
         accounting_mode: 'cash_ledger',
+        target_weights: payload.targetWeights ?? {},
       },
     );
     return toCamelCase<AlphaSiftPortfolioBacktestResponse>(response.data);

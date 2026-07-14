@@ -126,6 +126,25 @@ function formatMoney(value: unknown, currency = 'CNY'): string {
   }).format(amount);
 }
 
+function parsePortfolioTargetWeights(value: string): Record<string, number> {
+  const result: Record<string, number> = {};
+  const entries = value.split(/[\n,，]+/).map((item) => item.trim()).filter(Boolean);
+  for (const entry of entries) {
+    const [rawSymbol, rawWeight, ...extra] = entry.split(/[=:：]/).map((item) => item.trim());
+    const symbol = rawSymbol?.toUpperCase();
+    const weight = Number(rawWeight);
+    if (!symbol || !rawWeight || extra.length > 0 || !Number.isFinite(weight) || weight <= 0 || weight > 100) {
+      throw new Error(`目标权重格式无效：${entry}`);
+    }
+    result[symbol] = weight;
+  }
+  const total = Object.values(result).reduce((sum, weight) => sum + weight, 0);
+  if (total > 100 + 1e-9) {
+    throw new Error('目标权重总和不能超过 100%');
+  }
+  return result;
+}
+
 function runDataQuality(run: VnpyPaperAgentRunSummary | VnpyPaperAgentRunDetail | null): string {
   const diagnostics = asRecord(run?.diagnostics);
   const quality = asRecord(diagnostics?.dataQuality) ?? asRecord(diagnostics?.data_quality);
@@ -275,6 +294,7 @@ const AgentConsolePage: React.FC = () => {
   const [replayResult, setReplayResult] = useState<AlphaSiftReplayResponse | null>(null);
   const [portfolioDateFrom, setPortfolioDateFrom] = useState('');
   const [portfolioDateTo, setPortfolioDateTo] = useState('');
+  const [portfolioTargetWeights, setPortfolioTargetWeights] = useState('');
   const [portfolioBacktest, setPortfolioBacktest] = useState<AlphaSiftPortfolioBacktestResponse | null>(null);
   const [ingestionDates, setIngestionDates] = useState('');
   const [ingestionUniverse, setIngestionUniverse] = useState('');
@@ -622,6 +642,7 @@ const AgentConsolePage: React.FC = () => {
         dateTo: portfolioDateTo,
         topK: 5,
         benchmarkSymbol: (filters.market || 'cn') === 'cn' ? '000300' : undefined,
+        targetWeights: parsePortfolioTargetWeights(portfolioTargetWeights),
       });
       setPortfolioBacktest(payload);
       setSuccess(`组合回测完成，覆盖 ${payload.snapshotCount} 个快照日期`);
@@ -1133,7 +1154,7 @@ const AgentConsolePage: React.FC = () => {
         <div className="border-t border-border pt-3">
           <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
             <div>
-              <h3 className="text-sm font-semibold text-foreground">跨日期等权组合回测</h3>
+              <h3 className="text-sm font-semibold text-foreground">跨日期组合回测</h3>
               <p className="mt-1 text-xs text-secondary-text">
                 下一交易日开盘成交，双边手续费 3 bps、滑点 5 bps，A 股默认对比沪深 300
               </p>
@@ -1155,6 +1176,14 @@ const AgentConsolePage: React.FC = () => {
                 onChange={(event) => setPortfolioDateTo(event.target.value)}
                 aria-label="组合回测结束日期"
               />
+              <input
+                data-testid="agent-portfolio-target-weights"
+                className={`${INPUT_CLASS} sm:w-64`}
+                value={portfolioTargetWeights}
+                onChange={(event) => setPortfolioTargetWeights(event.target.value)}
+                aria-label="组合目标权重"
+                placeholder="600519=60, 000001=30"
+              />
               <Button
                 data-testid="agent-portfolio-backtest-run"
                 variant="secondary"
@@ -1169,6 +1198,23 @@ const AgentConsolePage: React.FC = () => {
           </div>
           {portfolioBacktest ? (
             <div className="mt-3 space-y-3" data-testid="agent-portfolio-backtest-results">
+              {Object.keys(
+                asRecord(portfolioBacktest.methodology.configuredTargetWeights)
+                ?? asRecord(portfolioBacktest.methodology.configured_target_weights)
+                ?? {},
+              ).length > 0 ? (
+                <div className="flex flex-wrap gap-2 text-xs" data-testid="agent-portfolio-target-audit">
+                  {Object.entries(
+                    asRecord(portfolioBacktest.methodology.configuredTargetWeights)
+                    ?? asRecord(portfolioBacktest.methodology.configured_target_weights)
+                    ?? {},
+                  ).map(([symbol, weight]) => (
+                    <span key={symbol} className="border border-border bg-surface px-2 py-1 text-secondary-text">
+                      {symbol} {formatPercent(weight)}
+                    </span>
+                  ))}
+                </div>
+              ) : null}
               <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
                 <StatTile
                   label="组合收益"

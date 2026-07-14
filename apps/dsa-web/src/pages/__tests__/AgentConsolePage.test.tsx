@@ -597,7 +597,10 @@ describe('AgentConsolePage', () => {
         positionCount: 4,
         equity: 104000,
       }],
-      methodology: { lookaheadProtection: true },
+      methodology: {
+        lookaheadProtection: true,
+        configuredTargetWeights: { '600519': 60, '000001': 30 },
+      },
     });
     resolveHistoricalUniverse.mockResolvedValue({
       market: 'cn',
@@ -840,6 +843,9 @@ describe('AgentConsolePage', () => {
     fireEvent.change(screen.getByTestId('agent-run-market-filter'), { target: { value: 'cn' } });
     fireEvent.change(screen.getByTestId('agent-portfolio-date-from'), { target: { value: '2024-01-01' } });
     fireEvent.change(screen.getByTestId('agent-portfolio-date-to'), { target: { value: '2024-02-01' } });
+    fireEvent.change(screen.getByTestId('agent-portfolio-target-weights'), {
+      target: { value: '600519=60, 000001=30' },
+    });
     fireEvent.click(screen.getByTestId('agent-portfolio-backtest-run'));
 
     await waitFor(() => expect(runPortfolioBacktest).toHaveBeenCalledWith({
@@ -849,6 +855,7 @@ describe('AgentConsolePage', () => {
       dateTo: '2024-02-01',
       topK: 5,
       benchmarkSymbol: '000300',
+      targetWeights: { '600519': 60, '000001': 30 },
     }));
     const results = await screen.findByTestId('agent-portfolio-backtest-results');
     expect(results).toHaveTextContent('8.0%');
@@ -858,6 +865,8 @@ describe('AgentConsolePage', () => {
     expect(results).toHaveTextContent('延续');
     expect(results).toHaveTextContent('被动');
     expect(results).toHaveTextContent('期末未平 1');
+    expect(screen.getByTestId('agent-portfolio-target-audit')).toHaveTextContent('600519 60.0%');
+    expect(screen.getByTestId('agent-portfolio-target-audit')).toHaveTextContent('000001 30.0%');
   });
 
   it('submits and observes bounded historical factor ingestion', async () => {

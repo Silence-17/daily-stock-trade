@@ -123,6 +123,7 @@ class AlphaSiftPortfolioBacktestRequest(BaseModel):
     benchmark_symbol: Optional[str] = Field(None, min_length=1, max_length=16)
     enforce_tradeability: bool = True
     accounting_mode: str = Field("cash_ledger", pattern="^(cash_ledger|equal_weight_approximation)$")
+    target_weights: Dict[str, float] = Field(default_factory=dict)
     min_hard_coverage: float = Field(0.95, gt=0, le=1)
     min_score_coverage: float = Field(0.80, gt=0, le=1)
 
@@ -409,6 +410,7 @@ def alphasift_run_portfolio_backtest(
             benchmark_symbol=payload.benchmark_symbol,
             enforce_tradeability=payload.enforce_tradeability,
             accounting_mode=payload.accounting_mode,
+            target_weights=payload.target_weights,
             min_hard_coverage=payload.min_hard_coverage,
             min_score_coverage=payload.min_score_coverage,
         )

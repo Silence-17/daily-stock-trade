@@ -362,6 +362,7 @@ describe('alphasiftApi', () => {
       dateTo: '2024-02-01',
       topK: 5,
       benchmarkSymbol: '000300',
+      targetWeights: { '600519': 60, '000001': 30 },
     });
 
     expect(post).toHaveBeenCalledWith('/api/v1/alphasift/replay/portfolio-backtest', {
@@ -377,6 +378,7 @@ describe('alphasiftApi', () => {
       benchmark_symbol: '000300',
       enforce_tradeability: true,
       accounting_mode: 'cash_ledger',
+      target_weights: { '600519': 60, '000001': 30 },
     });
     expect(result.metrics.excessReturnPct).toBe(5);
   });
