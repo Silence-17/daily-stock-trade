@@ -516,6 +516,7 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
                     "auto_correlation_lookback_days": 90,
                     "auto_correlation_min_observations": 30,
                     "auto_max_pairwise_correlation": 0.75,
+                    "auto_covariance_risk_penalty": 0.4,
                     "auto_interval_minutes": 5,
                     "auto_min_score": None,
                     "auto_exclude_st": True,
@@ -559,6 +560,7 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
         self.assertEqual(response.json()["settings"]["auto_correlation_lookback_days"], 90)
         self.assertEqual(response.json()["settings"]["auto_correlation_min_observations"], 30)
         self.assertEqual(response.json()["settings"]["auto_max_pairwise_correlation"], 0.75)
+        self.assertEqual(response.json()["settings"]["auto_covariance_risk_penalty"], 0.4)
         self.assertEqual(response.json()["settings"]["auto_interval_minutes"], 5)
         self.assertTrue(response.json()["settings"]["auto_exclude_st"])
         self.assertEqual(response.json()["settings"]["auto_min_turnover"], 100000000)

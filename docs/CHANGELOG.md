@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [新功能] 自动组合分配新增 `target_tracking_min_variance_20d`，使用严格截至运行日的本地 trailing returns 构建年化协方差矩阵，在目标缺口跟踪与可配置风险惩罚之间求解非负、和为 1 的连续权重。
+- [改进] 协方差优化结果继续受现金、订单槽位、单票/总仓位/行业上限、显式目标缺口和整手执行约束；历史或重叠样本不足时 fail-closed，Agent run 审计目标向量、协方差矩阵、收敛状态、风险惩罚和最终权重。
+- [改进] 模拟交易页新增目标缺口最小方差方法和风险惩罚设置，Agent 控制台展示优化器摘要、候选目标/优化权重与协方差样本。
+- [测试] 新增任意 8/2 目标缺口跟踪、高方差候选降权、设置 API/Web 映射和 Agent 优化审计展示回归。
 - [新功能] 自动选股 Agent 会按最近 30 天同策略/市场的持久化来源健康观测和当前连续失败状态计算有边界的 AlphaSift 快照源权重，并在未显式配置优先级时动态调整来源顺序。
 - [改进] AlphaSift screen 结果与 Agent run 诊断新增 `source_health` 和 `source_routing` 审计；Agent 控制台展示本轮有效来源顺序及各来源权重，显式 `SNAPSHOT_SOURCE_PRIORITY` 始终保持不变。
 - [测试] 新增历史降级源降权、显式优先级保护、趋势传入、运行审计和 Agent 来源路由展示回归，并修复有效 screen 缓存夹具使用固定日期导致的时效性失败。

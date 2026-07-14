@@ -8,7 +8,8 @@ export type VnpyPaperExecutionRoute = 'local_paper' | 'vnpy_bridge';
 export type VnpyPaperAllocationMethod =
   | 'score_weighted'
   | 'score_inverse_volatility_20d'
-  | 'score_inverse_volatility_20d_correlation_capped';
+  | 'score_inverse_volatility_20d_correlation_capped'
+  | 'target_tracking_min_variance_20d';
 
 export type VnpyPaperSettings = {
   enabled: boolean;
@@ -26,6 +27,7 @@ export type VnpyPaperSettings = {
   autoCorrelationLookbackDays: number;
   autoCorrelationMinObservations: number;
   autoMaxPairwiseCorrelation: number;
+  autoCovarianceRiskPenalty: number;
   autoIntervalMinutes: number;
   autoMinScore?: number | null;
   autoSkipExistingPositions: boolean;
@@ -951,6 +953,9 @@ function buildSettingsPayload(payload: VnpyPaperSettingsUpdate): Record<string, 
   }
   if (hasOwn(payload, 'autoMaxPairwiseCorrelation')) {
     body.auto_max_pairwise_correlation = payload.autoMaxPairwiseCorrelation;
+  }
+  if (hasOwn(payload, 'autoCovarianceRiskPenalty')) {
+    body.auto_covariance_risk_penalty = payload.autoCovarianceRiskPenalty;
   }
   if (hasOwn(payload, 'autoIntervalMinutes')) body.auto_interval_minutes = payload.autoIntervalMinutes;
   if (hasOwn(payload, 'autoMinScore')) body.auto_min_score = payload.autoMinScore ?? null;

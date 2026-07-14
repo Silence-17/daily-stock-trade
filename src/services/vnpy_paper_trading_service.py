@@ -134,6 +134,7 @@ class VnpyPaperSettings:
     auto_correlation_lookback_days: int = 60
     auto_correlation_min_observations: int = 20
     auto_max_pairwise_correlation: float = 0.85
+    auto_covariance_risk_penalty: float = 0.25
     auto_interval_minutes: int = 1440
     auto_min_score: Optional[float] = None
     auto_skip_existing_positions: bool = True
@@ -4290,6 +4291,7 @@ class VnpyPaperTradingService:
             "score_weighted",
             "score_inverse_volatility_20d",
             "score_inverse_volatility_20d_correlation_capped",
+            "target_tracking_min_variance_20d",
         }:
             auto_allocation_method = defaults.auto_allocation_method
         auto_risk_volatility_floor_pct = _safe_float(
@@ -4300,6 +4302,7 @@ class VnpyPaperTradingService:
             raw.get("auto_correlation_min_observations")
         )
         auto_max_pairwise_correlation = _safe_float(raw.get("auto_max_pairwise_correlation"))
+        auto_covariance_risk_penalty = _safe_float(raw.get("auto_covariance_risk_penalty"))
         auto_interval_minutes = _safe_int(raw.get("auto_interval_minutes"))
         auto_min_score = _safe_float(raw.get("auto_min_score"))
         auto_max_positions = _safe_int(raw.get("auto_max_positions"))
@@ -4403,6 +4406,15 @@ class VnpyPaperTradingService:
                     auto_max_pairwise_correlation
                     if auto_max_pairwise_correlation is not None
                     else defaults.auto_max_pairwise_correlation,
+                ),
+            ),
+            auto_covariance_risk_penalty=min(
+                10.0,
+                max(
+                    0.0,
+                    auto_covariance_risk_penalty
+                    if auto_covariance_risk_penalty is not None
+                    else defaults.auto_covariance_risk_penalty,
                 ),
             ),
             auto_interval_minutes=max(1, min(10080, auto_interval_minutes or defaults.auto_interval_minutes)),
@@ -4947,6 +4959,7 @@ class VnpyPaperTradingService:
                 "correlation_lookback_days": settings.auto_correlation_lookback_days,
                 "correlation_min_observations": settings.auto_correlation_min_observations,
                 "max_pairwise_correlation": settings.auto_max_pairwise_correlation,
+                "covariance_risk_penalty": settings.auto_covariance_risk_penalty,
                 "cash_per_order": settings.auto_cash_per_order,
                 "allocation_budget": allocation_budget,
                 "max_results": settings.auto_max_results,
@@ -5241,7 +5254,9 @@ class VnpyPaperTradingService:
         if cls._position_exposure_configured(settings) or settings.auto_max_positions > 0:
             layers.append("portfolio_limits")
         if settings.auto_score_weighted_allocation_enabled:
-            if settings.auto_allocation_method == "score_inverse_volatility_20d_correlation_capped":
+            if settings.auto_allocation_method == "target_tracking_min_variance_20d":
+                layers.append("target_tracking_covariance_allocation")
+            elif settings.auto_allocation_method == "score_inverse_volatility_20d_correlation_capped":
                 layers.append("correlation_capped_risk_allocation")
             elif settings.auto_allocation_method == "score_inverse_volatility_20d":
                 layers.append("risk_adjusted_allocation")
@@ -6292,27 +6307,44 @@ class VnpyPaperTradingService:
             "risk_model": (
                 {
                     "name": (
-                        "inverse_volatility_20d_with_correlation_cap"
+                        "target_tracking_min_variance_20d"
+                        if allocation_method == "target_tracking_min_variance_20d"
+                        else "inverse_volatility_20d_with_correlation_cap"
                         if allocation_method
                         == "score_inverse_volatility_20d_correlation_capped"
                         else "inverse_volatility_20d"
                     ),
-                    "input_field": "volatility_20d_pct",
+                    "input_field": (
+                        "stock_daily.trailing_returns"
+                        if allocation_method == "target_tracking_min_variance_20d"
+                        else "volatility_20d_pct"
+                    ),
                     "volatility_floor_pct": round(
                         max(PAPER_EPS, float(settings.auto_risk_volatility_floor_pct)),
                         6,
-                    ),
+                    ) if allocation_method != "target_tracking_min_variance_20d" else None,
                     "missing_input_policy": "exclude_candidate",
                     "correlation_lookback_days": (
                         settings.auto_correlation_lookback_days
                         if allocation_method
-                        == "score_inverse_volatility_20d_correlation_capped"
+                        in {
+                            "score_inverse_volatility_20d_correlation_capped",
+                            "target_tracking_min_variance_20d",
+                        }
                         else None
                     ),
                     "correlation_min_observations": (
                         settings.auto_correlation_min_observations
                         if allocation_method
-                        == "score_inverse_volatility_20d_correlation_capped"
+                        in {
+                            "score_inverse_volatility_20d_correlation_capped",
+                            "target_tracking_min_variance_20d",
+                        }
+                        else None
+                    ),
+                    "covariance_risk_penalty": (
+                        settings.auto_covariance_risk_penalty
+                        if allocation_method == "target_tracking_min_variance_20d"
                         else None
                     ),
                     "max_pairwise_correlation": (
@@ -6325,6 +6357,7 @@ class VnpyPaperTradingService:
                 if allocation_method in {
                     "score_inverse_volatility_20d_capped",
                     "score_inverse_volatility_20d_correlation_capped",
+                    "target_tracking_min_variance_20d",
                 }
                 else None
             ),
@@ -6454,6 +6487,13 @@ class VnpyPaperTradingService:
             if settings.auto_min_score is not None and score < settings.auto_min_score:
                 exclude(symbol, "score_below_threshold")
                 continue
+            if (
+                allocation_method == "target_tracking_min_variance_20d"
+                and position_targets
+                and symbol not in position_targets
+            ):
+                exclude(symbol, "portfolio_allocation_target_not_configured")
+                continue
             has_position_target = symbol in position_targets
             if settings.auto_skip_existing_positions and symbol in held_symbols and not has_position_target:
                 exclude(symbol, "position_exists")
@@ -6566,6 +6606,26 @@ class VnpyPaperTradingService:
                             risk_input=risk_input,
                         )
                         continue
+            elif allocation_method == "target_tracking_min_variance_20d":
+                covariance_history, correlation_returns = self._candidate_correlation_input(
+                    symbol=symbol,
+                    accepted_records=[],
+                    as_of=date.today(),
+                    lookback_days=settings.auto_correlation_lookback_days,
+                    min_observations=settings.auto_correlation_min_observations,
+                    max_pairwise_correlation=1.0,
+                )
+                risk_input = {
+                    "status": covariance_history.get("status"),
+                    "covariance_history": covariance_history,
+                }
+                if covariance_history.get("status") != "available" or correlation_returns is None:
+                    exclude(
+                        symbol,
+                        "portfolio_allocation_covariance_data_unavailable",
+                        risk_input=risk_input,
+                    )
+                    continue
 
             records.append({
                 "rank": index,
@@ -6586,6 +6646,39 @@ class VnpyPaperTradingService:
         if not records:
             result["reason"] = "portfolio_allocation_no_eligible_candidates"
             return result
+
+        if allocation_method == "target_tracking_min_variance_20d":
+            optimizer = self._target_tracking_min_variance_weights(
+                records=records,
+                position_values=position_values,
+                position_targets=position_targets,
+                total_equity=total_equity,
+                min_observations=settings.auto_correlation_min_observations,
+                risk_penalty=settings.auto_covariance_risk_penalty,
+            )
+            result["optimizer"] = optimizer
+            if optimizer.get("status") != "available":
+                result["reason"] = str(
+                    optimizer.get("reason")
+                    or "portfolio_allocation_covariance_optimizer_unavailable"
+                )
+                for record in records:
+                    exclude(
+                        str(record["symbol"]),
+                        str(result["reason"]),
+                        risk_input=record.get("risk_input"),
+                    )
+                result["candidate_count"] = 0
+                return result
+            weights = optimizer.get("weights_by_symbol") or {}
+            targets = optimizer.get("target_weights_by_symbol") or {}
+            for record in records:
+                symbol = str(record["symbol"])
+                record["weight"] = max(0.0, float(weights.get(symbol) or 0.0))
+                record["optimizer_target_weight"] = max(
+                    0.0,
+                    float(targets.get(symbol) or 0.0),
+                )
 
         allocations = {record["symbol"]: 0.0 for record in records}
         allocated_by_industry: Dict[str, float] = {}
@@ -6681,6 +6774,7 @@ class VnpyPaperTradingService:
                 "industry": record.get("industry"),
                 "constraints": record["constraints"],
                 "risk_input": record.get("risk_input"),
+                "optimizer_target_weight": record.get("optimizer_target_weight"),
                 "reason": None if amount > PAPER_EPS else "portfolio_allocation_budget_exhausted",
             }
             allocation_rows.append(row)
@@ -6695,11 +6789,169 @@ class VnpyPaperTradingService:
 
     @staticmethod
     def _portfolio_allocation_method(settings: VnpyPaperSettings) -> str:
+        if settings.auto_allocation_method == "target_tracking_min_variance_20d":
+            return "target_tracking_min_variance_20d"
         if settings.auto_allocation_method == "score_inverse_volatility_20d_correlation_capped":
             return "score_inverse_volatility_20d_correlation_capped"
         if settings.auto_allocation_method == "score_inverse_volatility_20d":
             return "score_inverse_volatility_20d_capped"
         return "score_weighted_capped"
+
+    @classmethod
+    def _target_tracking_min_variance_weights(
+        cls,
+        *,
+        records: List[Dict[str, Any]],
+        position_values: Dict[str, Any],
+        position_targets: Dict[str, float],
+        total_equity: float,
+        min_observations: int,
+        risk_penalty: float,
+    ) -> Dict[str, Any]:
+        symbols = [str(record["symbol"]) for record in records]
+        return_maps = [record.get("_correlation_returns") for record in records]
+        if not return_maps or any(not isinstance(item, dict) for item in return_maps):
+            return {
+                "status": "unavailable",
+                "reason": "portfolio_allocation_covariance_data_unavailable",
+                "symbols": symbols,
+            }
+        common_dates = set(return_maps[0])
+        for item in return_maps[1:]:
+            common_dates.intersection_update(item)
+        ordered_dates = sorted(common_dates)
+        if len(ordered_dates) < int(min_observations):
+            return {
+                "status": "unavailable",
+                "reason": "portfolio_allocation_covariance_overlap_insufficient",
+                "symbols": symbols,
+                "observation_count": len(ordered_dates),
+                "min_observations": int(min_observations),
+            }
+
+        matrix = np.asarray(
+            [[float(item[day]) for item in return_maps] for day in ordered_dates],
+            dtype=float,
+        )
+        if not np.isfinite(matrix).all():
+            return {
+                "status": "unavailable",
+                "reason": "portfolio_allocation_covariance_non_finite",
+                "symbols": symbols,
+            }
+        if len(symbols) == 1:
+            covariance = np.asarray([[float(np.var(matrix[:, 0], ddof=1) * 252.0)]])
+        else:
+            covariance = np.asarray(np.cov(matrix, rowvar=False, ddof=1) * 252.0, dtype=float)
+        if covariance.shape != (len(symbols), len(symbols)) or not np.isfinite(covariance).all():
+            return {
+                "status": "unavailable",
+                "reason": "portfolio_allocation_covariance_invalid",
+                "symbols": symbols,
+            }
+
+        if position_targets:
+            raw_targets = np.asarray(
+                [
+                    max(
+                        0.0,
+                        total_equity * float(position_targets.get(symbol, 0.0)) / 100.0
+                        - (_safe_float(position_values.get(symbol)) or 0.0),
+                    )
+                    for symbol in symbols
+                ],
+                dtype=float,
+            )
+            target_source = "remaining_position_target_gaps"
+        else:
+            raw_targets = np.asarray(
+                [max(0.0, float(record.get("score") or 0.0)) for record in records],
+                dtype=float,
+            )
+            target_source = "candidate_scores"
+        target_sum = float(raw_targets.sum())
+        if target_sum <= PAPER_EPS:
+            return {
+                "status": "unavailable",
+                "reason": "portfolio_allocation_targets_satisfied",
+                "symbols": symbols,
+                "target_source": target_source,
+            }
+        target = raw_targets / target_sum
+
+        diagonal_scale = float(np.mean(np.diag(covariance)))
+        scaled_covariance = (
+            covariance / diagonal_scale
+            if diagonal_scale > PAPER_EPS
+            else np.zeros_like(covariance)
+        )
+        scaled_covariance += np.eye(len(symbols), dtype=float) * 1e-8
+        penalty = max(0.0, min(10.0, float(risk_penalty)))
+        max_eigenvalue = max(0.0, float(np.max(np.linalg.eigvalsh(scaled_covariance))))
+        step_size = 0.9 / max(PAPER_EPS, 2.0 + 2.0 * penalty * max_eigenvalue)
+        weights = target.copy()
+        converged = False
+        iterations = 0
+        for iterations in range(1, 501):
+            gradient = 2.0 * (weights - target) + 2.0 * penalty * scaled_covariance.dot(weights)
+            next_weights = cls._project_weights_to_simplex(weights - step_size * gradient)
+            if float(np.max(np.abs(next_weights - weights))) <= 1e-10:
+                weights = next_weights
+                converged = True
+                break
+            weights = next_weights
+
+        tracking_error = float(np.sum((weights - target) ** 2))
+        portfolio_variance = float(weights.dot(covariance).dot(weights))
+        return {
+            "status": "available",
+            "reason": "optimizer_converged" if converged else "optimizer_iteration_limit",
+            "model": "target_tracking_min_variance_20d_v1",
+            "target_source": target_source,
+            "risk_penalty": round(penalty, 6),
+            "step_size": round(step_size, 12),
+            "symbols": symbols,
+            "observation_count": len(ordered_dates),
+            "min_observations": int(min_observations),
+            "window_started_at": ordered_dates[0].isoformat(),
+            "window_ended_at": ordered_dates[-1].isoformat(),
+            "iterations": iterations,
+            "converged": converged,
+            "tracking_error": round(tracking_error, 12),
+            "annualized_variance": round(portfolio_variance, 12),
+            "target_weights_by_symbol": {
+                symbol: round(float(target[index]), 10)
+                for index, symbol in enumerate(symbols)
+            },
+            "weights_by_symbol": {
+                symbol: round(float(weights[index]), 10)
+                for index, symbol in enumerate(symbols)
+            },
+            "annualized_covariance": [
+                [round(float(value), 12) for value in row]
+                for row in covariance.tolist()
+            ],
+        }
+
+    @staticmethod
+    def _project_weights_to_simplex(values: np.ndarray) -> np.ndarray:
+        if values.size == 1:
+            return np.asarray([1.0], dtype=float)
+        ordered = np.sort(values)[::-1]
+        cumulative = np.cumsum(ordered) - 1.0
+        indexes = np.arange(1, values.size + 1, dtype=float)
+        eligible = ordered - cumulative / indexes > 0
+        if not np.any(eligible):
+            return np.full(values.shape, 1.0 / values.size, dtype=float)
+        rho = int(np.nonzero(eligible)[0][-1])
+        theta = cumulative[rho] / float(rho + 1)
+        projected = np.maximum(values - theta, 0.0)
+        total = float(projected.sum())
+        return projected / total if total > PAPER_EPS else np.full(
+            values.shape,
+            1.0 / values.size,
+            dtype=float,
+        )
 
     @classmethod
     def _candidate_volatility_20d_input(
@@ -9403,7 +9655,11 @@ class VnpyPaperTradingService:
                 "position_pct"
                 if side == "sell" and position_quantity is not None
                 else (
-                    "score_inverse_volatility_20d_allocation"
+                    "target_tracking_min_variance_20d_allocation"
+                    if settings.auto_allocation_method == "target_tracking_min_variance_20d"
+                    else "score_inverse_volatility_20d_correlation_capped_allocation"
+                    if settings.auto_allocation_method == "score_inverse_volatility_20d_correlation_capped"
+                    else "score_inverse_volatility_20d_allocation"
                     if settings.auto_allocation_method == "score_inverse_volatility_20d"
                     else "score_weighted_allocation"
                 )
