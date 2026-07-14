@@ -947,6 +947,11 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
         self.assertNotIn("scheduler_not_running", readiness["blockers"])
         self.assertNotIn("task_not_registered", readiness["blockers"])
         self.assertEqual(payload["diagnostics"]["alphasift"]["strategy_count"], 8)
+        backend = payload["diagnostics"]["backend"]
+        self.assertEqual(backend["api_version"], "1.0.0")
+        self.assertEqual(backend["vnpy_paper_contract_version"], 3)
+        self.assertIsNotNone(backend["python_version"])
+        self.assertIsNotNone(backend["process_started_at"])
         scheduler_component = next(
             item for item in readiness["components"] if item["key"] == "scheduler"
         )
@@ -972,6 +977,12 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
         self.assertEqual(health_components["scheduling_window"]["reason"], "time_gate_not_enforced")
         self.assertEqual(health_components["trading_window"]["reason"], "time_gate_not_enforced")
         self.assertEqual(health_components["valuation"]["reason"], "snapshot_not_requested")
+        self.assertEqual(health_components["backend_version"]["status"], "ready")
+        self.assertEqual(
+            health_components["backend_version"]["reason"],
+            "backend_contract_compatible",
+        )
+        self.assertEqual(health_components["backend_version"]["contract_version"], 3)
 
     def test_readiness_exposes_persisted_last_auto_run_skip_reason(self) -> None:
         scheduler = MagicMock()

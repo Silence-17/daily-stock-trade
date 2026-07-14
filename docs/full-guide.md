@@ -754,6 +754,7 @@ python main.py --schedule --no-run-immediately
 > `GET /api/v1/vnpy-paper/status` 的完整持仓快照会使用进程内 10 秒短 TTL 缓存，减少频繁刷新时重复重放 Portfolio 和拉取行情估值；成交、vn.py 成交回调、账户重置或账户恢复后会主动失效缓存，响应诊断包含 `snapshot_cache_hit` 和 `snapshot_cache_ttl_seconds`。
 > 完整状态的系统健康视图还会汇总持仓价格覆盖率、新鲜率、价格来源/provider 分布、缺失/陈旧/状态未知代码和价格日期范围；这些指标只归纳当前 Portfolio 快照，不会额外请求行情。Web“可用性诊断”会显示相同的覆盖率与来源摘要。
 > readiness 与系统健康还会展示持久化的最近一次自动运行结果，包括运行时间/ID、原始跳过或失败 reason，以及候选和提交计数。该信息不依赖后台 task event 保留期；历史非成功结果只作为 warning，不会单独成为当前硬阻断。
+> `diagnostics.backend` 返回 API 版本、vn.py paper contract、可选 build id、Python 版本和进程启动时间。Web 当前要求 contract 3；旧后端未报告版本或 contract 更低时，“可用性诊断”会显示“需更新”。部署可选设置 `DSA_BUILD_ID`，CI/云平台也会自动读取常见的 Git commit 环境变量。
 > Web 模拟交易页还会读取 `GET /api/v1/vnpy-paper/task-event-summary` 展示“任务趋势”，按最近持久化事件聚合 completed/skipped/failed/started 分布、任务级失败率、平均耗时和最近失败/跳过时间。
 >
 > “长期稳定性”通过 `GET /api/v1/vnpy-paper/task-metrics` 提供 7/30/90 天窗口，按 completed/skipped/failed 终态运行计算成功率、失败率、跳过率、平均/P95 耗时和连续失败，并展示任务级与逐日趋势；started 事件不计入成功率分母。
