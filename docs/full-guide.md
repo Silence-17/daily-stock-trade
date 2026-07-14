@@ -663,6 +663,8 @@ python scripts/check_env.py --config
 
 **智能导入依赖**：`pypinyin`（名称→代码拼音匹配）和 `openpyxl`（Excel .xlsx 解析）已包含在 `requirements.txt` 中，执行上述 `pip install -r requirements.txt` 时会自动安装。若使用智能导入（图片/CSV/Excel/剪贴板）功能，请确保依赖已正确安装；缺失时可能报 `ModuleNotFoundError`。
 
+可选 vn.py runtime 建议使用 Python 3.13 隔离环境。Windows PowerShell 运行 `.\scripts\setup_vnpy_runtime.ps1 -PythonExecutable "python"`；脚本会拒绝上游未声明支持的 Python 3.14，安装 `requirements-vnpy.txt`，并用真实 OrderRequest、EventEngine、MainEngine 和内置即时撮合 gateway smoke 验收。使用 `DsaSimulatedGateway` 无需账户参数即可在 Web 走完整 vn.py 模拟订单/成交回写；真实通道仍须另装具体 gateway 并使用外部连接参数，详见 [vn.py 模拟交易](vnpy-paper-trading.md)。
+
 ### 命令行参数
 
 ```bash
@@ -748,6 +750,7 @@ python main.py --schedule --no-run-immediately
 > Web/API runtime scheduler 的立即执行入口只会在没有分析任务运行时接受请求；如果已有分析在执行，会返回忙碌状态而不是假装排队成功。
 > runtime scheduler 状态会返回最近 `task_events`，Web 模拟交易页据此展示“后台任务日志”，也可通过 `GET /api/v1/vnpy-paper/task-events` 按任务名和 started/completed/skipped/failed 状态筛选数据库持久化的最近事件，直接查看自动买入、自动重试和事件监控的执行结果；API 进程重启后仍可保留最近任务事件用于排障。
 > Web 模拟交易页还会读取 `GET /api/v1/vnpy-paper/task-health` 展示“任务健康检查”，按自动买入与自动恢复扫描聚合任务是否注册、运行、停用、持久化最近失败/跳过原因和下次运行时间。
+> 暂停“定时自动买入”只会注销新增买入任务；只要模拟交易总开关仍开启，`vnpy_paper_auto_retry` 会在服务注册时立即扫描一次并继续按 1 至 5 分钟周期恢复已有委托，暂停期间只对账和超时归档，不重提失败计划。API lifespan 创建或注入的 MainEngine/EventEngine 会绑定到 scheduler 后台 service，Web 手动桥接和后台自动任务复用同一 runtime。
 > `GET /api/v1/vnpy-paper/status` 的完整持仓快照会使用进程内 10 秒短 TTL 缓存，减少频繁刷新时重复重放 Portfolio 和拉取行情估值；成交、vn.py 成交回调、账户重置或账户恢复后会主动失效缓存，响应诊断包含 `snapshot_cache_hit` 和 `snapshot_cache_ttl_seconds`。
 > Web 模拟交易页还会读取 `GET /api/v1/vnpy-paper/task-event-summary` 展示“任务趋势”，按最近持久化事件聚合 completed/skipped/failed/started 分布、任务级失败率、平均耗时和最近失败/跳过时间。
 >
@@ -760,12 +763,13 @@ python main.py --schedule --no-run-immediately
 > `GET /api/v1/vnpy-paper/performance` 的 Web 展示包含绩效摘要、权益曲线、日度收益表、月度收益表和窗口级绩效矩阵；矩阵按当前 `run_limit` 以及可选 `created_from` / `created_to` Agent run 创建时间窗口展开策略/行业样本数、计划数、成交数、跳过数、成交金额和填充率，用于本地 paper 复盘，不等同完整历史行情回测。
 > 同一接口还返回 `daily_returns` 与 `monthly_returns`，Web 模拟交易页展示“日度收益”和“月度收益”表，按每日/每月最后权益聚合盈亏、收益率、累计收益率、回撤和交易数；它补充的是 paper 账本复盘粒度，仍不是完整回测净值曲线。
 > `GET /api/v1/vnpy-paper/trade-plans/recovery-summary` 返回只读交易计划恢复矩阵，Web 模拟交易页据此展示活跃提交态、疑似卡住、可撤单、可重试、冷却中和重试超限计划；该接口不自动修改订单状态。
-> `POST /api/v1/vnpy-paper/trade-plans/recovery/run` 可在页面确认后手动运行一次受限恢复扫描，复用后台到期重试逻辑。超时活跃计划会先通过注入的 `MainEngine.get_order` / `get_all_trades` 对账并补同步漏失回报；响应除超时归档、重试、提交、跳过和失败计数外，还返回 `reconciled_count`、`protected_count` 和 `reconciliation_failed_count`。
-> `vnpy_paper` 成交回报按 `vt_tradeid` 幂等累计，一张委托可分多笔更新 `part_filled`，累计达到计划数量后才变为 `filled`。网关明确取消、拒绝或失败，以及 `vnpy_order_timeout`、`vnpy_partial_fill_timeout`、`vnpy_cancel_timeout` 都不会进入自动重试队列；MainEngine 查询异常也会保护原活跃计划，避免用户撤单或状态不明时重复委托。
+> `POST /api/v1/vnpy-paper/trade-plans/recovery/run` 可在页面确认后手动运行一次受限恢复扫描，复用后台恢复逻辑。活跃计划提交满 60 秒后即可通过注入的 `MainEngine.get_order` / `get_all_trades` 对账并补同步漏失回报；未满 30 分钟且无证据时继续等待，超过 30 分钟仍无证据才安全归档。响应除超时归档、重试、提交、跳过和失败计数外，还返回 `reconciled_count`、`protected_count` 和 `reconciliation_failed_count`。
+> `vnpy_paper` 成交回报按 `vt_tradeid` 幂等累计，一张委托可分多笔更新 `part_filled`，累计达到计划数量后才变为 `filled`。网关明确取消、拒绝或失败，以及 `vnpy_order_timeout`、`vnpy_partial_fill_timeout`、`vnpy_cancel_timeout` 都不会进入自动重试队列；MainEngine 查询异常也会保护原活跃计划。撤单请求期间或超时归档后的迟到成交仍按原 `vt_orderid` 入账，避免真实成交丢失。
 > 自动卖出风控支持 `auto_sell_position_pct` 设置每次卖出的持仓比例；留空时默认整仓卖出，设置为 `50` 时止损、止盈、移动止损或最大持仓天数触发后只提交当前持仓 50% 的卖出计划，并在 Agent 审计的 `position_plan` 中记录 `sizing_method=position_pct`、持仓数量和卖出比例。
 > 自动卖出风控支持 `auto_no_progress_days` 与 `auto_no_progress_min_return_pct`：持仓达到指定天数且浮盈不高于阈值时会以 `no_progress_timeout` 生成卖出计划；收益阈值留空时按 0% 处理。
 > 自动卖出风控还支持 `auto_signal_exit_enabled`：开启后会读取当前持仓对应的 active `DecisionSignal`，命中 `sell/reduce/avoid` 防守信号时以 `strategy_invalidated` 生成卖出计划，并把信号摘要写入候选原始载荷和 Agent 风控审计。
 > 自动卖出风控还支持默认关闭的 `auto_rebalance_enabled`：开启后会复用单票、总仓位和行业仓位暴露上限，超限时按超出金额计算卖出数量，生成 `rebalance_*_exceeded` 卖出计划；也可通过 `auto_target_position_weights` / `auto_target_industry_weights` 设置股票或行业目标权益占比，超配时生成 `rebalance_target_position_weight_exceeded` / `rebalance_target_industry_weight_exceeded`。目标权重也会参与买入侧风控，候选或本轮已计划金额会突破目标时以 `target_position_weight_limit_reached` / `target_industry_weight_limit_reached` 跳过。候选原始载荷会记录 `rebalance_plan`、目标权重、阈值金额和超配金额。
+> 模拟交易的每票金额、每日预算、最低现金和金额型仓位上限均按账户基准币种计价。非 A 股订单会使用 Portfolio 汇率表换算交易币种金额，缺失或过期汇率以 `fx_rate_unavailable` 阻止新增买入但不阻止卖出；Agent 审计会保留基准金额、交易币种金额和汇率来源。可在持仓页面或 `POST /api/v1/portfolio/fx/refresh` 刷新汇率。
 > Agent 控制台会读取 `GET /api/v1/vnpy-paper/agent-runs/daily-summary` 展示“今日 Agent 总结”，按日期聚合 run 数、候选/计划/成交/跳过计数、状态分布、执行模式、数据质量、Agent 复核状态、LLM 复核状态、复核质量状态/风险标记/平均分、工作流状态/阶段、主要跳过原因和热门标的；候选决策详情会展示 `order_result.agent_review` 的规则 Agent 买入前复核状态和摘要，Agent 计划卡片会展示规则派生的计划档位、风控档位和可选 `llm_dynamic_plan` 状态。运行详情会派生 `diagnostics.agent_workflow`，按计划、数据质量、候选复核、交易计划和执行阶段展示当前阶段、整体状态和下一步，并通过 `diagnostics.agent_summary.review_quality` 展示本轮复核质量、覆盖率、风险标记和是否建议人工确认。运行详情还可手动触发 `POST /api/v1/vnpy-paper/agent-runs/{run_uid}/llm-recap` 生成可选 LLM 复盘并写入 `diagnostics.llm_recap`；该入口只做审计复盘，不提交订单，也不会改变交易计划状态。模拟交易设置中的 `auto_llm_plan_enabled` 默认关闭；开启后会在 AlphaSift 选股前调用 LLM 生成本轮动态计划，只允许在已知策略白名单内选择策略并在保存配置上限内收紧候选数、每票预算和最低分。`auto_llm_review_enabled` 同样默认关闭；开启后会在规则风控通过后调用 LLM 生成 `order_result.llm_review`，`blocked` 或调用失败会跳过候选。`llm_dynamic_plan` 与 `llm_review` 都会记录 `prompt_version` 和 `evaluator_version`，Agent 控制台会在对应位置展示这些审计版本。
 > `GET /api/v1/vnpy-paper/status` 会在 `diagnostics.system_health` 中返回跨模块健康视图，统一汇总本地账本、选股来源、自动化调度、调度窗口、交易窗口、持仓估值和 vn.py bridge；模拟交易页的“可用性诊断”优先展示该结构化摘要，旧后端再回退到 `diagnostics.auto_trade_readiness`。`diagnostics.auto_trade_readiness` 仍提供自动交易 readiness、阻断原因、关注项和组件状态；`scheduler.loop_running` 表示调度循环是否存活，`scheduler.running` 仅表示当前是否正在执行分析任务，readiness 会按 `loop_running` 判断定时自动交易是否可继续调度。`diagnostics.auto_trade_readiness.timing_alignment` 会对比自动任务下次触发时间和交易窗口开收盘时间；当 time gate 生效且服务启动时不在交易窗口内，首次自动买入后台任务会延迟到下一开盘窗口，避免固定间隔从盘后启动后反复错过交易时段。
 

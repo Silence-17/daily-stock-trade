@@ -9,12 +9,12 @@
 - 后端新增可选 vn.py adapter 诊断：`diagnostics.vnpy_adapter` 会说明是否能导入 `vnpy.trader.object.OrderRequest` / `CancelRequest` 与常量枚举，并保留 DSA 委托到 vn.py `OrderRequest` / `CancelRequest` 字段的基础映射。`diagnostics.vnpy_bridge` 会说明当前进程是否已注入 `MainEngine`、是否配置 `vnpy_gateway_name`，以及是否可通过 `MainEngine.send_order` 提交委托、通过 `MainEngine.cancel_order` 发起撤单、通过 `MainEngine.get_order` / `get_all_trades` 执行超时订单对账。
 - 手动模拟委托支持买入和卖出；A 股买入会按 100 股一手向下取整，按金额下单不足一手时返回 `cash_below_min_lot`，不会写入成交。
 - 未传成交价时，后端会尝试读取 DSA 实时行情；价格不可用、金额不足、数量取整后为 0、重复自动单或超卖时不会写入成交。
-- 自动模拟交易默认关闭。开启后，runtime scheduler 会按页面设置的间隔调用 AlphaSift 选股，并对候选票提交本地模拟买入；同时注册 `vnpy_paper_auto_retry`，按 1 到 5 分钟间隔扫描到期且可恢复的失败计划。若当前执行模式强制交易时段限制且服务启动时不在交易窗口内，首次 `vnpy_paper_auto_trade` 会延迟到下一开盘窗口触发，避免按固定间隔从盘后启动后每天都在盘后跳过。
-- 页面提供“暂停自动买入”按钮，确认后会关闭 `auto_trade_enabled` 并触发 runtime scheduler 重新 reconcile，停止后续后台自动买入；暂停后同位置提供“恢复自动买入”按钮，可重新打开后台自动买入并触发 scheduler reconcile。
+- 自动模拟交易默认关闭。开启后，runtime scheduler 会按页面设置的间隔调用 AlphaSift 选股，并对候选票提交本地模拟买入；模拟交易总开关开启时始终注册 `vnpy_paper_auto_retry`，首次注册立即扫描一次并按 1 到 5 分钟间隔恢复已有订单，自动买入开启时再注册 `vnpy_paper_auto_trade`。API 启动期创建或注入的 MainEngine/EventEngine 会传给这两个后台任务使用，不再只对 Web 请求可见。若当前执行模式强制交易时段限制且服务启动时不在交易窗口内，首次自动买入会延迟到下一开盘窗口触发，避免按固定间隔从盘后启动后每天都在盘后跳过。
+- 页面提供“暂停自动买入”按钮，确认后会关闭 `auto_trade_enabled` 并触发 runtime scheduler 重新 reconcile，停止后续后台自动买入；已有 `submitted` / `part_filled` / `cancel_requested` 委托仍由恢复任务对账和安全归档，暂停期间不会重提失败计划。暂停后同位置提供“恢复自动买入”按钮，可重新打开后台自动买入并触发 scheduler reconcile。
 - 自动模拟交易支持 `paper`、`vnpy_paper`、`dry_run` 和 `manual_approval` 四种执行模式：`paper` 会写入本地模拟成交，`vnpy_paper` 会把通过风控的买入计划提交给注入的 vn.py `MainEngine` 并记录为 `submitted`，随后可通过 vn.py 成交回报同步入口回写为 `filled`，`dry_run` 只生成交易计划和审计记录，`manual_approval` 会生成待审批交易计划，用户在页面确认后才写入 Portfolio 账本。
 - 交易计划支持受控恢复：`manual_approval`、`paper`、`vnpy_paper` 计划若变为 `failed` 或可恢复的 `skipped`，页面可触发“重试提交”。后端会重新走对应执行路由（`vnpy_paper` 走 vn.py bridge，其余走本地 paper）、现有持仓检查和 retry 次数/冷却控制，并回写交易计划、候选决策和 run 计数。数据质量、行情灯、组合风控等不可恢复跳过原因仍不能通过该入口绕过。`vnpy_paper` 的 `submitted` / `part_filled` 计划可在页面发起“撤单”，后端调用注入的 `MainEngine.cancel_order` 并把计划临时标记为 `cancel_requested`，最终是否撤销仍以后续 vn.py 订单状态回报为准。
 - Web 模拟交易页展示只读“交易计划恢复矩阵”，汇总最近非终态计划的状态、执行模式、活跃提交态、疑似卡住、可撤单、可重试、冷却中和重试超限数量，并列出需要关注的计划。矩阵不自动修改订单，只用于解释哪些计划还在等待 vn.py 回报、哪些可人工重试或撤单。
-- Web 模拟交易页可在确认后手动运行一次“交易计划恢复扫描”，该操作复用后台 `vnpy_paper_auto_retry` 的同一条执行路径：对超时 `submitted` / `part_filled` / `cancel_requested` 计划先查询注入的 `MainEngine.get_order` / `get_all_trades`，补同步漏失的订单和成交回报；查询到网关证据或查询异常时保护原计划，不执行本轮超时归档。只有没有可用对账能力或查询结果明确无订单/成交证据时才安全归档，再按 retry 次数、冷却和可恢复原因扫描其他到期计划。`vnpy_order_cancelled`、`vnpy_order_rejected`、`vnpy_order_failed` 以及 `vnpy_order_timeout`、`vnpy_partial_fill_timeout`、`vnpy_cancel_timeout` 均不会自动重下单，避免用户撤单、网关拒单或状态不明时重复委托。响应会返回 `reconciled_count`、`protected_count` 和 `reconciliation_failed_count`，Web 成功提示同步展示这些计数。
+- Web 模拟交易页可在确认后手动运行一次“交易计划恢复扫描”，该操作复用后台 `vnpy_paper_auto_retry` 的同一条执行路径：活跃 `submitted` / `part_filled` / `cancel_requested` 计划提交满 60 秒后即可查询注入的 `MainEngine.get_order` / `get_all_trades`，补同步漏失的订单和成交回报；查询到网关证据或查询异常时保护原计划。未满 30 分钟且没有网关证据的计划继续等待，只有超过 30 分钟且没有可用证据时才安全归档，再按 retry 次数、冷却和可恢复原因扫描其他到期计划。`vnpy_order_cancelled`、`vnpy_order_rejected`、`vnpy_order_failed` 以及 `vnpy_order_timeout`、`vnpy_partial_fill_timeout`、`vnpy_cancel_timeout` 均不会自动重下单，避免用户撤单、网关拒单或状态不明时重复委托。响应会返回 `reconciled_count`、`protected_count` 和 `reconciliation_failed_count`，Web 成功提示同步展示这些计数。
 - 页面提供“重置账户”入口，后端会归档当前 `vnpy_paper` 模拟账户、创建新的干净模拟账户并按初始资金写入现金流入；旧账户和旧流水保留在 Portfolio 账本中用于审计，不做硬删除。
 - Web 模拟交易页会展示“模拟账户历史”，显示当前 `vnpy_paper` 账户和已归档账户，并支持按全部、当前、已归档、活跃非当前筛选；非当前账户可在确认后恢复/切换为当前账户，后端只允许切换 `broker=vnpy_paper` 的本地 paper 账户，并会归档原当前 paper 账户、清空 `auto_trailing_peaks`。页面也提供“清理已归档”，该操作只把旧归档账户从 vn.py paper 历史视图隐藏，不删除 Portfolio 账户、成交或资金流水。
 - 页面提供“立即 dry-run”演练按钮，会以临时 `dry_run` 覆盖运行一次自动选股，不要求先保存或开启 `auto_trade_enabled`，也不会改变已保存的执行模式和自动交易开关。
@@ -28,6 +28,7 @@
 - 状态接口的完整持仓快照使用进程内 10 秒短 TTL 缓存，减少页面刷新时重复重放 Portfolio 和拉取行情估值；本地成交、vn.py 成交回调、账户重置或账户恢复后会主动失效缓存。`diagnostics.snapshot_cache_hit` 和 `diagnostics.snapshot_cache_ttl_seconds` 可用于判断本次状态是否来自缓存。
 - 自动模拟交易支持最大持仓数风控；当前持仓数量达到上限时，新候选会以 `max_positions_reached` 写入跳过记录，不会提交模拟成交。
 - 自动模拟交易支持基础仓位暴露风控；可设置单票最大持仓金额、组合最大持仓金额、组合最大仓位比例、行业最大持仓金额和行业最大仓位比例，触发时分别以 `single_position_value_limit_reached`、`total_position_value_limit_reached`、`total_position_pct_limit_reached`、`industry_position_value_limit_reached`、`industry_position_pct_limit_reached` 写入跳过审计。`dry_run` 和 `manual_approval` 的计划单也会占用同一轮风控预算，避免一次计划超出上限。配置行业上限后，若候选或已有持仓行业无法解析，会以 `industry_exposure_unavailable` 保守跳过。
+- “每票金额”、每日预算、最低现金和所有金额型仓位上限统一按模拟账户 `base_currency` 计价。港股、美股、日股、韩股和台股下单前会把基准币种预算换算为 `HKD`、`USD`、`JPY`、`KRW` 或 `TWD`；Agent run 的 `diagnostics.currency_budget` 以及订单 `raw.fx_conversion` 会记录基准金额、交易币种金额、汇率和来源。缺少当前汇率、汇率被标记 stale 或汇率日期超过 7 个自然日时，新增买入以 `fx_rate_unavailable` 保守跳过；卖出减仓不因汇率缺失被阻断。已有外币成交的每日预算和仓位暴露也按账户基准币种汇总。
 - 自动模拟交易支持每日买入上限和每日预算风控；达到次数上限时记录 `daily_order_limit_reached`，超过预算时记录 `daily_budget_exceeded`，均不会提交模拟成交。
 - 自动模拟交易支持股票黑名单风控；页面可填写逗号分隔代码，命中的候选会以 `symbol_blacklisted` 写入候选决策和交易计划，不会提交模拟成交。
 - 自动模拟交易支持候选级基础风控；可过滤 ST/退市风险、停牌、涨跌停和成交额过低的候选，分别以 `st_or_delisting_risk`、`suspended_stock`、`price_limit_reached`、`liquidity_below_threshold` 写入跳过审计。缺少对应字段时不会凭空拦截；AlphaSift/DSA 已补出的 `amount`、`turnover_amount`、`limit_status`、`is_suspended` 等字段会被用于判断。
@@ -37,7 +38,7 @@
 - 自动交易的关键异常会写入告警中心触发历史并复用 alert 路由主动外发通知：连续失败熔断打开记录 `failure_fuse_open`，AlphaSift 筛选异常记录 `alphasift_screen_failed`，数据质量阻断记录 `data_quality_stale` / `data_quality_unavailable`，账户级风控阻断记录 `cash_low_watermark` / `account_drawdown_limit_reached`，后台自动重试失败/未成交记录 `auto_retry_*`，`vnpy_paper` 提交态订单超时记录 `vnpy_order_timeout`，部分成交等待成交回报超时记录 `vnpy_partial_fill_timeout`，撤单请求超时记录 `vnpy_cancel_timeout`；这些事件使用 `rule_id=null`、`target=vnpy_paper`、`data_source=vnpy_paper_auto`，可通过 `/api/v1/alerts/triggers?target=vnpy_paper` 查询。通知结果会写入 `alert_notifications`，未配置 alert 渠道时会记录 `__no_channel__` 方便排障。
 - Web 模拟交易页展示最近 `target=vnpy_paper` 的“自动交易告警历史”，可直接看到数据质量阻断、熔断、自动重试失败和 vn.py 订单超时等系统事件；完整诊断仍以告警中心/API 记录为准。
 - 自动模拟交易会根据 AlphaSift 返回的 `quality_status`、`warnings`、`source_errors`、`fallback_used` 和 `stale` 生成基础数据质量诊断；仅 `ok` 或可接受的 `partial` 会继续执行，`stale` 或 `unavailable` 会以 `data_quality_stale` / `data_quality_unavailable` 写入跳过审计，不提交模拟成交。
-- 自动交易支持基础卖出风控，默认关闭；开启后会按止损百分比、止盈百分比、移动止损百分比、最大持仓天数、超时未走强或可选策略失效信号触发卖出，并写入候选决策和交易计划审计。默认整仓卖出，也可通过 `auto_sell_position_pct` 设置每次卖出的持仓比例，实现按比例分批退出；设置 `auto_no_progress_days` 后，持仓天数达到阈值且浮盈不高于 `auto_no_progress_min_return_pct`（留空按 0%）时会以 `no_progress_timeout` 触发卖出；开启 `auto_signal_exit_enabled` 后，当前持仓命中 active `DecisionSignal` 的 `sell/reduce/avoid` 信号时会以 `strategy_invalidated` 触发卖出。开启 `auto_rebalance_enabled` 后，自动卖出会复用单票、总仓位和行业仓位暴露上限，超限时生成 `rebalance_single_position_value_exceeded`、`rebalance_total_position_value_exceeded`、`rebalance_total_position_pct_exceeded`、`rebalance_industry_position_value_exceeded` 或 `rebalance_industry_position_pct_exceeded` 卖出计划；也可通过 `auto_target_position_weights` 和 `auto_target_industry_weights` 配置股票/行业目标权益占比，超配时生成 `rebalance_target_position_weight_exceeded` 或 `rebalance_target_industry_weight_exceeded` 卖出计划。目标权重也会参与买入侧风控，候选或本轮已计划金额会突破目标时以 `target_position_weight_limit_reached` 或 `target_industry_weight_limit_reached` 跳过。候选原始载荷会记录 `rebalance_plan`、目标权重、阈值金额和超配金额。`paper` 模式会直接写入本地模拟卖出；`vnpy_paper` 模式会把卖出委托提交给注入的 vn.py `MainEngine` 并记录为 `submitted`，只有后续成交回报同步后才会写入本地 Portfolio。移动止损会在 `data/vnpy_paper_trading.json` 记录每只持仓的本地峰值价，触发原因是 `trailing_stop_triggered`；未成交的 vn.py 提交态卖出不会提前清理峰值记录。当前不做分批止盈策略；目标权重再平衡覆盖买入侧拦截和卖出侧减仓，尚未做跨币种估值、补仓或完整组合优化。
+- 自动交易支持基础卖出风控，默认关闭；开启后会按止损百分比、止盈百分比、移动止损百分比、最大持仓天数、超时未走强或可选策略失效信号触发卖出，并写入候选决策和交易计划审计。默认整仓卖出，也可通过 `auto_sell_position_pct` 设置每次卖出的持仓比例，实现按比例分批退出；设置 `auto_no_progress_days` 后，持仓天数达到阈值且浮盈不高于 `auto_no_progress_min_return_pct`（留空按 0%）时会以 `no_progress_timeout` 触发卖出；开启 `auto_signal_exit_enabled` 后，当前持仓命中 active `DecisionSignal` 的 `sell/reduce/avoid` 信号时会以 `strategy_invalidated` 触发卖出。开启 `auto_rebalance_enabled` 后，自动卖出会复用单票、总仓位和行业仓位暴露上限，超限时生成 `rebalance_single_position_value_exceeded`、`rebalance_total_position_value_exceeded`、`rebalance_total_position_pct_exceeded`、`rebalance_industry_position_value_exceeded` 或 `rebalance_industry_position_pct_exceeded` 卖出计划；也可通过 `auto_target_position_weights` 和 `auto_target_industry_weights` 配置股票或行业目标权益占比，超配时生成 `rebalance_target_position_weight_exceeded` 或 `rebalance_target_industry_weight_exceeded` 卖出计划。目标权重也会参与买入侧风控，候选或本轮已计划金额会突破目标时以 `target_position_weight_limit_reached` 或 `target_industry_weight_limit_reached` 跳过。候选原始载荷会记录 `rebalance_plan`、目标权重、阈值金额和超配金额。`paper` 模式会直接写入本地模拟卖出；`vnpy_paper` 模式会把卖出委托提交给注入的 vn.py `MainEngine` 并记录为 `submitted`，只有后续成交回报同步后才会写入本地 Portfolio。移动止损会在 `data/vnpy_paper_trading.json` 记录每只持仓的本地峰值价，触发原因是 `trailing_stop_triggered`；未成交的 vn.py 提交态卖出不会提前清理峰值记录。当前不做分批止盈策略；目标权重再平衡覆盖买入侧拦截和卖出侧减仓，基础跨币种预算与仓位估值已接入 Portfolio 汇率表，尚未做补仓或完整组合优化。
 
 ## 配置与数据
 
@@ -59,7 +60,7 @@
 - Agent 控制台会读取 `GET /api/v1/vnpy-paper/agent-runs/data-quality-trends`，按 7/30/90 天窗口展示跨 run 的 `ok`、`partial`、`stale`、`unavailable`、`unknown` 分布、降级率、警告、source error 和逐日趋势。旧 run 没有整体质量快照时归入 `unknown`，不会被误算成健康。
 - 持久化后台任务事件默认保留 30 天，runtime scheduler 写入新事件后会按 `DSA_RUNTIME_SCHEDULER_TASK_EVENT_RETENTION_DAYS` 和 `DSA_RUNTIME_SCHEDULER_TASK_EVENT_CLEANUP_INTERVAL_SECONDS` 做低频清理；该清理只删除 `runtime_scheduler_task_events` 中的任务日志，不删除 Agent run、交易计划、Portfolio 成交或资金流水。保留天数设为 `0` 时不自动清理，适合由外部归档策略接管的部署。
 - 绩效接口会基于本地 paper 账本返回 `daily_returns` 和 `monthly_returns`，按每日/每月最后权益聚合盈亏、收益率、累计收益率、回撤和交易数；Web 模拟交易页展示最近日度收益表和月度收益表。该视图用于 paper 运行复盘，不等同接入完整历史行情后的回测级净值曲线。
-- 后台自动重试任务会先扫描超时的 `vnpy_paper` 活跃计划；若 `submitted` 计划超过 30 分钟未收到订单终态或成交回报，会标记为 `failed` / `vnpy_order_timeout`，保留原 `vt_orderid` 和 timeout 审计，之后再按 retry 冷却进入受控恢复流程。若 `cancel_requested` 计划超过 30 分钟未收到撤单或订单终态回报，会标记为 `failed` / `vnpy_cancel_timeout` 并写入告警，避免撤单挂起长期阻塞同股票同方向新委托。若 `part_filled` 计划超过 30 分钟仍未收到成交回报，会标记为 `failed` / `vnpy_partial_fill_timeout` 并写入告警，但不会进入自动重试，需先人工或后续回调完成对账，避免部分成交场景重复委托。
+- 后台恢复任务会先主动对账提交满 60 秒的 `vnpy_paper` 活跃计划；若 `submitted` 计划超过 30 分钟仍无订单终态、成交回报或 MainEngine 证据，会标记为 `failed` / `vnpy_order_timeout` 并保留原 `vt_orderid` 和 timeout 审计。`cancel_requested` 和 `part_filled` 分别归档为 `vnpy_cancel_timeout`、`vnpy_partial_fill_timeout`，且所有状态不明超时结果都禁止自动重提。撤单请求期间发生的成交以及超时归档后的迟到成交仍可按原 `vt_orderid` 回写并把计划恢复为实际成交状态。
 - 状态接口会返回 `diagnostics.vnpy_adapter`、`diagnostics.vnpy_bridge`、`diagnostics.vnpy_event_bridge`、`diagnostics.vnpy_runtime` 和 `diagnostics.trading_window`，用于区分当前是 `local_paper_fallback`、已具备 `vnpy_order_request` adapter 能力、已经具备 `MainEngine` 提交通道、已由 DSA 启动可选 vn.py runtime，还是自动交易正在等待下一个交易窗口；未安装 vn.py 或未配置 `MainEngine` 时仍保持本地 paper 可用。
 - Web “自动选股 Agent 记录”区块支持导出当前选中 run 的 JSON 明细，包含 Agent 计划、运行总结、候选决策、交易计划、诊断和成交关联信息，便于复盘或排障。
 - Web 新增“Agent 控制台”入口 `/agent-console`，独立展示最近自动选股 run 历史、分页、策略/市场/状态/时间范围筛选、运行详情、时间线、候选决策、交易计划和 JSON 导出；该页面支持 `/agent-console/<run_uid>` 独立详情路由，并兼容 `/agent-console?runUid=<run_uid>` 查询参数深链，复用 `/api/v1/vnpy-paper/agent-runs*` 审计接口，不直接提交订单。
@@ -111,7 +112,16 @@
 
 ## 可选 vn.py runtime 配置
 
-默认不创建 vn.py runtime。需要由 DSA 托管 vn.py EventEngine/MainEngine 时，显式设置：
+默认不创建 vn.py runtime。vn.py 4.4.0 发布元数据覆盖 Python 3.10 至 3.13；建议为该能力单独使用 Python 3.13，避免让系统默认 Python 3.14 环境承担未经上游声明支持的 GUI/数值依赖。Windows PowerShell 可执行：
+
+```powershell
+.\scripts\setup_vnpy_runtime.ps1 -PythonExecutable "python"
+.\.venv-vnpy\Scripts\python.exe scripts\check_vnpy_adapter.py --require-vnpy
+```
+
+安装脚本会校验 Python 版本，安装项目依赖与 `requirements-vnpy.txt`，优先选择 LiteLLM wheel，并把 pip 构建缓存放在 `.venv-vnpy/.pip-cache`。若 AlphaSift 的远程 Git 安装受限，可先准备固定提交的本地源码，再传 `-AlphaSiftSource <repo-relative-path>`；仅诊断 adapter 时可传 `-SkipProjectDependencies`，但该模式不能作为完整 DSA API 运行环境。验收脚本会构造真实 `OrderRequest`，调用测试 MainEngine bridge，启动内置 `DsaSimulatedGateway` 完成一笔标准订单/成交事件，并关闭 vn.py EventEngine/MainEngine。
+
+runtime 启动前会创建部署工作目录下已忽略的 `.vntrader/`，供 vn.py 保存本地运行状态，避免受限服务账户回退写入用户主目录。需要由 DSA 托管 vn.py EventEngine/MainEngine 时，显式设置：
 
 - `VNPY_RUNTIME_ENABLED=true`：启动时尝试创建 `vnpy.event.EventEngine` 与 `vnpy.trader.engine.MainEngine`。
 - `VNPY_GATEWAY_CLASS`：可选 gateway 类导入路径，支持 `module:Class` 或 `module.Class`。
@@ -122,9 +132,23 @@
 - `DSA_RUNTIME_SCHEDULER_TASK_EVENT_RETENTION_DAYS=30`：后台任务事件持久化保留天数；设为 `0` 时不自动清理。
 - `DSA_RUNTIME_SCHEDULER_TASK_EVENT_CLEANUP_INTERVAL_SECONDS=3600`：写入后台任务事件后最多每隔多少秒触发一次旧事件清理；设为 `0` 时每次写入后都检查。
 
+安装 vn.py 本身不会让 bridge 变为可提交状态。只做本地模拟时，可使用仓库内置且默认关闭的即时撮合网关：
+
+```dotenv
+VNPY_RUNTIME_ENABLED=true
+VNPY_GATEWAY_CLASS=src.services.vnpy_simulated_gateway:DsaSimulatedGateway
+VNPY_GATEWAY_NAME=DSA_SIM
+VNPY_CONNECT_ON_START=true
+VNPY_AUTO_ATTACH_EVENTS=true
+```
+
+内置网关无需 `VNPY_CONNECT_SETTINGS_PATH`。API 重启后，模拟交易设置会在未保存 gateway 名称时继承 `VNPY_GATEWAY_NAME`；把执行模式设为 `vnpy_paper` 后即可开启定时自动买入或执行手动委托。合法限价单默认延迟 500 毫秒全量成交，订单、成交、账户和持仓均通过真实 vn.py EventEngine 回到 DSA；DSA Portfolio 仍是跨进程持久化账本。
+
+内置网关只用于功能验收和本地模拟，不提供真实行情撮合、手续费、滑点、部分成交概率或网关状态持久化；进程重启会重置网关内存账户，但不会删除 DSA Portfolio 流水。接真实通道时仍需安装具体 gateway 插件，把敏感连接参数放入外部 JSON，并显式配置 `VNPY_CONNECT_SETTINGS_PATH`。未配置 gateway 时，runtime 和事件引擎可以为可用状态，但 `diagnostics.vnpy_bridge.available=false` 且 reason 为 `gateway_name_not_configured`，这是预期的安全状态。
+
 ## vn.py bridge 边界
 
-- `vnpy_paper` 模式负责把 DSA 通过风控后的买入计划和自动卖出计划转换为 vn.py `OrderRequest` 并调用 `MainEngine.send_order`，也可把提交态计划转换为 vn.py `CancelRequest` 并调用 `MainEngine.cancel_order` 发起撤单；订单状态、成交、账户和持仓回报可通过 `/vnpy-events/*` 同步回 DSA，或在宿主进程注入 EventEngine 后通过 `/vnpy-events/attach` 注册自动回调。DSA 也可以在 `VNPY_RUNTIME_ENABLED=true` 时创建 EventEngine/MainEngine 并按配置 add gateway/connect，但真实 gateway 运行态、连接参数和券商/模拟通道仍需要部署方显式验证。
+- `vnpy_paper` 模式负责把 DSA 通过风控后的买入计划和自动卖出计划转换为 vn.py `OrderRequest` 并调用 `MainEngine.send_order`，也可把提交态计划转换为 vn.py `CancelRequest` 并调用 `MainEngine.cancel_order` 发起撤单；订单状态、成交、账户和持仓回报可通过 `/vnpy-events/*` 同步回 DSA，或在宿主进程注入 EventEngine 后通过 `/vnpy-events/attach` 注册自动回调。DSA 也可以在 `VNPY_RUNTIME_ENABLED=true` 时创建 EventEngine/MainEngine 并按配置 add gateway/connect；内置 `DsaSimulatedGateway` 已完成自动交易事件回写验收，真实券商 gateway 的连接参数、重连和长跑仍需部署方显式验证。
 - bridge 提交成功只代表 vn.py 接收了委托请求，交易计划状态会记录为 `submitted`；订单状态中的部分成交会记录为 `part_filled` 供审计；只有收到并同步成交回报后，本地 Portfolio 才会写入成交并更新现金和持仓。
 - bridge 不可用、gateway 未配置、`OrderRequest` 构造失败或 `send_order` 抛错时，自动交易会把该计划记录为 `failed` 或 `skipped`，不会让整轮 Agent 运行变成 500。
 

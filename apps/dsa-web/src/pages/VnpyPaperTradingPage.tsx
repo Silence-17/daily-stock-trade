@@ -3426,7 +3426,7 @@ const VnpyPaperTradingPage: React.FC = () => {
               />
             </label>
             <label className="space-y-1 text-xs text-secondary-text">
-              单票金额上限
+              单票金额上限（{currency}）
               <input
                 className={INPUT_CLASS}
                 type="number"
@@ -3441,7 +3441,7 @@ const VnpyPaperTradingPage: React.FC = () => {
               />
             </label>
             <label className="space-y-1 text-xs text-secondary-text">
-              总持仓金额上限
+              总持仓金额上限（{currency}）
               <input
                 className={INPUT_CLASS}
                 type="number"
@@ -3472,7 +3472,7 @@ const VnpyPaperTradingPage: React.FC = () => {
               />
             </label>
             <label className="space-y-1 text-xs text-secondary-text">
-              行业金额上限
+              行业金额上限（{currency}）
               <input
                 className={INPUT_CLASS}
                 type="number"
@@ -3616,7 +3616,7 @@ const VnpyPaperTradingPage: React.FC = () => {
               />
             </label>
             <label className="space-y-1 text-xs text-secondary-text">
-              每日预算
+              每日预算（{currency}）
               <input
                 className={INPUT_CLASS}
                 type="number"
@@ -3628,7 +3628,7 @@ const VnpyPaperTradingPage: React.FC = () => {
               />
             </label>
             <label className="space-y-1 text-xs text-secondary-text">
-              最低现金余额
+              最低现金余额（{currency}）
               <input
                 className={INPUT_CLASS}
                 type="number"
@@ -3653,7 +3653,7 @@ const VnpyPaperTradingPage: React.FC = () => {
               />
             </label>
             <label className="space-y-1 text-xs text-secondary-text">
-              每票金额
+              每票金额（{currency}）
               <input
                 className={INPUT_CLASS}
                 type="number"

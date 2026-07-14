@@ -37,6 +37,7 @@ VALID_SIDES = {"buy", "sell"}
 VALID_CASH_DIRECTIONS = {"in", "out"}
 VALID_CORPORATE_ACTIONS = {"cash_dividend", "split_adjustment"}
 PORTFOLIO_FX_REFRESH_DISABLED_REASON = "portfolio_fx_update_disabled"
+PORTFOLIO_FX_MAX_AGE_DAYS = 7
 PORTFOLIO_REALTIME_QUOTE_MAX_WORKERS = 4
 
 
@@ -1434,7 +1435,8 @@ class PortfolioService:
             as_of=as_of_date,
         )
         if direct is not None and direct.rate > 0:
-            return float(amount) * float(direct.rate), bool(direct.is_stale), "direct_rate"
+            stale = bool(direct.is_stale) or (as_of_date - direct.rate_date).days > PORTFOLIO_FX_MAX_AGE_DAYS
+            return float(amount) * float(direct.rate), stale, "direct_rate"
 
         inverse = self.repo.get_latest_fx_rate(
             from_currency=to_norm,
@@ -1442,7 +1444,8 @@ class PortfolioService:
             as_of=as_of_date,
         )
         if inverse is not None and inverse.rate > 0:
-            return float(amount) / float(inverse.rate), bool(inverse.is_stale), "inverse_rate"
+            stale = bool(inverse.is_stale) or (as_of_date - inverse.rate_date).days > PORTFOLIO_FX_MAX_AGE_DAYS
+            return float(amount) / float(inverse.rate), stale, "inverse_rate"
 
         # P0 fallback: keep pipeline available even when FX cache is missing.
         return float(amount), True, "fallback_1_to_1"
@@ -1725,8 +1728,11 @@ class PortfolioService:
 
     @staticmethod
     def _default_currency_for_market(market: str) -> str:
-        if market == "hk":
-            return "HKD"
-        if market == "us":
-            return "USD"
-        return "CNY"
+        return {
+            "cn": "CNY",
+            "hk": "HKD",
+            "us": "USD",
+            "jp": "JPY",
+            "kr": "KRW",
+            "tw": "TWD",
+        }.get(market, "CNY")

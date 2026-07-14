@@ -1,0 +1,4 @@
+# Optional vn.py runtime used by VNPY_RUNTIME_ENABLED.
+# Keep this separate from the default local-paper installation because vn.py
+# includes GUI and native numerical dependencies.
+vnpy==4.4.0

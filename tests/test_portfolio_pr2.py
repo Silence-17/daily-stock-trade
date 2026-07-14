@@ -86,6 +86,33 @@ class PortfolioPr2TestCase(unittest.TestCase):
         self._board_fetch_patcher.stop()
         self.temp_dir.cleanup()
 
+    def test_default_market_currencies_cover_supported_non_cn_markets(self) -> None:
+        self.assertEqual(self.service._default_currency_for_market("hk"), "HKD")
+        self.assertEqual(self.service._default_currency_for_market("us"), "USD")
+        self.assertEqual(self.service._default_currency_for_market("jp"), "JPY")
+        self.assertEqual(self.service._default_currency_for_market("kr"), "KRW")
+        self.assertEqual(self.service._default_currency_for_market("tw"), "TWD")
+
+    def test_fx_rate_older_than_seven_days_is_stale_for_valuation(self) -> None:
+        self.service.repo.save_fx_rate(
+            from_currency="USD",
+            to_currency="CNY",
+            rate_date=date(2026, 7, 1),
+            rate=7.0,
+            source="unit-test",
+        )
+
+        converted, stale, source = self.service.convert_amount(
+            amount=100,
+            from_currency="USD",
+            to_currency="CNY",
+            as_of_date=date(2026, 7, 9),
+        )
+
+        self.assertEqual(converted, 700)
+        self.assertTrue(stale)
+        self.assertEqual(source, "direct_rate")
+
     def _save_close(self, symbol: str, on_date: date, close: float) -> None:
         df = pd.DataFrame(
             [

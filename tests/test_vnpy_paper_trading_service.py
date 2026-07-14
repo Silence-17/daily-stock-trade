@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import json
+import importlib.util
 import os
 import sys
 import tempfile
+import time
 import types
 import unittest
 from datetime import date, datetime, timedelta, timezone
@@ -125,6 +127,73 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertEqual(result["reason"], "cash_below_min_lot")
         self.assertIn("one A-share lot", result["message"])
 
+    def test_hk_order_requires_current_fx_rate_for_base_currency_cash_check(self) -> None:
+        result = self.service.submit_order(
+            symbol="00700",
+            side="buy",
+            market="hk",
+            cash_amount=1000,
+            price=100,
+        )
+
+        self.assertFalse(result["accepted"])
+        self.assertEqual(result["reason"], "fx_rate_unavailable")
+        self.assertEqual(result["raw"]["fx_conversion"]["quote_currency"], "HKD")
+        self.assertTrue(result["raw"]["fx_conversion"]["stale"])
+
+    def test_hk_order_records_quote_currency_and_base_currency_notional(self) -> None:
+        self.service.portfolio.repo.save_fx_rate(
+            from_currency="CNY",
+            to_currency="HKD",
+            rate_date=date.today(),
+            rate=1.1,
+            source="unit-test",
+        )
+
+        result = self.service.submit_order(
+            symbol="00700",
+            side="buy",
+            market="hk",
+            cash_amount=1100,
+            price=100,
+        )
+
+        self.assertTrue(result["accepted"])
+        self.assertEqual(result["cash_amount"], 1100)
+        self.assertAlmostEqual(result["cash_amount_base"], 1000)
+        self.assertEqual(result["base_currency"], "CNY")
+        self.assertEqual(result["quote_currency"], "HKD")
+        account_id = int(self.service.get_settings().account_id)
+        trades = self.service.portfolio.list_trade_events(account_id=account_id, page=1)
+        self.assertEqual(trades["items"][0]["currency"], "HKD")
+
+    def test_hk_sell_remains_available_when_fx_rate_is_missing(self) -> None:
+        account = self.service.ensure_account()
+        account_id = int(account["id"])
+        self.service.portfolio.record_trade(
+            account_id=account_id,
+            symbol="00700",
+            trade_date=date.today(),
+            side="buy",
+            quantity=10,
+            price=100,
+            market="hk",
+            currency="HKD",
+            trade_uid="hk-position-without-fx",
+        )
+
+        result = self.service.submit_order(
+            symbol="00700",
+            side="sell",
+            market="hk",
+            quantity=10,
+            price=101,
+        )
+
+        self.assertTrue(result["accepted"])
+        self.assertEqual(result["quote_currency"], "HKD")
+        self.assertTrue(result["raw"]["fx_conversion"]["stale"])
+
     def test_summary_status_skips_snapshot_and_recent_trades(self) -> None:
         self.service.submit_order(
             symbol="600519",
@@ -241,6 +310,12 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
 
         self.assertTrue(settings.auto_trade_enabled)
         self.assertEqual(settings.auto_interval_minutes, 5)
+
+    def test_settings_inherit_runtime_gateway_name_when_not_saved(self) -> None:
+        with patch.dict(os.environ, {"VNPY_GATEWAY_NAME": "DSA_SIM"}, clear=False):
+            settings = self.service.get_settings()
+
+        self.assertEqual(settings.vnpy_gateway_name, "DSA_SIM")
 
     def test_auto_trade_run_records_structured_agent_plan(self) -> None:
         result = self.service.run_auto_trade_once()
@@ -519,6 +594,151 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertEqual(audit["decisions"][1]["reason"], "score_below_threshold")
         self.assertEqual(audit["trade_plans"][0]["status"], "filled")
         self.assertEqual(audit["trade_plans"][1]["status"], "skipped")
+
+    def test_auto_trade_hk_fails_closed_without_current_fx_rate(self) -> None:
+        self.service.update_settings(
+            {
+                "auto_trade_enabled": True,
+                "auto_trade_time_gate_enabled": False,
+                "auto_market": "hk",
+                "auto_cash_per_order": 1000,
+                "auto_max_results": 1,
+            }
+        )
+        fake_alphasift = MagicMock()
+        fake_alphasift.screen.return_value = {
+            "quality_status": "ok",
+            "candidates": [{"code": "00700", "name": "Tencent", "score": 80, "price": 11.0}],
+            "warnings": [],
+            "source_errors": [],
+        }
+
+        with patch(
+            "src.services.vnpy_paper_trading_service.AlphaSiftService",
+            return_value=fake_alphasift,
+        ):
+            result = self.service.run_auto_trade_once()
+
+        self.assertEqual(result["orders"][0]["reason"], "fx_rate_unavailable")
+        self.assertEqual(result["orders"][0]["base_currency"], "CNY")
+        self.assertEqual(result["orders"][0]["quote_currency"], "HKD")
+        detail = self.service.agent_repo.get_run_detail(result["agent_run_uid"])
+        self.assertFalse(detail["diagnostics"]["currency_budget"]["available"])
+
+    def test_auto_trade_hk_converts_base_budget_but_audits_base_amount(self) -> None:
+        self.service.portfolio.repo.save_fx_rate(
+            from_currency="CNY",
+            to_currency="HKD",
+            rate_date=date.today(),
+            rate=1.1,
+            source="unit-test",
+        )
+        self.service.update_settings(
+            {
+                "auto_trade_enabled": True,
+                "auto_trade_time_gate_enabled": False,
+                "auto_market": "hk",
+                "auto_cash_per_order": 1000,
+                "auto_max_results": 1,
+            }
+        )
+        fake_alphasift = MagicMock()
+        fake_alphasift.screen.return_value = {
+            "quality_status": "ok",
+            "candidates": [{"code": "00700", "name": "Tencent", "score": 80, "price": 11.0}],
+            "warnings": [],
+            "source_errors": [],
+        }
+
+        with patch(
+            "src.services.vnpy_paper_trading_service.AlphaSiftService",
+            return_value=fake_alphasift,
+        ):
+            result = self.service.run_auto_trade_once()
+
+        order = result["orders"][0]
+        self.assertTrue(order["accepted"])
+        self.assertAlmostEqual(order["cash_amount"], 1100)
+        self.assertAlmostEqual(order["cash_amount_base"], 1000)
+        self.assertEqual(order["quote_currency"], "HKD")
+        detail = self.service.agent_repo.get_run_detail(result["agent_run_uid"])
+        self.assertAlmostEqual(detail["decisions"][0]["cash_amount"], 1000)
+        self.assertAlmostEqual(detail["trade_plans"][0]["planned_cash_amount"], 1000)
+        account_id = int(self.service.get_settings().account_id)
+        trades = self.service.portfolio.list_trade_events(account_id=account_id, page=1)
+        self.assertEqual(trades["items"][0]["currency"], "HKD")
+
+    def test_auto_trade_daily_budget_converts_existing_hk_notional_to_base_currency(self) -> None:
+        self.service.portfolio.repo.save_fx_rate(
+            from_currency="CNY",
+            to_currency="HKD",
+            rate_date=date.today(),
+            rate=1.1,
+            source="unit-test",
+        )
+        existing = self.service.submit_order(
+            symbol="00941",
+            side="buy",
+            market="hk",
+            cash_amount=1100,
+            price=11.0,
+            source="alphasift_auto",
+        )
+        self.assertTrue(existing["accepted"])
+        self.service.update_settings(
+            {
+                "auto_trade_enabled": True,
+                "auto_trade_time_gate_enabled": False,
+                "auto_market": "hk",
+                "auto_cash_per_order": 1000,
+                "auto_daily_budget": 1500,
+                "auto_max_results": 1,
+            }
+        )
+        fake_alphasift = MagicMock()
+        fake_alphasift.screen.return_value = {
+            "quality_status": "ok",
+            "candidates": [{"code": "00700", "name": "Tencent", "score": 80, "price": 11.0}],
+            "warnings": [],
+            "source_errors": [],
+        }
+
+        with patch(
+            "src.services.vnpy_paper_trading_service.AlphaSiftService",
+            return_value=fake_alphasift,
+        ):
+            result = self.service.run_auto_trade_once()
+
+        self.assertEqual(result["orders"][0]["reason"], "daily_budget_exceeded")
+
+    def test_daily_budget_fails_closed_when_historical_fx_conversion_raises(self) -> None:
+        self.service.update_settings(
+            {
+                "auto_trade_enabled": True,
+                "auto_trade_time_gate_enabled": False,
+                "auto_daily_budget": 1500,
+            }
+        )
+        existing = self.service.submit_order(
+            symbol="600519",
+            side="buy",
+            market="cn",
+            quantity=100,
+            price=10.0,
+            source="alphasift_auto",
+        )
+        self.assertTrue(existing["accepted"])
+
+        with patch.object(
+            self.service.portfolio,
+            "convert_amount",
+            side_effect=ValueError("invalid fx payload"),
+        ):
+            usage = self.service._daily_auto_trade_usage(self.service.get_settings())
+
+        self.assertTrue(usage["fx_unavailable"])
+        self.assertEqual(usage["order_count"], 1.0)
+        self.assertEqual(usage["cash_amount"], 1500.0)
 
     def test_performance_summary_aggregates_account_and_agent_runs(self) -> None:
         self.service.update_settings(
@@ -1465,6 +1685,79 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         trades = self.service.portfolio.list_trade_events(account_id=int(self.service.get_settings().account_id), page=1)
         self.assertEqual(trades["items"], [])
 
+    @unittest.skipUnless(importlib.util.find_spec("vnpy"), "optional vn.py runtime is not installed")
+    def test_builtin_simulated_gateway_fills_agent_plan_through_real_event_engine(self) -> None:
+        from vnpy.event import EventEngine
+        from vnpy.trader.engine import MainEngine
+
+        from src.services.vnpy_simulated_gateway import DsaSimulatedGateway
+
+        event_engine = EventEngine()
+        main_engine = MainEngine(event_engine)
+        main_engine.add_gateway(DsaSimulatedGateway, "DSA_SIM")
+        main_engine.connect({"fill_delay_ms": 100}, "DSA_SIM")
+        service = VnpyPaperTradingService(
+            data_fetcher_manager=_FakeDataFetcherManager(price=10.0),
+            config_path=self.config_path,
+            vnpy_main_engine=main_engine,
+            vnpy_event_engine=event_engine,
+        )
+        bridge = service.attach_vnpy_event_engine(event_engine)
+        service.update_settings(
+            {
+                "auto_trade_enabled": True,
+                "auto_trade_time_gate_enabled": False,
+                "auto_execution_mode": "vnpy_paper",
+                "vnpy_gateway_name": "DSA_SIM",
+                "auto_strategy": "dual_low",
+                "auto_max_results": 1,
+                "auto_cash_per_order": 1200,
+            }
+        )
+        fake_alphasift = MagicMock()
+        fake_alphasift.screen.return_value = {
+            "quality_status": "ok",
+            "candidates": [
+                {
+                    "code": "600519",
+                    "name": "贵州茅台",
+                    "score": 80,
+                    "price": 10.0,
+                    "amount": 200000000,
+                }
+            ],
+            "warnings": [],
+            "source_errors": [],
+        }
+
+        try:
+            with patch(
+                "src.services.vnpy_paper_trading_service.AlphaSiftService",
+                return_value=fake_alphasift,
+            ):
+                result = service.run_auto_trade_once()
+            self.assertEqual(result["orders"][0]["status"], "submitted")
+
+            deadline = time.monotonic() + 5.0
+            detail = None
+            while time.monotonic() < deadline:
+                detail = service.agent_repo.get_run_detail(result["agent_run_uid"])
+                if detail and detail["trade_plans"][0]["status"] == "filled":
+                    break
+                time.sleep(0.05)
+
+            self.assertIsNotNone(detail)
+            assert detail is not None
+            self.assertEqual(detail["trade_plans"][0]["status"], "filled")
+            self.assertEqual(detail["decisions"][0]["status"], "filled")
+            account_id = int(service.get_settings().account_id)
+            trades = service.portfolio.list_trade_events(account_id=account_id, page=1)
+            self.assertEqual(len(trades["items"]), 1)
+            self.assertEqual(trades["items"][0]["symbol"], "600519")
+        finally:
+            bridge.unregister()
+            main_engine.close()
+
     def test_cancel_submitted_vnpy_paper_trade_plan_requests_gateway_cancel(self) -> None:
         installed = _install_fake_vnpy_modules()
         main_engine = _FakeMainEngine()
@@ -1782,7 +2075,7 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertEqual(refreshed["submitted_price"], 10.25)
         self.assertEqual(refreshed["trade_id"], partial["trade_id"])
 
-    def test_stale_vnpy_plan_reconciles_main_engine_fill_before_expiring(self) -> None:
+    def test_active_vnpy_plan_reconciles_main_engine_fill_before_timeout(self) -> None:
         main_engine = _FakeMainEngine()
         main_engine.orders["SIM.RECOVER"] = SimpleNamespace(
             vt_orderid="SIM.RECOVER",
@@ -1806,11 +2099,6 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
                 datetime=datetime(2026, 7, 6, 2, 30, tzinfo=timezone.utc),
             )
         ]
-        self.service = VnpyPaperTradingService(
-            data_fetcher_manager=_FakeDataFetcherManager(price=10.0),
-            config_path=self.config_path,
-            vnpy_main_engine=main_engine,
-        )
         self.service.update_settings({"vnpy_gateway_name": "SIM"})
         run = self.service.agent_repo.create_run(
             run_uid="reconcile-filled-run",
@@ -1836,7 +2124,12 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
             submitted_price=10,
             order_result={"status": "submitted", "raw": {"vt_orderid": "SIM.RECOVER"}},
         )
-        self._age_trade_plan(int(plan["id"]))
+        self._age_trade_plan(int(plan["id"]), minutes=5)
+        self.service = VnpyPaperTradingService(
+            data_fetcher_manager=_FakeDataFetcherManager(price=10.0),
+            config_path=self.config_path,
+            vnpy_main_engine=main_engine,
+        )
 
         result = self.service.expire_stale_vnpy_trade_plans(max_plans=3, scan_limit=10)
         refreshed = self.service.agent_repo.get_trade_plan("reconcile-filled-plan")
@@ -1849,6 +2142,176 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         assert refreshed is not None
         self.assertEqual(refreshed["status"], "filled")
         self.assertEqual(refreshed["order_result"]["raw"]["fill_sync"]["trade_count"], 1)
+
+    def test_trade_callback_during_cancel_request_is_not_lost(self) -> None:
+        run = self.service.agent_repo.create_run(
+            run_uid="cancel-race-run",
+            trigger_source="vnpy_paper_auto",
+            strategy="dual_low",
+            market="cn",
+            settings={},
+            diagnostics={},
+        )
+        self.service.agent_repo.record_trade_plan(
+            plan_uid="cancel-race-plan",
+            run_id=int(run["id"]),
+            decision_id=None,
+            symbol="600519",
+            market="cn",
+            side="buy",
+            status="cancel_requested",
+            execution_mode="vnpy_paper",
+            planned_cash_amount=1000,
+            planned_quantity=100,
+            planned_price=10,
+            submitted_quantity=100,
+            submitted_price=10,
+            order_result={"status": "cancel_requested", "raw": {"vt_orderid": "SIM.CANCEL.RACE"}},
+        )
+
+        result = self.service.sync_vnpy_trade_callback(
+            vt_orderid="SIM.CANCEL.RACE",
+            vt_tradeid="SIM.CANCEL.RACE.T1",
+            quantity=100,
+            price=10.1,
+        )
+        refreshed = self.service.agent_repo.get_trade_plan("cancel-race-plan")
+
+        self.assertTrue(result["accepted"])
+        self.assertEqual(result["status"], "filled")
+        self.assertIsNotNone(refreshed)
+        assert refreshed is not None
+        self.assertEqual(refreshed["status"], "filled")
+
+    def test_late_trade_callback_recovers_timed_out_plan(self) -> None:
+        run = self.service.agent_repo.create_run(
+            run_uid="late-fill-run",
+            trigger_source="vnpy_paper_auto",
+            strategy="dual_low",
+            market="cn",
+            settings={},
+            diagnostics={},
+        )
+        self.service.agent_repo.record_trade_plan(
+            plan_uid="late-fill-plan",
+            run_id=int(run["id"]),
+            decision_id=None,
+            symbol="600519",
+            market="cn",
+            side="buy",
+            status="failed",
+            execution_mode="vnpy_paper",
+            planned_cash_amount=1000,
+            planned_quantity=100,
+            planned_price=10,
+            submitted_quantity=100,
+            submitted_price=10,
+            skip_reason="vnpy_order_timeout",
+            order_result={
+                "status": "failed",
+                "reason": "vnpy_order_timeout",
+                "raw": {"vt_orderid": "SIM.LATE.FILL"},
+            },
+        )
+
+        result = self.service.sync_vnpy_trade_callback(
+            vt_orderid="SIM.LATE.FILL",
+            vt_tradeid="SIM.LATE.FILL.T1",
+            quantity=100,
+            price=10.3,
+        )
+        refreshed = self.service.agent_repo.get_trade_plan("late-fill-plan")
+
+        self.assertTrue(result["accepted"])
+        self.assertEqual(result["status"], "filled")
+        self.assertIsNotNone(refreshed)
+        assert refreshed is not None
+        self.assertEqual(refreshed["status"], "filled")
+        self.assertIsNone(refreshed["skip_reason"])
+
+    def test_active_vnpy_plan_without_gateway_evidence_waits_for_timeout(self) -> None:
+        main_engine = _FakeMainEngine()
+        self.service = VnpyPaperTradingService(
+            data_fetcher_manager=_FakeDataFetcherManager(price=10.0),
+            config_path=self.config_path,
+            vnpy_main_engine=main_engine,
+        )
+        self.service.update_settings({"vnpy_gateway_name": "SIM"})
+        run = self.service.agent_repo.create_run(
+            run_uid="reconcile-empty-run",
+            trigger_source="vnpy_paper_auto",
+            strategy="dual_low",
+            market="cn",
+            settings={},
+            diagnostics={},
+        )
+        plan = self.service.agent_repo.record_trade_plan(
+            plan_uid="reconcile-empty-plan",
+            run_id=int(run["id"]),
+            decision_id=None,
+            symbol="600519",
+            market="cn",
+            side="buy",
+            status="submitted",
+            execution_mode="vnpy_paper",
+            planned_cash_amount=1000,
+            planned_quantity=100,
+            planned_price=10,
+            submitted_quantity=100,
+            submitted_price=10,
+            order_result={"status": "submitted", "raw": {"vt_orderid": "SIM.EMPTY"}},
+        )
+        self._age_trade_plan(int(plan["id"]), minutes=5)
+
+        result = self.service.expire_stale_vnpy_trade_plans(max_plans=3, scan_limit=10)
+        refreshed = self.service.agent_repo.get_trade_plan("reconcile-empty-plan")
+
+        self.assertEqual(result["scanned_count"], 1)
+        self.assertEqual(result["expired_count"], 0)
+        self.assertEqual(result["reconciled_count"], 0)
+        self.assertEqual(result["failed_count"], 0)
+        self.assertIsNotNone(refreshed)
+        assert refreshed is not None
+        self.assertEqual(refreshed["status"], "submitted")
+
+    def test_vnpy_reconciliation_grace_skips_just_submitted_plan(self) -> None:
+        main_engine = _FailingQueryMainEngine(AssertionError("gateway query should not run"))
+        self.service = VnpyPaperTradingService(
+            data_fetcher_manager=_FakeDataFetcherManager(price=10.0),
+            config_path=self.config_path,
+            vnpy_main_engine=main_engine,
+        )
+        self.service.update_settings({"vnpy_gateway_name": "SIM"})
+        run = self.service.agent_repo.create_run(
+            run_uid="reconcile-grace-run",
+            trigger_source="vnpy_paper_auto",
+            strategy="dual_low",
+            market="cn",
+            settings={},
+            diagnostics={},
+        )
+        self.service.agent_repo.record_trade_plan(
+            plan_uid="reconcile-grace-plan",
+            run_id=int(run["id"]),
+            decision_id=None,
+            symbol="600519",
+            market="cn",
+            side="buy",
+            status="submitted",
+            execution_mode="vnpy_paper",
+            planned_cash_amount=1000,
+            planned_quantity=100,
+            planned_price=10,
+            submitted_quantity=100,
+            submitted_price=10,
+            order_result={"status": "submitted", "raw": {"vt_orderid": "SIM.GRACE"}},
+        )
+
+        result = self.service.expire_stale_vnpy_trade_plans(max_plans=3, scan_limit=10)
+
+        self.assertEqual(result["scanned_count"], 0)
+        self.assertEqual(result["reconciliation_failed_count"], 0)
+        self.assertEqual(result["expired_count"], 0)
 
     def test_stale_vnpy_plan_query_failure_is_protected_from_expiration(self) -> None:
         main_engine = _FailingQueryMainEngine(RuntimeError("gateway cache unavailable"))
@@ -3794,6 +4257,92 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertEqual(tasks[0]["interval_seconds"], 5 * 60)
         self.assertEqual(tasks[1]["name"], "vnpy_paper_auto_retry")
         self.assertEqual(tasks[1]["interval_seconds"], 5 * 60)
+        self.assertTrue(tasks[1]["run_immediately"])
+
+    def test_background_task_builder_keeps_recovery_when_auto_trade_is_paused(self) -> None:
+        self.service.update_settings(
+            {
+                "enabled": True,
+                "auto_trade_enabled": False,
+                "auto_interval_minutes": 5,
+            }
+        )
+
+        with patch(
+            "src.services.vnpy_paper_trading_service.VNPY_PAPER_CONFIG_PATH",
+            self.config_path,
+        ):
+            tasks = build_vnpy_paper_trading_background_tasks()
+
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(tasks[0]["name"], "vnpy_paper_auto_retry")
+        self.assertEqual(tasks[0]["interval_seconds"], 5 * 60)
+        self.assertTrue(tasks[0]["run_immediately"])
+
+    def test_background_task_builder_injects_runtime_engines_into_service(self) -> None:
+        main_engine = object()
+        event_engine = object()
+        fake_service = MagicMock()
+        fake_service.get_settings.return_value = SimpleNamespace(
+            enabled=True,
+            auto_trade_enabled=False,
+            auto_interval_minutes=5,
+        )
+        fake_service.retry_due_trade_plans.return_value = {
+            "accepted": True,
+            "skipped": False,
+            "attempted_count": 0,
+            "submitted_count": 0,
+            "skipped_count": 0,
+            "failed_count": 0,
+        }
+
+        with patch(
+            "src.services.vnpy_paper_trading_service.VnpyPaperTradingService",
+            return_value=fake_service,
+        ) as service_factory:
+            tasks = build_vnpy_paper_trading_background_tasks(
+                vnpy_main_engine=main_engine,
+                vnpy_event_engine=event_engine,
+            )
+
+        service_factory.assert_called_once_with(
+            vnpy_main_engine=main_engine,
+            vnpy_event_engine=event_engine,
+        )
+        self.assertEqual([task["name"] for task in tasks], ["vnpy_paper_auto_retry"])
+        tasks[0]["task"]()
+        fake_service.retry_due_trade_plans.assert_called_once_with()
+
+    def test_retry_scan_recovers_orders_without_resubmitting_when_auto_trade_is_paused(self) -> None:
+        self.service.update_settings({"enabled": True, "auto_trade_enabled": False})
+        recovery = {
+            "scanned_count": 1,
+            "expired_count": 0,
+            "reconciled_count": 1,
+            "protected_count": 1,
+            "reconciliation_failed_count": 0,
+            "failed_count": 0,
+            "messages": ["reconciled_vnpy_orders:1"],
+        }
+
+        with patch.object(
+            self.service,
+            "expire_stale_vnpy_trade_plans",
+            return_value=recovery,
+        ) as recover, patch.object(
+            self.service,
+            "retry_trade_plan",
+            side_effect=AssertionError("paused auto trade must not resubmit plans"),
+        ):
+            result = self.service.retry_due_trade_plans(max_plans=3, scan_limit=10)
+
+        recover.assert_called_once_with(max_plans=3, scan_limit=10)
+        self.assertFalse(result["skipped"])
+        self.assertEqual(result["reason"], "auto_trade_disabled")
+        self.assertEqual(result["reconciled_count"], 1)
+        self.assertEqual(result["attempted_count"], 0)
+        self.assertEqual(result["submitted_count"], 0)
 
     def test_background_task_builder_aligns_first_auto_trade_run_to_next_window(self) -> None:
         self.service.update_settings(

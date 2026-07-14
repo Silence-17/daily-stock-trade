@@ -856,7 +856,12 @@ def _task_health_payload(status_payload: Dict[str, Any]) -> Dict[str, Any]:
     for name in names:
         task = tasks_by_name.get(name)
         registered = task is not None
-        required = bool(paper_enabled and auto_trade_enabled and name in _EXPECTED_VNPY_PAPER_TASKS)
+        is_auto_trade_task = name == "vnpy_paper_auto_trade"
+        is_recovery_task = name == "vnpy_paper_auto_retry"
+        required = bool(
+            paper_enabled
+            and (is_recovery_task or (is_auto_trade_task and auto_trade_enabled))
+        )
         event = _latest_task_event(events, name)
         event_status = str(event.get("status") or "") if event is not None else None
         event_details = event.get("details") if event is not None and isinstance(event.get("details"), dict) else {}
@@ -866,7 +871,7 @@ def _task_health_payload(status_payload: Dict[str, Any]) -> Dict[str, Any]:
         if not paper_enabled:
             health = "disabled"
             reason = "paper_trading_disabled"
-        elif name in _EXPECTED_VNPY_PAPER_TASKS and not auto_trade_enabled:
+        elif is_auto_trade_task and not auto_trade_enabled:
             health = "disabled"
             reason = "auto_trade_disabled"
         elif not scheduler_enabled:

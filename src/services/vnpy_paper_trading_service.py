@@ -14,6 +14,7 @@ import copy
 import json
 import logging
 import math
+import os
 import threading
 import time
 import uuid
@@ -52,6 +53,14 @@ VNPY_PAPER_ALERT_TARGET = "vnpy_paper"
 VNPY_PAPER_ALERT_SOURCE = "vnpy_paper_auto"
 VNPY_PAPER_ACCOUNT_NAME = "vn.py 模拟交易"
 VNPY_PAPER_CONFIG_PATH = Path("data") / "vnpy_paper_trading.json"
+MARKET_CURRENCIES = {
+    "cn": "CNY",
+    "hk": "HKD",
+    "us": "USD",
+    "jp": "JPY",
+    "kr": "KRW",
+    "tw": "TWD",
+}
 PAPER_EPS = 1e-8
 TRADE_PLAN_RETRY_MAX_ATTEMPTS = 3
 TRADE_PLAN_RETRY_COOLDOWN_SECONDS = 60
@@ -59,6 +68,7 @@ TRADE_PLAN_AUTO_RETRY_MAX_PLANS = 3
 TRADE_PLAN_AUTO_RETRY_SCAN_LIMIT = 50
 TRADE_PLAN_AUTO_RETRY_INTERVAL_SECONDS = 300
 TRADE_PLAN_ORDER_TIMEOUT_SECONDS = 30 * 60
+TRADE_PLAN_RECONCILIATION_GRACE_SECONDS = 60
 STATUS_SNAPSHOT_CACHE_TTL_SECONDS = 10
 RETRYABLE_TRADE_PLAN_EXECUTION_MODES = {"manual_approval", "paper", "vnpy_paper"}
 AUTO_RETRY_TRADE_PLAN_EXECUTION_MODES = {"paper", "vnpy_paper"}
@@ -457,7 +467,7 @@ class VnpyPaperTradingService:
         payload = self._read_config_payload()
         raw_settings = payload.get("settings") if isinstance(payload, dict) else None
         if not isinstance(raw_settings, dict):
-            return VnpyPaperSettings()
+            raw_settings = {}
         return self._normalize_settings(raw_settings)
 
     def update_settings(
@@ -1311,9 +1321,52 @@ class VnpyPaperTradingService:
             )
 
         cash_value = round(fill_quantity * fill_price, 6)
+        quote_currency = self._currency_for_market(market)
+        base_currency = str(account.get("base_currency") or "CNY").strip().upper() or "CNY"
+        cash_value_base, fx_stale, fx_source = self.portfolio.convert_amount(
+            amount=cash_value,
+            from_currency=quote_currency,
+            to_currency=base_currency,
+            as_of_date=date.today(),
+        )
+        fx_diagnostics = {
+            "base_currency": base_currency,
+            "quote_currency": quote_currency,
+            "base_cash_amount": round(cash_value_base, 6),
+            "quote_cash_amount": cash_value,
+            "source": fx_source,
+            "stale": bool(fx_stale),
+        }
+        order_raw = {**(raw or {}), "fx_conversion": fx_diagnostics}
+        if side_norm == "buy" and base_currency != quote_currency and fx_stale:
+            return self._skipped_order(
+                symbol=symbol_norm,
+                side=side_norm,
+                quantity=fill_quantity,
+                price=fill_price,
+                cash_amount=cash_value,
+                reason="fx_rate_unavailable",
+                message=f"A current {quote_currency}/{base_currency} FX rate is required.",
+                raw=order_raw,
+            )
+
+        if side_norm == "buy":
+            available_cash = self._account_cash(account_id)
+            if available_cash + 1e-8 < cash_value_base:
+                return self._skipped_order(
+                    symbol=symbol_norm,
+                    side=side_norm,
+                    quantity=fill_quantity,
+                    price=fill_price,
+                    cash_amount=cash_value,
+                    reason="cash_insufficient",
+                    message="Paper account cash is insufficient in its base currency.",
+                    raw=order_raw,
+                )
+
         route = str(execution_route or "local_paper").strip().lower()
         if route == "vnpy_bridge":
-            return self._submit_vnpy_bridge_order(
+            bridge_result = self._submit_vnpy_bridge_order(
                 settings=settings,
                 account_id=account_id,
                 symbol=symbol_norm,
@@ -1323,8 +1376,17 @@ class VnpyPaperTradingService:
                 price=fill_price,
                 cash_amount=cash_value,
                 source=source,
-                raw=raw,
+                raw=order_raw,
             )
+            bridge_result.update(
+                {
+                    "cash_amount_base": round(cash_value_base, 6),
+                    "cash_amount_quote": cash_value,
+                    "base_currency": base_currency,
+                    "quote_currency": quote_currency,
+                }
+            )
+            return bridge_result
         if route != "local_paper":
             return self._skipped_order(
                 symbol=symbol_norm,
@@ -1335,19 +1397,6 @@ class VnpyPaperTradingService:
                 reason="unsupported_execution_route",
                 message=f"Unsupported execution_route: {execution_route}",
             )
-
-        if side_norm == "buy":
-            available_cash = self._account_cash(account_id)
-            if available_cash + 1e-8 < cash_value:
-                return self._skipped_order(
-                    symbol=symbol_norm,
-                    side=side_norm,
-                    quantity=fill_quantity,
-                    price=fill_price,
-                    cash_amount=cash_value,
-                    reason="cash_insufficient",
-                    message="Paper account cash is insufficient.",
-                )
 
         trade_uid = f"vnpy-paper-{uuid.uuid4().hex}"
         dedup_hash = self._dedup_hash(dedup_key) if dedup_key else None
@@ -1363,7 +1412,7 @@ class VnpyPaperTradingService:
                 fee=0.0,
                 tax=0.0,
                 market=market,
-                currency="CNY" if market == "cn" else None,
+                currency=quote_currency,
                 trade_uid=trade_uid,
                 dedup_hash=dedup_hash,
                 note=trade_note,
@@ -1403,7 +1452,11 @@ class VnpyPaperTradingService:
             "source": "vnpy_local_paper_ledger",
             "message": "Paper order filled.",
             "reason": None,
-            "raw": raw or {},
+            "cash_amount_base": round(cash_value_base, 6),
+            "cash_amount_quote": cash_value,
+            "base_currency": base_currency,
+            "quote_currency": quote_currency,
+            "raw": order_raw,
         }
 
     def _submit_vnpy_bridge_order(
@@ -1611,7 +1664,7 @@ class VnpyPaperTradingService:
                 fee=fee_value,
                 tax=tax_value,
                 market=market_norm,
-                currency=currency or ("CNY" if market_norm == "cn" else None),
+                currency=currency or self._currency_for_market(market_norm),
                 trade_uid=trade_uid,
                 dedup_hash=self._dedup_hash(f"vnpy-trade:{trade_ref}"),
                 note=f"vn.py callback | vt_orderid={order_id}",
@@ -2312,12 +2365,16 @@ class VnpyPaperTradingService:
             self._record_last_auto_run(result)
             return result
 
+        currency_budget = self._auto_order_currency_budget(settings)
+        run_diagnostics["currency_budget"] = currency_budget
+        currency_budget_reason = None if currency_budget.get("available") else "fx_rate_unavailable"
         exposure_state = self._position_exposure_state(settings)
         held_symbols = set(exposure_state.get("held_symbols") or set())
         blacklisted_symbols = set(settings.auto_symbol_blacklist or [])
         daily_usage = self._daily_auto_trade_usage(settings)
         daily_order_count = int(daily_usage["order_count"])
         daily_cash_used = float(daily_usage["cash_amount"])
+        daily_usage_fx_unavailable = bool(daily_usage.get("fx_unavailable"))
         account_risk_reason, account_risk_diagnostics = self._account_pre_trade_risk(settings)
         market_risk_reason = self._market_light_pre_trade_risk_reason(settings)
         if account_risk_reason:
@@ -2408,6 +2465,49 @@ class VnpyPaperTradingService:
                     order=order,
                     reason=risk_reason,
                     risk_flags=[risk_reason],
+                )
+                continue
+            if currency_budget_reason:
+                order = self._skipped_order(
+                    symbol=symbol,
+                    side="buy",
+                    reason=currency_budget_reason,
+                    message="A current FX rate is required before cross-currency auto trading.",
+                    raw={**candidate, "fx_conversion": currency_budget},
+                )
+                self._annotate_order_currency_budget(order, currency_budget)
+                orders.append(order)
+                self._record_agent_decision(
+                    run_id=run_id,
+                    sequence=index,
+                    candidate=candidate,
+                    symbol=symbol,
+                    settings=settings,
+                    action="skip",
+                    order=order,
+                    reason=currency_budget_reason,
+                    risk_flags=[currency_budget_reason],
+                )
+                continue
+            if daily_usage_fx_unavailable:
+                order = self._skipped_order(
+                    symbol=symbol,
+                    side="buy",
+                    reason="fx_rate_unavailable",
+                    message="Daily cross-currency usage cannot be valued in the account currency.",
+                    raw={**candidate, "daily_usage": daily_usage},
+                )
+                orders.append(order)
+                self._record_agent_decision(
+                    run_id=run_id,
+                    sequence=index,
+                    candidate=candidate,
+                    symbol=symbol,
+                    settings=settings,
+                    action="skip",
+                    order=order,
+                    reason="fx_rate_unavailable",
+                    risk_flags=["fx_rate_unavailable"],
                 )
                 continue
             if account_risk_reason:
@@ -2586,10 +2686,10 @@ class VnpyPaperTradingService:
                 order = self._planned_order(
                     symbol=symbol,
                     market=settings.auto_market,
-                    cash_amount=settings.auto_cash_per_order,
+                    cash_amount=float(currency_budget["quote_cash_amount"]),
                     price=candidate_price,
                     reason=plan_reason,
-                    raw=candidate,
+                    raw={**candidate, "fx_conversion": currency_budget},
                 )
             else:
                 execution_route = "vnpy_bridge" if settings.auto_execution_mode == "vnpy_paper" else "local_paper"
@@ -2597,14 +2697,15 @@ class VnpyPaperTradingService:
                     symbol=symbol,
                     side="buy",
                     market=settings.auto_market,
-                    cash_amount=settings.auto_cash_per_order,
+                    cash_amount=float(currency_budget["quote_cash_amount"]),
                     price=candidate_price,
                     source="alphasift_auto",
                     dedup_key=dedup_key,
                     note=f"AlphaSift {settings.auto_strategy}",
-                    raw=candidate,
+                    raw={**candidate, "fx_conversion": currency_budget},
                     execution_route=execution_route,
                 )
+            self._annotate_order_currency_budget(order, currency_budget)
             if llm_review is not None:
                 order["llm_review"] = llm_review
             orders.append(order)
@@ -2625,7 +2726,7 @@ class VnpyPaperTradingService:
                 self._apply_planned_exposure(exposure_state, symbol, order, settings=settings, candidate=candidate)
             if order.get("accepted") or order.get("status") == "planned":
                 daily_order_count += 1
-                daily_cash_used += _safe_float(order.get("cash_amount")) or settings.auto_cash_per_order
+                daily_cash_used += self._order_base_cash_amount(order, settings=settings)
 
         planned_count = sum(1 for item in orders if item.get("status") == "planned")
         submitted_count = sum(1 for item in orders if item.get("accepted"))
@@ -2926,7 +3027,7 @@ class VnpyPaperTradingService:
         """Retry due failed/skipped automatic paper plans under bounded controls."""
 
         settings = self.get_settings()
-        if not settings.enabled or not settings.auto_trade_enabled:
+        if not settings.enabled:
             return {
                 "accepted": True,
                 "skipped": True,
@@ -2937,7 +3038,7 @@ class VnpyPaperTradingService:
                 "skipped_count": 0,
                 "failed_count": 0,
                 "orders": [],
-                "messages": ["Automatic paper trading is disabled; retry scan skipped."],
+                "messages": ["Automatic paper trading is disabled; recovery scan skipped."],
             }
 
         max_attempts = max(1, min(20, int(max_plans or TRADE_PLAN_AUTO_RETRY_MAX_PLANS)))
@@ -2945,6 +3046,28 @@ class VnpyPaperTradingService:
             max_plans=max_attempts,
             scan_limit=scan_limit,
         )
+        if not settings.auto_trade_enabled:
+            return {
+                "accepted": True,
+                "skipped": False,
+                "reason": "auto_trade_disabled",
+                "expired_count": int(expiration.get("expired_count") or 0),
+                "reconciled_count": int(expiration.get("reconciled_count") or 0),
+                "protected_count": int(expiration.get("protected_count") or 0),
+                "reconciliation_failed_count": int(
+                    expiration.get("reconciliation_failed_count") or 0
+                ),
+                "scanned_count": int(expiration.get("scanned_count") or 0),
+                "attempted_count": 0,
+                "submitted_count": 0,
+                "skipped_count": 0,
+                "failed_count": int(expiration.get("failed_count") or 0),
+                "orders": [],
+                "messages": [
+                    *list(expiration.get("messages") or []),
+                    "Automatic paper trading is paused; active order recovery remains enabled.",
+                ],
+            }
         candidates = self._auto_retry_candidate_trade_plans(scan_limit=scan_limit)
         result: Dict[str, Any] = {
             "accepted": True,
@@ -3038,13 +3161,15 @@ class VnpyPaperTradingService:
         max_plans: int = TRADE_PLAN_AUTO_RETRY_MAX_PLANS,
         scan_limit: int = TRADE_PLAN_AUTO_RETRY_SCAN_LIMIT,
         timeout_seconds: int = TRADE_PLAN_ORDER_TIMEOUT_SECONDS,
+        reconciliation_grace_seconds: int = TRADE_PLAN_RECONCILIATION_GRACE_SECONDS,
     ) -> Dict[str, Any]:
-        """Mark stale vn.py submitted plans as failed so recovery paths can act."""
+        """Reconcile active vn.py plans and expire only unsupported stale orders."""
 
         timeout = max(60, int(timeout_seconds or TRADE_PLAN_ORDER_TIMEOUT_SECONDS))
-        candidates = self._stale_active_vnpy_trade_plans(
+        grace = max(0, min(timeout, int(reconciliation_grace_seconds or 0)))
+        candidates = self._active_vnpy_trade_plans(
             scan_limit=scan_limit,
-            timeout_seconds=timeout,
+            minimum_age_seconds=grace,
         )
         limit = max(1, min(20, int(max_plans or TRADE_PLAN_AUTO_RETRY_MAX_PLANS)))
         result: Dict[str, Any] = {
@@ -3059,7 +3184,7 @@ class VnpyPaperTradingService:
         }
         for plan in candidates[:limit]:
             try:
-                reconciliation = self._reconcile_stale_vnpy_trade_plan(plan)
+                reconciliation = self._reconcile_vnpy_trade_plan(plan)
             except Exception as exc:  # noqa: BLE001 - gateway query failures must fail closed.
                 logger.warning("Reconcile stale vn.py trade plan failed for %s: %s", plan.get("plan_uid"), exc)
                 result["reconciliation_failed_count"] = int(result["reconciliation_failed_count"]) + 1
@@ -3081,6 +3206,9 @@ class VnpyPaperTradingService:
             if reconciliation.get("supported") and reconciliation.get("observed"):
                 result["reconciled_count"] = int(result["reconciled_count"]) + 1
                 result["protected_count"] = int(result["protected_count"]) + 1
+                continue
+            age_seconds = self._trade_plan_age_seconds(plan)
+            if age_seconds is None or age_seconds < timeout:
                 continue
             try:
                 self._expire_stale_vnpy_trade_plan(plan, timeout_seconds=timeout)
@@ -3110,7 +3238,7 @@ class VnpyPaperTradingService:
             )
         return result
 
-    def _reconcile_stale_vnpy_trade_plan(self, plan: Dict[str, Any]) -> Dict[str, Any]:
+    def _reconcile_vnpy_trade_plan(self, plan: Dict[str, Any]) -> Dict[str, Any]:
         order_result = plan.get("order_result") if isinstance(plan.get("order_result"), dict) else {}
         raw = order_result.get("raw") if isinstance(order_result.get("raw"), dict) else {}
         vt_orderid = str(
@@ -3211,11 +3339,11 @@ class VnpyPaperTradingService:
                 candidates.append(plan)
         return candidates
 
-    def _stale_active_vnpy_trade_plans(
+    def _active_vnpy_trade_plans(
         self,
         *,
         scan_limit: int,
-        timeout_seconds: int,
+        minimum_age_seconds: int,
     ) -> List[Dict[str, Any]]:
         runs = self.agent_repo.list_recent_runs(
             trigger_source="vnpy_paper_auto",
@@ -3246,11 +3374,23 @@ class VnpyPaperTradingService:
                 }:
                     continue
                 updated_at = self._coerce_local_naive_datetime(plan.get("updated_at") or plan.get("created_at"))
-                if updated_at is None or now - updated_at < timedelta(seconds=timeout_seconds):
+                if updated_at is None or now - updated_at < timedelta(seconds=minimum_age_seconds):
                     continue
                 seen_plan_uids.add(plan_uid)
                 candidates.append(plan)
+        candidates.sort(
+            key=lambda plan: self._coerce_local_naive_datetime(
+                plan.get("updated_at") or plan.get("created_at")
+            )
+            or now
+        )
         return candidates
+
+    def _trade_plan_age_seconds(self, plan: Dict[str, Any]) -> Optional[float]:
+        updated_at = self._coerce_local_naive_datetime(plan.get("updated_at") or plan.get("created_at"))
+        if updated_at is None:
+            return None
+        return max(0.0, (datetime.now() - updated_at).total_seconds())
 
     def _expire_stale_vnpy_trade_plan(self, plan: Dict[str, Any], *, timeout_seconds: int) -> None:
         plan_uid = str(plan.get("plan_uid") or "").strip()
@@ -3834,7 +3974,10 @@ class VnpyPaperTradingService:
         auto_execution_mode = str(raw.get("auto_execution_mode") or defaults.auto_execution_mode).strip().lower()
         if auto_execution_mode not in {"paper", "vnpy_paper", "dry_run", "manual_approval"}:
             auto_execution_mode = defaults.auto_execution_mode
-        vnpy_gateway_name = str(raw.get("vnpy_gateway_name") or "").strip()[:64] or None
+        vnpy_gateway_name = (
+            str(raw.get("vnpy_gateway_name") or os.getenv("VNPY_GATEWAY_NAME") or "").strip()[:64]
+            or None
+        )
         auto_symbol_blacklist = self._normalize_symbol_list(raw.get("auto_symbol_blacklist"))
         auto_target_position_weights = self._normalize_target_weight_map(
             raw.get("auto_target_position_weights"),
@@ -4132,6 +4275,60 @@ class VnpyPaperTradingService:
         except Exception as exc:
             logger.warning("Failed to resolve vn.py paper cash: %s", exc)
         return 0.0
+
+    def _auto_order_currency_budget(self, settings: VnpyPaperSettings) -> Dict[str, Any]:
+        account = self.ensure_account(settings=settings)
+        base_currency = str(account.get("base_currency") or "CNY").strip().upper() or "CNY"
+        quote_currency = self._currency_for_market(settings.auto_market)
+        base_cash_amount = max(0.0, float(settings.auto_cash_per_order or 0.0))
+        try:
+            quote_cash_amount, stale, source = self.portfolio.convert_amount(
+                amount=base_cash_amount,
+                from_currency=base_currency,
+                to_currency=quote_currency,
+                as_of_date=date.today(),
+            )
+        except Exception as exc:  # noqa: BLE001 - automatic orders must fail closed on FX errors.
+            return {
+                "available": False,
+                "base_currency": base_currency,
+                "quote_currency": quote_currency,
+                "base_cash_amount": round(base_cash_amount, 6),
+                "quote_cash_amount": None,
+                "rate": None,
+                "source": "conversion_error",
+                "stale": True,
+                "error": str(exc),
+            }
+        available = base_currency == quote_currency or not stale
+        rate = quote_cash_amount / base_cash_amount if base_cash_amount > 0 else None
+        return {
+            "available": bool(available),
+            "base_currency": base_currency,
+            "quote_currency": quote_currency,
+            "base_cash_amount": round(base_cash_amount, 6),
+            "quote_cash_amount": round(float(quote_cash_amount), 6),
+            "rate": round(float(rate), 10) if rate is not None else None,
+            "source": source,
+            "stale": bool(stale),
+        }
+
+    @staticmethod
+    def _annotate_order_currency_budget(order: Dict[str, Any], budget: Dict[str, Any]) -> None:
+        order["cash_amount_base"] = budget.get("base_cash_amount")
+        order["cash_amount_quote"] = order.get("cash_amount")
+        order["base_currency"] = budget.get("base_currency")
+        order["quote_currency"] = budget.get("quote_currency")
+        raw = dict(order.get("raw") if isinstance(order.get("raw"), dict) else {})
+        raw["fx_conversion"] = dict(budget)
+        order["raw"] = raw
+
+    @staticmethod
+    def _order_base_cash_amount(order: Dict[str, Any], *, settings: VnpyPaperSettings) -> float:
+        value = _safe_float(order.get("cash_amount_base"))
+        if value is not None:
+            return max(0.0, float(value))
+        return max(0.0, float(settings.auto_cash_per_order or 0.0))
 
     def _auto_trade_time_gate(self, settings: VnpyPaperSettings) -> Tuple[Optional[str], Dict[str, Any]]:
         if (
@@ -5425,6 +5622,8 @@ class VnpyPaperTradingService:
             "industry_available": True,
             "total_market_value": 0.0,
             "total_equity": None,
+            "base_currency": None,
+            "fx_stale": False,
         }
         if not needs_snapshot:
             return state
@@ -5439,6 +5638,16 @@ class VnpyPaperTradingService:
 
         accounts = snapshot.get("accounts") or []
         account_snapshot = accounts[0] if accounts and isinstance(accounts[0], dict) else snapshot
+        fx_stale = bool(account_snapshot.get("fx_stale") or snapshot.get("fx_stale"))
+        if fx_stale and self._position_exposure_configured(settings):
+            state.update(
+                {
+                    "available": False,
+                    "base_currency": account_snapshot.get("base_currency"),
+                    "fx_stale": True,
+                }
+            )
+            return state
         positions = list(account_snapshot.get("positions") or [])
         position_values: Dict[str, float] = {}
         industry_values: Dict[str, float] = {}
@@ -5473,6 +5682,8 @@ class VnpyPaperTradingService:
                 "total_market_value": total_market_value if total_market_value is not None else total_from_positions,
                 "total_equity": _safe_float(account_snapshot.get("total_equity"))
                 or _safe_float(snapshot.get("total_equity")),
+                "base_currency": account_snapshot.get("base_currency"),
+                "fx_stale": fx_stale,
             }
         )
         return state
@@ -5589,7 +5800,7 @@ class VnpyPaperTradingService:
         settings: VnpyPaperSettings,
         candidate: Dict[str, Any],
     ) -> None:
-        cash_amount = _safe_float(order.get("cash_amount")) or settings.auto_cash_per_order
+        cash_amount = self._order_base_cash_amount(order, settings=settings)
         cash_amount = max(0.0, float(cash_amount or 0.0))
         position_values = exposure_state.setdefault("position_values", {})
         if isinstance(position_values, dict):
@@ -6313,11 +6524,12 @@ class VnpyPaperTradingService:
             payload["updated_at"] = _utc_now_iso()
             self._write_config_payload(payload)
 
-    def _daily_auto_trade_usage(self, settings: VnpyPaperSettings) -> Dict[str, float]:
+    def _daily_auto_trade_usage(self, settings: VnpyPaperSettings) -> Dict[str, Any]:
         if settings.auto_daily_max_orders is None and settings.auto_daily_budget is None:
-            return {"order_count": 0.0, "cash_amount": 0.0}
+            return {"order_count": 0.0, "cash_amount": 0.0, "fx_unavailable": False}
 
         account = self.ensure_account(settings=settings)
+        base_currency = str(account.get("base_currency") or "CNY").strip().upper() or "CNY"
         today = date.today()
         order_count = 0
         cash_amount = 0.0
@@ -6337,6 +6549,7 @@ class VnpyPaperTradingService:
                 return {
                     "order_count": float(settings.auto_daily_max_orders or 0),
                     "cash_amount": float(settings.auto_daily_budget or 0.0),
+                    "fx_unavailable": True,
                 }
             items = list(payload.get("items") or [])
             for item in items:
@@ -6344,11 +6557,39 @@ class VnpyPaperTradingService:
                 if "source=alphasift_auto" not in note:
                     continue
                 order_count += 1
-                cash_amount += float(item.get("quantity") or 0.0) * float(item.get("price") or 0.0)
+                local_notional = float(item.get("quantity") or 0.0) * float(item.get("price") or 0.0)
+                trade_currency = str(
+                    item.get("currency") or self._currency_for_market(item.get("market"))
+                ).strip().upper()
+                try:
+                    converted, stale, _source = self.portfolio.convert_amount(
+                        amount=local_notional,
+                        from_currency=trade_currency,
+                        to_currency=base_currency,
+                        as_of_date=today,
+                    )
+                except Exception as exc:  # noqa: BLE001 - automatic limits must fail closed.
+                    logger.warning("Failed to convert daily auto trade usage: %s", exc)
+                    return {
+                        "order_count": float(order_count),
+                        "cash_amount": float(settings.auto_daily_budget or 0.0),
+                        "fx_unavailable": True,
+                    }
+                if trade_currency != base_currency and stale:
+                    return {
+                        "order_count": float(order_count),
+                        "cash_amount": float(settings.auto_daily_budget or 0.0),
+                        "fx_unavailable": True,
+                    }
+                cash_amount += converted
             if page * int(payload.get("page_size") or 100) >= int(payload.get("total") or 0):
                 break
             page += 1
-        return {"order_count": float(order_count), "cash_amount": cash_amount}
+        return {
+            "order_count": float(order_count),
+            "cash_amount": cash_amount,
+            "fx_unavailable": False,
+        }
 
     @staticmethod
     def _daily_limit_reason(
@@ -6489,6 +6730,10 @@ class VnpyPaperTradingService:
     @staticmethod
     def _normalize_symbol(symbol: Any) -> str:
         return str(symbol or "").strip().upper()
+
+    @staticmethod
+    def _currency_for_market(market: Any) -> str:
+        return MARKET_CURRENCIES.get(str(market or "cn").strip().lower(), "CNY")
 
     def _paper_trade_performance(
         self,
@@ -7327,7 +7572,7 @@ class VnpyPaperTradingService:
             reason=reason,
             score=self._candidate_score(candidate),
             confidence=self._candidate_confidence(candidate),
-            cash_amount=_safe_float(order.get("cash_amount")) or settings.auto_cash_per_order,
+            cash_amount=self._order_base_cash_amount(order, settings=settings),
             quantity=_safe_float(order.get("quantity")),
             price=_safe_float(order.get("price")) or _safe_float(candidate.get("price")),
             trade_id=_safe_int(order.get("trade_id")),
@@ -7336,7 +7581,7 @@ class VnpyPaperTradingService:
             order_result=audit_order,
             raw_candidate=candidate,
         )
-        planned_cash_amount = _safe_float(order.get("cash_amount")) or settings.auto_cash_per_order
+        planned_cash_amount = self._order_base_cash_amount(order, settings=settings)
         self.agent_repo.record_trade_plan(
             plan_uid=f"plan-{run_id}-{sequence}-{uuid.uuid4().hex[:8]}",
             run_id=run_id,
@@ -7369,7 +7614,7 @@ class VnpyPaperTradingService:
         reason: Optional[str],
         risk_flags: List[str],
     ) -> Dict[str, Any]:
-        planned_cash_amount = _safe_float(order.get("cash_amount")) or settings.auto_cash_per_order
+        planned_cash_amount = self._order_base_cash_amount(order, settings=settings)
         planned_price = _safe_float(order.get("price")) or _safe_float(candidate.get("price"))
         planned_quantity = _safe_float(order.get("quantity"))
         position_quantity = _safe_float(candidate.get("position_quantity"))
@@ -7903,12 +8148,19 @@ class VnpyPaperTradingService:
         }
 
 
-def build_vnpy_paper_trading_background_tasks() -> List[Dict[str, Any]]:
+def build_vnpy_paper_trading_background_tasks(
+    *,
+    vnpy_main_engine: Optional[Any] = None,
+    vnpy_event_engine: Optional[Any] = None,
+) -> List[Dict[str, Any]]:
     """Return scheduler background task entries for automatic paper trading."""
 
-    service = VnpyPaperTradingService()
+    service = VnpyPaperTradingService(
+        vnpy_main_engine=vnpy_main_engine,
+        vnpy_event_engine=vnpy_event_engine,
+    )
     settings = service.get_settings()
-    if not settings.enabled or not settings.auto_trade_enabled:
+    if not settings.enabled:
         return []
 
     def run_auto_trade() -> Dict[str, Any]:
@@ -7936,22 +8188,26 @@ def build_vnpy_paper_trading_background_tasks() -> List[Dict[str, Any]]:
         TRADE_PLAN_RETRY_COOLDOWN_SECONDS,
         min(int(settings.auto_interval_minutes) * 60, TRADE_PLAN_AUTO_RETRY_INTERVAL_SECONDS),
     )
-    initial_delay_seconds = _auto_trade_initial_delay_seconds(service, settings)
-    return [
-        {
-            "task": run_auto_trade,
-            "interval_seconds": int(settings.auto_interval_minutes) * 60,
-            "run_immediately": False,
-            "name": "vnpy_paper_auto_trade",
-            "initial_delay_seconds": initial_delay_seconds,
-        },
+    tasks = [
         {
             "task": run_auto_retry,
             "interval_seconds": retry_interval,
-            "run_immediately": False,
+            "run_immediately": True,
             "name": "vnpy_paper_auto_retry",
         }
     ]
+    if settings.auto_trade_enabled:
+        tasks.insert(
+            0,
+            {
+                "task": run_auto_trade,
+                "interval_seconds": int(settings.auto_interval_minutes) * 60,
+                "run_immediately": False,
+                "name": "vnpy_paper_auto_trade",
+                "initial_delay_seconds": _auto_trade_initial_delay_seconds(service, settings),
+            },
+        )
+    return tasks
 
 
 def _auto_trade_initial_delay_seconds(

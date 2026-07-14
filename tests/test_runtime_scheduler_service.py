@@ -10,7 +10,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from fastapi import HTTPException
@@ -131,6 +131,31 @@ class _FakeTaskEventRepository:
 
 
 class RuntimeSchedulerServiceTestCase(unittest.TestCase):
+    def test_vnpy_background_tasks_receive_runtime_engine_dependencies(self) -> None:
+        config = SimpleNamespace(schedule_enabled=False)
+        main_engine = object()
+        event_engine = object()
+        service = RuntimeSchedulerService(config_provider=lambda: config)
+        service.set_vnpy_runtime_engines(
+            main_engine=main_engine,
+            event_engine=event_engine,
+        )
+        build_tasks = MagicMock(return_value=[])
+        fake_module = ModuleType("src.services.vnpy_paper_trading_service")
+        fake_module.build_vnpy_paper_trading_background_tasks = build_tasks
+
+        with patch.dict(
+            sys.modules,
+            {"src.services.vnpy_paper_trading_service": fake_module},
+        ):
+            tasks = service._current_vnpy_paper_trading_background_tasks(config)
+
+        self.assertEqual(tasks, [])
+        build_tasks.assert_called_once_with(
+            vnpy_main_engine=main_engine,
+            vnpy_event_engine=event_engine,
+        )
+
     def test_run_analysis_args_include_workers(self) -> None:
         config = SimpleNamespace(
             schedule_enabled=True,
@@ -835,6 +860,8 @@ class RuntimeSchedulerServiceTestCase(unittest.TestCase):
         from api.app import create_app
 
         events = []
+        main_engine = object()
+        event_engine = object()
 
         class FakeRuntimeSchedulerService:
             def __init__(
@@ -851,6 +878,9 @@ class RuntimeSchedulerServiceTestCase(unittest.TestCase):
 
             def reconcile_from_config(self, *, run_immediately=False, clear_enabled_override=False):
                 events.append(("reconcile", run_immediately, clear_enabled_override))
+
+            def set_vnpy_runtime_engines(self, *, main_engine=None, event_engine=None):
+                events.append(("bind_vnpy", main_engine, event_engine))
 
             def stop(self):
                 events.append(("stop",))
@@ -869,6 +899,15 @@ class RuntimeSchedulerServiceTestCase(unittest.TestCase):
         ), patch("api.app.RuntimeSchedulerService", FakeRuntimeSchedulerService), patch(
             "api.app.SystemConfigService",
             FakeSystemConfigService,
+        ), patch(
+            "api.app.bootstrap_vnpy_runtime",
+            return_value=SimpleNamespace(
+                main_engine=main_engine,
+                event_engine=event_engine,
+                event_bridge=None,
+                diagnostics={},
+                close=lambda: None,
+            ),
         ), patch("api.app._schedule_stock_index_background_refresh"):
             app = create_app(static_dir=Path(temp_dir))
             with TestClient(app):
@@ -876,6 +915,7 @@ class RuntimeSchedulerServiceTestCase(unittest.TestCase):
 
         self.assertEqual(events, [
             ("init", True, False, True),
+            ("bind_vnpy", main_engine, event_engine),
             ("reconcile", False, False),
             ("stop",),
         ])

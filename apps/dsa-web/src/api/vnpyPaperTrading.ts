@@ -151,6 +151,10 @@ export type VnpyPaperOrderResult = {
   quantity?: number | null;
   price?: number | null;
   cashAmount?: number | null;
+  cashAmountBase?: number | null;
+  cashAmountQuote?: number | null;
+  baseCurrency?: string | null;
+  quoteCurrency?: string | null;
   source: string;
   message: string;
   reason?: string | null;

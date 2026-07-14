@@ -2,7 +2,7 @@
 
 本文档记录“在线选股 Agent + 自动化选股 + 自动模拟交易”的目标状态、当前完成度和待完成事项。
 
-截至 2026-07-13，本系统已经具备 AlphaSift 在线选股、本地模拟交易账本、Web 入口、定时自动买入、可交易窗口诊断、跨模块系统健康视图、关键异常 alert 路由通知、vn.py 提交态审计、成交回报同步入口、规则 Agent 买入前二次复核、默认关闭的 LLM 动态计划、默认关闭的 LLM 买入前复核、基础复核质量摘要和手动可选 LLM 复盘，但还没有达到完整 Agent 化、稳定自动化和 vn.py 标准化模拟交易的目标。
+截至 2026-07-14，本系统已经具备 AlphaSift 在线选股、本地模拟交易账本、Web 入口、定时自动买入、可交易窗口诊断、跨模块系统健康视图、关键异常 alert 路由通知、vn.py 提交态审计、内置即时撮合 gateway、成交回报同步入口、规则 Agent 买入前二次复核、默认关闭的 LLM 动态计划、默认关闭的 LLM 买入前复核、基础复核质量摘要和手动可选 LLM 复盘，但还没有达到完整 Agent 化、稳定自动化和真实 gateway 长跑验收目标。
 
 ## 目标状态
 
@@ -20,16 +20,16 @@
 | --- | --- | ---: | --- |
 | 在线选股能力 | AlphaSift 可用，策略接口返回 8 个策略，候选级数据质量/缺失字段/来源已有基础标注，Web 可查看 AlphaSift source health | 约 80% | 长任务稳定性、来源权重仍需增强 |
 | 选股 Agent | 已有自动选股运行记录、结构化 Agent 计划、规则派生计划档位/执行路由/预算上限/降级动作、默认关闭的 LLM 动态计划、每轮运行总结、基础复核质量摘要、基础 Agent 工作流状态机、按日结构化运行总结、候选级仓位计划/规则风控复核、规则 Agent 买入前二次复核、默认关闭的 LLM 买入前复核、手动可选 LLM 复盘、候选决策审计和交易计划审计，但还不是完整 Agent 工作流 | 约 86% | 缺少跨市场动态目标、多模型/长周期复核质量评估的自动验收闭环和跨运行状态机 |
-| 自动模拟交易 | 已能从 AlphaSift 候选生成交易计划，支持 dry-run、手动审批、按交易时段写入本地 paper 订单，并支持可交易窗口诊断、首次自动买入调度对齐下一交易窗口、基础止损/止盈/移动止损/持仓天数卖出、超时未走强卖出、按比例分批卖出、active 防守决策信号触发的策略失效卖出、单票/组合/行业仓位暴露上限和股票/行业目标权重触发的买入拦截与基础组合再平衡、股票黑名单、候选级/账户级/市场级基础风控 | 约 99% | 仍缺真实 gateway 长跑验证、跨币种估值和完整组合优化 |
+| 自动模拟交易 | 已能从 AlphaSift 候选生成交易计划，支持 dry-run、手动审批、按交易时段写入本地 paper 订单，并支持可交易窗口诊断、首次自动买入调度对齐下一交易窗口、基础止损/止盈/移动止损/持仓天数卖出、超时未走强卖出、按比例分批卖出、active 防守决策信号触发的策略失效卖出、单票/组合/行业仓位暴露上限、跨币种预算和股票/行业目标权重触发的买入拦截与基础组合再平衡、股票黑名单、候选级/账户级/市场级基础风控 | 约 99% | 仍缺真实 gateway 长跑验证和完整组合优化 |
 | Web 操作页 | 已有选股页、模拟交易页和独立自动选股 Agent 控制台，支持暂停确认、一键恢复、立即 dry-run 演练、后台调度状态、持久化可筛选后台任务日志、任务趋势摘要、7/30/90 天后台任务长期指标、任务健康检查、模拟账户历史筛选/恢复/切换/隐藏式批量清理、权益曲线、日度收益表、月度收益表、按 Agent run 创建时间筛选的窗口级绩效矩阵、可交易窗口、风控统计、复核质量摘要、运行时间线、分页历史、策略/市场/状态/时间范围筛选、`/agent-console/<runUid>` 独立详情路由、查询参数兼容深链和单次/最近 run JSON 导出 | 约 99% | 缺少完整历史行情驱动的回测级绩效矩阵和真实回测指标 |
-| vn.py 集成 | 已有可选 `OrderRequest` / `CancelRequest` 映射、`MainEngine.send_order` / `cancel_order` 桥接入口、订单/成交/账户/持仓回写 API、注入式 EventEngine attach 入口和 opt-in runtime bootstrap，但当前环境未安装真实 vn.py | 约 66% | 真实 gateway 运行态、连接参数和长期订阅稳定性仍未验证 |
-| 稳定性与可观测 | 有状态接口、错误提示、跨模块 `system_health` 健康视图、AlphaSift source health 页面视图、候选级数据质量标注、自动交易数据质量诊断、可交易窗口诊断、读取持久化最近事件的后台任务健康检查、持久化可筛选后台任务日志、任务趋势摘要、7/30/90 天终态运行长期指标、7/30/90 天跨 run 数据质量趋势、任务事件保留/低频清理策略、Agent run 时间线、基础失败重试、交易计划恢复矩阵、手动恢复扫描、MainEngine 超时订单对账、多笔成交幂等累计、对账异常保护、熔断状态/恢复入口、自动交易系统事件告警历史和 alert 路由通知尝试审计 | 约 96% | 缺少真实 gateway 长跑恢复验收、细粒度来源权重趋势和性能优化 |
+| vn.py 集成 | 已有可选 `OrderRequest` / `CancelRequest` 映射、`MainEngine.send_order` / `cancel_order` 桥接入口、订单/成交/账户/持仓回写 API、注入式 EventEngine attach、opt-in runtime bootstrap、内置即时撮合 gateway，以及 Python 3.13 隔离环境中的真实 vn.py 4.4.0 Agent 计划到 Portfolio 成交验收 | 约 90% | 真实 gateway 插件/账户连接、回报、重连和长期订阅稳定性仍未验证 |
+| 稳定性与可观测 | 有状态接口、错误提示、跨模块 `system_health` 健康视图、AlphaSift source health 页面视图、候选级数据质量标注、自动交易数据质量诊断、可交易窗口诊断、读取持久化最近事件的后台任务健康检查、持久化可筛选后台任务日志、任务趋势摘要、7/30/90 天终态运行长期指标、7/30/90 天跨 run 数据质量趋势、任务事件保留/低频清理策略、Agent run 时间线、基础失败重试、交易计划恢复矩阵、手动恢复扫描、MainEngine 主动订单对账、暂停买入时独立恢复、多笔成交幂等累计、撤单竞态/迟到成交恢复、对账异常保护、熔断状态/恢复入口、自动交易系统事件告警历史和 alert 路由通知尝试审计 | 约 97% | 缺少真实 gateway 长跑恢复验收、细粒度来源权重趋势和性能优化 |
 
 综合判断：
 
-- MVP 距离可用还差约 30% 到 35%。
-- 长期稳定版距离完成还差 50% 以上。
-- 真正 vn.py 标准化模拟交易距离完成还差 35% 以上。
+- 本地 paper 的在线选股、自动计划、风控、审计和恢复链路已达到可用 MVP；生产验收仍取决于真实数据与运行窗口。
+- 长期稳定版仍缺真实 gateway 长跑、完整组合优化、完整回测评价和 Agent 跨运行闭环；基础跨币种估值和预算风控已完成。
+- vn.py 标准化本地模拟链路已可启动并完成真实事件回写，剩余重点约为 10%：真实 gateway、账户连接、真实回报和长跑恢复验收。
 
 ## Goal 1：稳定当前模拟交易页面与 API
 
@@ -142,7 +142,7 @@
 
 未完成：
 
-- 自动交易已有基础止损、止盈、移动止损、持仓天数卖出、超时未走强卖出、按比例分批卖出、active 防守决策信号触发的策略失效卖出，以及基于单票/总仓位/行业仓位暴露上限和股票/行业目标权重的买入拦截与卖出侧组合再平衡；仍缺跨币种估值、补仓和完整组合优化驱动的再平衡策略。
+- 自动交易已有基础止损、止盈、移动止损、持仓天数卖出、超时未走强卖出、按比例分批卖出、active 防守决策信号触发的策略失效卖出，以及基于单票/总仓位/行业仓位暴露上限、跨币种预算和股票/行业目标权重的买入拦截与卖出侧组合再平衡；仍缺补仓和完整组合优化驱动的再平衡策略。
 - 交易计划表已有基础状态、手动审批成交、受控计划重试、retry 次数/冷却审计、vn.py 多笔成交累计、MainEngine 超时对账、对账异常保护、提交态/部分成交/撤单请求安全归档、主动撤单、活跃提交态防重复、只读恢复矩阵和手动恢复扫描，但还缺完整订单生命周期的真实 gateway 长跑验证。
 - 自动失败恢复已有页面/API 受控重试、后台到期重试调度、页面手动恢复扫描、MainEngine 漏回报对账、状态不明 fail-closed、数据质量阻断告警历史、熔断状态诊断、交易计划恢复矩阵、告警中心系统事件历史和 alert 路由通知尝试审计；剩余重点是真实 gateway 重连、缓存保留和迟到回报长跑验收。
 
@@ -150,7 +150,7 @@
 
 - 扩展交易计划层：已具备 `planned`、`submitted`、`part_filled`、`cancel_requested`、`filled`、`skipped`、`failed`、受控重试、后台到期重试、页面手动恢复扫描、提交态/部分成交/撤单请求超时归档、主动撤单、活跃提交态防重复、只读恢复矩阵、关键异常告警历史和 alert 路由通知基础语义；继续补真实 gateway 长跑验证和完整自动恢复策略。
 - 已支持 dry-run、手动审批、受控计划重试和自动成交；继续补完整订单生命周期。
-- 扩展交易规则：基础止损、止盈、移动止损、持仓天数、超时未走强、按比例分批卖出、策略失效卖出、暴露上限驱动和目标权重驱动的买入拦截/基础组合再平衡已落地；继续补真实 gateway 长跑验证、跨币种估值和完整组合优化。
+- 扩展交易规则：基础止损、止盈、移动止损、持仓天数、超时未走强、按比例分批卖出、策略失效卖出、暴露上限驱动和目标权重驱动的买入拦截/基础组合再平衡，以及跨币种估值和预算风控已落地；继续补真实 gateway 长跑验证和完整组合优化。
 - 已把下次可交易窗口和调度器下次运行时间通过 readiness 关联起来；继续补单次 run 的跳过原因到该诊断链路。
 - Web 继续增强每次自动交易的成交、跳过原因、持仓变化和导出能力。
 
@@ -180,15 +180,15 @@
 
 未完成：
 
-- 行业仓位已有基础上限，仍缺跨币种行业预算和行业解析覆盖率可视化。
-- 每日最大买入次数和每日最大买入金额仍需补跨币种预算。
+- 行业仓位已有基础上限和基准币种估值，仍缺行业解析覆盖率可视化。
+- 每日最大买入次数和每日最大买入金额已按账户基准币种统计，外币汇率缺失时新增买入 fail-closed。
 - 候选级基础风控依赖 AlphaSift/DSA 返回的结构化字段；仍需补更稳定的股票状态源和涨跌停状态源。
 - 市场环境过滤已有基础大盘红绿灯 gate，仍缺实时市场宽度、热点退潮和多市场联动的独立规则。
 - 最大回撤已有基于初始资金的基础限制，连续失败熔断已有基础实现、页面诊断、手动恢复入口、告警中心历史和 alert 路由通知，仍缺权益曲线回撤和自动恢复策略。
 
 需要做：
 
-- 扩展风控配置：单票上限、总仓位金额上限和行业上限已有基础实现，继续补跨币种预算；最大持仓数、每日次数和每日预算已有基础实现。
+- 扩展风控配置：单票上限、总仓位金额上限、行业上限、跨币种预算、最大持仓数、每日次数和每日预算已有基础实现。
 - 强化股票状态过滤：股票黑名单、ST/退市风险、停牌、涨跌停、成交额过低已有基础实现；继续补独立状态数据源、价格不可用与跨市场规则。
 - 强化账户级风控：最低现金余额、最大回撤、连续失败熔断和现金低水位告警已有基础实现；继续补权益曲线回撤、连续亏损和熔断恢复。
 - 强化市场级风控：大盘红绿灯 gate 已有基础实现；继续补指数趋势、市场宽度、热点退潮时降低买入。
@@ -253,25 +253,26 @@
 - 新增 `POST /api/v1/vnpy-paper/vnpy-events/account` 和 `POST /api/v1/vnpy-paper/vnpy-events/positions` 外部快照同步入口，状态接口通过 `diagnostics.vnpy_sync_state` 暴露最近账户、持仓和订单状态诊断。
 - 新增 `POST /api/v1/vnpy-paper/vnpy-events/attach` 注入式 EventEngine bridge：应用进程提供 `app.state.vnpy_event_engine` 或 `app.state.vnpy_main_engine.event_engine` 后，可注册订单、成交、账户和持仓事件 handler，把 vn.py 事件自动转入 DSA 同步入口。
 - 新增 opt-in vn.py runtime bootstrap：`VNPY_RUNTIME_ENABLED=true` 时，API 进程启动会尝试创建 EventEngine/MainEngine，可按 `VNPY_GATEWAY_CLASS` add gateway、按 `VNPY_CONNECT_SETTINGS_PATH` 和 `VNPY_CONNECT_ON_START=true` 显式连接，并自动 attach 事件回调。
+- 新增 `requirements-vnpy.txt` 与 `scripts/setup_vnpy_runtime.ps1`，可在 Python 3.10 至 3.13 隔离环境安装项目、AlphaSift 和 vn.py 4.4.0，并在仓库内使用受控 pip 缓存。
+- Python 3.13.14 隔离环境已完成真实 vn.py 验收：`OrderRequest` 构造、EventEngine/MainEngine 启停、四类事件 attach 和 API lifespan runtime 注入均通过；后台恢复任务注册由 scheduler/API 回归测试覆盖。
+- runtime 会准备部署工作目录下的 `.vntrader/`，避免受限服务账户尝试写用户主目录导致 MainEngine bootstrap 失败。
+- 新增默认关闭的内置 `DsaSimulatedGateway`：无需账户参数即可通过真实 MainEngine/EventEngine 延迟即时成交，并已验证 Agent 自动交易计划经订单/成交事件回写为 Portfolio 成交。
 - 新增 `POST /api/v1/vnpy-paper/trade-plans/{plan_uid}/cancel` 和 Web “撤单”入口：`vnpy_paper` 的 `submitted` / `part_filled` 计划可映射为 vn.py `CancelRequest` 并调用 `MainEngine.cancel_order`，计划进入 `cancel_requested`，终态仍以 vn.py 订单回报为准。
 
 未完成：
 
-- 当前环境 `vnpy` 未安装。
-- 未接 vn.py `EventEngine`。
-- 当前环境 `vnpy` 未安装，真实 vn.py gateway 运行态未验证。
-- 已有 opt-in Gateway add/connect bootstrap，但当前环境 `vnpy` 未安装，真实 gateway 运行态、连接参数、长期事件订阅稳定性和关闭流程未验证。
+- 系统默认 Python 3.14.6 未安装 vn.py，继续保持本地 paper fallback；完整 vn.py 能力使用已验证的 Python 3.13.14 隔离环境。
+- 已有 opt-in Gateway add/connect bootstrap，但尚未安装和配置具体 gateway 插件/账户，真实 gateway 运行态、连接参数、回报、重连和长期事件订阅稳定性未验证。
 - 已能调用注入或启动期创建的 `MainEngine.send_order`，并支持订单状态、成交、账户和持仓回报通过 API 手动/外部同步；注入或启动期创建的 EventEngine 可自动 attach 回调，但真实 gateway 连接仍未验收。
 - `vnpy_paper` 当前覆盖买入委托提交、自动按比例卖出提交、主动撤单请求、订单/成交状态回写、多笔成交累计、MainEngine 漏回报对账、对账异常保护、提交态/部分成交/撤单请求超时安全归档和活跃委托防重复；真实 gateway 长运行、重连和迟到回报验收仍未完成。
-- 已有 adapter smoke 脚本，但仍未完整处理 vn.py 安装体积、GUI 依赖、Python 版本和打包影响。
+- 安装脚本已处理 Python 版本、GUI/数值依赖、LiteLLM wheel 和受限 pip 缓存；Docker、Desktop 安装体积与打包影响仍未验收。
 
 需要做：
 
 - 明确是否必须接 vn.py；如果只做模拟交易，本地账本已能满足 MVP。
-- 若必须接入，已有基础 adapter 文档和安装验证脚本；继续补 vn.py 版本矩阵、GUI 依赖和打包影响说明。
+- 若必须接入真实通道，基于已验证的 Python 3.13 runtime 安装对应 gateway 插件，并使用非仓库连接参数文件完成模拟账户验收。
 - 继续扩展 vn.py adapter 层：已完成 DSA 委托 -> vn.py `OrderRequest` / `CancelRequest` 基础映射、可选 `MainEngine.send_order` / `cancel_order` 调用、订单/成交/账户/持仓回写 API、注入式 EventEngine attach 和 opt-in runtime bootstrap，下一步需要真实 gateway 连接、长时间运行和异常恢复验收。
-- 增加 vn.py paper gateway 或模拟撮合方案。
-- Web 页面区分“本地 paper 模式”和“vn.py paper 模式”。
+- 内置 vn.py 模拟撮合方案已完成；继续增加真实 gateway 长跑验收。
 
 验收标准：
 
@@ -376,7 +377,7 @@
 任务：
 
 - 行业仓位、单票/总仓位、黑名单、候选级基础风控、账户级基础风控、市场红绿灯 gate、数据质量风控和候选级缺失字段展示已落地，继续补来源权重、独立状态源和缺失字段处置策略。
-- 卖出、止损、止盈、暴露上限和目标权重驱动的基础调仓/买入拦截规则已落地；继续补真实 gateway 长跑验证、跨币种估值和完整组合优化。
+- 卖出、止损、止盈、暴露上限、跨币种预算和目标权重驱动的基础调仓/买入拦截规则已落地；继续补真实 gateway 长跑验证和完整组合优化。
 - dry-run、手动审批、受控计划重试、交易计划恢复矩阵、手动恢复扫描、连续失败熔断、关键异常告警历史和 alert 路由通知已有基础能力；继续补完整订单生命周期真实 gateway 验证和完整自动恢复策略。
 - 完善自动失败重试、熔断和订单超时后的自动恢复策略。
 
@@ -401,12 +402,12 @@
 
 任务：
 
-- 定义可选依赖和安装验证；adapter smoke 脚本已有基础实现，仍缺版本矩阵。
-- 接 vn.py EventEngine / Gateway 或 paper adapter；当前已完成 `OrderRequest` / `CancelRequest` payload 映射、adapter 诊断、可选注入式 `MainEngine.send_order` / `cancel_order` 调用、订单/成交/账户/持仓回写 API、注入式 EventEngine attach 和 opt-in runtime bootstrap。
+- 定义可选依赖、Python 3.10 至 3.13 版本边界和安装验证；`requirements-vnpy.txt`、PowerShell 安装脚本及真实 runtime smoke 已完成。
+- 接 vn.py EventEngine / Gateway 或 paper adapter；当前已完成 `OrderRequest` / `CancelRequest` payload 映射、adapter 诊断、可选注入式 `MainEngine.send_order` / `cancel_order` 调用、订单/成交/账户/持仓回写 API、注入式 EventEngine attach 和 opt-in runtime bootstrap，并在 Python 3.13 隔离环境完成 EventEngine/MainEngine 启停验收。
 - 映射订单、成交、账户、持仓；当前订单请求、提交态、订单状态回写、成交入账、账户/持仓诊断快照、注入式 EventEngine 回调和启动期 add/connect 入口已有基础桥接，真实 Gateway 运行态未完成。
 - 增加 vn.py smoke test 和文档。
 
-未完成程度：当前约 76% 未完成。
+未完成程度：当前约 35% 未完成，主要集中在真实 gateway 与部署打包验收。
 
 ## 明确不属于当前目标的事项
 

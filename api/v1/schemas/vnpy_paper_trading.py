@@ -198,6 +198,10 @@ class VnpyPaperOrderResult(BaseModel):
     quantity: Optional[float] = None
     price: Optional[float] = None
     cash_amount: Optional[float] = None
+    cash_amount_base: Optional[float] = None
+    cash_amount_quote: Optional[float] = None
+    base_currency: Optional[str] = None
+    quote_currency: Optional[str] = None
     source: str = "dsa_paper"
     message: str = ""
     reason: Optional[str] = None

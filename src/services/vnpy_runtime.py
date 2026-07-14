@@ -103,6 +103,9 @@ def bootstrap_vnpy_runtime(
         return VnpyRuntimeHandle(settings=settings, diagnostics=diagnostics)
 
     try:
+        runtime_data_dir = Path.cwd().joinpath(".vntrader")
+        runtime_data_dir.mkdir(parents=True, exist_ok=True)
+        diagnostics["runtime_data_dir"] = str(runtime_data_dir)
         event_module = importlib.import_module("vnpy.event")
         engine_module = importlib.import_module("vnpy.trader.engine")
         event_engine_cls = getattr(event_module, "EventEngine")
@@ -226,25 +229,31 @@ def _connect_gateway(
             "reason": "gateway_name_required",
         }
         return
-    if not settings_path:
-        diagnostics["connect"] = {
-            "attempted": True,
-            "connected": False,
-            "reason": "connect_settings_path_required",
-        }
-        return
-    path = Path(settings_path).expanduser()
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except Exception as exc:  # noqa: BLE001
-        diagnostics["connect"] = {
-            "attempted": True,
-            "connected": False,
-            "reason": "connect_settings_read_failed",
-            "error_type": type(exc).__name__,
-            "message": str(exc),
-        }
-        return
+    path: Optional[Path] = None
+    if settings_path:
+        path = Path(settings_path).expanduser()
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:  # noqa: BLE001
+            diagnostics["connect"] = {
+                "attempted": True,
+                "connected": False,
+                "reason": "connect_settings_read_failed",
+                "error_type": type(exc).__name__,
+                "message": str(exc),
+            }
+            return
+    else:
+        get_gateway = getattr(main_engine, "get_gateway", None)
+        gateway = get_gateway(gateway_name) if callable(get_gateway) else None
+        if not bool(getattr(gateway, "connect_without_settings", False)):
+            diagnostics["connect"] = {
+                "attempted": True,
+                "connected": False,
+                "reason": "connect_settings_path_required",
+            }
+            return
+        payload = {}
     if not isinstance(payload, dict):
         diagnostics["connect"] = {
             "attempted": True,
@@ -256,7 +265,8 @@ def _connect_gateway(
     diagnostics["connect"] = {
         "attempted": True,
         "connected": True,
-        "settings_path": str(path),
+        "settings_path": str(path) if path is not None else None,
+        "settings_source": "file" if path is not None else "gateway_defaults",
         "gateway_name": gateway_name,
     }
 

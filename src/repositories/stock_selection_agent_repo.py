@@ -275,7 +275,11 @@ class StockSelectionAgentRepository:
             rows = session.execute(
                 select(StockSelectionAgentTradePlan)
                 .where(StockSelectionAgentTradePlan.execution_mode == "vnpy_paper")
-                .where(StockSelectionAgentTradePlan.status.in_(["submitted", "part_filled", "filled", "failed"]))
+                .where(
+                    StockSelectionAgentTradePlan.status.in_(
+                        ["submitted", "part_filled", "cancel_requested", "filled", "failed"]
+                    )
+                )
                 .order_by(desc(StockSelectionAgentTradePlan.updated_at), desc(StockSelectionAgentTradePlan.id))
                 .limit(limit)
             ).scalars().all()

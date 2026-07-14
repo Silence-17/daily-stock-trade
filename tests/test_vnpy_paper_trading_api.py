@@ -109,6 +109,9 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
         self.assertTrue(payload["accepted"])
         self.assertEqual(payload["quantity"], 100.0)
         self.assertEqual(payload["cash_amount"], 1000.0)
+        self.assertEqual(payload["cash_amount_base"], 1000.0)
+        self.assertEqual(payload["base_currency"], "CNY")
+        self.assertEqual(payload["quote_currency"], "CNY")
 
     def test_reset_failure_fuse_endpoint_resets_baseline(self) -> None:
         service = self._service()
@@ -999,6 +1002,55 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
         self.assertEqual(items["vnpy_paper_auto_retry"]["reason"], "last_event_failed")
         self.assertEqual(items["vnpy_paper_auto_retry"]["last_event_message"], "persisted boom")
         scheduler.task_events.assert_called_once_with(name=None, status=None, limit=100)
+
+    def test_task_health_keeps_recovery_required_when_auto_buy_is_paused(self) -> None:
+        scheduler = MagicMock()
+        scheduler.status.return_value = {
+            "enabled": True,
+            "running": False,
+            "loop_running": True,
+            "background_tasks": [
+                {
+                    "name": "vnpy_paper_auto_retry",
+                    "interval_seconds": 300,
+                    "running": False,
+                    "last_run": "2026-07-02T09:31:00",
+                    "next_run_at": "2026-07-02T09:36:00",
+                }
+            ],
+            "task_events": [
+                {
+                    "name": "vnpy_paper_auto_retry",
+                    "status": "completed",
+                    "message": "recovery completed",
+                    "timestamp": "2026-07-02T09:31:00",
+                    "duration_seconds": 0.1,
+                    "details": {"reason": "auto_trade_disabled", "reconciled_count": 1},
+                }
+            ],
+        }
+        self.client.app.state.runtime_scheduler_service = scheduler
+        service = self._service()
+        service.update_settings(
+            {"enabled": True, "auto_trade_enabled": False},
+            include_snapshot=False,
+            include_recent_trades=False,
+        )
+
+        with patch(
+            "api.v1.endpoints.vnpy_paper_trading.VnpyPaperTradingService",
+            return_value=service,
+        ):
+            response = self.client.get("/api/v1/vnpy-paper/task-health")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        items = {item["name"]: item for item in payload["items"]}
+        self.assertEqual(items["vnpy_paper_auto_trade"]["health"], "disabled")
+        self.assertFalse(items["vnpy_paper_auto_trade"]["required"])
+        self.assertEqual(items["vnpy_paper_auto_retry"]["health"], "healthy")
+        self.assertTrue(items["vnpy_paper_auto_retry"]["required"])
+        self.assertTrue(items["vnpy_paper_auto_retry"]["registered"])
 
     def test_task_events_endpoint_filters_scheduler_events(self) -> None:
         scheduler = MagicMock()

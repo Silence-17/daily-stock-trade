@@ -1030,28 +1030,42 @@ describe('vnpyPaperTradingApi', () => {
   });
 
   it('submits manual paper orders with snake_case cash amount', async () => {
-    post.mockResolvedValueOnce({ data: { accepted: true, cash_amount: 1000, trade_id: 1 } });
+    post.mockResolvedValueOnce({
+      data: {
+        accepted: true,
+        cash_amount: 1100,
+        cash_amount_base: 1000,
+        cash_amount_quote: 1100,
+        base_currency: 'CNY',
+        quote_currency: 'HKD',
+        trade_id: 1,
+      },
+    });
 
     const result = await vnpyPaperTradingApi.submitOrder({
-      symbol: '600519',
+      symbol: '00700',
       side: 'buy',
-      market: 'cn',
+      market: 'hk',
       cashAmount: 1000,
       price: 10,
       executionRoute: 'vnpy_bridge',
     });
 
     expect(post).toHaveBeenCalledWith('/api/v1/vnpy-paper/orders', {
-      symbol: '600519',
+      symbol: '00700',
       side: 'buy',
-      market: 'cn',
+      market: 'hk',
       quantity: undefined,
       cash_amount: 1000,
       price: 10,
       note: undefined,
       execution_route: 'vnpy_bridge',
     });
-    expect(result.cashAmount).toBe(1000);
+    expect(result.cashAmount).toBe(1100);
+    expect(result.cashAmountBase).toBe(1000);
+    expect(result.cashAmountQuote).toBe(1100);
+    expect(result.baseCurrency).toBe('CNY');
+    expect(result.quoteCurrency).toBe('HKD');
     expect(result.tradeId).toBe(1);
   });
 

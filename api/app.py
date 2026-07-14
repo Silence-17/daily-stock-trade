@@ -291,6 +291,16 @@ async def app_lifespan(app: FastAPI):
         app.state.vnpy_event_engine = vnpy_runtime.event_engine
     if vnpy_runtime.event_bridge is not None:
         app.state.vnpy_paper_event_bridge = vnpy_runtime.event_bridge
+    bind_vnpy_runtime = getattr(
+        app.state.runtime_scheduler_service,
+        "set_vnpy_runtime_engines",
+        None,
+    )
+    if callable(bind_vnpy_runtime):
+        bind_vnpy_runtime(
+            main_engine=vnpy_runtime.main_engine,
+            event_engine=vnpy_runtime.event_engine,
+        )
     if not runtime_suppress_start:
         app.state.runtime_scheduler_service.reconcile_from_config(
             run_immediately=runtime_run_immediately,

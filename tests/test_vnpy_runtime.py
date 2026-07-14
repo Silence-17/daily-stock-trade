@@ -70,6 +70,28 @@ class VnpyRuntimeTestCase(unittest.TestCase):
         self.assertEqual(handle.diagnostics["reason"], "bootstrap_failed")
         self.assertEqual(handle.diagnostics["error_type"], "ModuleNotFoundError")
 
+    def test_bootstrap_prepares_local_vnpy_runtime_directory(self) -> None:
+        installed = _install_fake_vnpy_runtime_modules()
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime_root = Path(tmp)
+            try:
+                with patch("src.services.vnpy_runtime.Path.cwd", return_value=runtime_root):
+                    handle = bootstrap_vnpy_runtime(
+                        settings=VnpyRuntimeSettings(
+                            enabled=True,
+                            auto_attach_events=False,
+                        )
+                    )
+            finally:
+                _restore_modules(installed)
+
+            self.assertTrue(runtime_root.joinpath(".vntrader").is_dir())
+            self.assertEqual(
+                handle.diagnostics["runtime_data_dir"],
+                str(runtime_root.joinpath(".vntrader")),
+            )
+            handle.close()
+
     def test_bootstrap_adds_gateway_connects_and_attaches_events(self) -> None:
         installed = _install_fake_vnpy_runtime_modules()
         with tempfile.TemporaryDirectory() as tmp:
@@ -103,6 +125,50 @@ class VnpyRuntimeTestCase(unittest.TestCase):
             self.assertTrue(handle.main_engine.closed)
             self.assertTrue(handle.event_engine.stopped)
             self.assertTrue(all(not handlers for handlers in handle.event_engine.handlers.values()))
+
+    def test_bootstrap_connects_opt_in_gateway_without_settings_file(self) -> None:
+        installed = _install_fake_vnpy_runtime_modules()
+        try:
+            handle = bootstrap_vnpy_runtime(
+                settings=VnpyRuntimeSettings(
+                    enabled=True,
+                    gateway_class="fake_vnpy_gateway:SimGateway",
+                    gateway_name="SIM",
+                    connect_on_start=True,
+                    auto_attach_events=False,
+                )
+            )
+        finally:
+            _restore_modules(installed)
+
+        self.assertTrue(handle.diagnostics["connect"]["connected"])
+        self.assertEqual(handle.diagnostics["connect"]["settings_source"], "gateway_defaults")
+        self.assertIsNone(handle.diagnostics["connect"]["settings_path"])
+        self.assertEqual(handle.main_engine.connects[0], ({}, "SIM"))
+        handle.close()
+
+    def test_bootstrap_keeps_settings_file_required_for_regular_gateway(self) -> None:
+        installed = _install_fake_vnpy_runtime_modules()
+        try:
+            handle = bootstrap_vnpy_runtime(
+                settings=VnpyRuntimeSettings(
+                    enabled=True,
+                    gateway_class="fake_vnpy_gateway:StrictGateway",
+                    gateway_name="STRICT",
+                    connect_on_start=True,
+                    auto_attach_events=False,
+                )
+            )
+        finally:
+            _restore_modules(installed)
+
+        self.assertFalse(handle.diagnostics["connect"]["connected"])
+        self.assertEqual(
+            handle.diagnostics["connect"]["reason"],
+            "connect_settings_path_required",
+        )
+        self.assertEqual(handle.main_engine.connects, [])
+        handle.close()
 
 
 def _install_fake_vnpy_runtime_modules() -> dict[str, object]:
@@ -141,11 +207,20 @@ def _install_fake_vnpy_runtime_modules() -> dict[str, object]:
         def __init__(self, event_engine) -> None:
             self.event_engine = event_engine
             self.gateways = []
+            self.gateway_instances = {}
             self.connects = []
             self.closed = False
 
         def add_gateway(self, gateway_class, gateway_name=""):
             self.gateways.append((gateway_class, gateway_name))
+            self.gateway_instances[gateway_name] = types.SimpleNamespace(
+                connect_without_settings=bool(
+                    getattr(gateway_class, "connect_without_settings", False)
+                )
+            )
+
+        def get_gateway(self, gateway_name):
+            return self.gateway_instances.get(gateway_name)
 
         def connect(self, setting, gateway_name):
             self.connects.append((setting, gateway_name))
@@ -154,7 +229,10 @@ def _install_fake_vnpy_runtime_modules() -> dict[str, object]:
             self.closed = True
 
     class SimGateway:
-        pass
+        connect_without_settings = True
+
+    class StrictGateway:
+        connect_without_settings = False
 
     event_module.EventEngine = EventEngine
     engine_module.MainEngine = MainEngine
@@ -163,6 +241,7 @@ def _install_fake_vnpy_runtime_modules() -> dict[str, object]:
     trader_event_module.EVENT_ACCOUNT = "eAccount."
     trader_event_module.EVENT_POSITION = "ePosition."
     gateway_module.SimGateway = SimGateway
+    gateway_module.StrictGateway = StrictGateway
     vnpy_module.event = event_module
     vnpy_module.trader = trader_module
     trader_module.engine = engine_module

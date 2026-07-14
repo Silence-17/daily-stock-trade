@@ -138,6 +138,8 @@ class RuntimeSchedulerService:
         daily_schedule_disabled: bool = False,
         run_immediately_in_background: bool = False,
         background_tasks_provider: Optional[Callable[[Config], List[Dict[str, Any]]]] = None,
+        vnpy_main_engine_provider: Optional[Callable[[], Any]] = None,
+        vnpy_event_engine_provider: Optional[Callable[[], Any]] = None,
         schedule_args_overrides: Optional[Dict[str, Any]] = None,
         task_event_repository: Optional[Any] = None,
         task_event_retention_days: Optional[int] = None,
@@ -157,6 +159,8 @@ class RuntimeSchedulerService:
         self._daily_schedule_disabled = daily_schedule_disabled
         self._run_immediately_in_background = run_immediately_in_background
         self._background_tasks_provider = background_tasks_provider
+        self._vnpy_main_engine_provider = vnpy_main_engine_provider
+        self._vnpy_event_engine_provider = vnpy_event_engine_provider
         self._schedule_args_overrides = {
             key: value
             for key, value in (schedule_args_overrides or {}).items()
@@ -198,6 +202,17 @@ class RuntimeSchedulerService:
         self._last_error: Optional[str] = None
         self._last_skipped_at: Optional[str] = None
         self._last_skip_reason: Optional[str] = None
+
+    def set_vnpy_runtime_engines(
+        self,
+        *,
+        main_engine: Optional[Any] = None,
+        event_engine: Optional[Any] = None,
+    ) -> None:
+        """Bind the API-owned vn.py runtime used by scheduler background tasks."""
+
+        self._vnpy_main_engine_provider = lambda: main_engine
+        self._vnpy_event_engine_provider = lambda: event_engine
 
     def _make_schedule_args(self) -> SimpleNamespace:
         defaults = {
@@ -279,7 +294,20 @@ class RuntimeSchedulerService:
         try:
             from src.services.vnpy_paper_trading_service import build_vnpy_paper_trading_background_tasks
 
-            return build_vnpy_paper_trading_background_tasks()
+            main_engine = (
+                self._vnpy_main_engine_provider()
+                if self._vnpy_main_engine_provider is not None
+                else None
+            )
+            event_engine = (
+                self._vnpy_event_engine_provider()
+                if self._vnpy_event_engine_provider is not None
+                else None
+            )
+            return build_vnpy_paper_trading_background_tasks(
+                vnpy_main_engine=main_engine,
+                vnpy_event_engine=event_engine,
+            )
         except Exception as exc:  # pragma: no cover - defensive branch
             logger.warning("Failed to build vn.py paper trading background tasks: %s", exc)
             return []

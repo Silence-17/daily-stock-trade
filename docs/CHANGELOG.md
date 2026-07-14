@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [修复] 自动模拟交易的每票预算、每日预算、现金和仓位金额上限统一按账户基准币种计算，港股/美股/日股/韩股/台股订单按 Portfolio 汇率换算交易币种，避免不同币种金额直接相加。
+- [改进] 跨币种自动买入在汇率缺失、被标记 stale 或汇率日期超过 7 个自然日时以 `fx_rate_unavailable` fail-closed，并在 Agent run 与订单审计中记录基准金额、交易币种金额和汇率来源；卖出减仓保持可用。
+- [改进] 模拟交易 Web 金额输入标签显示当前账户基准币种，明确每票预算、每日预算、最低现金和金额型仓位上限的计价口径。
+- [测试] 新增港股无汇率拒买、基准预算换算、HKD 成交币种、跨币种每日预算和无汇率可卖出回归，并补齐 JP/KR/TW 默认交易币种验证。
+- [新功能] 新增默认关闭的内置 vn.py `DsaSimulatedGateway`，可通过真实 MainEngine/EventEngine 延迟即时撮合买卖委托，并把订单、成交、账户和持仓事件回写 DSA。
+- [改进] vn.py runtime 允许显式标记为免参数的内置模拟 gateway 在无连接 JSON 时使用默认设置启动，真实 gateway 仍要求外部连接参数。
+- [改进] 模拟交易设置未保存 gateway 名称时继承 `VNPY_GATEWAY_NAME`，避免 runtime 与 Web 自动交易重复配置同一 gateway。
+- [测试] vn.py 验收脚本和隔离环境集成测试新增内置模拟 gateway 全量成交以及 Agent 计划经真实事件引擎回写 Portfolio 的端到端覆盖。
+- [新功能] 新增独立 `requirements-vnpy.txt` 与 Windows `scripts/setup_vnpy_runtime.ps1`，在 Python 3.10 至 3.13 环境安装完整项目、可选本地 AlphaSift 和 vn.py 4.4.0。
+- [修复] vn.py runtime 启动前准备仓库内已忽略的 `.vntrader/`，避免受限服务账户因无法写用户主目录而导致 MainEngine bootstrap 失败。
+- [改进] vn.py 安装脚本优先使用 LiteLLM wheel、限制网络重试并将 pip 构建缓存放在隔离环境内部，兼容受限 Windows 运行环境。
+- [测试] `check_vnpy_adapter.py --require-vnpy` 新增真实 EventEngine/MainEngine 启停 smoke；Python 3.13.14 隔离 API 已验证四类事件 attach、scheduler runtime 注入和恢复任务注册。
+- [文档] 更新 vn.py 模拟交易说明、full guide 中英文版、当前项目状态和 Agent goals，区分已验证 runtime 与尚未验证的真实 gateway/账户长跑边界。
+- [修复] API 启动期创建或注入的 vn.py MainEngine/EventEngine 现在会传入 Runtime scheduler 的自动交易与恢复 service，避免 Web 手动桥接可用而后台任务仍误判 bridge 未配置。
+- [改进] `vnpy_paper_auto_retry` 首次注册时立即执行一次受限恢复扫描，随后维持 1 至 5 分钟周期，缩短服务重启后的订单盲区。
+- [修复] 暂停自动买入时保留 `vnpy_paper_auto_retry` 订单恢复任务，已有委托继续对账和超时归档，但不会重提失败计划。
+- [改进] vn.py 活跃委托提交满 60 秒后即可按 1 至 5 分钟周期主动查询 MainEngine，30 分钟仅作为无网关证据时的安全归档阈值。
+- [测试] 扩展 vn.py paper service/API 回归，覆盖服务重建后漏回报恢复、超时前无证据等待、宽限期、暂停状态任务健康、撤单竞态成交和超时后的迟到成交。
 - [修复] `vnpy_paper` 成交回报改为按 `vt_tradeid` 幂等累计多笔部分成交，达到计划数量后才标记 `filled`，并保留累计数量、加权均价、剩余数量和成交明细审计。
 - [改进] vn.py 超时恢复扫描会先通过 `MainEngine.get_order` / `get_all_trades` 对账漏失回报；查询到订单或成交时同步本地计划和 Portfolio，查询异常时保护原活跃计划，网关取消/拒绝/失败和所有超时终态禁止自动重提，避免误归档或用户撤单后重复下单。
 - [测试] 扩展 vn.py adapter、paper service 和 API 回归，覆盖订单快照过滤、多笔成交幂等累计、服务漏回调恢复、网关查询异常保护和恢复计数字段。
@@ -43,7 +61,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [改进] `vnpy-paper` 自动再平衡支持 `auto_target_position_weights` 和 `auto_target_industry_weights`，可按股票/行业目标权益占比跳过超目标买入并生成超配减仓计划。
 - [改进] Web 模拟交易页新增目标持仓权重和目标行业权重设置输入，并在保存自动交易配置时同步到后端。
 - [测试] 扩展 `vnpy-paper` 服务/API/Web API/Web 页面回归，覆盖目标权重买入拦截、再平衡卖出数量、设置字段映射和页面表单保存。
-- [文档] 更新 vn.py 模拟交易说明、full guide 中英文版和在线选股 Agent goals，标注目标权重基础再平衡已落地以及真实 gateway/跨币种估值仍待验证。
+- [文档] 更新 vn.py 模拟交易说明、full guide 中英文版和在线选股 Agent goals，标注目标权重基础再平衡与基础跨币种估值已落地，真实 gateway 长跑和完整组合优化仍待验证。
 - [改进] `vnpy-paper` 每日 Agent 总结新增 `workflow_status_counts` 和 `workflow_stage_counts`，Web Agent 控制台展示“工作流阶段”分布。
 - [测试] 扩展 `vnpy-paper` API/Web API/Agent 控制台回归，覆盖 workflow 每日聚合、camelCase 映射和页面展示。
 - [改进] `vnpy-paper` Agent run 详情新增派生 `diagnostics.agent_workflow`，按计划、数据质量、候选复核、交易计划和执行阶段输出状态机摘要、当前阶段和下一步。
