@@ -2265,6 +2265,11 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
                     },
                 }
             ],
+            "review_policy_quality": {
+                "policy": "llm_review_then_rule_agent",
+                "source_counts": {"llm": 2},
+                "horizons": {"1": {"passed_precision_pct": 100.0}},
+            },
             "items": [],
         }
 
@@ -2290,6 +2295,10 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
         self.assertTrue(response.json()["methodology"]["lookahead_protection"])
         self.assertEqual(response.json()["matrix"]["1"]["coverage_pct"], 50.0)
         self.assertEqual(response.json()["review_quality_matrix"][0]["model"], "openai/model-a")
+        self.assertEqual(
+            response.json()["review_policy_quality"]["policy"],
+            "llm_review_then_rule_agent",
+        )
         service.evaluate.assert_called_once()
         call = service.evaluate.call_args.kwargs
         self.assertEqual(call["strategy"], "dual_low")
@@ -2317,6 +2326,15 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
             "changed": False,
             "strategy": "dual_low",
             "market": "cn",
+            "selection_quality_state": "insufficient_evidence",
+            "selection_quality_reason": "mature_sample_count_below_threshold",
+            "review_quality_state": "insufficient_evidence",
+            "review_quality_reason": "review_mature_sample_count_below_threshold",
+            "review_quality_applied": False,
+            "review_policy_quality": {
+                "policy": "llm_review_then_rule_agent",
+                "horizons": {"5": {"passed_precision_pct": None}},
+            },
             "horizon_days": 5,
             "min_mature_samples": 10,
             "min_win_rate_pct": 45.0,
@@ -2345,6 +2363,7 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["state"], "insufficient_evidence")
         self.assertFalse(response.json()["gate_blocked"])
+        self.assertEqual(response.json()["review_quality_state"], "insufficient_evidence")
         service.get_cross_run_quality_status.assert_called_once_with()
 
 

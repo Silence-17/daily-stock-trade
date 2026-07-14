@@ -5242,6 +5242,7 @@ class VnpyPaperTradingService:
         feedback_verdict = str(latest_feedback.get("verdict") or "").strip().lower()
         failure_streak = max(0, int(_safe_int(context.get("current_failure_streak")) or 0))
         quality_state = str(quality.get("state") or "").strip().lower()
+        review_quality_state = str(quality.get("review_quality_state") or "").strip().lower()
 
         if feedback_verdict == "rejected":
             severity = "strict"
@@ -5263,6 +5264,8 @@ class VnpyPaperTradingService:
             if severity == "baseline":
                 severity = "guarded"
             reasons.append(f"cross_run_quality_{quality_state}")
+        if quality.get("review_quality_applied") and review_quality_state:
+            reasons.append(f"review_quality_{review_quality_state}")
 
         configured_max_results = max(1, int(settings.auto_max_results or 1))
         configured_cash = max(0.0, float(settings.auto_cash_per_order or 0.0))

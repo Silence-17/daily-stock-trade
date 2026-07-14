@@ -1608,6 +1608,11 @@ describe('vnpyPaperTradingApi', () => {
             },
           },
         ],
+        review_policy_quality: {
+          policy: 'llm_review_then_rule_agent',
+          source_counts: { llm: 2 },
+          horizons: { 1: { passed_precision_pct: 100 } },
+        },
         items: [],
       },
     });
@@ -1638,6 +1643,7 @@ describe('vnpyPaperTradingApi', () => {
     expect(result.matrix['1'].averageReturnPct).toBe(1.25);
     expect(result.reviewQualityMatrix[0].model).toBe('openai/model-a');
     expect(result.reviewQualityMatrix[0].horizons['1'].blockedAvoidanceRatePct).toBe(100);
+    expect(result.reviewPolicyQuality?.policy).toBe('llm_review_then_rule_agent');
   });
 
   it('loads the current cross-run quality gate state', async () => {
@@ -1652,6 +1658,15 @@ describe('vnpyPaperTradingApi', () => {
         changed: true,
         strategy: 'dual_low',
         market: 'cn',
+        selection_quality_state: 'healthy',
+        selection_quality_reason: 'forward_quality_thresholds_met',
+        review_quality_state: 'blocked',
+        review_quality_reason: 'review_passed_precision_below_threshold',
+        review_quality_applied: true,
+        review_policy_quality: {
+          policy: 'llm_review_then_rule_agent',
+          horizons: { 5: { passed_precision_pct: 40 } },
+        },
         horizon_days: 5,
         min_mature_samples: 10,
         min_win_rate_pct: 45,
@@ -1679,5 +1694,8 @@ describe('vnpyPaperTradingApi', () => {
     expect(result.matureSampleCount).toBe(18);
     expect(result.gateBlocked).toBe(true);
     expect(result.transition).toBe('healthy->blocked');
+    expect(result.reviewQualityState).toBe('blocked');
+    expect(result.reviewQualityApplied).toBe(true);
+    expect(result.reviewPolicyQuality?.horizons).toEqual({ 5: { passedPrecisionPct: 40 } });
   });
 });

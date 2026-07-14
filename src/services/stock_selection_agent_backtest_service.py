@@ -50,23 +50,40 @@ class StockSelectionAgentBacktestService:
         win_rate = self._finite_float(metrics.get("win_rate_pct"))
         average_return = self._finite_float(metrics.get("average_return_pct"))
         if completed_count < minimum:
-            state = "insufficient_evidence"
-            reason = "mature_sample_count_below_threshold"
+            selection_state = "insufficient_evidence"
+            selection_reason = "mature_sample_count_below_threshold"
         elif win_rate is None:
-            state = "unavailable"
-            reason = "win_rate_unavailable"
+            selection_state = "unavailable"
+            selection_reason = "win_rate_unavailable"
         elif win_rate < threshold:
-            state = "blocked"
-            reason = "forward_win_rate_below_threshold"
+            selection_state = "blocked"
+            selection_reason = "forward_win_rate_below_threshold"
         elif average_return is not None and average_return < 0:
-            state = "guarded"
-            reason = "average_forward_return_negative"
+            selection_state = "guarded"
+            selection_reason = "average_forward_return_negative"
         else:
-            state = "healthy"
-            reason = "forward_quality_thresholds_met"
+            selection_state = "healthy"
+            selection_reason = "forward_quality_thresholds_met"
+        review_policy_quality = dict(result.get("review_policy_quality") or {})
+        review_metrics = dict(review_policy_quality.get("horizons", {}).get(str(horizon)) or {})
+        review_state, review_reason = self._review_policy_state(
+            review_metrics,
+            min_mature_samples=minimum,
+            min_accuracy_pct=threshold,
+        )
+        severity = {
+            "insufficient_evidence": 0,
+            "healthy": 1,
+            "guarded": 2,
+            "blocked": 3,
+            "unavailable": 4,
+        }
+        review_quality_applied = severity.get(review_state, 0) > severity.get(selection_state, 0)
+        state = review_state if review_quality_applied else selection_state
+        reason = review_reason if review_quality_applied else selection_reason
         previous = str(previous_state or "").strip().lower() or None
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "generated_at": result.get("generated_at"),
             "state": state,
             "reason": reason,
@@ -75,6 +92,12 @@ class StockSelectionAgentBacktestService:
             "changed": bool(previous and previous != state),
             "strategy": strategy,
             "market": market,
+            "selection_quality_state": selection_state,
+            "selection_quality_reason": selection_reason,
+            "review_quality_state": review_state,
+            "review_quality_reason": review_reason,
+            "review_quality_applied": review_quality_applied,
+            "review_policy_quality": review_policy_quality,
             "horizon_days": horizon,
             "min_mature_samples": minimum,
             "min_win_rate_pct": threshold,
@@ -93,6 +116,36 @@ class StockSelectionAgentBacktestService:
             "source": "persisted_agent_decisions_and_stock_daily",
             "truncated": bool(result.get("truncated")),
         }
+
+    @classmethod
+    def _review_policy_state(
+        cls,
+        metrics: Dict[str, Any],
+        *,
+        min_mature_samples: int,
+        min_accuracy_pct: float,
+    ) -> tuple[str, str]:
+        minimum = max(1, int(min_mature_samples))
+        threshold = float(min_accuracy_pct)
+        passed_count = int(metrics.get("passed_completed_count") or 0)
+        blocked_count = int(metrics.get("blocked_completed_count") or 0)
+        passed_precision = cls._finite_float(metrics.get("passed_precision_pct"))
+        blocked_avoidance = cls._finite_float(metrics.get("blocked_avoidance_rate_pct"))
+        passed_average = cls._finite_float(metrics.get("passed_average_return_pct"))
+        return_spread = cls._finite_float(metrics.get("return_spread_pct"))
+        passed_mature = passed_count >= minimum and passed_precision is not None
+        blocked_mature = blocked_count >= minimum and blocked_avoidance is not None
+        if not passed_mature and not blocked_mature:
+            return "insufficient_evidence", "review_mature_sample_count_below_threshold"
+        if passed_mature and passed_precision < threshold:
+            return "blocked", "review_passed_precision_below_threshold"
+        if blocked_mature and blocked_avoidance < threshold:
+            return "blocked", "review_blocked_avoidance_below_threshold"
+        if passed_mature and passed_average is not None and passed_average < 0:
+            return "guarded", "review_passed_average_return_negative"
+        if passed_mature and blocked_mature and return_spread is not None and return_spread < 0:
+            return "guarded", "review_return_spread_negative"
+        return "healthy", "review_quality_thresholds_met"
 
     def __init__(self, db_manager: Optional[DatabaseManager] = None) -> None:
         self.db = db_manager or DatabaseManager.get_instance()
@@ -248,6 +301,7 @@ class StockSelectionAgentBacktestService:
                 for window in windows
             }
         review_quality_matrix = self._build_review_quality_matrix(items, windows=windows)
+        review_policy_quality = self._build_effective_review_policy_quality(items, windows=windows)
 
         return {
             "generated_at": datetime.now(),
@@ -282,6 +336,7 @@ class StockSelectionAgentBacktestService:
             "matrix": matrix,
             "strategy_matrix": strategy_matrix,
             "review_quality_matrix": review_quality_matrix,
+            "review_policy_quality": review_policy_quality,
             "items": items,
         }
 
@@ -366,6 +421,49 @@ class StockSelectionAgentBacktestService:
                 }
             )
         return result
+
+    @classmethod
+    def _build_effective_review_policy_quality(
+        cls,
+        items: List[Dict[str, Any]],
+        *,
+        windows: List[int],
+    ) -> Dict[str, Any]:
+        samples: List[tuple[Dict[str, Any], Dict[str, Any]]] = []
+        status_counts: Counter[str] = Counter()
+        source_counts: Counter[str] = Counter()
+        model_counts: Counter[str] = Counter()
+        version_counts: Counter[str] = Counter()
+        for item in items:
+            reviews = [review for review in item.get("reviews") or [] if isinstance(review, dict)]
+            llm_review = next((review for review in reviews if review.get("source") == "llm"), None)
+            rule_review = next(
+                (review for review in reviews if review.get("source") == "rule_agent"),
+                None,
+            )
+            effective = llm_review or rule_review
+            if not isinstance(effective, dict):
+                continue
+            samples.append((item, effective))
+            status_counts[str(effective.get("status") or "unknown")] += 1
+            source_counts[str(effective.get("source") or "unknown")] += 1
+            model = str(effective.get("model") or "").strip()
+            if model:
+                model_counts[model] += 1
+            version_counts[str(effective.get("version") or "unknown")] += 1
+        return {
+            "schema_version": 1,
+            "policy": "llm_review_then_rule_agent",
+            "sample_count": len(samples),
+            "status_counts": dict(sorted(status_counts.items())),
+            "source_counts": dict(sorted(source_counts.items())),
+            "model_counts": dict(sorted(model_counts.items())),
+            "version_counts": dict(sorted(version_counts.items())),
+            "horizons": {
+                str(window): cls._summarize_review_samples(samples, window=window)
+                for window in windows
+            },
+        }
 
     @classmethod
     def _summarize_review_samples(
