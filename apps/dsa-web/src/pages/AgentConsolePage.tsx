@@ -348,6 +348,7 @@ const AgentConsolePage: React.FC = () => {
   const [portfolioTargetWeights, setPortfolioTargetWeights] = useState('');
   const [portfolioMinimumCommission, setPortfolioMinimumCommission] = useState('');
   const [portfolioSellTaxBps, setPortfolioSellTaxBps] = useState('');
+  const [portfolioSellTaxMode, setPortfolioSellTaxMode] = useState<'explicit' | 'cn_historical_stamp_duty'>('explicit');
   const [portfolioCorporateActions, setPortfolioCorporateActions] = useState('');
   const [includePersistedCorporateActions, setIncludePersistedCorporateActions] = useState(true);
   const [portfolioBacktest, setPortfolioBacktest] = useState<AlphaSiftPortfolioBacktestResponse | null>(null);
@@ -691,11 +692,11 @@ const AgentConsolePage: React.FC = () => {
     setSuccess('');
     try {
       const minimumCommission = Number(portfolioMinimumCommission);
-      const sellTaxBps = Number(portfolioSellTaxBps);
+      const sellTaxBps = portfolioSellTaxMode === 'explicit' ? Number(portfolioSellTaxBps) : 0;
       if (!Number.isFinite(minimumCommission) || minimumCommission < 0) {
         throw new Error('最低佣金必须是不小于 0 的数字');
       }
-      if (!Number.isFinite(sellTaxBps) || sellTaxBps < 0 || sellTaxBps > 1000) {
+      if (portfolioSellTaxMode === 'explicit' && (!Number.isFinite(sellTaxBps) || sellTaxBps < 0 || sellTaxBps > 1000)) {
         throw new Error('卖出税率必须在 0 到 1000 bps 之间');
       }
       const payload = await alphasiftApi.runPortfolioBacktest({
@@ -708,6 +709,7 @@ const AgentConsolePage: React.FC = () => {
         targetWeights: parsePortfolioTargetWeights(portfolioTargetWeights),
         minimumCommission,
         sellTaxBps,
+        sellTaxMode: portfolioSellTaxMode,
         corporateActions: parsePortfolioCorporateActions(portfolioCorporateActions),
         includePersistedCorporateActions,
       });
@@ -1271,9 +1273,20 @@ const AgentConsolePage: React.FC = () => {
                 step="0.1"
                 value={portfolioSellTaxBps}
                 onChange={(event) => setPortfolioSellTaxBps(event.target.value)}
+                disabled={portfolioSellTaxMode !== 'explicit'}
                 aria-label="卖出税率 bps"
                 placeholder="卖出税 bps"
               />
+              <select
+                data-testid="agent-portfolio-sell-tax-mode"
+                className={`${INPUT_CLASS} sm:w-44`}
+                value={portfolioSellTaxMode}
+                onChange={(event) => setPortfolioSellTaxMode(event.target.value as 'explicit' | 'cn_historical_stamp_duty')}
+                aria-label="卖出税模式"
+              >
+                <option value="explicit">固定卖出税率</option>
+                <option value="cn_historical_stamp_duty">A 股历史印花税</option>
+              </select>
               <Button
                 data-testid="agent-portfolio-backtest-run"
                 variant="secondary"

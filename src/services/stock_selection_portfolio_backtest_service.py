@@ -25,6 +25,11 @@ from src.storage import DatabaseManager, StockDaily
 class StockSelectionPortfolioBacktestService:
     """Run sequential equal-weight periods from dated strategy replays."""
 
+    CN_STAMP_DUTY_REGIMES = (
+        (date(2008, 9, 19), 10.0, "mof_2008_09_19_single_sided"),
+        (date(2023, 8, 28), 5.0, "mof_sta_announcement_2023_39"),
+    )
+
     def __init__(
         self,
         db_manager: Optional[DatabaseManager] = None,
@@ -53,6 +58,7 @@ class StockSelectionPortfolioBacktestService:
         commission_bps: float = 3.0,
         minimum_commission: float = 0.0,
         sell_tax_bps: float = 0.0,
+        sell_tax_mode: str = "explicit",
         slippage_bps: float = 5.0,
         benchmark_symbol: Optional[str] = None,
         enforce_tradeability: bool = True,
@@ -72,8 +78,11 @@ class StockSelectionPortfolioBacktestService:
             commission_bps=commission_bps,
             minimum_commission=minimum_commission,
             sell_tax_bps=sell_tax_bps,
+            sell_tax_mode=sell_tax_mode,
             slippage_bps=slippage_bps,
         )
+        if sell_tax_mode == "cn_historical_stamp_duty" and str(market).lower() != "cn":
+            raise ValueError("cn_historical_stamp_duty is supported only for the cn market")
         dates = self.repository.list_dates(market=market, date_from=date_from, date_to=date_to)
         if not dates:
             raise ValueError("no point-in-time factor snapshots exist in the requested range")
@@ -104,8 +113,11 @@ class StockSelectionPortfolioBacktestService:
             raise ValueError("target_weights are supported only in cash_ledger mode")
         if normalized_corporate_actions and accounting_mode != "cash_ledger":
             raise ValueError("corporate_actions are supported only in cash_ledger mode")
-        if (minimum_commission > 0 or sell_tax_bps > 0) and accounting_mode != "cash_ledger":
-            raise ValueError("minimum_commission and sell_tax_bps are supported only in cash_ledger mode")
+        has_cash_ledger_cost_settings = (
+            minimum_commission > 0 or sell_tax_bps > 0 or sell_tax_mode != "explicit"
+        )
+        if has_cash_ledger_cost_settings and accounting_mode != "cash_ledger":
+            raise ValueError("minimum_commission and sell tax settings are supported only in cash_ledger mode")
         if accounting_mode == "cash_ledger":
             return self._run_cash_ledger(
                 strategy=strategy,
@@ -117,6 +129,7 @@ class StockSelectionPortfolioBacktestService:
                 commission_bps=commission_bps,
                 minimum_commission=minimum_commission,
                 sell_tax_bps=sell_tax_bps,
+                sell_tax_mode=sell_tax_mode,
                 slippage_bps=slippage_bps,
                 benchmark_symbol=benchmark_symbol,
                 enforce_tradeability=enforce_tradeability,
@@ -340,6 +353,7 @@ class StockSelectionPortfolioBacktestService:
         commission_bps: float,
         minimum_commission: float,
         sell_tax_bps: float,
+        sell_tax_mode: str,
         slippage_bps: float,
         benchmark_symbol: Optional[str],
         enforce_tradeability: bool,
@@ -373,7 +387,6 @@ class StockSelectionPortfolioBacktestService:
         first_entry_date: Optional[date] = None
         last_exit_date: Optional[date] = None
         commission = commission_bps / 10_000
-        sell_tax = sell_tax_bps / 10_000
         slippage = slippage_bps / 10_000
         lot_size = 100 if str(market).lower() == "cn" else 1
 
@@ -494,7 +507,13 @@ class StockSelectionPortfolioBacktestService:
                     commission_rate=commission,
                     minimum_commission=minimum_commission,
                 )
-                tax = execution_notional * sell_tax
+                effective_tax_bps, tax_source = self._resolve_sell_tax(
+                    mode=sell_tax_mode,
+                    explicit_bps=sell_tax_bps,
+                    market=market,
+                    trade_date=bar.date,
+                )
+                tax = execution_notional * effective_tax_bps / 10_000
                 cash_effect = execution_notional - fee - tax
                 cash += cash_effect
                 position["quantity"] = current_quantity - sell_quantity
@@ -510,6 +529,8 @@ class StockSelectionPortfolioBacktestService:
                     execution_price=execution_price,
                     fee=fee,
                     tax=tax,
+                    tax_bps=effective_tax_bps,
+                    tax_source=tax_source,
                     cash_effect=cash_effect,
                     trade_date=bar.date,
                 ))
@@ -663,7 +684,13 @@ class StockSelectionPortfolioBacktestService:
                         commission_rate=commission,
                         minimum_commission=minimum_commission,
                     )
-                    tax = execution_notional * sell_tax
+                    effective_tax_bps, tax_source = self._resolve_sell_tax(
+                        mode=sell_tax_mode,
+                        explicit_bps=sell_tax_bps,
+                        market=market,
+                        trade_date=item["mark_date"],
+                    )
+                    tax = execution_notional * effective_tax_bps / 10_000
                     cash_effect = execution_notional - fee - tax
                     cash += cash_effect
                     traded_notional += quantity * price
@@ -678,6 +705,8 @@ class StockSelectionPortfolioBacktestService:
                         execution_price=execution_price,
                         fee=fee,
                         tax=tax,
+                        tax_bps=effective_tax_bps,
+                        tax_source=tax_source,
                         cash_effect=cash_effect,
                         trade_date=item["mark_date"],
                     ))
@@ -841,6 +870,15 @@ class StockSelectionPortfolioBacktestService:
                 "commission_bps_per_side": commission_bps,
                 "minimum_commission_per_trade": minimum_commission,
                 "sell_tax_bps": sell_tax_bps,
+                "sell_tax_mode": sell_tax_mode,
+                "sell_tax_regimes": (
+                    [
+                        {"effective_from": start.isoformat(), "sell_tax_bps": bps, "source": source}
+                        for start, bps, source in self.CN_STAMP_DUTY_REGIMES
+                    ]
+                    if sell_tax_mode == "cn_historical_stamp_duty"
+                    else []
+                ),
                 "slippage_bps_per_side": slippage_bps,
                 "tradeability_gate_enabled": enforce_tradeability,
                 "places_orders": False,
@@ -1054,6 +1092,8 @@ class StockSelectionPortfolioBacktestService:
         tax: float,
         cash_effect: float,
         trade_date: date,
+        tax_bps: float = 0.0,
+        tax_source: str = "none",
     ) -> Dict[str, Any]:
         effective_price = abs(cash_effect) / quantity if quantity > 0 else 0.0
         return {
@@ -1067,6 +1107,8 @@ class StockSelectionPortfolioBacktestService:
             "execution_notional": round(quantity * execution_price, 4),
             "fee": round(fee, 4),
             "tax": round(tax, 4),
+            "tax_bps": round(tax_bps, 6),
+            "tax_source": tax_source,
             "slippage_cost": round(quantity * abs(execution_price - price), 4),
             "cash_effect": round(cash_effect, 4),
             "trade_date": trade_date,
@@ -1310,6 +1352,30 @@ class StockSelectionPortfolioBacktestService:
         }
 
     @staticmethod
+    def _resolve_sell_tax(
+        *,
+        mode: str,
+        explicit_bps: float,
+        market: str,
+        trade_date: date,
+    ) -> tuple[float, str]:
+        if mode == "explicit":
+            return float(explicit_bps), "explicit_request"
+        if mode != "cn_historical_stamp_duty":
+            raise ValueError("unsupported sell_tax_mode")
+        if str(market).lower() != "cn":
+            raise ValueError("cn_historical_stamp_duty is supported only for the cn market")
+        matched = [
+            item
+            for item in StockSelectionPortfolioBacktestService.CN_STAMP_DUTY_REGIMES
+            if item[0] <= trade_date
+        ]
+        if not matched:
+            raise ValueError("cn historical stamp duty is unavailable before 2008-09-19")
+        _, bps, source = matched[-1]
+        return bps, source
+
+    @staticmethod
     def _max_drawdown(points: List[float]) -> float:
         peak = 0.0
         drawdown = 0.0
@@ -1354,6 +1420,7 @@ class StockSelectionPortfolioBacktestService:
         commission_bps: float,
         minimum_commission: float,
         sell_tax_bps: float,
+        sell_tax_mode: str,
         slippage_bps: float,
     ) -> None:
         if date_from > date_to:
@@ -1370,3 +1437,5 @@ class StockSelectionPortfolioBacktestService:
             raise ValueError("minimum_commission must be between 0 and initial_capital")
         if not math.isfinite(sell_tax_bps) or not 0 <= sell_tax_bps <= 1000:
             raise ValueError("sell_tax_bps must be between 0 and 1000")
+        if sell_tax_mode not in {"explicit", "cn_historical_stamp_duty"}:
+            raise ValueError("unsupported sell_tax_mode")

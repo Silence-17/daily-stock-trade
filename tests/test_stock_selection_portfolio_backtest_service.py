@@ -441,12 +441,34 @@ class StockSelectionPortfolioBacktestServiceTestCase(unittest.TestCase):
         self.assertEqual(buy["cash_effect"], -905)
         self.assertEqual(sell["fee"], 5)
         self.assertEqual(sell["tax"], 9)
+        self.assertEqual(sell["tax_bps"], 100)
+        self.assertEqual(sell["tax_source"], "explicit_request")
         self.assertEqual(sell["cash_effect"], 886)
         self.assertEqual(result["metrics"]["total_fees"], 10)
         self.assertEqual(result["metrics"]["total_taxes"], 9)
         self.assertEqual(result["final_equity"], 981)
         self.assertEqual(result["methodology"]["minimum_commission_per_trade"], 5)
         self.assertEqual(result["methodology"]["sell_tax_bps"], 100)
+
+        historical = self.service.run(
+            strategy="dual_low",
+            market="cn",
+            date_from=date(2024, 1, 1),
+            date_to=date(2024, 1, 1),
+            initial_capital=1000,
+            final_holding_bars=2,
+            commission_bps=0,
+            minimum_commission=5,
+            sell_tax_mode="cn_historical_stamp_duty",
+            slippage_bps=0,
+            accounting_mode="cash_ledger",
+        )
+        historical_sell = next(item for item in historical["periods"][0]["trades"] if item["side"] == "sell")
+        self.assertEqual(historical_sell["tax_bps"], 5)
+        self.assertEqual(historical_sell["tax_source"], "mof_sta_announcement_2023_39")
+        self.assertEqual(historical_sell["tax"], 0.45)
+        self.assertEqual(historical["final_equity"], 989.55)
+        self.assertEqual(historical["methodology"]["sell_tax_mode"], "cn_historical_stamp_duty")
 
     def test_cash_ledger_applies_dividend_and_split_before_final_exit(self) -> None:
         with self.db.get_session() as session:
@@ -650,7 +672,7 @@ class StockSelectionPortfolioBacktestServiceTestCase(unittest.TestCase):
                 accounting_mode="equal_weight_approximation",
                 target_weights={"600001": 50},
             )
-        with self.assertRaisesRegex(ValueError, "minimum_commission and sell_tax_bps"):
+        with self.assertRaisesRegex(ValueError, "minimum_commission and sell tax settings"):
             self.service.run(
                 strategy="dual_low",
                 market="cn",
@@ -704,6 +726,40 @@ class StockSelectionPortfolioBacktestServiceTestCase(unittest.TestCase):
                 "cash_dividend_per_share": 1,
                 "split_ratio": 2,
             }])
+
+    def test_cn_historical_stamp_duty_resolves_official_effective_dates(self) -> None:
+        self.assertEqual(
+            self.service._resolve_sell_tax(
+                mode="cn_historical_stamp_duty",
+                explicit_bps=999,
+                market="cn",
+                trade_date=date(2023, 8, 27),
+            ),
+            (10.0, "mof_2008_09_19_single_sided"),
+        )
+        self.assertEqual(
+            self.service._resolve_sell_tax(
+                mode="cn_historical_stamp_duty",
+                explicit_bps=999,
+                market="cn",
+                trade_date=date(2023, 8, 28),
+            ),
+            (5.0, "mof_sta_announcement_2023_39"),
+        )
+        with self.assertRaisesRegex(ValueError, "before 2008-09-19"):
+            self.service._resolve_sell_tax(
+                mode="cn_historical_stamp_duty",
+                explicit_bps=0,
+                market="cn",
+                trade_date=date(2008, 9, 18),
+            )
+        with self.assertRaisesRegex(ValueError, "only for the cn market"):
+            self.service._resolve_sell_tax(
+                mode="cn_historical_stamp_duty",
+                explicit_bps=0,
+                market="us",
+                trade_date=date(2024, 1, 1),
+            )
 
 
 if __name__ == "__main__":
