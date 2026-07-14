@@ -673,6 +673,27 @@ class StockSelectionAgentRun(Base):
     )
 
 
+class StockSelectionAgentRunFeedback(Base):
+    """Latest human acceptance feedback for one stock-selection agent run."""
+
+    __tablename__ = 'stock_selection_agent_run_feedback'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    run_id = Column(
+        Integer,
+        ForeignKey('stock_selection_agent_runs.id'),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    verdict = Column(String(24), nullable=False, index=True)
+    note = Column(Text)
+    reviewer = Column(String(80))
+    source = Column(String(24), nullable=False, default='web', index=True)
+    created_at = Column(DateTime, default=datetime.now, nullable=False, index=True)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
+
+
 class StockSelectionAgentDecision(Base):
     """Candidate-level decision and optional paper-trade result for one run."""
 

@@ -15,6 +15,7 @@ from src.storage import (
     DatabaseManager,
     StockSelectionAgentDecision,
     StockSelectionAgentRun,
+    StockSelectionAgentRunFeedback,
     StockSelectionAgentTradePlan,
 )
 
@@ -501,6 +502,48 @@ class StockSelectionAgentRepository:
             session.refresh(run)
             return self._run_to_dict(run)
 
+    def upsert_run_feedback(
+        self,
+        run_uid: str,
+        *,
+        verdict: str,
+        note: Optional[str] = None,
+        reviewer: Optional[str] = None,
+        source: str = "web",
+    ) -> Optional[Dict[str, Any]]:
+        with self.db.get_session() as session:
+            run = session.execute(
+                select(StockSelectionAgentRun)
+                .where(StockSelectionAgentRun.run_uid == str(run_uid).strip())
+                .limit(1)
+            ).scalar_one_or_none()
+            if run is None:
+                return None
+            feedback = session.execute(
+                select(StockSelectionAgentRunFeedback)
+                .where(StockSelectionAgentRunFeedback.run_id == run.id)
+                .limit(1)
+            ).scalar_one_or_none()
+            now = datetime.now()
+            if feedback is None:
+                feedback = StockSelectionAgentRunFeedback(
+                    run_id=run.id,
+                    created_at=now,
+                )
+                session.add(feedback)
+            feedback.verdict = str(verdict).strip().lower()
+            feedback.note = str(note).strip()[:2000] if note and str(note).strip() else None
+            feedback.reviewer = (
+                str(reviewer).strip()[:80]
+                if reviewer and str(reviewer).strip()
+                else None
+            )
+            feedback.source = str(source or "web").strip().lower()[:24] or "web"
+            feedback.updated_at = now
+            session.commit()
+            session.refresh(feedback)
+            return self._feedback_to_dict(feedback)
+
     def list_runs(
         self,
         *,
@@ -537,8 +580,14 @@ class StockSelectionAgentRepository:
                 .offset(offset)
                 .limit(limit)
             ).scalars().all()
+            feedback_by_run = self._feedback_by_run_ids(session, [row.id for row in rows])
+            items = []
+            for row in rows:
+                item = self._run_to_dict(row)
+                item["human_feedback"] = feedback_by_run.get(int(row.id))
+                items.append(item)
             return {
-                "items": [self._run_to_dict(row) for row in rows],
+                "items": items,
                 "limit": limit,
                 "offset": offset,
                 "total": total,
@@ -568,7 +617,13 @@ class StockSelectionAgentRepository:
                 query.order_by(desc(StockSelectionAgentRun.created_at), desc(StockSelectionAgentRun.id))
                 .limit(limit)
             ).scalars().all()
-            return [self._run_to_dict(row) for row in rows]
+            feedback_by_run = self._feedback_by_run_ids(session, [row.id for row in rows])
+            items = []
+            for row in rows:
+                item = self._run_to_dict(row)
+                item["human_feedback"] = feedback_by_run.get(int(row.id))
+                items.append(item)
+            return items
 
     def summarize_daily_runs(
         self,
@@ -603,7 +658,12 @@ class StockSelectionAgentRepository:
                 query.order_by(desc(StockSelectionAgentRun.created_at), desc(StockSelectionAgentRun.id))
                 .limit(limit)
             ).scalars().all()
-            runs = [self._run_to_dict(row) for row in rows]
+            feedback_by_run = self._feedback_by_run_ids(session, [row.id for row in rows])
+            runs = []
+            for row in rows:
+                item = self._run_to_dict(row)
+                item["human_feedback"] = feedback_by_run.get(int(row.id))
+                runs.append(item)
 
         status_counts: Counter[str] = Counter()
         strategy_counts: Counter[str] = Counter()
@@ -616,6 +676,7 @@ class StockSelectionAgentRepository:
         workflow_stage_counts: Counter[str] = Counter()
         review_quality_counts: Counter[str] = Counter()
         review_quality_flag_counts: Counter[str] = Counter()
+        human_feedback_counts: Counter[str] = Counter()
         trade_plan_status_counts: Counter[str] = Counter()
         side_counts: Counter[str] = Counter()
         skip_reason_counts: Counter[str] = Counter()
@@ -642,6 +703,14 @@ class StockSelectionAgentRepository:
             submitted_count += int(run.get("submitted_count") or 0)
             skipped_count += int(run.get("skipped_count") or 0)
             message_count += int(run.get("message_count") or 0)
+            human_feedback = (
+                run.get("human_feedback")
+                if isinstance(run.get("human_feedback"), dict)
+                else {}
+            )
+            feedback_verdict = str(human_feedback.get("verdict") or "").strip().lower()
+            if feedback_verdict:
+                human_feedback_counts[feedback_verdict] += 1
 
             diagnostics = run.get("diagnostics") if isinstance(run.get("diagnostics"), dict) else {}
             settings = run.get("settings") if isinstance(run.get("settings"), dict) else {}
@@ -782,6 +851,8 @@ class StockSelectionAgentRepository:
             "llm_review_counts": dict(sorted(llm_review_counts.items())),
             "review_quality_counts": dict(sorted(review_quality_counts.items())),
             "review_quality_flag_counts": dict(sorted(review_quality_flag_counts.items())),
+            "human_feedback_counts": dict(sorted(human_feedback_counts.items())),
+            "human_feedback_reviewed_count": sum(human_feedback_counts.values()),
             "review_quality_score_avg": (
                 round(review_quality_score_total / review_quality_score_count, 2)
                 if review_quality_score_count > 0
@@ -1036,6 +1107,14 @@ class StockSelectionAgentRepository:
                 .order_by(StockSelectionAgentTradePlan.id.asc())
             ).scalars().all()
             payload = self._run_to_dict(run)
+            feedback = session.execute(
+                select(StockSelectionAgentRunFeedback)
+                .where(StockSelectionAgentRunFeedback.run_id == run.id)
+                .limit(1)
+            ).scalar_one_or_none()
+            payload["human_feedback"] = (
+                self._feedback_to_dict(feedback) if feedback is not None else None
+            )
             payload["decisions"] = [self._decision_to_dict(row) for row in decisions]
             payload["trade_plans"] = [self._trade_plan_to_dict(row) for row in plans]
             diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), dict) else {}
@@ -1227,6 +1306,29 @@ class StockSelectionAgentRepository:
                         + (f", error={error}" if error else "")
                     ),
                     "timestamp": completed_at,
+                }
+            )
+        human_feedback = (
+            run.get("human_feedback") if isinstance(run.get("human_feedback"), dict) else None
+        )
+        if human_feedback:
+            verdict = str(human_feedback.get("verdict") or "unknown")
+            reviewer = str(human_feedback.get("reviewer") or "").strip()
+            timeline.append(
+                {
+                    "stage": "human_feedback",
+                    "status": verdict,
+                    "message": (
+                        f"Human review {verdict}"
+                        + (f" by {reviewer}" if reviewer else "")
+                    ),
+                    "timestamp": human_feedback.get("updated_at") or human_feedback.get("created_at"),
+                    "details": {
+                        "verdict": verdict,
+                        "note": human_feedback.get("note"),
+                        "reviewer": human_feedback.get("reviewer"),
+                        "source": human_feedback.get("source"),
+                    },
                 }
             )
         return timeline
@@ -1733,6 +1835,34 @@ class StockSelectionAgentRepository:
             "created_at": row.created_at,
             "updated_at": row.updated_at,
         }
+
+    @classmethod
+    def _feedback_to_dict(cls, row: StockSelectionAgentRunFeedback) -> Dict[str, Any]:
+        return {
+            "id": int(row.id),
+            "run_id": int(row.run_id),
+            "verdict": row.verdict,
+            "note": row.note,
+            "reviewer": row.reviewer,
+            "source": row.source,
+            "created_at": row.created_at,
+            "updated_at": row.updated_at,
+        }
+
+    @classmethod
+    def _feedback_by_run_ids(
+        cls,
+        session: Any,
+        run_ids: List[int],
+    ) -> Dict[int, Dict[str, Any]]:
+        normalized = sorted({int(run_id) for run_id in run_ids if run_id is not None})
+        if not normalized:
+            return {}
+        rows = session.execute(
+            select(StockSelectionAgentRunFeedback)
+            .where(StockSelectionAgentRunFeedback.run_id.in_(normalized))
+        ).scalars().all()
+        return {int(row.run_id): cls._feedback_to_dict(row) for row in rows}
 
     @classmethod
     def _decision_to_dict(cls, row: StockSelectionAgentDecision) -> Dict[str, Any]:

@@ -585,10 +585,31 @@ export type VnpyPaperAgentRunSummary = {
   error?: string | null;
   settings?: Record<string, unknown>;
   diagnostics?: Record<string, unknown>;
+  humanFeedback?: VnpyPaperAgentRunFeedback | null;
   startedAt?: string | null;
   completedAt?: string | null;
   createdAt?: string | null;
   updatedAt?: string | null;
+};
+
+export type VnpyPaperAgentRunFeedbackVerdict = 'approved' | 'needs_changes' | 'rejected';
+
+export type VnpyPaperAgentRunFeedback = {
+  id: number;
+  runId: number;
+  verdict: VnpyPaperAgentRunFeedbackVerdict;
+  note?: string | null;
+  reviewer?: string | null;
+  source: string;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+};
+
+export type VnpyPaperAgentRunFeedbackResponse = {
+  accepted: boolean;
+  runUid: string;
+  humanFeedback: VnpyPaperAgentRunFeedback;
+  runDetail: VnpyPaperAgentRunDetail;
 };
 
 export type VnpyPaperAgentDecision = {
@@ -693,6 +714,8 @@ export type VnpyPaperAgentDailySummary = {
   reviewQualityCounts: Record<string, number>;
   reviewQualityFlagCounts: Record<string, number>;
   reviewQualityScoreAvg?: number | null;
+  humanFeedbackCounts: Record<string, number>;
+  humanFeedbackReviewedCount: number;
   workflowStatusCounts: Record<string, number>;
   workflowStageCounts: Record<string, number>;
   tradePlanStatusCounts: Record<string, number>;
@@ -1528,6 +1551,25 @@ export const vnpyPaperTradingApi = {
       { max_output_tokens: maxOutputTokens },
     );
     return toCamelCase<VnpyPaperAgentRunRecapResponse>(response.data);
+  },
+
+  async updateAgentRunFeedback(
+    runUid: string,
+    payload: {
+      verdict: VnpyPaperAgentRunFeedbackVerdict;
+      note?: string;
+      reviewer?: string;
+    },
+  ): Promise<VnpyPaperAgentRunFeedbackResponse> {
+    const response = await apiClient.put<Record<string, unknown>>(
+      `/api/v1/vnpy-paper/agent-runs/${runUid}/feedback`,
+      {
+        verdict: payload.verdict,
+        note: payload.note?.trim() || null,
+        reviewer: payload.reviewer?.trim() || null,
+      },
+    );
+    return toCamelCase<VnpyPaperAgentRunFeedbackResponse>(response.data);
   },
 
   async getAgentRun(runUid: string): Promise<VnpyPaperAgentRunDetail> {

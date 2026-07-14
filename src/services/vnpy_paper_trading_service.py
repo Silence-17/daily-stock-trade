@@ -5214,6 +5214,7 @@ class VnpyPaperTradingService:
         )
         status_counts: Counter[str] = Counter()
         quality_counts: Counter[str] = Counter()
+        human_feedback_counts: Counter[str] = Counter()
         candidate_count = 0
         planned_count = 0
         submitted_count = 0
@@ -5234,6 +5235,14 @@ class VnpyPaperTradingService:
             )
             quality = str(data_quality.get("status") or "unknown").strip().lower() or "unknown"
             quality_counts[quality] += 1
+            human_feedback = (
+                item.get("human_feedback")
+                if isinstance(item.get("human_feedback"), dict)
+                else {}
+            )
+            feedback_verdict = str(human_feedback.get("verdict") or "").strip().lower()
+            if feedback_verdict:
+                human_feedback_counts[feedback_verdict] += 1
             item_candidates = int(item.get("candidate_count") or 0)
             item_planned = int(item.get("planned_count") or 0)
             item_submitted = int(item.get("submitted_count") or 0)
@@ -5253,9 +5262,19 @@ class VnpyPaperTradingService:
                 "submitted_count": item_submitted,
                 "skipped_count": item_skipped,
                 "error": str(item.get("error") or "")[:160] or None,
+                "human_feedback": (
+                    {
+                        "verdict": feedback_verdict,
+                        "note": str(human_feedback.get("note") or "")[:240] or None,
+                        "reviewer": human_feedback.get("reviewer"),
+                        "updated_at": human_feedback.get("updated_at"),
+                    }
+                    if feedback_verdict
+                    else None
+                ),
             })
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "scope": "same_trigger_strategy_market",
             "strategy": settings.auto_strategy,
             "market": settings.auto_market,
@@ -5263,6 +5282,13 @@ class VnpyPaperTradingService:
             "run_count": len(recent),
             "status_counts": dict(sorted(status_counts.items())),
             "data_quality_counts": dict(sorted(quality_counts.items())),
+            "human_feedback_counts": dict(sorted(human_feedback_counts.items())),
+            "human_feedback_reviewed_count": sum(human_feedback_counts.values()),
+            "human_feedback_attention_required": bool(
+                human_feedback_counts.get("rejected", 0)
+                or human_feedback_counts.get("needs_changes", 0)
+            ),
+            "human_feedback_policy": "context_only_never_bypasses_risk_gates",
             "candidate_count": candidate_count,
             "planned_count": planned_count,
             "submitted_count": submitted_count,
@@ -5275,6 +5301,14 @@ class VnpyPaperTradingService:
             "current_failure_streak": failure_streak,
             "latest_run_uid": compact_runs[0]["run_uid"] if compact_runs else None,
             "latest_status": compact_runs[0]["status"] if compact_runs else None,
+            "latest_human_feedback": next(
+                (
+                    item["human_feedback"]
+                    for item in compact_runs
+                    if isinstance(item.get("human_feedback"), dict)
+                ),
+                None,
+            ),
             "runs": compact_runs,
         }
 

@@ -4,13 +4,16 @@ import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import {
   Bot,
   ChartNoAxesCombined,
+  CheckCircle2,
   Clock3,
   Download,
   ListChecks,
+  MessageSquareWarning,
   RefreshCw,
   Search,
   ShieldAlert,
   Sparkles,
+  XCircle,
 } from 'lucide-react';
 import {
   vnpyPaperTradingApi,
@@ -20,6 +23,7 @@ import {
   type VnpyPaperAgentDataQualityTrends,
   type VnpyPaperAgentDecision,
   type VnpyPaperAgentRunDetail,
+  type VnpyPaperAgentRunFeedbackVerdict,
   type VnpyPaperAgentRunFilters,
   type VnpyPaperAgentRunSummary,
   type VnpyPaperAgentTimelineEvent,
@@ -41,6 +45,8 @@ import { AppPage, Button, InlineAlert } from '../components/common';
 const INPUT_CLASS =
   'h-10 w-full rounded-xl border border-border bg-surface px-3 text-sm text-foreground outline-none transition-colors focus:border-cyan disabled:cursor-not-allowed disabled:opacity-60';
 const SELECT_CLASS = `${INPUT_CLASS} appearance-none`;
+const TEXTAREA_CLASS =
+  'min-h-24 w-full resize-y rounded-lg border border-border bg-surface px-3 py-2 text-sm text-foreground outline-none transition-colors focus:border-cyan disabled:cursor-not-allowed disabled:opacity-60';
 const AGENT_RUN_PAGE_SIZE = 25;
 
 type AgentRunFilterForm = {
@@ -335,6 +341,10 @@ const AgentConsolePage: React.FC = () => {
   const [detailLoading, setDetailLoading] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [recapLoading, setRecapLoading] = useState(false);
+  const [feedbackSaving, setFeedbackSaving] = useState(false);
+  const [feedbackVerdict, setFeedbackVerdict] = useState<VnpyPaperAgentRunFeedbackVerdict>('approved');
+  const [feedbackReviewer, setFeedbackReviewer] = useState('');
+  const [feedbackNote, setFeedbackNote] = useState('');
   const [backtestLoading, setBacktestLoading] = useState(false);
   const [backtestIncludeSkipped, setBacktestIncludeSkipped] = useState(true);
   const [backtestResult, setBacktestResult] = useState<VnpyPaperAgentBacktestResponse | null>(null);
@@ -438,6 +448,13 @@ const AgentConsolePage: React.FC = () => {
     }
   }, [initialRunUid, loadRunDetail, loadRuns]);
 
+  useEffect(() => {
+    const feedback = selectedRun?.humanFeedback;
+    setFeedbackVerdict(feedback?.verdict || 'approved');
+    setFeedbackReviewer(feedback?.reviewer || '');
+    setFeedbackNote(feedback?.note || '');
+  }, [selectedRun?.runUid, selectedRun?.humanFeedback]);
+
   const stats = useMemo(() => {
     return runs.reduce(
       (acc, item) => {
@@ -475,6 +492,9 @@ const AgentConsolePage: React.FC = () => {
     .join(' / ') || '-';
   const dailyReviewQualityFlags = Object.entries(dailySummary?.reviewQualityFlagCounts || {});
   const dailyReviewQualityScore = dailySummary?.reviewQualityScoreAvg;
+  const dailyHumanFeedbackHint = Object.entries(dailySummary?.humanFeedbackCounts || {})
+    .map(([key, value]) => `${key} ${value}`)
+    .join(' / ') || '-';
   const dailyWorkflowStages = Object.entries(dailySummary?.workflowStageCounts || {});
   const dailyTopSymbols = dailySummary?.topSymbols || [];
 
@@ -604,6 +624,36 @@ const AgentConsolePage: React.FC = () => {
       setError(toApiErrorMessage(err, 'LLM 复盘生成失败'));
     } finally {
       setRecapLoading(false);
+    }
+  };
+
+  const handleSaveFeedback = async () => {
+    if (!selectedRun) return;
+    const runUid = selectedRun.runUid;
+    setFeedbackSaving(true);
+    setError('');
+    setSuccess('');
+    try {
+      const payload = await vnpyPaperTradingApi.updateAgentRunFeedback(runUid, {
+        verdict: feedbackVerdict,
+        reviewer: feedbackReviewer,
+        note: feedbackNote,
+      });
+      setSelectedRun(payload.runDetail);
+      setRuns((items) => items.map((item) => (
+        item.runUid === runUid
+          ? { ...item, humanFeedback: payload.humanFeedback }
+          : item
+      )));
+      setSuccess(`已保存 ${runUid} 人工验收结论`);
+      const refreshedSummary = await vnpyPaperTradingApi
+        .getAgentDailySummary(undefined, buildFilters(filters))
+        .catch(() => null);
+      if (refreshedSummary) setDailySummary(refreshedSummary);
+    } catch (err) {
+      setError(toApiErrorMessage(err, '人工验收结论保存失败'));
+    } finally {
+      setFeedbackSaving(false);
     }
   };
 
@@ -1443,7 +1493,7 @@ const AgentConsolePage: React.FC = () => {
           </div>
           {renderStatusBadge(dailySummary?.health || 'idle', dailySummary?.health || 'idle')}
         </div>
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-7">
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-8">
           <StatTile label="今日运行" value={dailySummary?.runCount ?? 0} hint={dailyStatusHint} />
           <StatTile
             label="候选 / 计划"
@@ -1474,6 +1524,11 @@ const AgentConsolePage: React.FC = () => {
             label="复核质量"
             value={dailyReviewQualityScore == null ? '-' : formatNumber(dailyReviewQualityScore, 1)}
             hint={dailyReviewQualityHint}
+          />
+          <StatTile
+            label="人工验收"
+            value={dailySummary?.humanFeedbackReviewedCount ?? 0}
+            hint={dailyHumanFeedbackHint}
           />
         </div>
         <div className="grid gap-3 lg:grid-cols-4">
@@ -1877,6 +1932,87 @@ const AgentConsolePage: React.FC = () => {
                   hint={selectedReviewQualityScore == null ? undefined : `score ${formatNumber(selectedReviewQualityScore, 1)}`}
                 />
               </div>
+
+              <section
+                data-testid="agent-human-feedback"
+                className="rounded-lg border border-border bg-surface px-3 py-3"
+              >
+                <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                  <div>
+                    <div className="flex items-center gap-2 text-sm font-semibold text-foreground">
+                      <MessageSquareWarning className="h-4 w-4 text-cyan" />
+                      人工验收
+                      {selectedRun.humanFeedback?.verdict
+                        ? renderStatusBadge(selectedRun.humanFeedback.verdict)
+                        : renderStatusBadge('idle', '未验收')}
+                    </div>
+                    <p className="mt-1 text-xs text-secondary-text">
+                      结论会进入后续 Agent 运行上下文，但不会绕过数据质量、仓位或交易风控。
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap gap-2" role="group" aria-label="人工验收结论">
+                    <Button
+                      size="xsm"
+                      variant={feedbackVerdict === 'approved' ? 'primary' : 'outline'}
+                      onClick={() => setFeedbackVerdict('approved')}
+                      disabled={feedbackSaving}
+                    >
+                      <CheckCircle2 className="h-3.5 w-3.5" />
+                      通过
+                    </Button>
+                    <Button
+                      size="xsm"
+                      variant={feedbackVerdict === 'needs_changes' ? 'primary' : 'outline'}
+                      onClick={() => setFeedbackVerdict('needs_changes')}
+                      disabled={feedbackSaving}
+                    >
+                      <MessageSquareWarning className="h-3.5 w-3.5" />
+                      需修改
+                    </Button>
+                    <Button
+                      size="xsm"
+                      variant={feedbackVerdict === 'rejected' ? 'danger' : 'outline'}
+                      onClick={() => setFeedbackVerdict('rejected')}
+                      disabled={feedbackSaving}
+                    >
+                      <XCircle className="h-3.5 w-3.5" />
+                      驳回
+                    </Button>
+                  </div>
+                </div>
+                <div className="mt-3 grid gap-3 lg:grid-cols-[minmax(0,1fr)_14rem]">
+                  <textarea
+                    data-testid="agent-human-feedback-note"
+                    className={TEXTAREA_CLASS}
+                    maxLength={2000}
+                    value={feedbackNote}
+                    onChange={(event) => setFeedbackNote(event.target.value)}
+                    placeholder="记录需要保留、修改或拒绝的原因"
+                    disabled={feedbackSaving}
+                  />
+                  <div className="space-y-3">
+                    <input
+                      data-testid="agent-human-feedback-reviewer"
+                      className={INPUT_CLASS}
+                      maxLength={80}
+                      value={feedbackReviewer}
+                      onChange={(event) => setFeedbackReviewer(event.target.value)}
+                      placeholder="审阅人（可选）"
+                      disabled={feedbackSaving}
+                    />
+                    <Button
+                      className="w-full"
+                      onClick={() => void handleSaveFeedback()}
+                      disabled={feedbackSaving}
+                      isLoading={feedbackSaving}
+                      loadingText="保存中..."
+                    >
+                      <CheckCircle2 className="h-4 w-4" />
+                      保存验收结论
+                    </Button>
+                  </div>
+                </div>
+              </section>
 
               {selectedPlan || selectedSummary || selectedWorkflow || selectedLlmRecap ? (
                 <div className="grid gap-3 lg:grid-cols-2">
