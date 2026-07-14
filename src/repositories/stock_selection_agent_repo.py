@@ -222,7 +222,7 @@ class StockSelectionAgentRepository:
         include_skipped: bool = True,
         limit: int = 500,
     ) -> Dict[str, Any]:
-        """Return persisted buy decisions with their run metadata for forward evaluation."""
+        """Return persisted buy intents, including audited skips when requested."""
 
         limit = max(1, min(2000, int(limit or 500)))
         strategy_value = str(strategy or "").strip()
@@ -234,9 +234,12 @@ class StockSelectionAgentRepository:
             query = (
                 select(StockSelectionAgentDecision, StockSelectionAgentRun)
                 .join(StockSelectionAgentRun, StockSelectionAgentRun.id == StockSelectionAgentDecision.run_id)
-                .where(StockSelectionAgentDecision.action == "buy")
                 .where(StockSelectionAgentDecision.symbol.is_not(None))
             )
+            if include_skipped:
+                query = query.where(StockSelectionAgentDecision.action.in_(["buy", "skip"]))
+            else:
+                query = query.where(StockSelectionAgentDecision.action == "buy")
             if strategy_value:
                 query = query.where(StockSelectionAgentRun.strategy == strategy_value)
             if market_value:

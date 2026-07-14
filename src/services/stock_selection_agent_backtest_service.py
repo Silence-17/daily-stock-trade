@@ -204,6 +204,12 @@ class StockSelectionAgentBacktestService:
                         )
                 horizons[str(window)] = evaluation
 
+            order_result = (
+                decision.get("order_result")
+                if isinstance(decision.get("order_result"), dict)
+                else {}
+            )
+
             items.append(
                 {
                     "decision_id": decision.get("id"),
@@ -221,6 +227,7 @@ class StockSelectionAgentBacktestService:
                     "anchor_price": start_price,
                     "daily_code": matched_code,
                     "forward_bar_count": len(bars),
+                    "reviews": self._decision_reviews(order_result),
                     "horizons": horizons,
                 }
             )
@@ -240,6 +247,7 @@ class StockSelectionAgentBacktestService:
                 )
                 for window in windows
             }
+        review_quality_matrix = self._build_review_quality_matrix(items, windows=windows)
 
         return {
             "generated_at": datetime.now(),
@@ -251,6 +259,9 @@ class StockSelectionAgentBacktestService:
                 "lookahead_protection": True,
                 "reruns_historical_strategy": False,
                 "includes_fees_or_slippage": False,
+                "review_grouping": "source_model_prompt_evaluator_version",
+                "passed_precision_rule": "completed_passed_reviews_with_hit_or_win_outcome",
+                "blocked_avoidance_rule": "completed_blocked_reviews_with_miss_or_loss_outcome",
             },
             "filters": {
                 "strategy": strategy,
@@ -270,8 +281,154 @@ class StockSelectionAgentBacktestService:
             "status_counts": dict(Counter(str(item.get("decision_status") or "unknown") for item in items)),
             "matrix": matrix,
             "strategy_matrix": strategy_matrix,
+            "review_quality_matrix": review_quality_matrix,
             "items": items,
         }
+
+    @classmethod
+    def _decision_reviews(cls, order_result: Dict[str, Any]) -> List[Dict[str, Any]]:
+        reviews: List[Dict[str, Any]] = []
+        definitions = (
+            ("rule_agent", order_result.get("agent_review")),
+            ("llm", order_result.get("llm_review")),
+        )
+        for source, raw in definitions:
+            if not isinstance(raw, dict):
+                continue
+            status = str(raw.get("status") or "unknown").strip().lower() or "unknown"
+            reviewer = str(raw.get("reviewer") or "unknown").strip() or "unknown"
+            model = str(raw.get("model") or "").strip() or None
+            prompt_version = str(raw.get("prompt_version") or "").strip() or None
+            evaluator_version = str(raw.get("evaluator_version") or "").strip() or None
+            identity = model or reviewer
+            version_parts = [value for value in (prompt_version, evaluator_version) if value]
+            schema_version = str(raw.get("schema_version") or "1").strip() or "1"
+            version = "/".join(version_parts) or f"schema_v{schema_version}"
+            reviews.append(
+                {
+                    "key": f"{source}:{identity}:{version}",
+                    "source": source,
+                    "reviewer": reviewer,
+                    "model": model,
+                    "status": status,
+                    "prompt_version": prompt_version,
+                    "evaluator_version": evaluator_version,
+                    "version": version,
+                }
+            )
+        return reviews
+
+    @classmethod
+    def _build_review_quality_matrix(
+        cls,
+        items: List[Dict[str, Any]],
+        *,
+        windows: List[int],
+    ) -> List[Dict[str, Any]]:
+        groups: Dict[str, Dict[str, Any]] = {}
+        for item in items:
+            for review in item.get("reviews") or []:
+                key = str(review.get("key") or "").strip()
+                if not key:
+                    continue
+                group = groups.setdefault(
+                    key,
+                    {
+                        "key": key,
+                        "source": review.get("source"),
+                        "reviewer": review.get("reviewer"),
+                        "model": review.get("model"),
+                        "prompt_version": review.get("prompt_version"),
+                        "evaluator_version": review.get("evaluator_version"),
+                        "version": review.get("version"),
+                        "status_counts": Counter(),
+                        "samples": [],
+                    },
+                )
+                group["status_counts"][str(review.get("status") or "unknown")] += 1
+                group["samples"].append((item, review))
+
+        result: List[Dict[str, Any]] = []
+        for key in sorted(groups):
+            group = groups[key]
+            samples = group.pop("samples")
+            status_counts = group.pop("status_counts")
+            horizons = {
+                str(window): cls._summarize_review_samples(samples, window=window)
+                for window in windows
+            }
+            result.append(
+                {
+                    **group,
+                    "sample_count": len(samples),
+                    "status_counts": dict(sorted(status_counts.items())),
+                    "horizons": horizons,
+                }
+            )
+        return result
+
+    @classmethod
+    def _summarize_review_samples(
+        cls,
+        samples: List[tuple[Dict[str, Any], Dict[str, Any]]],
+        *,
+        window: int,
+    ) -> Dict[str, Any]:
+        completed: List[tuple[Dict[str, Any], Dict[str, Any]]] = []
+        unable_reasons: Counter[str] = Counter()
+        for item, review in samples:
+            evaluation = dict(item.get("horizons", {}).get(str(window)) or {})
+            if evaluation.get("eval_status") == "completed":
+                completed.append((evaluation, review))
+            else:
+                unable_reasons[str(evaluation.get("unable_reason") or "unknown")] += 1
+
+        passed = [sample for sample in completed if sample[1].get("status") == "passed"]
+        blocked = [sample for sample in completed if sample[1].get("status") == "blocked"]
+        passed_returns = [
+            value
+            for value in (cls._finite_float(sample[0].get("stock_return_pct")) for sample in passed)
+            if value is not None
+        ]
+        blocked_returns = [
+            value
+            for value in (cls._finite_float(sample[0].get("stock_return_pct")) for sample in blocked)
+            if value is not None
+        ]
+        passed_average = cls._average(passed_returns)
+        blocked_average = cls._average(blocked_returns)
+        return {
+            "eval_window_days": window,
+            "sample_count": len(samples),
+            "completed_count": len(completed),
+            "coverage_pct": cls._pct(len(completed), len(samples)),
+            "passed_completed_count": len(passed),
+            "blocked_completed_count": len(blocked),
+            "passed_precision_pct": cls._pct(
+                sum(1 for evaluation, _review in passed if cls._is_winning_outcome(evaluation)),
+                len(passed),
+            ),
+            "blocked_avoidance_rate_pct": cls._pct(
+                sum(1 for evaluation, _review in blocked if cls._is_losing_outcome(evaluation)),
+                len(blocked),
+            ),
+            "passed_average_return_pct": passed_average,
+            "blocked_average_return_pct": blocked_average,
+            "return_spread_pct": (
+                round(passed_average - blocked_average, 6)
+                if passed_average is not None and blocked_average is not None
+                else None
+            ),
+            "unable_reason_counts": dict(unable_reasons),
+        }
+
+    @staticmethod
+    def _is_winning_outcome(evaluation: Dict[str, Any]) -> bool:
+        return str(evaluation.get("outcome") or "").strip().lower() in {"hit", "win"}
+
+    @staticmethod
+    def _is_losing_outcome(evaluation: Dict[str, Any]) -> bool:
+        return str(evaluation.get("outcome") or "").strip().lower() in {"miss", "loss"}
 
     def _load_forward_bars(
         self,

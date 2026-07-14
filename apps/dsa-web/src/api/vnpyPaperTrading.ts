@@ -806,6 +806,34 @@ export type VnpyPaperAgentBacktestMetric = {
   unableReasonCounts: Record<string, number>;
 };
 
+export type VnpyPaperAgentReviewQualityMetric = {
+  evalWindowDays: number;
+  sampleCount: number;
+  completedCount: number;
+  coveragePct?: number | null;
+  passedCompletedCount: number;
+  blockedCompletedCount: number;
+  passedPrecisionPct?: number | null;
+  blockedAvoidanceRatePct?: number | null;
+  passedAverageReturnPct?: number | null;
+  blockedAverageReturnPct?: number | null;
+  returnSpreadPct?: number | null;
+  unableReasonCounts: Record<string, number>;
+};
+
+export type VnpyPaperAgentReviewQualityGroup = {
+  key: string;
+  source: string;
+  reviewer: string;
+  model?: string | null;
+  promptVersion?: string | null;
+  evaluatorVersion?: string | null;
+  version: string;
+  sampleCount: number;
+  statusCounts: Record<string, number>;
+  horizons: Record<string, VnpyPaperAgentReviewQualityMetric>;
+};
+
 export type VnpyPaperAgentBacktestResponse = {
   generatedAt: string;
   methodology: Record<string, unknown>;
@@ -817,6 +845,7 @@ export type VnpyPaperAgentBacktestResponse = {
   statusCounts: Record<string, number>;
   matrix: Record<string, VnpyPaperAgentBacktestMetric>;
   strategyMatrix: Record<string, Record<string, VnpyPaperAgentBacktestMetric>>;
+  reviewQualityMatrix: VnpyPaperAgentReviewQualityGroup[];
   items: Array<Record<string, unknown>>;
 };
 

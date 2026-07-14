@@ -1081,6 +1081,65 @@ const AgentConsolePage: React.FC = () => {
               <span>前视保护 {backtestResult.methodology.lookaheadProtection ? '已启用' : '未启用'}</span>
               {backtestResult.truncated ? <span className="text-warning">结果已截断</span> : null}
             </div>
+            {backtestResult.reviewQualityMatrix?.length ? (
+              <div className="space-y-2 border-t border-border pt-3" data-testid="agent-review-quality-matrix">
+                <div>
+                  <h3 className="text-sm font-semibold text-foreground">长周期复核质量</h3>
+                  <p className="mt-1 text-xs text-secondary-text">
+                    按规则复核、LLM 模型及提示词/评估器版本分组；仅统计成熟后向样本
+                  </p>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="min-w-[880px] w-full text-left text-xs">
+                    <thead className="border-b border-border text-secondary-text">
+                      <tr>
+                        <th className="px-3 py-2 font-medium">复核来源</th>
+                        <th className="px-3 py-2 font-medium">状态样本</th>
+                        {Object.keys(backtestResult.matrix)
+                          .sort((left, right) => Number(left) - Number(right))
+                          .map((window) => (
+                            <th key={window} className="px-3 py-2 font-medium">{window} 日</th>
+                          ))}
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-border">
+                      {backtestResult.reviewQualityMatrix.map((group) => (
+                        <tr key={group.key}>
+                          <td className="px-3 py-3 align-top">
+                            <div className="font-semibold text-foreground">
+                              {group.source === 'llm' ? group.model || group.reviewer : group.reviewer}
+                            </div>
+                            <div className="mt-1 max-w-64 break-all text-secondary-text">{group.version}</div>
+                          </td>
+                          <td className="px-3 py-3 align-top text-secondary-text">
+                            {Object.entries(group.statusCounts)
+                              .map(([status, count]) => `${status} ${count}`)
+                              .join(' / ') || '-'}
+                          </td>
+                          {Object.keys(backtestResult.matrix)
+                            .sort((left, right) => Number(left) - Number(right))
+                            .map((window) => {
+                              const metric = group.horizons[window];
+                              return (
+                                <td key={window} className="px-3 py-3 align-top text-secondary-text">
+                                  {metric ? (
+                                    <div className="space-y-1">
+                                      <div>通过精度 {formatPercent(metric.passedPrecisionPct)}</div>
+                                      <div>阻断避损 {formatPercent(metric.blockedAvoidanceRatePct)}</div>
+                                      <div>收益差 {formatPercent(metric.returnSpreadPct)}</div>
+                                      <div>覆盖 {metric.completedCount}/{metric.sampleCount}</div>
+                                    </div>
+                                  ) : '-'}
+                                </td>
+                              );
+                            })}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            ) : null}
           </>
         ) : (
           <div className="border-t border-border pt-3 text-sm text-secondary-text">尚未运行评价</div>

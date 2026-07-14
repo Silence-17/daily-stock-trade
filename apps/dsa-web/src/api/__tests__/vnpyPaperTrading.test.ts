@@ -1584,6 +1584,30 @@ describe('vnpyPaperTradingApi', () => {
           },
         },
         strategy_matrix: {},
+        review_quality_matrix: [
+          {
+            key: 'llm:openai/model-a:prompt-v2/eval-v1',
+            source: 'llm',
+            reviewer: 'llm_reviewer_v1',
+            model: 'openai/model-a',
+            version: 'prompt-v2/eval-v1',
+            sample_count: 2,
+            status_counts: { passed: 1, blocked: 1 },
+            horizons: {
+              1: {
+                eval_window_days: 1,
+                sample_count: 2,
+                completed_count: 2,
+                passed_completed_count: 1,
+                blocked_completed_count: 1,
+                passed_precision_pct: 100,
+                blocked_avoidance_rate_pct: 100,
+                return_spread_pct: 6,
+                unable_reason_counts: {},
+              },
+            },
+          },
+        ],
         items: [],
       },
     });
@@ -1612,6 +1636,8 @@ describe('vnpyPaperTradingApi', () => {
     expect(result.scannedCount).toBe(2);
     expect(result.methodology.lookaheadProtection).toBe(true);
     expect(result.matrix['1'].averageReturnPct).toBe(1.25);
+    expect(result.reviewQualityMatrix[0].model).toBe('openai/model-a');
+    expect(result.reviewQualityMatrix[0].horizons['1'].blockedAvoidanceRatePct).toBe(100);
   });
 
   it('loads the current cross-run quality gate state', async () => {

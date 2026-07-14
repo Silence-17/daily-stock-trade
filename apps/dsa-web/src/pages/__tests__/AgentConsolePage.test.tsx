@@ -531,6 +531,35 @@ describe('AgentConsolePage', () => {
         },
       },
       strategyMatrix: {},
+      reviewQualityMatrix: [
+        {
+          key: 'llm:openai/model-a:prompt-v2/eval-v1',
+          source: 'llm',
+          reviewer: 'llm_reviewer_v1',
+          model: 'openai/model-a',
+          promptVersion: 'prompt-v2',
+          evaluatorVersion: 'eval-v1',
+          version: 'prompt-v2/eval-v1',
+          sampleCount: 2,
+          statusCounts: { blocked: 1, passed: 1 },
+          horizons: {
+            1: {
+              evalWindowDays: 1,
+              sampleCount: 2,
+              completedCount: 2,
+              coveragePct: 100,
+              passedCompletedCount: 1,
+              blockedCompletedCount: 1,
+              passedPrecisionPct: 100,
+              blockedAvoidanceRatePct: 100,
+              passedAverageReturnPct: 3.5,
+              blockedAverageReturnPct: -2.5,
+              returnSpreadPct: 6,
+              unableReasonCounts: {},
+            },
+          },
+        },
+      ],
       items: [],
     });
     const replayCompatibility = {
@@ -882,6 +911,10 @@ describe('AgentConsolePage', () => {
     }));
     expect(await screen.findByTestId('agent-backtest-matrix')).toHaveTextContent('3.5%');
     expect(screen.getByTestId('agent-backtest-panel')).toHaveTextContent('前视保护 已启用');
+    expect(screen.getByTestId('agent-review-quality-matrix')).toHaveTextContent('openai/model-a');
+    expect(screen.getByTestId('agent-review-quality-matrix')).toHaveTextContent('prompt-v2/eval-v1');
+    expect(screen.getByTestId('agent-review-quality-matrix')).toHaveTextContent('阻断避损 100.0%');
+    expect(screen.getByTestId('agent-review-quality-matrix')).toHaveTextContent('收益差 6.0%');
   });
 
   it('checks point-in-time factor coverage and runs strategy replay', async () => {

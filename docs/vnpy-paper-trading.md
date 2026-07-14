@@ -119,6 +119,7 @@
 - `GET /agent-runs/daily-summary?date=2026-07-06`：聚合某一天的自动选股 Agent 运行摘要，返回 run 数、候选/计划/成交/跳过计数、状态分布、执行模式分布、数据质量分布、Agent 复核状态、LLM 复核状态、复核质量状态/风险标记/平均分、工作流状态/阶段分布、交易计划状态、主要跳过原因和热门标的；当复核质量出现 `guarded` 或 `needs_review` 时，摘要 `health` 会进入 `warning`；支持 `trigger_source`、`strategy`、`market`、`status` 过滤。
 - `GET /agent-runs/data-quality-trends?days=30`：按 1 至 90 天窗口汇总跨 run 的整体筛选数据质量、降级率、警告/source error、逐日趋势和来源级 `source_health_items`；支持 `trigger_source`、`strategy`、`market`、`status` 过滤，最多扫描 5000 条，`truncated=true` 表示结果已截断。
 - `GET /agent-runs/cross-run-quality`：按当前保存的策略、市场和前瞻门禁参数，只读计算当前跨运行前瞻状态、成熟样本、覆盖率、胜率、收益、状态迁移与是否会阻断下一轮新增买入；不创建 Agent run、不联网补数、不提交订单。
+- `POST /agent-runs/backtest`：除候选与策略的 1/5/10/20 交易日前瞻矩阵外，还返回 `review_quality_matrix`。该矩阵按规则 reviewer 或 LLM model、`prompt_version`、`evaluator_version` 分组，分别计算成熟样本覆盖率、通过精度、阻断避损率、通过/阻断平均收益与收益差；`include_skipped=true` 会纳入真实 `action=skip` 风控阻断候选，但仍只读取决策日之后的本地日线。
 - `GET /agent-runs/export?limit=50&include_details=true`：导出最近 Agent run；`include_details=true` 时内联候选决策、交易计划和时间线；同样支持 `trigger_source`、`strategy`、`market`、`status`、`created_from` 和 `created_to` 过滤。
 - `GET /agent-runs/{run_uid}`：读取单次运行的候选决策、交易计划、风控/跳过原因和模拟成交关联。
 - `POST /agent-runs/{run_uid}/llm-recap`：基于该 run 的结构化审计数据生成一次可选 LLM 复盘，并写入 `diagnostics.llm_recap`；请求体支持 `max_output_tokens`（200~2000，默认 800）。LLM 不可用、空响应或调用失败时返回 `accepted=false` 和失败原因，不改变订单、交易计划或自动交易状态。

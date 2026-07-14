@@ -50,6 +50,8 @@ class StockSelectionAgentBacktestServiceTestCase(unittest.TestCase):
         status: str,
         price: float | None,
         created_at: datetime,
+        order_result: dict | None = None,
+        action: str = "buy",
     ) -> int:
         run = self.repo.create_run(
             run_uid=run_uid,
@@ -62,10 +64,11 @@ class StockSelectionAgentBacktestServiceTestCase(unittest.TestCase):
             sequence=1,
             symbol=symbol,
             market="cn",
-            action="buy",
+            action=action,
             status=status,
             score=80,
             price=price,
+            order_result=order_result,
         )
         with self.db.get_session() as session:
             row = session.get(StockSelectionAgentDecision, decision["id"])
@@ -107,6 +110,83 @@ class StockSelectionAgentBacktestServiceTestCase(unittest.TestCase):
         self.assertEqual(result["matrix"]["2"]["loss_count"], 1)
         self.assertEqual(result["strategy_matrix"]["dual_low"]["1"]["coverage_pct"], 100.0)
 
+    def test_review_quality_matrix_separates_rule_and_llm_versions_across_horizons(self) -> None:
+        rule_passed = {
+            "agent_review": {
+                "schema_version": 1,
+                "status": "passed",
+                "reviewer": "rule_agent_v1",
+            },
+            "llm_review": {
+                "schema_version": 1,
+                "status": "passed",
+                "reviewer": "llm_reviewer_v1",
+                "model": "openai/model-a",
+                "prompt_version": "prompt-v2",
+                "evaluator_version": "eval-v1",
+            },
+        }
+        rule_blocked = {
+            "agent_review": {
+                "schema_version": 1,
+                "status": "blocked",
+                "reviewer": "rule_agent_v1",
+            },
+            "llm_review": {
+                "schema_version": 1,
+                "status": "blocked",
+                "reviewer": "llm_reviewer_v1",
+                "model": "openai/model-b",
+                "prompt_version": "prompt-v2",
+                "evaluator_version": "eval-v1",
+            },
+        }
+        self._record_decision(
+            run_uid="review-quality-pass",
+            strategy="dual_low",
+            symbol="600519",
+            status="filled",
+            price=100.0,
+            created_at=datetime(2024, 1, 1, 10, 0),
+            order_result=rule_passed,
+        )
+        self._record_decision(
+            run_uid="review-quality-block",
+            strategy="dual_low",
+            symbol="000001",
+            status="skipped",
+            price=10.0,
+            created_at=datetime(2024, 1, 1, 10, 0),
+            order_result=rule_blocked,
+            action="skip",
+        )
+        with self.db.get_session() as session:
+            session.add_all(
+                [
+                    StockDaily(code="600519", date=date(2024, 1, 2), high=106, low=99, close=105),
+                    StockDaily(code="600519", date=date(2024, 1, 3), high=111, low=104, close=110),
+                    StockDaily(code="000001", date=date(2024, 1, 2), high=10, low=8.8, close=9),
+                    StockDaily(code="000001", date=date(2024, 1, 3), high=9.2, low=7.8, close=8),
+                ]
+            )
+            session.commit()
+
+        result = self.service.evaluate(eval_windows=[1, 2], include_skipped=True)
+
+        groups = {item["key"]: item for item in result["review_quality_matrix"]}
+        rule = groups["rule_agent:rule_agent_v1:schema_v1"]
+        self.assertEqual(rule["sample_count"], 2)
+        self.assertEqual(rule["status_counts"], {"blocked": 1, "passed": 1})
+        self.assertEqual(rule["horizons"]["1"]["passed_precision_pct"], 100.0)
+        self.assertEqual(rule["horizons"]["1"]["blocked_avoidance_rate_pct"], 100.0)
+        self.assertEqual(rule["horizons"]["2"]["return_spread_pct"], 30.0)
+        self.assertIn("llm:openai/model-a:prompt-v2/eval-v1", groups)
+        self.assertIn("llm:openai/model-b:prompt-v2/eval-v1", groups)
+        self.assertEqual(
+            result["items"][0]["reviews"][0]["source"],
+            "rule_agent",
+        )
+
     def test_include_skipped_false_excludes_risk_rejected_candidates(self) -> None:
         anchor = datetime(2024, 1, 1, 10, 0)
         self._record_decision(
@@ -124,6 +204,7 @@ class StockSelectionAgentBacktestServiceTestCase(unittest.TestCase):
             status="skipped",
             price=10.0,
             created_at=anchor,
+            action="skip",
         )
 
         all_result = self.service.evaluate(eval_windows=[1], include_skipped=True)

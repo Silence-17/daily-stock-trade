@@ -2248,6 +2248,23 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
                 }
             },
             "strategy_matrix": {},
+            "review_quality_matrix": [
+                {
+                    "key": "llm:openai/model-a:prompt-v2/eval-v1",
+                    "source": "llm",
+                    "reviewer": "llm_reviewer_v1",
+                    "model": "openai/model-a",
+                    "version": "prompt-v2/eval-v1",
+                    "sample_count": 2,
+                    "status_counts": {"passed": 1, "blocked": 1},
+                    "horizons": {
+                        "1": {
+                            "passed_precision_pct": 100.0,
+                            "blocked_avoidance_rate_pct": 100.0,
+                        }
+                    },
+                }
+            ],
             "items": [],
         }
 
@@ -2272,6 +2289,7 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.json()["methodology"]["lookahead_protection"])
         self.assertEqual(response.json()["matrix"]["1"]["coverage_pct"], 50.0)
+        self.assertEqual(response.json()["review_quality_matrix"][0]["model"], "openai/model-a")
         service.evaluate.assert_called_once()
         call = service.evaluate.call_args.kwargs
         self.assertEqual(call["strategy"], "dual_low")

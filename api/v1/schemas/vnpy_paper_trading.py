@@ -675,6 +675,7 @@ class VnpyPaperAgentBacktestResponse(BaseModel):
     status_counts: Dict[str, int] = Field(default_factory=dict)
     matrix: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
     strategy_matrix: Dict[str, Dict[str, Dict[str, Any]]] = Field(default_factory=dict)
+    review_quality_matrix: List[Dict[str, Any]] = Field(default_factory=list)
     items: List[Dict[str, Any]] = Field(default_factory=list)
 
 
