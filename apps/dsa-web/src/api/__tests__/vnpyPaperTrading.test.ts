@@ -966,6 +966,67 @@ describe('vnpyPaperTradingApi', () => {
     });
   });
 
+  it('loads Agent return-risk calibration trends with filters', async () => {
+    get.mockResolvedValueOnce({
+      data: {
+        schema_version: 1,
+        window_days: 30,
+        total: 2,
+        scanned_count: 2,
+        observed_count: 2,
+        unknown_count: 0,
+        observation_rate_pct: 100,
+        health: 'ok',
+        state_counts: { healthy: 2 },
+        version_counts: { 'candidate-return-risk-v1': 2 },
+        market_counts: { cn: 2 },
+        strategy_counts: { dual_low: 2 },
+        transition_counts: {},
+        applied_count: 2,
+        applied_rate_pct: 100,
+        gate_blocked_count: 0,
+        utility_observation_count: 2,
+        average_utility_pct: 0.3,
+        minimum_utility_pct: 0.1,
+        maximum_utility_pct: 0.5,
+        latest_mature_sample_count: 8,
+        max_mature_sample_count: 9,
+        groups: [{
+          key: 'cn/dual_low/candidate-return-risk-v1',
+          market: 'cn',
+          strategy: 'dual_low',
+          version: 'candidate-return-risk-v1',
+          run_snapshot_count: 2,
+          state_counts: { healthy: 2 },
+          utility_observation_count: 2,
+          average_utility_pct: 0.3,
+          latest_state: 'healthy',
+        }],
+        daily: [{
+          date: '2026-07-15',
+          run_snapshot_count: 2,
+          state_counts: { healthy: 2 },
+          average_utility_pct: 0.3,
+        }],
+        truncated: false,
+        methodology: { overlapping_rolling_samples: true },
+      },
+    });
+
+    const result = await vnpyPaperTradingApi.getAgentReturnRiskCalibrationTrends(30, {
+      strategy: 'dual_low',
+      market: 'cn',
+    });
+
+    expect(get).toHaveBeenCalledWith(
+      '/api/v1/vnpy-paper/agent-runs/return-risk-calibration-trends',
+      { params: { days: 30, strategy: 'dual_low', market: 'cn' } },
+    );
+    expect(result.observedCount).toBe(2);
+    expect(result.groups[0].runSnapshotCount).toBe(2);
+    expect(result.daily[0].averageUtilityPct).toBe(0.3);
+  });
+
   it('generates an Agent run LLM recap', async () => {
     post.mockResolvedValueOnce({
       data: {

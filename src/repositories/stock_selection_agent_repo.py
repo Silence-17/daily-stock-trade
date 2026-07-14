@@ -1083,6 +1083,268 @@ class StockSelectionAgentRepository:
             },
         }
 
+    def summarize_return_risk_calibration_trends(
+        self,
+        *,
+        days: int = 30,
+        limit: int = 5000,
+        trigger_source: Optional[str] = None,
+        strategy: Optional[str] = None,
+        market: Optional[str] = None,
+        status: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Aggregate persisted cross-run return/risk snapshots without claiming independence."""
+
+        days = max(1, min(90, int(days or 30)))
+        limit = max(1, min(5000, int(limit or 5000)))
+        window_ended_at = datetime.now()
+        window_started_at = window_ended_at - timedelta(days=days)
+        with self.db.get_session() as session:
+            query = select(StockSelectionAgentRun).where(
+                StockSelectionAgentRun.created_at >= window_started_at,
+                StockSelectionAgentRun.created_at <= window_ended_at,
+            )
+            if trigger_source:
+                query = query.where(
+                    StockSelectionAgentRun.trigger_source == str(trigger_source).strip()
+                )
+            if strategy:
+                query = query.where(StockSelectionAgentRun.strategy == str(strategy).strip())
+            if market:
+                query = query.where(StockSelectionAgentRun.market == str(market).strip())
+            if status:
+                query = query.where(StockSelectionAgentRun.status == str(status).strip())
+            total = int(
+                session.execute(select(func.count()).select_from(query.subquery())).scalar_one()
+                or 0
+            )
+            rows = session.execute(
+                query.order_by(
+                    StockSelectionAgentRun.created_at.asc(),
+                    StockSelectionAgentRun.id.asc(),
+                ).limit(limit)
+            ).scalars().all()
+
+        state_counts: Counter[str] = Counter()
+        version_counts: Counter[str] = Counter()
+        market_counts: Counter[str] = Counter()
+        strategy_counts: Counter[str] = Counter()
+        transition_counts: Counter[str] = Counter()
+        daily: Dict[str, Dict[str, Any]] = {}
+        groups: Dict[str, Dict[str, Any]] = {}
+        utilities: List[float] = []
+        applied_count = 0
+        gate_blocked_count = 0
+        latest: Optional[Dict[str, Any]] = None
+        max_mature_sample_count = 0
+
+        for row in rows:
+            run = self._run_to_dict(row)
+            diagnostics = (
+                run.get("diagnostics") if isinstance(run.get("diagnostics"), dict) else {}
+            )
+            quality = diagnostics.get("cross_run_quality")
+            if not isinstance(quality, dict):
+                continue
+            objective = quality.get("return_risk_objective")
+            if not isinstance(objective, dict):
+                continue
+            version = str(objective.get("version") or "").strip()
+            objective_state = str(
+                quality.get("return_risk_objective_state")
+                or objective.get("state")
+                or ""
+            ).strip().lower()
+            if not version or not objective_state:
+                continue
+            metrics = objective.get("metrics") if isinstance(objective.get("metrics"), dict) else {}
+            utility = self._safe_float(
+                quality.get("return_risk_utility_pct")
+                if quality.get("return_risk_utility_pct") is not None
+                else metrics.get("return_risk_utility_pct")
+            )
+            created_at = run.get("created_at")
+            created_at_text = (
+                created_at.isoformat(timespec="seconds")
+                if isinstance(created_at, datetime)
+                else None
+            )
+            day_key = created_at.date().isoformat() if isinstance(created_at, datetime) else "unknown"
+            market_value = str(run.get("market") or "unknown").strip().lower() or "unknown"
+            strategy_value = str(run.get("strategy") or "unknown").strip() or "unknown"
+            mature_sample_count = self._safe_non_negative_int(
+                quality.get("mature_sample_count")
+            )
+            max_mature_sample_count = max(max_mature_sample_count, mature_sample_count)
+            if utility is not None:
+                utilities.append(utility)
+            if quality.get("return_risk_objective_applied"):
+                applied_count += 1
+            if quality.get("gate_blocked"):
+                gate_blocked_count += 1
+            transition = str(quality.get("transition") or "").strip()
+            if transition:
+                transition_counts[transition] += 1
+            state_counts[objective_state] += 1
+            version_counts[version] += 1
+            market_counts[market_value] += 1
+            strategy_counts[strategy_value] += 1
+
+            snapshot = {
+                "run_uid": run.get("run_uid"),
+                "created_at": created_at_text,
+                "market": market_value,
+                "strategy": strategy_value,
+                "version": version,
+                "state": objective_state,
+                "reason": quality.get("return_risk_objective_reason") or objective.get("reason"),
+                "utility_pct": utility,
+                "daily_return_coverage_pct": metrics.get("daily_return_coverage_pct"),
+                "mature_sample_count": mature_sample_count,
+                "combined_state": quality.get("state"),
+                "gate_blocked": bool(quality.get("gate_blocked")),
+            }
+            latest = snapshot
+
+            day = daily.setdefault(
+                day_key,
+                {
+                    "date": day_key,
+                    "run_snapshot_count": 0,
+                    "state_counts": Counter(),
+                    "utilities": [],
+                },
+            )
+            day["run_snapshot_count"] += 1
+            day["state_counts"][objective_state] += 1
+            if utility is not None:
+                day["utilities"].append(utility)
+
+            group_key = f"{market_value}/{strategy_value}/{version}"
+            group = groups.setdefault(
+                group_key,
+                {
+                    "key": group_key,
+                    "market": market_value,
+                    "strategy": strategy_value,
+                    "version": version,
+                    "run_snapshot_count": 0,
+                    "state_counts": Counter(),
+                    "utilities": [],
+                    "latest_state": None,
+                    "latest_utility_pct": None,
+                    "latest_run_uid": None,
+                    "latest_at": None,
+                },
+            )
+            group["run_snapshot_count"] += 1
+            group["state_counts"][objective_state] += 1
+            if utility is not None:
+                group["utilities"].append(utility)
+            group["latest_state"] = objective_state
+            group["latest_utility_pct"] = utility
+            group["latest_run_uid"] = run.get("run_uid")
+            group["latest_at"] = created_at_text
+
+        observed_count = sum(state_counts.values())
+        unknown_count = len(rows) - observed_count
+        if latest is None:
+            health = "idle" if not rows else "collecting"
+        elif latest["state"] in {"blocked", "unavailable"}:
+            health = "error"
+        elif latest["state"] == "guarded":
+            health = "warning"
+        elif latest["state"] == "healthy":
+            health = "ok"
+        else:
+            health = "collecting"
+
+        daily_items: List[Dict[str, Any]] = []
+        for key in sorted(daily):
+            item = daily[key]
+            item_utilities = item.pop("utilities")
+            state_counter = item.pop("state_counts")
+            daily_items.append(
+                {
+                    **item,
+                    "state_counts": dict(sorted(state_counter.items())),
+                    "average_utility_pct": self._average_float(item_utilities),
+                }
+            )
+
+        group_items: List[Dict[str, Any]] = []
+        for group in groups.values():
+            group_utilities = group.pop("utilities")
+            state_counter = group.pop("state_counts")
+            group_items.append(
+                {
+                    **group,
+                    "state_counts": dict(sorted(state_counter.items())),
+                    "utility_observation_count": len(group_utilities),
+                    "average_utility_pct": self._average_float(group_utilities),
+                    "minimum_utility_pct": min(group_utilities) if group_utilities else None,
+                    "maximum_utility_pct": max(group_utilities) if group_utilities else None,
+                }
+            )
+        group_items.sort(
+            key=lambda item: (-int(item["run_snapshot_count"]), str(item["key"]))
+        )
+
+        return {
+            "schema_version": 1,
+            "generated_at": datetime.now().isoformat(timespec="seconds"),
+            "window_days": days,
+            "window_started_at": window_started_at.isoformat(timespec="seconds"),
+            "window_ended_at": window_ended_at.isoformat(timespec="seconds"),
+            "total": total,
+            "scanned_count": len(rows),
+            "observed_count": observed_count,
+            "unknown_count": unknown_count,
+            "observation_rate_pct": (
+                round(observed_count / len(rows) * 100.0, 2) if rows else 0.0
+            ),
+            "health": health,
+            "state_counts": dict(sorted(state_counts.items())),
+            "version_counts": dict(sorted(version_counts.items())),
+            "market_counts": dict(sorted(market_counts.items())),
+            "strategy_counts": dict(sorted(strategy_counts.items())),
+            "transition_counts": dict(sorted(transition_counts.items())),
+            "applied_count": applied_count,
+            "applied_rate_pct": (
+                round(applied_count / observed_count * 100.0, 2) if observed_count else 0.0
+            ),
+            "gate_blocked_count": gate_blocked_count,
+            "utility_observation_count": len(utilities),
+            "average_utility_pct": self._average_float(utilities),
+            "minimum_utility_pct": min(utilities) if utilities else None,
+            "maximum_utility_pct": max(utilities) if utilities else None,
+            "latest_mature_sample_count": (
+                int(latest["mature_sample_count"]) if latest is not None else 0
+            ),
+            "max_mature_sample_count": max_mature_sample_count,
+            "latest": latest,
+            "groups": group_items,
+            "daily": daily_items,
+            "truncated": total > len(rows),
+            "methodology": {
+                "unit": "persisted_agent_run_cross_run_quality_snapshot",
+                "objective_source": "diagnostics.cross_run_quality.return_risk_objective",
+                "overlapping_rolling_samples": True,
+                "independent_sample_count_claimed": False,
+                "legacy_runs_without_objective": "unknown",
+            },
+            "filters": {
+                "trigger_source": trigger_source,
+                "strategy": strategy,
+                "market": market,
+                "status": status,
+            },
+        }
+
+    @staticmethod
+    def _average_float(values: List[float]) -> Optional[float]:
+        return round(sum(values) / len(values), 6) if values else None
+
     @staticmethod
     def _safe_non_negative_int(value: Any) -> int:
         try:

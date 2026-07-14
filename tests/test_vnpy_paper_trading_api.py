@@ -2032,6 +2032,10 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
             "/api/v1/vnpy-paper/agent-runs/data-quality-trends"
             "?days=30&trigger_source=unit-test&status=completed"
         )
+        calibration_trends_resp = self.client.get(
+            "/api/v1/vnpy-paper/agent-runs/return-risk-calibration-trends"
+            "?days=30&trigger_source=unit-test&strategy=dual_low&market=cn&status=completed"
+        )
         future_list_resp = self.client.get(
             "/api/v1/vnpy-paper/agent-runs"
             "?limit=5&trigger_source=unit-test&created_from=2999-01-01T00:00:00"
@@ -2042,6 +2046,7 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
         self.assertEqual(daily_summary_resp.status_code, 200)
         self.assertEqual(quality_trends_resp.status_code, 200)
         self.assertEqual(all_quality_trends_resp.status_code, 200)
+        self.assertEqual(calibration_trends_resp.status_code, 200)
         self.assertEqual(future_list_resp.status_code, 200)
         self.assertEqual(
             [item["run_uid"] for item in filtered_list_resp.json()["items"]],
@@ -2073,6 +2078,14 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
         self.assertEqual(quality_trends["window_days"], 30)
         self.assertEqual(quality_trends["scanned_count"], 1)
         self.assertEqual(quality_trends["known_count"], 1)
+        calibration_trends = calibration_trends_resp.json()
+        self.assertEqual(calibration_trends["window_days"], 30)
+        self.assertEqual(calibration_trends["scanned_count"], 1)
+        self.assertEqual(calibration_trends["observed_count"], 0)
+        self.assertEqual(calibration_trends["unknown_count"], 1)
+        self.assertEqual(calibration_trends["health"], "collecting")
+        self.assertTrue(calibration_trends["methodology"]["overlapping_rolling_samples"])
+        self.assertFalse(calibration_trends["methodology"]["independent_sample_count_claimed"])
         self.assertEqual(quality_trends["quality_counts"], {"ok": 1})
         self.assertEqual(quality_trends["degraded_count"], 0)
         self.assertEqual(quality_trends["degraded_rate_pct"], 0.0)

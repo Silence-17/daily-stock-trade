@@ -24,6 +24,7 @@ from api.v1.schemas.vnpy_paper_trading import (
     VnpyPaperAgentCrossRunQualityResponse,
     VnpyPaperAgentDailySummaryResponse,
     VnpyPaperAgentDataQualityTrendsResponse,
+    VnpyPaperAgentReturnRiskCalibrationTrendsResponse,
     VnpyPaperAgentRunFeedbackRequest,
     VnpyPaperAgentRunFeedbackResponse,
     VnpyPaperAgentRunRecapRequest,
@@ -2372,6 +2373,33 @@ def get_vnpy_paper_agent_data_quality_trends(
         )
     except Exception as exc:
         raise _internal_error("Summarize vn.py paper agent data quality trends failed", exc)
+
+
+@router.get(
+    "/agent-runs/return-risk-calibration-trends",
+    response_model=VnpyPaperAgentReturnRiskCalibrationTrendsResponse,
+    responses={500: {"model": ErrorResponse}},
+    summary="Summarize persisted Agent return-risk calibration snapshots",
+)
+def get_vnpy_paper_agent_return_risk_calibration_trends(
+    days: int = Query(30, ge=1, le=90),
+    trigger_source: Optional[str] = Query(None, min_length=1, max_length=64),
+    strategy: Optional[str] = Query(None, min_length=1, max_length=64),
+    market: Optional[str] = Query(None, min_length=1, max_length=16),
+    status: Optional[str] = Query(None, min_length=1, max_length=32),
+) -> VnpyPaperAgentReturnRiskCalibrationTrendsResponse:
+    try:
+        return VnpyPaperAgentReturnRiskCalibrationTrendsResponse.model_validate(
+            _agent_repo().summarize_return_risk_calibration_trends(
+                days=days,
+                trigger_source=trigger_source,
+                strategy=strategy,
+                market=market,
+                status=status,
+            )
+        )
+    except Exception as exc:
+        raise _internal_error("Summarize Agent return-risk calibration trends failed", exc)
 
 
 @router.post(
