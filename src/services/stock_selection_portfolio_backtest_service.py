@@ -50,6 +50,7 @@ class StockSelectionPortfolioBacktestService:
         benchmark_symbol: Optional[str] = None,
         enforce_tradeability: bool = True,
         accounting_mode: str = "equal_weight_approximation",
+        target_weights: Optional[Dict[str, float]] = None,
         min_hard_coverage: float = 0.95,
         min_score_coverage: float = 0.80,
     ) -> Dict[str, Any]:
@@ -66,6 +67,9 @@ class StockSelectionPortfolioBacktestService:
         if not dates:
             raise ValueError("no point-in-time factor snapshots exist in the requested range")
 
+        normalized_target_weights = self._normalize_target_weights(target_weights)
+        if normalized_target_weights and accounting_mode != "cash_ledger":
+            raise ValueError("target_weights are supported only in cash_ledger mode")
         if accounting_mode == "cash_ledger":
             return self._run_cash_ledger(
                 strategy=strategy,
@@ -82,6 +86,7 @@ class StockSelectionPortfolioBacktestService:
                 min_score_coverage=min_score_coverage,
                 date_from=date_from,
                 date_to=date_to,
+                target_weights=normalized_target_weights,
             )
         if accounting_mode != "equal_weight_approximation":
             raise ValueError("accounting_mode must be cash_ledger or equal_weight_approximation")
@@ -298,6 +303,7 @@ class StockSelectionPortfolioBacktestService:
         min_score_coverage: float,
         date_from: date,
         date_to: date,
+        target_weights: Dict[str, float],
     ) -> Dict[str, Any]:
         cash = float(initial_capital)
         equity = float(initial_capital)
@@ -327,11 +333,27 @@ class StockSelectionPortfolioBacktestService:
                 min_score_coverage=min_score_coverage,
             )
             candidates = list(replay.get("candidates") or [])[:top_k]
-            targets = {
-                str(item.get("symbol") or ""): item
+            replay_targets = {
+                str(item.get("symbol") or "").strip().upper(): item
                 for item in candidates
                 if item.get("symbol")
             }
+            if target_weights:
+                targets = {
+                    symbol: candidate
+                    for symbol, candidate in replay_targets.items()
+                    if symbol in target_weights
+                }
+                target_weight_pcts = {
+                    symbol: float(target_weights[symbol])
+                    for symbol in targets
+                }
+            else:
+                targets = replay_targets
+                target_weight_pcts = {
+                    symbol: 100.0 / len(targets)
+                    for symbol in targets
+                } if targets else {}
             total_selected += len(targets)
             symbols = list(dict.fromkeys([*positions.keys(), *targets.keys()]))
             trade_bars: Dict[str, Optional[StockDaily]] = {}
@@ -348,7 +370,6 @@ class StockSelectionPortfolioBacktestService:
                 for symbol, position in positions.items()
             )
             pretrade_equity = cash + pretrade_market_value
-            target_value = pretrade_equity / len(targets) if targets else 0.0
             desired_quantities: Dict[str, int] = {}
             evaluated_symbols = 0
             for symbol, candidate in targets.items():
@@ -358,6 +379,7 @@ class StockSelectionPortfolioBacktestService:
                     continue
                 evaluated_symbols += 1
                 buy_unit_cost = price * (1 + slippage) * (1 + commission)
+                target_value = pretrade_equity * target_weight_pcts[symbol] / 100.0
                 desired_quantities[symbol] = self._floor_lot(target_value / buy_unit_cost, lot_size)
             total_evaluated += evaluated_symbols
 
@@ -474,7 +496,7 @@ class StockSelectionPortfolioBacktestService:
                     "mark_price": mark_price,
                     "market_value": round(int(position["quantity"]) * mark_price, 4),
                     "mark_mode": mark_mode,
-                    "target_weight_pct": round(100 / len(targets), 4) if symbol in targets and targets else 0.0,
+                    "target_weight_pct": round(target_weight_pcts.get(symbol, 0.0), 4),
                 })
                 last_exit_date = max(last_exit_date, mark_date) if last_exit_date else mark_date
 
@@ -536,6 +558,14 @@ class StockSelectionPortfolioBacktestService:
                 "signal_date": signal_date.isoformat(),
                 "next_signal_date": next_signal_date.isoformat() if next_signal_date else None,
                 "selected_count": len(targets),
+                "replay_candidate_count": len(replay_targets),
+                "target_weights": {
+                    symbol: round(weight, 6)
+                    for symbol, weight in target_weight_pcts.items()
+                },
+                "configured_targets_not_selected": sorted(
+                    set(target_weights) - set(replay_targets)
+                ) if target_weights else [],
                 "evaluated_count": evaluated_symbols,
                 "coverage_pct": round(evaluated_symbols / len(targets) * 100, 4) if targets else 0.0,
                 "cash": round(cash, 4),
@@ -593,7 +623,13 @@ class StockSelectionPortfolioBacktestService:
                 "point_in_time": True,
                 "lookahead_protection": True,
                 "accounting_mode": "cash_ledger",
-                "position_sizing": "equal_target_value_rounded_down_to_lot",
+                "position_sizing": (
+                    "explicit_target_weight_value_rounded_down_to_lot"
+                    if target_weights
+                    else "equal_target_value_rounded_down_to_lot"
+                ),
+                "target_weight_mode": "explicit_symbol_weights" if target_weights else "equal_weight",
+                "configured_target_weights": dict(target_weights),
                 "lot_size": lot_size,
                 "cash_constraint": "buys_capped_by_available_cash",
                 "commission_bps_per_side": commission_bps,
@@ -603,6 +639,25 @@ class StockSelectionPortfolioBacktestService:
                 "uses_current_data_fallback": False,
             },
         }
+
+    @staticmethod
+    def _normalize_target_weights(raw: Optional[Dict[str, float]]) -> Dict[str, float]:
+        normalized: Dict[str, float] = {}
+        for raw_symbol, raw_weight in dict(raw or {}).items():
+            symbol = str(raw_symbol or "").strip().upper()
+            if not symbol:
+                raise ValueError("target_weights contains an empty symbol")
+            try:
+                weight = float(raw_weight)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"target weight for {symbol} must be numeric") from exc
+            if not math.isfinite(weight) or weight <= 0 or weight > 100:
+                raise ValueError(f"target weight for {symbol} must be greater than 0 and at most 100")
+            normalized[symbol] = weight
+        total = sum(normalized.values())
+        if total > 100 + 1e-9:
+            raise ValueError("target_weights total must not exceed 100 percent")
+        return normalized
 
     @staticmethod
     def _floor_lot(quantity: float, lot_size: int) -> int:

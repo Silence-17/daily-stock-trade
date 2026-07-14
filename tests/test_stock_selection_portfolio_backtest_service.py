@@ -358,6 +358,75 @@ class StockSelectionPortfolioBacktestServiceTestCase(unittest.TestCase):
         holdings = {item["symbol"]: item for item in result["periods"][1]["holdings"]}
         self.assertLessEqual(abs(holdings["600001"]["market_value"] - holdings["600002"]["market_value"]), 2000)
 
+    def test_cash_ledger_applies_explicit_target_weights_and_keeps_residual_cash(self) -> None:
+        with self.db.get_session() as session:
+            session.add_all([
+                StockDaily(code="600001", date=date(2024, 1, 2), open=10, close=10, volume=1000, pct_chg=0),
+                StockDaily(code="600001", date=date(2024, 1, 3), open=10, close=10, volume=1000, pct_chg=0),
+                StockDaily(code="600002", date=date(2024, 1, 2), open=20, close=20, volume=1000, pct_chg=0),
+                StockDaily(code="600002", date=date(2024, 1, 3), open=20, close=20, volume=1000, pct_chg=0),
+            ])
+            session.commit()
+        self.repository.list_dates.return_value = [date(2024, 1, 1)]
+        self.replay.replay.return_value = {
+            "candidates": [
+                {"symbol": "600001", "name": "primary", "screen_score": 90},
+                {"symbol": "600002", "name": "secondary", "screen_score": 80},
+                {"symbol": "600003", "name": "unconfigured", "screen_score": 70},
+            ],
+            "compatibility": {},
+        }
+
+        result = self.service.run(
+            strategy="dual_low",
+            market="cn",
+            date_from=date(2024, 1, 1),
+            date_to=date(2024, 1, 1),
+            top_k=3,
+            final_holding_bars=2,
+            initial_capital=100_000,
+            commission_bps=0,
+            slippage_bps=0,
+            accounting_mode="cash_ledger",
+            target_weights={"600001": 60, "600002": 20, "600004": 10},
+        )
+
+        period = result["periods"][0]
+        buys = {item["symbol"]: item for item in period["trades"] if item["side"] == "buy"}
+        holdings = {item["symbol"]: item for item in period["holdings"]}
+        self.assertEqual(buys["600001"]["quantity"], 6000)
+        self.assertEqual(buys["600002"]["quantity"], 1000)
+        self.assertNotIn("600003", buys)
+        self.assertEqual(holdings["600001"]["target_weight_pct"], 60)
+        self.assertEqual(holdings["600002"]["target_weight_pct"], 20)
+        self.assertEqual(period["target_weights"], {"600001": 60.0, "600002": 20.0})
+        self.assertEqual(period["configured_targets_not_selected"], ["600004"])
+        self.assertEqual(result["methodology"]["target_weight_mode"], "explicit_symbol_weights")
+        self.assertEqual(result["methodology"]["configured_target_weights"]["600004"], 10.0)
+        self.assertEqual(result["final_equity"], 100_000)
+
+    def test_rejects_invalid_target_weight_contracts(self) -> None:
+        self.repository.list_dates.return_value = [date(2024, 1, 1)]
+
+        with self.assertRaisesRegex(ValueError, "total must not exceed 100"):
+            self.service.run(
+                strategy="dual_low",
+                market="cn",
+                date_from=date(2024, 1, 1),
+                date_to=date(2024, 1, 1),
+                accounting_mode="cash_ledger",
+                target_weights={"600001": 60, "600002": 50},
+            )
+        with self.assertRaisesRegex(ValueError, "only in cash_ledger"):
+            self.service.run(
+                strategy="dual_low",
+                market="cn",
+                date_from=date(2024, 1, 1),
+                date_to=date(2024, 1, 1),
+                accounting_mode="equal_weight_approximation",
+                target_weights={"600001": 50},
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

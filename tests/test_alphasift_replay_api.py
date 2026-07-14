@@ -142,6 +142,7 @@ class AlphaSiftReplayApiTestCase(unittest.TestCase):
                     "benchmark_symbol": "000300",
                     "enforce_tradeability": True,
                     "accounting_mode": "cash_ledger",
+                    "target_weights": {"600519": 60, "000001": 30},
                 },
             )
 
@@ -153,6 +154,7 @@ class AlphaSiftReplayApiTestCase(unittest.TestCase):
         self.assertEqual(call["benchmark_symbol"], "000300")
         self.assertTrue(call["enforce_tradeability"])
         self.assertEqual(call["accounting_mode"], "cash_ledger")
+        self.assertEqual(call["target_weights"], {"600519": 60, "000001": 30})
 
     def test_historical_factor_ingestion_runs_as_background_task(self) -> None:
         queue = MagicMock()
