@@ -108,6 +108,7 @@
 - `POST /vnpy-events/attach`：当应用进程已注入 `app.state.vnpy_event_engine` 或 `app.state.vnpy_main_engine.event_engine` 时，注册订单、成交、账户和持仓事件 handler，把 vn.py EventEngine 事件自动转入上述同步入口；重复 attach 会先注销旧 bridge。
 - `POST /auto/run`：立即运行一次 AlphaSift 选股驱动的自动模拟买入，响应中包含 `agent_run_uid`。
 - `POST /auto/run` 可传可选 JSON 请求体，例如 `{"execution_mode":"dry_run","ignore_auto_trade_enabled":true}`，用于一次性演练自动选股和交易计划生成；也可传 `{"execution_mode":"vnpy_paper"}` 临时把本轮买入委托交给 vn.py bridge。该请求只影响本次运行，审计 diagnostics 会记录临时覆盖参数。
+- 每次自动运行会在 LLM 动态计划之前生成 `diagnostics.market_objective` 和 `diagnostics.agent_plan.market_objective`。A 股、港股、美股、日股、韩股和台股使用不同目标画像；只有最近人工意见要求修改/拒绝、连续运行失败或跨运行质量降级时才收紧候选上限与单票预算。该规则只收紧保存配置，不能降低最低分或绕过数据质量、账户、仓位、交易时段及其他风控；收紧后的有效值会同时用于 AlphaSift 筛选、Agent 计划和交易计划。
 - `GET /performance?run_limit=50&created_from=2026-07-01T09:00:00&created_to=2026-07-02T15:00:00`：读取本地 paper 绩效摘要，聚合当前模拟账户权益、相对初始资金收益、成交额、买卖次数、FIFO 卖出胜率、权益路径、日度收益、月度收益、最大回撤、换手率、当前仓位、最近 Agent run 状态、成交计划状态、跳过原因、成交股票分布和按策略/行业归因；`created_from` / `created_to` 可选，用于按 Agent run 创建时间筛选窗口级归因。
 - `POST /trade-plans/{plan_uid}/approve`：审批一笔 `manual_approval` 模式生成的待执行交易计划，成功后写入本地 paper 成交并回写计划、候选决策和运行统计。
 - `POST /trade-plans/{plan_uid}/retry`：重试一笔 `failed` 或可恢复 `skipped` 的 `manual_approval` / `paper` / `vnpy_paper` 交易计划；响应和计划审计中的 `raw.retry` / `order_result.retry` 会记录尝试次数、最大次数、上次原因和下一次可重试时间。

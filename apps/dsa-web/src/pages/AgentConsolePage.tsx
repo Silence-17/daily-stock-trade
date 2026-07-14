@@ -535,6 +535,18 @@ const AgentConsolePage: React.FC = () => {
   );
   const selectedDynamicRecommendation = asRecord(selectedDynamicPlan?.recommendation);
   const selectedDynamicVersionHint = versionHint(selectedDynamicPlan);
+  const selectedMarketObjective = (
+    asRecord(selectedPlan?.marketObjective)
+    ?? asRecord(selectedPlan?.market_objective)
+    ?? asRecord(selectedDiagnostics?.marketObjective)
+    ?? asRecord(selectedDiagnostics?.market_objective)
+  );
+  const selectedMarketObjectiveConfigured = asRecord(selectedMarketObjective?.configured);
+  const selectedMarketObjectiveEffective = asRecord(selectedMarketObjective?.effective);
+  const selectedMarketObjectiveReasonsValue = selectedMarketObjective?.reasons;
+  const selectedMarketObjectiveReasons = Array.isArray(selectedMarketObjectiveReasonsValue)
+    ? selectedMarketObjectiveReasonsValue.map((item) => String(item || '').trim()).filter(Boolean)
+    : [];
   const selectedRecentRunContext = (
     asRecord(selectedPlan?.recentRunContext)
     ?? asRecord(selectedPlan?.recent_run_context)
@@ -2098,6 +2110,34 @@ const AgentConsolePage: React.FC = () => {
                             )}
                           </dd>
                         </div>
+                        {selectedMarketObjective ? (
+                          <div className="sm:col-span-2" data-testid="cross-market-objective">
+                            <dt>跨市场动态目标</dt>
+                            <dd className="mt-1 space-y-1 font-semibold text-foreground">
+                              <span>
+                                {String(selectedMarketObjective.primaryObjective || selectedMarketObjective.primary_objective || '-')}
+                                {' · '}
+                                {String(selectedMarketObjective.mode || '-')}
+                                {' · '}
+                                {String(selectedMarketObjective.status || '-')}
+                              </span>
+                              <div className="text-xs font-normal text-secondary-text">
+                                候选 {String(selectedMarketObjectiveConfigured?.maxResults ?? selectedMarketObjectiveConfigured?.max_results ?? '-')}
+                                {' → '}
+                                {String(selectedMarketObjectiveEffective?.maxResults ?? selectedMarketObjectiveEffective?.max_results ?? '-')}
+                                {' · 单票预算 '}
+                                {formatMoney(selectedMarketObjectiveConfigured?.cashPerOrder ?? selectedMarketObjectiveConfigured?.cash_per_order)}
+                                {' → '}
+                                {formatMoney(selectedMarketObjectiveEffective?.cashPerOrder ?? selectedMarketObjectiveEffective?.cash_per_order)}
+                              </div>
+                              {selectedMarketObjectiveReasons.length > 0 ? (
+                                <div className="text-xs font-normal text-secondary-text">
+                                  {selectedMarketObjectiveReasons.join(' · ')}
+                                </div>
+                              ) : null}
+                            </dd>
+                          </div>
+                        ) : null}
                         <div>
                           <dt>最近运行</dt>
                           <dd className="mt-1 font-semibold text-foreground">
