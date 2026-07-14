@@ -368,6 +368,7 @@ class StockSelectionPortfolioBacktestService:
         total_taxes = 0.0
         total_slippage_cost = 0.0
         total_dividend_cash = 0.0
+        total_cash_in_lieu = 0.0
         applied_corporate_actions: set[int] = set()
         first_entry_date: Optional[date] = None
         last_exit_date: Optional[date] = None
@@ -700,6 +701,11 @@ class StockSelectionPortfolioBacktestService:
                 for item in period_corporate_actions
                 if item.get("status") == "applied" and item.get("action_type") == "cash_dividend"
             )
+            total_cash_in_lieu += sum(
+                float(item.get("cash_in_lieu_effect") or 0.0)
+                for item in period_corporate_actions
+                if item.get("status") == "applied" and item.get("action_type") == "split_adjustment"
+            )
 
             benchmark = self._evaluate_benchmark(
                 symbol=benchmark_symbol,
@@ -778,6 +784,7 @@ class StockSelectionPortfolioBacktestService:
                 if item.get("status") == "applied"
             ),
             "cash_dividends_received": round(total_dividend_cash, 4),
+            "cash_in_lieu_received": round(total_cash_in_lieu, 4),
             "ending_open_position_count": len(positions),
             "ending_cash": round(cash, 4),
             "ending_market_value": round(
@@ -899,6 +906,8 @@ class StockSelectionPortfolioBacktestService:
             if action_type == "cash_dividend":
                 if raw.get("split_ratio") is not None:
                     raise ValueError(f"split_ratio is not allowed for cash_dividend {symbol}")
+                if raw.get("cash_in_lieu_price") is not None:
+                    raise ValueError(f"cash_in_lieu_price is not allowed for cash_dividend {symbol}")
                 value = cls._positive(raw.get("cash_dividend_per_share"))
                 if value is None:
                     raise ValueError(f"cash_dividend_per_share must be positive for {symbol}")
@@ -910,6 +919,12 @@ class StockSelectionPortfolioBacktestService:
                 if value is None:
                     raise ValueError(f"split_ratio must be positive for {symbol}")
                 item["split_ratio"] = value
+                cash_in_lieu_price = raw.get("cash_in_lieu_price")
+                if cash_in_lieu_price is not None:
+                    normalized_price = cls._positive(cash_in_lieu_price)
+                    if normalized_price is None:
+                        raise ValueError(f"cash_in_lieu_price must be positive for {symbol}")
+                    item["cash_in_lieu_price"] = normalized_price
             normalized.append(item)
         normalized.sort(key=lambda item: (item["effective_date"], item["event_index"]))
         return normalized
@@ -943,6 +958,8 @@ class StockSelectionPortfolioBacktestService:
                 "quantity_before": quantity_before,
                 "quantity_after": quantity_before,
                 "cash_effect": 0.0,
+                "fractional_quantity": 0.0,
+                "cash_in_lieu_effect": 0.0,
             }
             if quantity_before <= 0:
                 records.append(record)
@@ -953,13 +970,21 @@ class StockSelectionPortfolioBacktestService:
                 record["cash_effect"] = round(cash_effect, 4)
             else:
                 adjusted_quantity = quantity_before * float(action["split_ratio"])
-                rounded_quantity = round(adjusted_quantity)
-                if abs(adjusted_quantity - rounded_quantity) > 1e-9:
+                whole_quantity = math.floor(adjusted_quantity + 1e-9)
+                fractional_quantity = max(0.0, adjusted_quantity - whole_quantity)
+                if fractional_quantity > 1e-9 and action.get("cash_in_lieu_price") is None:
                     raise ValueError(
-                        f"split adjustment for {symbol} produces fractional shares; cash-in-lieu is unsupported"
+                        f"split adjustment for {symbol} produces fractional shares; cash_in_lieu_price is required"
                     )
-                position["quantity"] = int(rounded_quantity)
-                record["quantity_after"] = int(rounded_quantity)
+                cash_in_lieu_effect = fractional_quantity * float(action.get("cash_in_lieu_price") or 0.0)
+                cash += cash_in_lieu_effect
+                position["quantity"] = int(whole_quantity)
+                record["quantity_after"] = int(whole_quantity)
+                record["fractional_quantity"] = round(fractional_quantity, 8)
+                record["cash_in_lieu_effect"] = round(cash_in_lieu_effect, 4)
+                record["cash_effect"] = round(cash_in_lieu_effect, 4)
+                if whole_quantity <= 0:
+                    del positions[symbol]
             records.append(record)
         return cash, records
 

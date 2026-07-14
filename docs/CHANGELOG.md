@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [新功能] AlphaSift 现金账本拆并股事件支持可选 `cash_in_lieu_price`，将非整数零碎股向下结算为整股并按显式结算价兑付现金。
+- [改进] 公司行动审计新增零碎股数量、补偿单价、补偿现金及汇总 `cash_in_lieu_received`；Agent 控制台直接展示事件和累计补偿，未提供结算价时继续 fail-closed。
+- [测试] 新增零碎股补偿成功、缺少结算价阻断、字段误用、API 转发和 Web JSON 映射/展示回归。
 - [新功能] 历史因子采集接入 Tushare `dividend`，将已实施的现金分红和送转比例标准化为公司行动并幂等持久化；全市场可恢复作业同步汇总事件采集、新增和更新数量。
 - [改进] AlphaSift 现金账本组合回测默认读取回测区间内已保存的公司行动，Agent 控制台可关闭该行为；请求内显式事件按股票、日期和类型覆盖持久化事件，避免重复执行。
 - [测试] 新增 Tushare 已实施事件过滤、公司行动仓储、采集失败降级、全市场任务统计、持久化事件回测及 API/Web 开关映射回归。

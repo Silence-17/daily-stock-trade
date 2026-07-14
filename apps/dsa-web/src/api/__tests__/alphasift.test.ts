@@ -370,6 +370,12 @@ describe('alphasiftApi', () => {
         effectiveDate: '2024-01-15',
         actionType: 'cash_dividend',
         cashDividendPerShare: 1.5,
+      }, {
+        symbol: '000001',
+        effectiveDate: '2024-01-20',
+        actionType: 'split_adjustment',
+        splitRatio: 1.5,
+        cashInLieuPrice: 9.8,
       }],
       includePersistedCorporateActions: false,
     });
@@ -396,6 +402,14 @@ describe('alphasiftApi', () => {
         action_type: 'cash_dividend',
         cash_dividend_per_share: 1.5,
         split_ratio: null,
+        cash_in_lieu_price: null,
+      }, {
+        symbol: '000001',
+        effective_date: '2024-01-20',
+        action_type: 'split_adjustment',
+        cash_dividend_per_share: null,
+        split_ratio: 1.5,
+        cash_in_lieu_price: 9.8,
       }],
       include_persisted_corporate_actions: false,
     });

@@ -166,6 +166,9 @@ function parsePortfolioCorporateActions(value: string): AlphaSiftPortfolioCorpor
       throw new Error(`第 ${index + 1} 个公司行动缺少代码或有效日期`);
     }
     if (actionType === 'cash_dividend') {
+      if (item?.cashInLieuPrice !== undefined || item?.cash_in_lieu_price !== undefined) {
+        throw new Error(`第 ${index + 1} 个现金分红不能配置零碎股补偿价`);
+      }
       const cashDividendPerShare = Number(
         item?.cashDividendPerShare ?? item?.cash_dividend_per_share,
       );
@@ -179,7 +182,15 @@ function parsePortfolioCorporateActions(value: string): AlphaSiftPortfolioCorpor
       if (!Number.isFinite(splitRatio) || splitRatio <= 0) {
         throw new Error(`第 ${index + 1} 个拆并股事件缺少有效比例`);
       }
-      return { symbol, effectiveDate, actionType, splitRatio };
+      const rawCashInLieuPrice = item?.cashInLieuPrice ?? item?.cash_in_lieu_price;
+      if (rawCashInLieuPrice === undefined || rawCashInLieuPrice === null || rawCashInLieuPrice === '') {
+        return { symbol, effectiveDate, actionType, splitRatio };
+      }
+      const cashInLieuPrice = Number(rawCashInLieuPrice);
+      if (!Number.isFinite(cashInLieuPrice) || cashInLieuPrice <= 0) {
+        throw new Error(`第 ${index + 1} 个拆并股事件的零碎股补偿价无效`);
+      }
+      return { symbol, effectiveDate, actionType, splitRatio, cashInLieuPrice };
     }
     throw new Error(`第 ${index + 1} 个公司行动类型无效`);
   });
@@ -1290,7 +1301,7 @@ const AgentConsolePage: React.FC = () => {
             value={portfolioCorporateActions}
             onChange={(event) => setPortfolioCorporateActions(event.target.value)}
             aria-label="组合回测公司行动 JSON"
-            placeholder='[{"symbol":"600519","effective_date":"2024-06-14","action_type":"cash_dividend","cash_dividend_per_share":1.5}]'
+            placeholder='[{"symbol":"600519","effective_date":"2024-06-14","action_type":"split_adjustment","split_ratio":1.5,"cash_in_lieu_price":10}]'
           />
           {portfolioBacktest ? (
             <div className="mt-3 space-y-3" data-testid="agent-portfolio-backtest-results">
@@ -1316,6 +1327,9 @@ const AgentConsolePage: React.FC = () => {
                   {portfolioBacktest.periods.flatMap((period) => period.corporateActions ?? []).map((item, index) => (
                     <span key={`${String(item.symbol)}-${String(item.effectiveDate)}-${index}`} className="border border-border bg-surface px-2 py-1 text-secondary-text">
                       {String(item.symbol)} {String(item.actionType)} {String(item.status)}
+                      {Number(item.cashInLieuEffect || 0) > 0
+                        ? ` · 零碎股 ${formatNumber(item.fractionalQuantity, 4)} · 补偿 ${formatMoney(item.cashInLieuEffect)}`
+                        : ''}
                     </span>
                   ))}
                 </div>
@@ -1324,7 +1338,7 @@ const AgentConsolePage: React.FC = () => {
                 <StatTile
                   label="组合收益"
                   value={formatPercent(portfolioBacktest.metrics.totalReturnPct)}
-                  hint={`期末 ${formatMoney(portfolioBacktest.finalEquity)} · 现金 ${formatMoney(portfolioBacktest.metrics.endingCash)}`}
+                  hint={`期末 ${formatMoney(portfolioBacktest.finalEquity)} · 现金 ${formatMoney(portfolioBacktest.metrics.endingCash)} · 零碎股补偿 ${formatMoney(portfolioBacktest.metrics.cashInLieuReceived)}`}
                 />
                 <StatTile
                   label="超额收益"

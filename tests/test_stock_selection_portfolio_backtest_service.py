@@ -533,6 +533,47 @@ class StockSelectionPortfolioBacktestServiceTestCase(unittest.TestCase):
         self.assertEqual(result["metrics"]["cash_dividends_received"], 0)
         self.assertEqual(result["final_equity"], 100_000)
 
+    def test_split_fractional_share_is_settled_with_explicit_cash_in_lieu_price(self) -> None:
+        with self.db.get_session() as session:
+            session.add_all([
+                StockDaily(code="600001", date=date(2024, 1, 2), open=10, close=10, volume=1000, pct_chg=0),
+                StockDaily(code="600001", date=date(2024, 1, 3), open=10, close=10, volume=1000, pct_chg=0),
+            ])
+            session.commit()
+        self.repository.list_dates.return_value = [date(2024, 1, 1)]
+        self.replay.replay.return_value = {
+            "candidates": [{"symbol": "600001", "name": "cash-in-lieu", "screen_score": 90}],
+            "compatibility": {},
+        }
+
+        result = self.service.run(
+            strategy="dual_low",
+            market="cn",
+            date_from=date(2024, 1, 1),
+            date_to=date(2024, 1, 1),
+            final_holding_bars=2,
+            commission_bps=0,
+            slippage_bps=0,
+            accounting_mode="cash_ledger",
+            corporate_actions=[{
+                "symbol": "600001",
+                "effective_date": date(2024, 1, 3),
+                "action_type": "split_adjustment",
+                "split_ratio": 1.00005,
+                "cash_in_lieu_price": 8,
+            }],
+        )
+
+        action = result["periods"][0]["corporate_actions"][0]
+        self.assertEqual(action["quantity_before"], 10_000)
+        self.assertEqual(action["quantity_after"], 10_000)
+        self.assertAlmostEqual(action["fractional_quantity"], 0.5)
+        self.assertEqual(action["cash_in_lieu_price"], 8)
+        self.assertEqual(action["cash_in_lieu_effect"], 4)
+        self.assertEqual(action["cash_effect"], 4)
+        self.assertEqual(result["metrics"]["cash_in_lieu_received"], 4)
+        self.assertEqual(result["final_equity"], 100_004)
+
     def test_persisted_corporate_actions_are_loaded_and_explicit_events_override(self) -> None:
         with self.db.get_session() as session:
             session.add_all([
@@ -639,7 +680,7 @@ class StockSelectionPortfolioBacktestServiceTestCase(unittest.TestCase):
             "action_type": "split_adjustment",
             "split_ratio": 1.5,
         }])
-        with self.assertRaisesRegex(ValueError, "fractional shares"):
+        with self.assertRaisesRegex(ValueError, "cash_in_lieu_price is required"):
             self.service._apply_corporate_actions(
                 cash=0,
                 positions={"600001": {"quantity": 1}},
@@ -647,6 +688,14 @@ class StockSelectionPortfolioBacktestServiceTestCase(unittest.TestCase):
                 applied_indexes=set(),
                 through_dates={"600001": date(2024, 1, 1)},
             )
+        with self.assertRaisesRegex(ValueError, "cash_in_lieu_price is not allowed"):
+            self.service._normalize_corporate_actions([{
+                "symbol": "600001",
+                "effective_date": date(2024, 1, 1),
+                "action_type": "cash_dividend",
+                "cash_dividend_per_share": 1,
+                "cash_in_lieu_price": 10,
+            }])
         with self.assertRaisesRegex(ValueError, "split_ratio is not allowed"):
             self.service._normalize_corporate_actions([{
                 "symbol": "600001",

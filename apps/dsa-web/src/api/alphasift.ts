@@ -325,6 +325,7 @@ export type AlphaSiftPortfolioBacktestResponse = {
     processedCorporateActionCount?: number;
     appliedCorporateActionCount?: number;
     cashDividendsReceived?: number;
+    cashInLieuReceived?: number;
   };
   periods: Array<{
     signalDate: string;
@@ -363,6 +364,7 @@ export type AlphaSiftPortfolioCorporateActionInput = {
   actionType: 'cash_dividend' | 'split_adjustment';
   cashDividendPerShare?: number;
   splitRatio?: number;
+  cashInLieuPrice?: number;
 };
 
 export type AlphaSiftHistoricalUniverseResponse = {
@@ -607,6 +609,7 @@ export const alphasiftApi = {
           action_type: item.actionType,
           cash_dividend_per_share: item.cashDividendPerShare ?? null,
           split_ratio: item.splitRatio ?? null,
+          cash_in_lieu_price: item.cashInLieuPrice ?? null,
         })),
         include_persisted_corporate_actions: payload.includePersistedCorporateActions ?? true,
       },
