@@ -209,8 +209,17 @@ def _snapshot_valuation_health(status_payload: Dict[str, Any]) -> Dict[str, Any]
         limitations.extend(item for item in raw_limitations if isinstance(item, dict))
     stale_count = 0
     missing_count = 0
+    unknown_count = 0
+    available_count = 0
+    fresh_count = 0
     account_count = 0
     position_count = 0
+    source_counts: Dict[str, int] = {}
+    provider_counts: Dict[str, int] = {}
+    missing_symbols: List[str] = []
+    stale_symbols: List[str] = []
+    unknown_symbols: List[str] = []
+    price_dates: List[str] = []
     for account in list(snapshot.get("accounts") or []):
         if not isinstance(account, dict):
             continue
@@ -222,33 +231,85 @@ def _snapshot_valuation_health(status_payload: Dict[str, Any]) -> Dict[str, Any]
             if not isinstance(position, dict):
                 continue
             position_count += 1
-            if position.get("price_available") is False:
+            symbol = str(position.get("symbol") or "").strip()
+            source = str(position.get("price_source") or "unknown").strip() or "unknown"
+            provider = str(position.get("price_provider") or "unknown").strip() or "unknown"
+            source_counts[source] = source_counts.get(source, 0) + 1
+            provider_counts[provider] = provider_counts.get(provider, 0) + 1
+            price_date = str(position.get("price_date") or "").strip()
+            if price_date:
+                price_dates.append(price_date)
+            price_available = position.get("price_available")
+            if price_available is False:
                 missing_count += 1
+                if symbol:
+                    missing_symbols.append(symbol)
+            elif price_available is True:
+                available_count += 1
+            else:
+                unknown_count += 1
+                if symbol:
+                    unknown_symbols.append(symbol)
             if position.get("price_stale") is True:
                 stale_count += 1
-    if missing_count or stale_count or limitations:
+                if symbol:
+                    stale_symbols.append(symbol)
+            elif price_available is True:
+                fresh_count += 1
+    coverage_pct = round(available_count / position_count * 100.0, 2) if position_count else 100.0
+    fresh_coverage_pct = round(fresh_count / position_count * 100.0, 2) if position_count else 100.0
+    source_summary = "、".join(
+        f"{key}={value}" for key, value in sorted(source_counts.items())
+    ) or "无持仓"
+    health_fields = {
+        "position_count": position_count,
+        "account_count": account_count,
+        "available_count": available_count,
+        "fresh_count": fresh_count,
+        "missing_count": missing_count,
+        "unknown_count": unknown_count,
+        "stale_count": stale_count,
+        "coverage_pct": coverage_pct,
+        "fresh_coverage_pct": fresh_coverage_pct,
+        "source_counts": dict(sorted(source_counts.items())),
+        "provider_counts": dict(sorted(provider_counts.items())),
+        "missing_symbols": missing_symbols,
+        "stale_symbols": stale_symbols,
+        "unknown_symbols": unknown_symbols,
+        "oldest_price_date": min(price_dates) if price_dates else None,
+        "latest_price_date": max(price_dates) if price_dates else None,
+    }
+    if missing_count or stale_count or unknown_count or limitations:
         parts = []
         if missing_count:
             parts.append(f"缺价 {missing_count} 笔")
         if stale_count:
             parts.append(f"陈旧价格 {stale_count} 笔")
+        if unknown_count:
+            parts.append(f"价格状态未知 {unknown_count} 笔")
         if limitations:
             parts.append(f"限制 {len(limitations)} 项")
         return {
             "status": "warning",
             "reason": "valuation_degraded",
-            "detail": "，".join(parts),
+            "detail": (
+                f"覆盖 {available_count}/{position_count}（{coverage_pct}%），"
+                f"新鲜 {fresh_count}/{position_count}（{fresh_coverage_pct}%）；"
+                f"{'；'.join(parts)}；来源 {source_summary}"
+            ),
             "required": False,
-            "position_count": position_count,
-            "account_count": account_count,
+            **health_fields,
         }
     return {
         "status": "ready",
         "reason": "valuation_ready",
-        "detail": f"账户 {account_count} 个，持仓 {position_count} 笔",
+        "detail": (
+            f"覆盖 {available_count}/{position_count}（{coverage_pct}%），"
+            f"新鲜 {fresh_count}/{position_count}（{fresh_coverage_pct}%）；"
+            f"来源 {source_summary}"
+        ),
         "required": False,
-        "position_count": position_count,
-        "account_count": account_count,
+        **health_fields,
     }
 
 
