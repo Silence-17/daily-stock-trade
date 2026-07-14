@@ -16,6 +16,7 @@ import importlib.util
 import os
 import sys
 import unittest
+from datetime import date
 from unittest.mock import MagicMock, patch
 
 _PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -289,6 +290,37 @@ class TestTushareFetcherNormalizeData(unittest.TestCase):
         out = fetcher._normalize_data(self._sample_daily_frame(), "510050")
         self.assertEqual(out.iloc[0]["volume"], 10000.0)
         self.assertEqual(out.iloc[0]["amount"], 50000.0)
+
+    def test_get_stock_corporate_actions_normalizes_implemented_ex_date_events(self) -> None:
+        fetcher = self._make_fetcher()
+        fetcher._api.dividend.return_value = pd.DataFrame([
+            {
+                "ts_code": "600519.SH", "ann_date": "20240101", "imp_ann_date": "20240102",
+                "div_proc": "预案", "stk_div": 0.1, "cash_div_tax": 0.5, "ex_date": "20240110",
+            },
+            {
+                "ts_code": "600519.SH", "ann_date": "20240103", "imp_ann_date": "20240104",
+                "div_proc": "实施", "stk_div": 0.2, "cash_div_tax": 1.5, "ex_date": "20240110",
+            },
+            {
+                "ts_code": "600519.SH", "ann_date": "20250103", "imp_ann_date": "20250104",
+                "div_proc": "实施", "stk_div": 0, "cash_div_tax": 2.0, "ex_date": "20250110",
+            },
+        ])
+
+        events = fetcher.get_stock_corporate_actions(
+            "600519",
+            start_date=date(2024, 1, 1),
+            end_date=date(2024, 12, 31),
+        )
+
+        self.assertEqual(len(events), 2)
+        cash = next(item for item in events if item["action_type"] == "cash_dividend")
+        split = next(item for item in events if item["action_type"] == "split_adjustment")
+        self.assertEqual(cash["effective_date"], date(2024, 1, 10))
+        self.assertEqual(cash["cash_dividend_per_share"], 1.5)
+        self.assertAlmostEqual(split["split_ratio"], 1.2)
+        fetcher._api.dividend.assert_called_once()
 
 
 class TestTushareFetcherChipDistribution(unittest.TestCase):

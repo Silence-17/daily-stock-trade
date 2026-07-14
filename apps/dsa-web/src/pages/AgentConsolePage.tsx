@@ -338,6 +338,7 @@ const AgentConsolePage: React.FC = () => {
   const [portfolioMinimumCommission, setPortfolioMinimumCommission] = useState('');
   const [portfolioSellTaxBps, setPortfolioSellTaxBps] = useState('');
   const [portfolioCorporateActions, setPortfolioCorporateActions] = useState('');
+  const [includePersistedCorporateActions, setIncludePersistedCorporateActions] = useState(true);
   const [portfolioBacktest, setPortfolioBacktest] = useState<AlphaSiftPortfolioBacktestResponse | null>(null);
   const [ingestionDates, setIngestionDates] = useState('');
   const [ingestionUniverse, setIngestionUniverse] = useState('');
@@ -697,6 +698,7 @@ const AgentConsolePage: React.FC = () => {
         minimumCommission,
         sellTaxBps,
         corporateActions: parsePortfolioCorporateActions(portfolioCorporateActions),
+        includePersistedCorporateActions,
       });
       setPortfolioBacktest(payload);
       setSuccess(`组合回测完成，覆盖 ${payload.snapshotCount} 个快照日期`);
@@ -1273,6 +1275,15 @@ const AgentConsolePage: React.FC = () => {
               </Button>
             </div>
           </div>
+          <label className="mt-2 flex items-center gap-2 text-xs text-secondary-text">
+            <input
+              data-testid="agent-portfolio-include-persisted-actions"
+              type="checkbox"
+              checked={includePersistedCorporateActions}
+              onChange={(event) => setIncludePersistedCorporateActions(event.target.checked)}
+            />
+            读取历史因子采集已保存的公司行动
+          </label>
           <textarea
             data-testid="agent-portfolio-corporate-actions"
             className="mt-2 min-h-20 w-full resize-y rounded-xl border border-border bg-surface px-3 py-2 font-mono text-xs text-foreground outline-none transition-colors focus:border-cyan"

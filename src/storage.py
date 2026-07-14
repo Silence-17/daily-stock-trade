@@ -340,6 +340,39 @@ class StockSelectionFactorSnapshot(Base):
     )
 
 
+class StockSelectionCorporateAction(Base):
+    """Historical corporate action used by point-in-time portfolio replay."""
+
+    __tablename__ = 'stock_selection_corporate_actions'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    market = Column(String(16), nullable=False, default='cn', index=True)
+    symbol = Column(String(16), nullable=False, index=True)
+    effective_date = Column(Date, nullable=False, index=True)
+    action_type = Column(String(24), nullable=False, index=True)
+    cash_dividend_per_share = Column(Float)
+    split_ratio = Column(Float)
+    source = Column(String(64), nullable=False, default='unknown')
+    source_record_key = Column(String(160), nullable=False)
+    created_at = Column(DateTime, default=utc_naive_now, nullable=False, index=True)
+    updated_at = Column(DateTime, default=utc_naive_now, onupdate=utc_naive_now, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            'market',
+            'symbol',
+            'effective_date',
+            'action_type',
+            name='uix_stock_selection_corporate_action_event',
+        ),
+        Index(
+            'ix_stock_selection_corporate_action_range',
+            'market',
+            'effective_date',
+        ),
+    )
+
+
 class StockSelectionFactorIngestionJob(Base):
     """Persistent checkpoint for full-market historical factor ingestion."""
 

@@ -371,6 +371,7 @@ describe('alphasiftApi', () => {
         actionType: 'cash_dividend',
         cashDividendPerShare: 1.5,
       }],
+      includePersistedCorporateActions: false,
     });
 
     expect(post).toHaveBeenCalledWith('/api/v1/alphasift/replay/portfolio-backtest', {
@@ -396,6 +397,7 @@ describe('alphasiftApi', () => {
         cash_dividend_per_share: 1.5,
         split_ratio: null,
       }],
+      include_persisted_corporate_actions: false,
     });
     expect(result.metrics.excessReturnPct).toBe(5);
   });
