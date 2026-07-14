@@ -867,6 +867,9 @@ describe('AgentConsolePage', () => {
     fireEvent.change(screen.getByTestId('agent-portfolio-sell-tax-bps'), {
       target: { value: '5' },
     });
+    fireEvent.change(screen.getByTestId('agent-portfolio-sell-tax-mode'), {
+      target: { value: 'cn_historical_stamp_duty' },
+    });
     fireEvent.change(screen.getByTestId('agent-portfolio-corporate-actions'), {
       target: {
         value: '[{"symbol":"600519","effective_date":"2024-01-15","action_type":"cash_dividend","cash_dividend_per_share":1.5},{"symbol":"000001","effective_date":"2024-01-20","action_type":"split_adjustment","split_ratio":1.5,"cash_in_lieu_price":9.8}]',
@@ -883,7 +886,8 @@ describe('AgentConsolePage', () => {
       benchmarkSymbol: '000300',
       targetWeights: { '600519': 60, '000001': 30 },
       minimumCommission: 5,
-      sellTaxBps: 5,
+      sellTaxBps: 0,
+      sellTaxMode: 'cn_historical_stamp_duty',
       corporateActions: [{
         symbol: '600519',
         effectiveDate: '2024-01-15',

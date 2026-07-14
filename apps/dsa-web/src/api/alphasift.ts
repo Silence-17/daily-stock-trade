@@ -582,6 +582,7 @@ export const alphasiftApi = {
     targetWeights?: Record<string, number>;
     minimumCommission?: number;
     sellTaxBps?: number;
+    sellTaxMode?: 'explicit' | 'cn_historical_stamp_duty';
     corporateActions?: AlphaSiftPortfolioCorporateActionInput[];
     includePersistedCorporateActions?: boolean;
   }): Promise<AlphaSiftPortfolioBacktestResponse> {
@@ -598,6 +599,7 @@ export const alphasiftApi = {
         commission_bps: 3,
         minimum_commission: payload.minimumCommission ?? 0,
         sell_tax_bps: payload.sellTaxBps ?? 0,
+        sell_tax_mode: payload.sellTaxMode ?? 'explicit',
         slippage_bps: 5,
         benchmark_symbol: payload.benchmarkSymbol || null,
         enforce_tradeability: true,

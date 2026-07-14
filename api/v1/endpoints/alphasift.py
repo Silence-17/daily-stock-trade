@@ -130,6 +130,7 @@ class AlphaSiftPortfolioBacktestRequest(BaseModel):
     commission_bps: float = Field(3, ge=0, le=1000)
     minimum_commission: float = Field(0, ge=0)
     sell_tax_bps: float = Field(0, ge=0, le=1000)
+    sell_tax_mode: str = Field("explicit", pattern="^(explicit|cn_historical_stamp_duty)$")
     slippage_bps: float = Field(5, ge=0, le=1000)
     benchmark_symbol: Optional[str] = Field(None, min_length=1, max_length=16)
     enforce_tradeability: bool = True
@@ -421,6 +422,7 @@ def alphasift_run_portfolio_backtest(
             commission_bps=payload.commission_bps,
             minimum_commission=payload.minimum_commission,
             sell_tax_bps=payload.sell_tax_bps,
+            sell_tax_mode=payload.sell_tax_mode,
             slippage_bps=payload.slippage_bps,
             benchmark_symbol=payload.benchmark_symbol,
             enforce_tradeability=payload.enforce_tradeability,

@@ -365,6 +365,7 @@ describe('alphasiftApi', () => {
       targetWeights: { '600519': 60, '000001': 30 },
       minimumCommission: 5,
       sellTaxBps: 5,
+      sellTaxMode: 'explicit',
       corporateActions: [{
         symbol: '600519',
         effectiveDate: '2024-01-15',
@@ -391,6 +392,7 @@ describe('alphasiftApi', () => {
       commission_bps: 3,
       minimum_commission: 5,
       sell_tax_bps: 5,
+      sell_tax_mode: 'explicit',
       slippage_bps: 5,
       benchmark_symbol: '000300',
       enforce_tradeability: true,

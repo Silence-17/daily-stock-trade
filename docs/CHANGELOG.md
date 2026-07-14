@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [新功能] AlphaSift 现金账本新增 `cn_historical_stamp_duty` 卖出税模式，按卖出成交日在 2008-09-19 起使用 10 bps、2023-08-28 起使用 5 bps，并保留 `explicit` 固定税率兼容模式。
+- [改进] 每笔成交新增实际 `tax_bps` 和政策 `tax_source` 审计，方法论返回生效制度表；历史模式仅允许中国市场，早于已覆盖制度起点的实际卖出 fail-closed。
+- [测试] 新增官方生效日边界、固定/历史模式税额、非中国市场和未覆盖历史日期阻断，以及 API/Web 模式映射回归。
 - [新功能] AlphaSift 现金账本拆并股事件支持可选 `cash_in_lieu_price`，将非整数零碎股向下结算为整股并按显式结算价兑付现金。
 - [改进] 公司行动审计新增零碎股数量、补偿单价、补偿现金及汇总 `cash_in_lieu_received`；Agent 控制台直接展示事件和累计补偿，未提供结算价时继续 fail-closed。
 - [测试] 新增零碎股补偿成功、缺少结算价阻断、字段误用、API 转发和 Web JSON 映射/展示回归。
