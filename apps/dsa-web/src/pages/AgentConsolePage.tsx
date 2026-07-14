@@ -132,6 +132,13 @@ function runDataQuality(run: VnpyPaperAgentRunSummary | VnpyPaperAgentRunDetail 
   return typeof status === 'string' ? status : '';
 }
 
+function runDataQualityScore(run: VnpyPaperAgentRunSummary | VnpyPaperAgentRunDetail | null): number | null {
+  const diagnostics = asRecord(run?.diagnostics);
+  const quality = asRecord(diagnostics?.dataQuality) ?? asRecord(diagnostics?.data_quality);
+  const score = Number(quality?.score);
+  return Number.isFinite(score) ? score : null;
+}
+
 function runAgentSummary(run: VnpyPaperAgentRunDetail | null): Record<string, unknown> | null {
   const diagnostics = asRecord(run?.diagnostics);
   return asRecord(diagnostics?.agentSummary) ?? asRecord(diagnostics?.agent_summary);
@@ -425,6 +432,12 @@ const AgentConsolePage: React.FC = () => {
   const selectedRecentRunContext = (
     asRecord(selectedPlan?.recentRunContext)
     ?? asRecord(selectedPlan?.recent_run_context)
+  );
+  const selectedCrossRunQuality = (
+    asRecord(selectedDiagnostics?.crossRunQuality)
+    ?? asRecord(selectedDiagnostics?.cross_run_quality)
+    ?? asRecord(selectedRecentRunContext?.crossRunQuality)
+    ?? asRecord(selectedRecentRunContext?.cross_run_quality)
   );
   const selectedTopSkips = asRecordList(
     selectedSummary?.topSkipReasons ?? selectedSummary?.top_skip_reasons,
@@ -1604,7 +1617,14 @@ const AgentConsolePage: React.FC = () => {
                 <StatTile label="策略 / 市场" value={selectedRun.strategy} hint={selectedRun.market} />
                 <StatTile label="候选 / 计划" value={`${selectedRun.candidateCount} / ${selectedRun.plannedCount}`} />
                 <StatTile label="成交 / 跳过" value={`${selectedRun.submittedCount} / ${selectedRun.skippedCount}`} />
-                <StatTile label="数据质量" value={runDataQuality(selectedRun) || '-'} />
+                <StatTile
+                  label="数据质量"
+                  value={(() => {
+                    const status = runDataQuality(selectedRun) || '-';
+                    const score = runDataQualityScore(selectedRun);
+                    return score == null ? status : `${status} / ${formatNumber(score, 1)}`;
+                  })()}
+                />
                 <StatTile
                   label="复核质量"
                   value={selectedReviewQualityStatus || '-'}
@@ -1705,6 +1725,37 @@ const AgentConsolePage: React.FC = () => {
                                 ?? selectedRecentRunContext.current_failure_streak
                                 ?? 0,
                               )}
+                            </dd>
+                          </div>
+                        ) : null}
+                        {selectedCrossRunQuality ? (
+                          <div className="sm:col-span-2" data-testid="cross-run-quality-state">
+                            <dt>跨运行前瞻状态</dt>
+                            <dd className="mt-1 space-y-1 font-semibold text-foreground">
+                              <span>
+                                {String(selectedCrossRunQuality.state || '-')}
+                                {' · '}
+                                {String(
+                                  selectedCrossRunQuality.matureSampleCount
+                                  ?? selectedCrossRunQuality.mature_sample_count
+                                  ?? 0,
+                                )} 个成熟样本
+                                {' · 胜率 '}
+                                {formatPercent(
+                                  selectedCrossRunQuality.winRatePct
+                                  ?? selectedCrossRunQuality.win_rate_pct,
+                                  1,
+                                )}
+                              </span>
+                              <div className="text-xs font-normal text-secondary-text">
+                                {String(selectedCrossRunQuality.reason || '-')}
+                                {selectedCrossRunQuality.transition
+                                  ? ` · ${String(selectedCrossRunQuality.transition)}`
+                                  : ''}
+                                {selectedCrossRunQuality.gateBlocked || selectedCrossRunQuality.gate_blocked
+                                  ? ' · 买入已阻断'
+                                  : ''}
+                              </div>
                             </dd>
                           </div>
                         ) : null}
@@ -1966,6 +2017,12 @@ function DecisionTable({ decisions }: { decisions: VnpyPaperAgentDecision[] }) {
                   asRecord(positionPlan?.portfolioAllocation)
                   ?? asRecord(positionPlan?.portfolio_allocation)
                 );
+                const allocationRiskInput = (
+                  asRecord(portfolioAllocation?.riskInput)
+                  ?? asRecord(portfolioAllocation?.risk_input)
+                );
+                const allocationCorrelation = asRecord(allocationRiskInput?.correlation);
+                const correlationPairs = asRecordList(allocationCorrelation?.pairwise);
                 return (
                   <tr key={item.id} className="border-t border-border align-top">
                     <td className="px-3 py-2">
@@ -1988,6 +2045,48 @@ function DecisionTable({ decisions }: { decisions: VnpyPaperAgentDecision[] }) {
                           评分权重 {formatPercent(Number(portfolioAllocation.scoreWeight ?? portfolioAllocation.score_weight) * 100)}
                           {' · 上限 '}
                           {formatMoney(portfolioAllocation.candidateCap ?? portfolioAllocation.candidate_cap)}
+                          {allocationRiskInput?.status === 'available' ? (
+                            <div data-testid={`portfolio-risk-input-${item.id}`}>
+                              20日波动率 {formatPercent(
+                                allocationRiskInput.volatility20dPct
+                                ?? allocationRiskInput.volatility_20d_pct,
+                              )}
+                              {' / 有效波动率 '}
+                              {formatPercent(
+                                allocationRiskInput.effectiveVolatilityPct
+                                ?? allocationRiskInput.effective_volatility_pct,
+                              )}
+                              {' / 风险权重 '}
+                              {formatNumber(
+                                allocationRiskInput.riskAdjustedWeight
+                                ?? allocationRiskInput.risk_adjusted_weight,
+                                4,
+                              )}
+                            </div>
+                          ) : null}
+                          {allocationCorrelation ? (
+                            <div className="mt-1" data-testid={`portfolio-correlation-input-${item.id}`}>
+                              相关性样本 {String(
+                                allocationCorrelation.observationCount
+                                ?? allocationCorrelation.observation_count
+                                ?? 0,
+                              )}
+                              {' · 上限 '}
+                              {formatNumber(
+                                allocationCorrelation.maxPairwiseCorrelation
+                                ?? allocationCorrelation.max_pairwise_correlation,
+                                2,
+                              )}
+                              {correlationPairs.length > 0 ? (
+                                <span>
+                                  {' · '}
+                                  {correlationPairs.map((pair) => (
+                                    `${String(pair.symbol || '-')}=${formatNumber(pair.correlation, 2)}`
+                                  )).join(' / ')}
+                                </span>
+                              ) : null}
+                            </div>
+                          ) : null}
                         </div>
                       ) : null}
                     </td>

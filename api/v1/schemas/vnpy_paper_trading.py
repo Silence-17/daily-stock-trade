@@ -20,6 +20,11 @@ class VnpyPaperSettings(BaseModel):
     auto_cash_per_order: float = Field(10000.0, gt=0)
     auto_score_weighted_allocation_enabled: bool = False
     auto_allocation_budget: Optional[float] = Field(None, gt=0)
+    auto_allocation_method: Literal["score_weighted", "score_inverse_volatility_20d", "score_inverse_volatility_20d_correlation_capped"] = "score_weighted"
+    auto_risk_volatility_floor_pct: float = Field(5.0, gt=0, le=1000)
+    auto_correlation_lookback_days: int = Field(60, ge=20, le=252)
+    auto_correlation_min_observations: int = Field(20, ge=5, le=120)
+    auto_max_pairwise_correlation: float = Field(0.85, ge=-1, le=1)
     auto_interval_minutes: int = Field(1440, ge=1, le=10080)
     auto_min_score: Optional[float] = None
     auto_skip_existing_positions: bool = True
@@ -38,6 +43,12 @@ class VnpyPaperSettings(BaseModel):
     auto_exclude_suspended: bool = True
     auto_exclude_price_limit: bool = True
     auto_min_turnover: Optional[float] = Field(None, gt=0)
+    auto_min_data_quality_score: Optional[float] = Field(None, ge=0, le=100)
+    auto_cross_run_quality_gate_enabled: bool = False
+    auto_cross_run_horizon_days: int = Field(5, ge=1, le=60)
+    auto_cross_run_min_mature_samples: int = Field(10, ge=1, le=500)
+    auto_cross_run_min_win_rate_pct: float = Field(45.0, ge=0, le=100)
+    auto_cross_run_max_decisions: int = Field(200, ge=1, le=2000)
     auto_min_cash_balance: Optional[float] = Field(None, gt=0)
     auto_max_drawdown_pct: Optional[float] = Field(None, gt=0, le=100)
     auto_market_light_gate_enabled: bool = False
@@ -72,6 +83,11 @@ class VnpyPaperSettingsUpdate(BaseModel):
     auto_cash_per_order: Optional[float] = Field(None, gt=0)
     auto_score_weighted_allocation_enabled: Optional[bool] = None
     auto_allocation_budget: Optional[float] = Field(None, gt=0)
+    auto_allocation_method: Optional[Literal["score_weighted", "score_inverse_volatility_20d", "score_inverse_volatility_20d_correlation_capped"]] = None
+    auto_risk_volatility_floor_pct: Optional[float] = Field(None, gt=0, le=1000)
+    auto_correlation_lookback_days: Optional[int] = Field(None, ge=20, le=252)
+    auto_correlation_min_observations: Optional[int] = Field(None, ge=5, le=120)
+    auto_max_pairwise_correlation: Optional[float] = Field(None, ge=-1, le=1)
     auto_interval_minutes: Optional[int] = Field(None, ge=1, le=10080)
     auto_min_score: Optional[float] = None
     auto_skip_existing_positions: Optional[bool] = None
@@ -90,6 +106,12 @@ class VnpyPaperSettingsUpdate(BaseModel):
     auto_exclude_suspended: Optional[bool] = None
     auto_exclude_price_limit: Optional[bool] = None
     auto_min_turnover: Optional[float] = Field(None, gt=0)
+    auto_min_data_quality_score: Optional[float] = Field(None, ge=0, le=100)
+    auto_cross_run_quality_gate_enabled: Optional[bool] = None
+    auto_cross_run_horizon_days: Optional[int] = Field(None, ge=1, le=60)
+    auto_cross_run_min_mature_samples: Optional[int] = Field(None, ge=1, le=500)
+    auto_cross_run_min_win_rate_pct: Optional[float] = Field(None, ge=0, le=100)
+    auto_cross_run_max_decisions: Optional[int] = Field(None, ge=1, le=2000)
     auto_min_cash_balance: Optional[float] = Field(None, gt=0)
     auto_max_drawdown_pct: Optional[float] = Field(None, gt=0, le=100)
     auto_market_light_gate_enabled: Optional[bool] = None

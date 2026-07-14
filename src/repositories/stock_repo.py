@@ -169,3 +169,14 @@ class StockRepository:
                 .limit(eval_window_days)
             ).scalars().all()
             return list(rows)
+
+    def get_trailing_bars(self, *, code: str, as_of: date, limit: int) -> List[StockDaily]:
+        """Return the latest daily bars on or before as_of in ascending date order."""
+        with self.db.get_session() as session:
+            rows = session.execute(
+                select(StockDaily)
+                .where(and_(StockDaily.code == code, StockDaily.date <= as_of))
+                .order_by(desc(StockDaily.date))
+                .limit(max(1, int(limit)))
+            ).scalars().all()
+            return list(reversed(rows))

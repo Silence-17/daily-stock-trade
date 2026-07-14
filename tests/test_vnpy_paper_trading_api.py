@@ -511,12 +511,23 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
                     "auto_trade_enabled": True,
                     "auto_score_weighted_allocation_enabled": True,
                     "auto_allocation_budget": 25000,
+                    "auto_allocation_method": "score_inverse_volatility_20d",
+                    "auto_risk_volatility_floor_pct": 7.5,
+                    "auto_correlation_lookback_days": 90,
+                    "auto_correlation_min_observations": 30,
+                    "auto_max_pairwise_correlation": 0.75,
                     "auto_interval_minutes": 5,
                     "auto_min_score": None,
                     "auto_exclude_st": True,
                     "auto_exclude_suspended": True,
                     "auto_exclude_price_limit": True,
                     "auto_min_turnover": 100000000,
+                    "auto_min_data_quality_score": 72.5,
+                    "auto_cross_run_quality_gate_enabled": True,
+                    "auto_cross_run_horizon_days": 10,
+                    "auto_cross_run_min_mature_samples": 20,
+                    "auto_cross_run_min_win_rate_pct": 48,
+                    "auto_cross_run_max_decisions": 300,
                     "auto_min_cash_balance": 5000,
                     "auto_max_drawdown_pct": 12,
                     "auto_max_single_position_value": 20000,
@@ -540,9 +551,23 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
         self.assertTrue(response.json()["settings"]["auto_trade_enabled"])
         self.assertTrue(response.json()["settings"]["auto_score_weighted_allocation_enabled"])
         self.assertEqual(response.json()["settings"]["auto_allocation_budget"], 25000)
+        self.assertEqual(
+            response.json()["settings"]["auto_allocation_method"],
+            "score_inverse_volatility_20d",
+        )
+        self.assertEqual(response.json()["settings"]["auto_risk_volatility_floor_pct"], 7.5)
+        self.assertEqual(response.json()["settings"]["auto_correlation_lookback_days"], 90)
+        self.assertEqual(response.json()["settings"]["auto_correlation_min_observations"], 30)
+        self.assertEqual(response.json()["settings"]["auto_max_pairwise_correlation"], 0.75)
         self.assertEqual(response.json()["settings"]["auto_interval_minutes"], 5)
         self.assertTrue(response.json()["settings"]["auto_exclude_st"])
         self.assertEqual(response.json()["settings"]["auto_min_turnover"], 100000000)
+        self.assertEqual(response.json()["settings"]["auto_min_data_quality_score"], 72.5)
+        self.assertTrue(response.json()["settings"]["auto_cross_run_quality_gate_enabled"])
+        self.assertEqual(response.json()["settings"]["auto_cross_run_horizon_days"], 10)
+        self.assertEqual(response.json()["settings"]["auto_cross_run_min_mature_samples"], 20)
+        self.assertEqual(response.json()["settings"]["auto_cross_run_min_win_rate_pct"], 48)
+        self.assertEqual(response.json()["settings"]["auto_cross_run_max_decisions"], 300)
         self.assertEqual(response.json()["settings"]["auto_min_cash_balance"], 5000)
         self.assertEqual(response.json()["settings"]["auto_max_drawdown_pct"], 12)
         self.assertEqual(response.json()["settings"]["auto_max_single_position_value"], 20000)

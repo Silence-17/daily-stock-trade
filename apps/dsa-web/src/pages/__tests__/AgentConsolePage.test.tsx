@@ -81,13 +81,23 @@ const runSummary = {
   error: null,
   settings: {},
   diagnostics: {
-    dataQuality: { status: 'partial' },
+    dataQuality: { status: 'partial', score: 82.5, grade: 'good' },
     portfolioAllocation: {
       enabled: true,
-      method: 'score_weighted_capped',
+      method: 'score_inverse_volatility_20d_capped',
       configuredBudget: 10000,
       resolvedBudget: 10000,
       allocatedBudget: 10000,
+    },
+    crossRunQuality: {
+      state: 'healthy',
+      reason: 'forward_quality_thresholds_met',
+      previousState: 'blocked',
+      transition: 'blocked->healthy',
+      matureSampleCount: 20,
+      winRatePct: 55,
+      gateEnabled: true,
+      gateBlocked: false,
     },
     agentPlan: {
       strategy: 'dual_low',
@@ -210,13 +220,25 @@ const runDetail = {
     riskFlags: [],
     orderResult: {
       positionPlan: {
-        sizingMethod: 'score_weighted_allocation',
+        sizingMethod: 'score_inverse_volatility_20d_allocation',
         portfolioAllocation: {
           enabled: true,
-          method: 'score_weighted_capped',
+          method: 'score_inverse_volatility_20d_capped',
           scoreWeight: 0.8,
           candidateCap: 10000,
           allocatedBaseAmount: 8000,
+        riskInput: {
+            status: 'available',
+            volatility20dPct: 12.5,
+            effectiveVolatilityPct: 12.5,
+          riskAdjustedWeight: 6.4,
+          correlation: {
+            status: 'available',
+            observationCount: 60,
+            maxPairwiseCorrelation: 0.85,
+            pairwise: [{ symbol: '000001', correlation: 0.42 }],
+          },
+          },
         },
       },
       agentReview: {
@@ -625,6 +647,9 @@ describe('AgentConsolePage', () => {
     expect(screen.getByText('历史成交率')).toBeInTheDocument();
     expect(screen.getByText('40.0%')).toBeInTheDocument();
     expect(screen.getByText(/failed · ss-agent-previous · 连续失败 1/)).toBeInTheDocument();
+    expect(screen.getByTestId('cross-run-quality-state')).toHaveTextContent('healthy');
+    expect(screen.getByTestId('cross-run-quality-state')).toHaveTextContent('20 个成熟样本');
+    expect(screen.getByTestId('cross-run-quality-state')).toHaveTextContent('blocked->healthy');
     expect(screen.getAllByText('score 85.0').length).toBeGreaterThan(0);
     expect(screen.getByText('建议人工确认')).toBeInTheDocument();
     expect(screen.getByText('100.0%')).toBeInTheDocument();
@@ -634,10 +659,15 @@ describe('AgentConsolePage', () => {
     expect(screen.getByText(/autoMaxResults=1/)).toBeInTheDocument();
     expect(screen.getByText('Prefer a narrower heat strategy today.')).toBeInTheDocument();
     expect(screen.getByText('prompt=vnpy_paper_dynamic_agent_plan_v2 / eval=dynamic_plan_guardrails_v1')).toBeInTheDocument();
-    expect(screen.getByTestId('portfolio-allocation-summary')).toHaveTextContent('score_weighted_capped');
+    expect(screen.getByTestId('portfolio-allocation-summary')).toHaveTextContent('score_inverse_volatility_20d_capped');
     expect(screen.getByTestId('portfolio-allocation-summary')).toHaveTextContent('10,000');
+    expect(screen.getByText('partial / 82.5')).toBeInTheDocument();
     expect(screen.getByTestId('portfolio-allocation-1')).toHaveTextContent('80.0%');
     expect(screen.getByTestId('portfolio-allocation-1')).toHaveTextContent('10,000');
+    expect(screen.getByTestId('portfolio-risk-input-1')).toHaveTextContent('12.5%');
+    expect(screen.getByTestId('portfolio-risk-input-1')).toHaveTextContent('6.4000');
+    expect(screen.getByTestId('portfolio-correlation-input-1')).toHaveTextContent('60');
+    expect(screen.getByTestId('portfolio-correlation-input-1')).toHaveTextContent('000001=0.42');
     expect(screen.getByTestId('agent-llm-recap')).toHaveTextContent('LLM recap generated');
     expect(screen.getByTestId('agent-review-1')).toHaveTextContent('Agent 复核 passed');
     expect(screen.getByText('Pre-trade Agent review passed')).toBeInTheDocument();

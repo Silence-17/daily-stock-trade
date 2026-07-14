@@ -94,6 +94,8 @@ const statusResponse = {
     autoCashPerOrder: 10000,
     autoScoreWeightedAllocationEnabled: false,
     autoAllocationBudget: null,
+    autoAllocationMethod: 'score_weighted',
+    autoRiskVolatilityFloorPct: 5,
     autoIntervalMinutes: 1440,
     autoMinScore: null,
     autoSkipExistingPositions: true,
@@ -112,6 +114,7 @@ const statusResponse = {
     autoExcludeSuspended: true,
     autoExcludePriceLimit: true,
     autoMinTurnover: null,
+    autoMinDataQualityScore: null,
     autoMinCashBalance: null,
     autoMaxDrawdownPct: null,
     autoMarketLightGateEnabled: false,
@@ -1722,6 +1725,19 @@ describe('VnpyPaperTradingPage', () => {
     fireEvent.click(screen.getByLabelText('LLM 买入复核'));
     fireEvent.change(screen.getByLabelText('vn.py gateway'), { target: { value: 'SIM' } });
     const saveButton = screen.getByRole('button', { name: '保存设置' });
+    fireEvent.change(screen.getByLabelText('组合分配方法'), {
+      target: { value: 'score_inverse_volatility_20d_correlation_capped' },
+    });
+    fireEvent.change(screen.getByLabelText('波动率下限（%）'), { target: { value: '7.5' } });
+    fireEvent.change(screen.getByLabelText('相关性回看日数'), { target: { value: '90' } });
+    fireEvent.change(screen.getByLabelText('最少重叠收益数'), { target: { value: '30' } });
+    fireEvent.change(screen.getByLabelText('最大两两相关性'), { target: { value: '0.75' } });
+    fireEvent.change(screen.getByLabelText('最低数据质量分'), { target: { value: '72.5' } });
+    fireEvent.click(screen.getByLabelText('跨运行前瞻门禁'));
+    fireEvent.change(screen.getByLabelText('前瞻周期（交易日）'), { target: { value: '10' } });
+    fireEvent.change(screen.getByLabelText('最少成熟样本'), { target: { value: '20' } });
+    fireEvent.change(screen.getByLabelText('最低前瞻胜率%'), { target: { value: '48' } });
+    fireEvent.change(screen.getByLabelText('前瞻扫描上限'), { target: { value: '300' } });
     fireEvent.submit(saveButton.closest('form') as HTMLFormElement);
 
     await waitFor(() => expect(updateSettings).toHaveBeenCalledWith(
@@ -1729,6 +1745,11 @@ describe('VnpyPaperTradingPage', () => {
         autoTradeEnabled: true,
         autoScoreWeightedAllocationEnabled: true,
         autoAllocationBudget: 25000,
+        autoAllocationMethod: 'score_inverse_volatility_20d_correlation_capped',
+        autoRiskVolatilityFloorPct: 7.5,
+        autoCorrelationLookbackDays: 90,
+        autoCorrelationMinObservations: 30,
+        autoMaxPairwiseCorrelation: 0.75,
         autoIntervalMinutes: 5,
         autoMaxPositions: 10,
         autoDailyMaxOrders: null,
@@ -1739,6 +1760,12 @@ describe('VnpyPaperTradingPage', () => {
         autoExcludeSuspended: true,
         autoExcludePriceLimit: true,
         autoMinTurnover: 100000000,
+        autoMinDataQualityScore: 72.5,
+        autoCrossRunQualityGateEnabled: true,
+        autoCrossRunHorizonDays: 10,
+        autoCrossRunMinMatureSamples: 20,
+        autoCrossRunMinWinRatePct: 48,
+        autoCrossRunMaxDecisions: 300,
         autoMaxSinglePositionValue: 20000,
         autoMaxTotalPositionValue: 80000,
         autoMaxTotalPositionPct: 80,

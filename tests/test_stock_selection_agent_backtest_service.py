@@ -7,6 +7,7 @@ import os
 import tempfile
 import unittest
 from datetime import date, datetime
+from unittest.mock import patch
 
 from src.config import Config
 from src.repositories.stock_selection_agent_repo import StockSelectionAgentRepository
@@ -185,6 +186,66 @@ class StockSelectionAgentBacktestServiceTestCase(unittest.TestCase):
                 created_from=datetime(2024, 2, 1),
                 created_to=datetime(2024, 1, 1),
             )
+
+    def test_quality_snapshot_tracks_insufficient_blocked_guarded_and_recovery_states(self) -> None:
+        base_result = {
+            "generated_at": datetime(2024, 1, 31, 12, 0),
+            "truncated": False,
+            "matrix": {
+                "5": {
+                    "sample_count": 12,
+                    "completed_count": 4,
+                    "coverage_pct": 33.33,
+                    "win_rate_pct": 50.0,
+                    "average_return_pct": 1.0,
+                    "median_return_pct": 0.5,
+                    "average_max_adverse_excursion_pct": -2.0,
+                    "unable_reason_counts": {"insufficient_forward_bars": 8},
+                }
+            },
+        }
+        with patch.object(self.service, "evaluate", return_value=base_result):
+            insufficient = self.service.build_quality_snapshot(
+                strategy="dual_low",
+                market="cn",
+                min_mature_samples=10,
+            )
+        self.assertEqual(insufficient["state"], "insufficient_evidence")
+
+        base_result["matrix"]["5"].update(
+            completed_count=12,
+            coverage_pct=100.0,
+            win_rate_pct=40.0,
+        )
+        with patch.object(self.service, "evaluate", return_value=base_result):
+            blocked = self.service.build_quality_snapshot(
+                strategy="dual_low",
+                market="cn",
+                min_mature_samples=10,
+                min_win_rate_pct=45,
+                previous_state="healthy",
+            )
+        self.assertEqual(blocked["state"], "blocked")
+        self.assertEqual(blocked["transition"], "healthy->blocked")
+
+        base_result["matrix"]["5"].update(win_rate_pct=50.0, average_return_pct=-0.2)
+        with patch.object(self.service, "evaluate", return_value=base_result):
+            guarded = self.service.build_quality_snapshot(
+                strategy="dual_low",
+                market="cn",
+                previous_state="blocked",
+            )
+        self.assertEqual(guarded["state"], "guarded")
+
+        base_result["matrix"]["5"].update(average_return_pct=0.8)
+        with patch.object(self.service, "evaluate", return_value=base_result):
+            healthy = self.service.build_quality_snapshot(
+                strategy="dual_low",
+                market="cn",
+                previous_state="blocked",
+            )
+        self.assertEqual(healthy["state"], "healthy")
+        self.assertEqual(healthy["transition"], "blocked->healthy")
 
 
 if __name__ == "__main__":
