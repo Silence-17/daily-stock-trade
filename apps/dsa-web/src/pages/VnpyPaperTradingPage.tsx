@@ -107,6 +107,8 @@ type SettingsForm = {
   autoMarketLightBlockMode: 'red' | 'red_yellow';
   autoFailureFuseEnabled: boolean;
   autoFailureFuseThreshold: string;
+  autoFailureFuseAutoRecoveryEnabled: boolean;
+  autoFailureFuseCooldownMinutes: string;
   autoSellEnabled: boolean;
   autoStopLossPct: string;
   autoTakeProfitPct: string;
@@ -201,6 +203,8 @@ const defaultSettingsForm: SettingsForm = {
   autoMarketLightBlockMode: 'red',
   autoFailureFuseEnabled: false,
   autoFailureFuseThreshold: '3',
+  autoFailureFuseAutoRecoveryEnabled: false,
+  autoFailureFuseCooldownMinutes: '1440',
   autoSellEnabled: false,
   autoStopLossPct: '',
   autoTakeProfitPct: '',
@@ -536,6 +540,8 @@ function settingsToForm(status: VnpyPaperStatusResponse): SettingsForm {
       : 'red',
     autoFailureFuseEnabled: Boolean(settings.autoFailureFuseEnabled),
     autoFailureFuseThreshold: String(settings.autoFailureFuseThreshold ?? 3),
+    autoFailureFuseAutoRecoveryEnabled: Boolean(settings.autoFailureFuseAutoRecoveryEnabled),
+    autoFailureFuseCooldownMinutes: String(settings.autoFailureFuseCooldownMinutes ?? 1440),
     autoSellEnabled: Boolean(settings.autoSellEnabled),
     autoStopLossPct: settings.autoStopLossPct == null ? '' : String(settings.autoStopLossPct),
     autoTakeProfitPct: settings.autoTakeProfitPct == null ? '' : String(settings.autoTakeProfitPct),
@@ -629,6 +635,8 @@ function buildSettingsUpdate(settingsForm: SettingsForm): VnpyPaperSettingsUpdat
       : ['red'],
     autoFailureFuseEnabled: settingsForm.autoFailureFuseEnabled,
     autoFailureFuseThreshold: parseNumber(settingsForm.autoFailureFuseThreshold) ?? 3,
+    autoFailureFuseAutoRecoveryEnabled: settingsForm.autoFailureFuseAutoRecoveryEnabled,
+    autoFailureFuseCooldownMinutes: parseNumber(settingsForm.autoFailureFuseCooldownMinutes) ?? 1440,
     autoSellEnabled: settingsForm.autoSellEnabled,
     autoStopLossPct: settingsForm.autoStopLossPct.trim()
       ? parseNumber(settingsForm.autoStopLossPct)
@@ -1331,6 +1339,8 @@ const VnpyPaperTradingPage: React.FC = () => {
   const failureFuseOpen = Boolean(failureFuse?.open);
   const failureFuseCount = Number(failureFuse?.consecutiveFailureCount ?? 0);
   const failureFuseThreshold = Number(failureFuse?.threshold ?? settingsForm.autoFailureFuseThreshold);
+  const failureFuseAutoRecoveryEnabled = Boolean(failureFuse?.autoRecoveryEnabled);
+  const failureFuseRecoverAt = failureFuse?.recoverAt;
   const failureFuseDisplay = failureFuseEnabled
     ? `${failureFuseOpen ? '已熔断' : '正常'} ${formatNumber(failureFuseCount, 0)}/${formatNumber(failureFuseThreshold, 0)}`
     : '未启用';
@@ -2208,6 +2218,11 @@ const VnpyPaperTradingPage: React.FC = () => {
             <p className={`mt-2 text-sm font-semibold ${failureFuseOpen ? 'text-danger' : 'text-foreground'}`}>
               {failureFuseDisplay}
             </p>
+            {failureFuseOpen && failureFuseAutoRecoveryEnabled ? (
+              <p className="mt-1 break-words text-xs text-secondary-text">
+                自动恢复探测：{formatDateTime(failureFuseRecoverAt)}
+              </p>
+            ) : null}
             {failureFuseOpen ? (
               <Button
                 className="mt-2"
@@ -3431,6 +3446,19 @@ const VnpyPaperTradingPage: React.FC = () => {
               <input
                 type="checkbox"
                 className={CHECKBOX_CLASS}
+                checked={settingsForm.autoFailureFuseAutoRecoveryEnabled}
+                disabled={!settingsForm.autoFailureFuseEnabled}
+                onChange={(event) => setSettingsForm((prev) => ({
+                  ...prev,
+                  autoFailureFuseAutoRecoveryEnabled: event.target.checked,
+                }))}
+              />
+              熔断冷却后自动恢复
+            </label>
+            <label className="flex items-center gap-2 text-sm text-foreground">
+              <input
+                type="checkbox"
+                className={CHECKBOX_CLASS}
                 checked={settingsForm.autoCrossRunQualityGateEnabled}
                 onChange={(event) => setSettingsForm((prev) => ({
                   ...prev,
@@ -3930,6 +3958,21 @@ const VnpyPaperTradingPage: React.FC = () => {
                 onChange={(event) => setSettingsForm((prev) => ({
                   ...prev,
                   autoFailureFuseThreshold: event.target.value,
+                }))}
+              />
+            </label>
+            <label className="space-y-1 text-xs text-secondary-text">
+              熔断冷却（分钟）
+              <input
+                className={INPUT_CLASS}
+                type="number"
+                min={1}
+                max={10080}
+                disabled={!settingsForm.autoFailureFuseAutoRecoveryEnabled}
+                value={settingsForm.autoFailureFuseCooldownMinutes}
+                onChange={(event) => setSettingsForm((prev) => ({
+                  ...prev,
+                  autoFailureFuseCooldownMinutes: event.target.value,
                 }))}
               />
             </label>

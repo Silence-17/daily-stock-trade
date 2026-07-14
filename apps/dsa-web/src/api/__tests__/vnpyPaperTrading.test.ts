@@ -73,6 +73,8 @@ describe('vnpyPaperTradingApi', () => {
           auto_market_light_block_statuses: ['red', 'yellow'],
           auto_failure_fuse_enabled: true,
           auto_failure_fuse_threshold: 2,
+          auto_failure_fuse_auto_recovery_enabled: true,
+          auto_failure_fuse_cooldown_minutes: 60,
           auto_sell_enabled: false,
           auto_stop_loss_pct: null,
           auto_take_profit_pct: null,
@@ -158,6 +160,8 @@ describe('vnpyPaperTradingApi', () => {
     expect(result.settings.autoMarketLightBlockStatuses).toEqual(['red', 'yellow']);
     expect(result.settings.autoFailureFuseEnabled).toBe(true);
     expect(result.settings.autoFailureFuseThreshold).toBe(2);
+    expect(result.settings.autoFailureFuseAutoRecoveryEnabled).toBe(true);
+    expect(result.settings.autoFailureFuseCooldownMinutes).toBe(60);
     expect(result.settings.autoSellPositionPct).toBe(50);
     expect(result.settings.autoSignalExitEnabled).toBe(true);
     expect(result.settings.autoNoProgressDays).toBe(5);
@@ -1028,6 +1032,8 @@ describe('vnpyPaperTradingApi', () => {
       autoMarketLightBlockStatuses: ['red', 'yellow'],
       autoFailureFuseEnabled: true,
       autoFailureFuseThreshold: 2,
+      autoFailureFuseAutoRecoveryEnabled: true,
+      autoFailureFuseCooldownMinutes: 60,
       autoSellEnabled: true,
       autoStopLossPct: 8,
       autoTakeProfitPct: 18,
@@ -1087,6 +1093,8 @@ describe('vnpyPaperTradingApi', () => {
       auto_market_light_block_statuses: ['red', 'yellow'],
       auto_failure_fuse_enabled: true,
       auto_failure_fuse_threshold: 2,
+      auto_failure_fuse_auto_recovery_enabled: true,
+      auto_failure_fuse_cooldown_minutes: 60,
       auto_sell_enabled: true,
       auto_stop_loss_pct: 8,
       auto_take_profit_pct: 18,

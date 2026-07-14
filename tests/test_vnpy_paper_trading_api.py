@@ -542,6 +542,8 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
                     "auto_market_light_block_statuses": ["red", "yellow"],
                     "auto_failure_fuse_enabled": True,
                     "auto_failure_fuse_threshold": 2,
+                    "auto_failure_fuse_auto_recovery_enabled": True,
+                    "auto_failure_fuse_cooldown_minutes": 60,
                     "auto_trailing_stop_pct": 12,
                     "auto_llm_plan_enabled": True,
                     "auto_llm_review_enabled": True,
@@ -583,6 +585,13 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
         self.assertEqual(response.json()["settings"]["auto_market_light_block_statuses"], ["red", "yellow"])
         self.assertTrue(response.json()["settings"]["auto_failure_fuse_enabled"])
         self.assertEqual(response.json()["settings"]["auto_failure_fuse_threshold"], 2)
+        self.assertTrue(
+            response.json()["settings"]["auto_failure_fuse_auto_recovery_enabled"]
+        )
+        self.assertEqual(
+            response.json()["settings"]["auto_failure_fuse_cooldown_minutes"],
+            60,
+        )
         self.assertEqual(response.json()["settings"]["auto_trailing_stop_pct"], 12)
         self.assertTrue(response.json()["settings"]["auto_llm_plan_enabled"])
         self.assertTrue(response.json()["settings"]["auto_llm_review_enabled"])

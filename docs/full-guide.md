@@ -756,6 +756,8 @@ python main.py --schedule --no-run-immediately
 >
 > “长期稳定性”通过 `GET /api/v1/vnpy-paper/task-metrics` 提供 7/30/90 天窗口，按 completed/skipped/failed 终态运行计算成功率、失败率、跳过率、平均/P95 耗时和连续失败，并展示任务级与逐日趋势；started 事件不计入成功率分母。
 >
+> 连续失败熔断默认保持锁存并支持手动恢复。需要无人值守恢复时，可在模拟交易页显式开启“熔断冷却后自动恢复”并设置冷却分钟数；打开时间会持久化，冷却到期只放行一轮探测，探测失败会重新熔断。页面和状态接口会显示预计探测时间，自动恢复会写入系统告警审计。
+>
 > Agent 控制台通过 `GET /api/v1/vnpy-paper/agent-runs/data-quality-trends` 展示 7/30/90 天跨 run 数据质量趋势，包括 ok/partial/stale/unavailable/unknown 分布、降级率、警告、source error、逐日结果和具体 snapshot/daily 来源的健康观测。来源表展示观测数、降级次数/比例、最新状态和最新/最大失败计数；缺少整体质量或来源快照的旧 run 不会被推断为健康。
 >
 > Agent 控制台可调用 `POST /api/v1/vnpy-paper/agent-runs/backtest`，复用当前策略、市场和运行时间筛选，按已记录候选价格和严格晚于决策日期的本地日线计算 1/5/10/20 个交易日的覆盖率、胜率、平均/中位收益和平均最大有利/不利波动。默认不联网补行情，也不会重跑策略或触发交易；缺价和未来日线不足会降低覆盖率。它用于评价已记录候选，不等同于 point-in-time 全市场历史策略回放。

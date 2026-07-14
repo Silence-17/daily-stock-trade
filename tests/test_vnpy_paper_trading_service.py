@@ -1574,6 +1574,79 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertTrue(notifications[0]["success"])
         self.assertEqual(notifications[0]["latency_ms"], 12)
 
+    def test_failure_fuse_auto_recovers_after_persisted_cooldown(self) -> None:
+        self.service.update_settings(
+            {
+                "auto_trade_enabled": True,
+                "auto_failure_fuse_enabled": True,
+                "auto_failure_fuse_threshold": 2,
+                "auto_failure_fuse_auto_recovery_enabled": True,
+                "auto_failure_fuse_cooldown_minutes": 60,
+            }
+        )
+        for index in range(2):
+            run = self.service.agent_repo.create_run(
+                run_uid=f"failed-cooldown-run-{index}",
+                trigger_source="vnpy_paper_auto",
+                strategy="dual_low",
+                market="cn",
+                max_results=1,
+                cash_per_order=1200,
+            )
+            self.service.agent_repo.complete_run(
+                run_id=int(run["id"]),
+                status="failed",
+                candidate_count=0,
+                planned_count=0,
+                submitted_count=0,
+                skipped_count=0,
+                error="alphasift_unavailable",
+            )
+        probe = self.service.agent_repo.create_run(
+            run_uid="cooldown-probe-run",
+            trigger_source="vnpy_paper_auto",
+            strategy="dual_low",
+            market="cn",
+            max_results=1,
+            cash_per_order=1200,
+        )
+        settings = self.service.get_settings()
+        opened_at = datetime.now(timezone.utc).replace(microsecond=0)
+
+        with patch.object(self.service, "_now_utc", return_value=opened_at):
+            reason, diagnostics = self.service._failure_fuse_reason(
+                settings,
+                current_run_id=int(probe["id"]),
+            )
+        self.assertEqual(reason, "failure_fuse_open")
+        self.assertEqual(diagnostics["remaining_cooldown_seconds"], 3600)
+        self.assertFalse(diagnostics["auto_recovery_due"])
+
+        with patch.object(
+            self.service,
+            "_now_utc",
+            return_value=opened_at + timedelta(minutes=60),
+        ):
+            reason, diagnostics = self.service._failure_fuse_reason(
+                settings,
+                current_run_id=int(probe["id"]),
+            )
+        self.assertIsNone(reason)
+        self.assertTrue(diagnostics["auto_recovered"])
+        self.assertFalse(diagnostics["open"])
+        self.assertEqual(diagnostics["remaining_cooldown_seconds"], 0)
+
+        payload = json.loads(self.service.config_path.read_text(encoding="utf-8"))
+        self.assertNotIn("failure_fuse_opened_at", payload)
+        self.assertEqual(
+            payload["failure_fuse_reset_at"],
+            diagnostics["auto_recovered_at"],
+        )
+        self.assertEqual(
+            payload["failure_fuse_last_auto_recovered_at"],
+            diagnostics["auto_recovered_at"],
+        )
+
     def test_auto_trade_alert_event_records_no_channel_notification_attempt(self) -> None:
         dispatch = NotificationDispatchResult(
             dispatched=False,

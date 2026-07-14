@@ -58,6 +58,8 @@ export type VnpyPaperSettings = {
   autoMarketLightBlockStatuses: string[];
   autoFailureFuseEnabled: boolean;
   autoFailureFuseThreshold: number;
+  autoFailureFuseAutoRecoveryEnabled: boolean;
+  autoFailureFuseCooldownMinutes: number;
   autoSellEnabled: boolean;
   autoStopLossPct?: number | null;
   autoTakeProfitPct?: number | null;
@@ -1018,6 +1020,12 @@ function buildSettingsPayload(payload: VnpyPaperSettingsUpdate): Record<string, 
   if (hasOwn(payload, 'autoFailureFuseEnabled')) body.auto_failure_fuse_enabled = payload.autoFailureFuseEnabled;
   if (hasOwn(payload, 'autoFailureFuseThreshold')) {
     body.auto_failure_fuse_threshold = payload.autoFailureFuseThreshold;
+  }
+  if (hasOwn(payload, 'autoFailureFuseAutoRecoveryEnabled')) {
+    body.auto_failure_fuse_auto_recovery_enabled = payload.autoFailureFuseAutoRecoveryEnabled;
+  }
+  if (hasOwn(payload, 'autoFailureFuseCooldownMinutes')) {
+    body.auto_failure_fuse_cooldown_minutes = payload.autoFailureFuseCooldownMinutes;
   }
   if (hasOwn(payload, 'autoSellEnabled')) body.auto_sell_enabled = payload.autoSellEnabled;
   if (hasOwn(payload, 'autoStopLossPct')) body.auto_stop_loss_pct = payload.autoStopLossPct ?? null;

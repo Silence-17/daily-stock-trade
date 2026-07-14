@@ -121,6 +121,8 @@ const statusResponse = {
     autoMarketLightBlockStatuses: ['red'],
     autoFailureFuseEnabled: false,
     autoFailureFuseThreshold: 3,
+    autoFailureFuseAutoRecoveryEnabled: false,
+    autoFailureFuseCooldownMinutes: 1440,
     autoSellEnabled: false,
     autoStopLossPct: null,
     autoTakeProfitPct: null,
@@ -1720,6 +1722,8 @@ describe('VnpyPaperTradingPage', () => {
     fireEvent.change(screen.getByLabelText('红绿灯拦截'), { target: { value: 'red_yellow' } });
     fireEvent.click(screen.getByLabelText('连续失败熔断'));
     fireEvent.change(screen.getByLabelText('熔断阈值'), { target: { value: '2' } });
+    fireEvent.click(screen.getByLabelText('熔断冷却后自动恢复'));
+    fireEvent.change(screen.getByLabelText('熔断冷却（分钟）'), { target: { value: '60' } });
     fireEvent.change(screen.getByLabelText('股票黑名单'), { target: { value: '600519, 000001' } });
     fireEvent.click(screen.getByLabelText('LLM 动态计划'));
     fireEvent.click(screen.getByLabelText('LLM 买入复核'));
@@ -1779,6 +1783,8 @@ describe('VnpyPaperTradingPage', () => {
         autoMarketLightBlockStatuses: ['red', 'yellow'],
         autoFailureFuseEnabled: true,
         autoFailureFuseThreshold: 2,
+        autoFailureFuseAutoRecoveryEnabled: true,
+        autoFailureFuseCooldownMinutes: 60,
         autoSellEnabled: true,
         autoStopLossPct: 8,
         autoTakeProfitPct: 18,
@@ -1850,6 +1856,8 @@ describe('VnpyPaperTradingPage', () => {
         autoMarketLightBlockStatuses: ['red'],
         autoFailureFuseEnabled: false,
         autoFailureFuseThreshold: 3,
+        autoFailureFuseAutoRecoveryEnabled: false,
+        autoFailureFuseCooldownMinutes: 1440,
         autoSellEnabled: false,
         autoStopLossPct: null,
         autoTakeProfitPct: null,
