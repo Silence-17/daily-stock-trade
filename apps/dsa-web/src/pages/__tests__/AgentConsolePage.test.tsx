@@ -12,6 +12,7 @@ const getAgentDataQualityTrends = vi.hoisted(() => vi.fn());
 const getAgentCrossRunQuality = vi.hoisted(() => vi.fn());
 const runAgentBacktest = vi.hoisted(() => vi.fn());
 const generateAgentRunRecap = vi.hoisted(() => vi.fn());
+const updateAgentRunFeedback = vi.hoisted(() => vi.fn());
 const getReplayCompatibility = vi.hoisted(() => vi.fn());
 const runReplay = vi.hoisted(() => vi.fn());
 const runPortfolioBacktest = vi.hoisted(() => vi.fn());
@@ -33,6 +34,7 @@ vi.mock('../../api/vnpyPaperTrading', () => ({
     getAgentCrossRunQuality,
     runAgentBacktest,
     generateAgentRunRecap,
+    updateAgentRunFeedback,
   },
 }));
 
@@ -179,6 +181,7 @@ const runSummary = {
       content: 'LLM recap generated',
     },
   },
+  humanFeedback: null,
   startedAt: '2026-07-01T09:30:00Z',
   completedAt: '2026-07-01T09:31:00Z',
   createdAt: '2026-07-01T09:30:00Z',
@@ -380,6 +383,8 @@ const dailySummary = {
   reviewQualityCounts: { guarded: 1, idle: 1 },
   reviewQualityFlagCounts: { agent_review_blocked: 1, data_quality_stale: 1 },
   reviewQualityScoreAvg: 92.5,
+  humanFeedbackCounts: { approved: 1 },
+  humanFeedbackReviewedCount: 1,
   workflowStatusCounts: { executed: 1, skipped: 1 },
   workflowStageCounts: { execution: 1, candidateReview: 1 },
   tradePlanStatusCounts: { filled: 1 },
@@ -436,6 +441,7 @@ describe('AgentConsolePage', () => {
     getAgentCrossRunQuality.mockReset();
     runAgentBacktest.mockReset();
     generateAgentRunRecap.mockReset();
+    updateAgentRunFeedback.mockReset();
     getReplayCompatibility.mockReset();
     runReplay.mockReset();
     runPortfolioBacktest.mockReset();
@@ -676,6 +682,29 @@ describe('AgentConsolePage', () => {
       },
       runDetail,
     });
+    updateAgentRunFeedback.mockImplementation(async (_runUid, payload) => ({
+      accepted: true,
+      runUid: 'ss-agent-test',
+      humanFeedback: {
+        id: 7,
+        runId: 1,
+        verdict: payload.verdict,
+        note: payload.note,
+        reviewer: payload.reviewer,
+        source: 'web',
+      },
+      runDetail: {
+        ...runDetail,
+        humanFeedback: {
+          id: 7,
+          runId: 1,
+          verdict: payload.verdict,
+          note: payload.note,
+          reviewer: payload.reviewer,
+          source: 'web',
+        },
+      },
+    }));
   });
 
   it('renders Agent run history and selected run details', async () => {
@@ -768,6 +797,28 @@ describe('AgentConsolePage', () => {
 
     await waitFor(() => expect(generateAgentRunRecap).toHaveBeenCalledWith('ss-agent-test', 800));
     expect(await screen.findByText('已生成 ss-agent-test LLM 复盘')).toBeInTheDocument();
+  });
+
+  it('saves human acceptance feedback for the selected Agent run', async () => {
+    renderPage();
+
+    await waitFor(() => expect(getAgentRun).toHaveBeenCalledWith('ss-agent-test'));
+    fireEvent.click(await screen.findByRole('button', { name: '需修改' }));
+    fireEvent.change(screen.getByTestId('agent-human-feedback-note'), {
+      target: { value: 'Reduce concentration before the next run.' },
+    });
+    fireEvent.change(screen.getByTestId('agent-human-feedback-reviewer'), {
+      target: { value: 'risk-owner' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: '保存验收结论' }));
+
+    await waitFor(() => expect(updateAgentRunFeedback).toHaveBeenCalledWith('ss-agent-test', {
+      verdict: 'needs_changes',
+      note: 'Reduce concentration before the next run.',
+      reviewer: 'risk-owner',
+    }));
+    expect(await screen.findByText('已保存 ss-agent-test 人工验收结论')).toBeInTheDocument();
+    expect(screen.getByTestId('agent-human-feedback')).toHaveTextContent('needs_changes');
   });
 
   it('applies filters to the Agent run list API', async () => {

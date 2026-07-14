@@ -1922,6 +1922,50 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
         self.assertEqual(detail["timeline"][0]["stage"], "started")
         self.assertEqual(detail["timeline"][-1]["stage"], "completed")
 
+        feedback_resp = self.client.put(
+            "/api/v1/vnpy-paper/agent-runs/ss-agent-api-test/feedback",
+            json={
+                "verdict": "needs_changes",
+                "note": "Reduce concentration before approval.",
+                "reviewer": "risk-owner",
+            },
+        )
+        self.assertEqual(feedback_resp.status_code, 200)
+        feedback_payload = feedback_resp.json()
+        self.assertTrue(feedback_payload["accepted"])
+        self.assertEqual(feedback_payload["human_feedback"]["verdict"], "needs_changes")
+        self.assertEqual(feedback_payload["human_feedback"]["reviewer"], "risk-owner")
+        self.assertEqual(
+            feedback_payload["run_detail"]["human_feedback"]["note"],
+            "Reduce concentration before approval.",
+        )
+        feedback_events = [
+            item
+            for item in feedback_payload["run_detail"]["timeline"]
+            if item["stage"] == "human_feedback"
+        ]
+        self.assertEqual(len(feedback_events), 1)
+        self.assertEqual(feedback_events[0]["status"], "needs_changes")
+        self.assertEqual(feedback_events[0]["details"]["reviewer"], "risk-owner")
+
+        updated_feedback_resp = self.client.put(
+            "/api/v1/vnpy-paper/agent-runs/ss-agent-api-test/feedback",
+            json={
+                "verdict": "approved",
+                "note": "Risk sizing revised and accepted.",
+                "reviewer": "risk-owner",
+            },
+        )
+        self.assertEqual(updated_feedback_resp.status_code, 200)
+        self.assertEqual(
+            updated_feedback_resp.json()["human_feedback"]["id"],
+            feedback_payload["human_feedback"]["id"],
+        )
+        self.assertEqual(
+            updated_feedback_resp.json()["human_feedback"]["verdict"],
+            "approved",
+        )
+
         fake_analyzer = MagicMock()
         fake_analyzer.is_available.return_value = True
         fake_analyzer._call_litellm.return_value = (
@@ -2004,6 +2048,10 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
             ["ss-agent-api-test"],
         )
         self.assertEqual(filtered_list_resp.json()["total"], 1)
+        self.assertEqual(
+            filtered_list_resp.json()["items"][0]["human_feedback"]["verdict"],
+            "approved",
+        )
         self.assertEqual(filtered_export_resp.json()["count"], 1)
         self.assertEqual(filtered_export_resp.json()["items"][0]["run_uid"], "ss-agent-api-test")
         daily_summary = daily_summary_resp.json()
@@ -2015,6 +2063,8 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
         self.assertEqual(daily_summary["review_quality_counts"], {"audited": 1})
         self.assertEqual(daily_summary["review_quality_flag_counts"], {})
         self.assertEqual(daily_summary["review_quality_score_avg"], 100.0)
+        self.assertEqual(daily_summary["human_feedback_counts"], {"approved": 1})
+        self.assertEqual(daily_summary["human_feedback_reviewed_count"], 1)
         self.assertEqual(daily_summary["workflow_status_counts"], {"executed": 1})
         self.assertEqual(daily_summary["workflow_stage_counts"], {"execution": 1})
         self.assertEqual(daily_summary["trade_plan_status_counts"], {"filled": 1})
@@ -2042,6 +2092,12 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
         self.assertEqual(all_quality_trends["health"], "error")
         self.assertEqual(future_list_resp.json()["items"], [])
         self.assertEqual(future_list_resp.json()["total"], 0)
+
+        missing_feedback_resp = self.client.put(
+            "/api/v1/vnpy-paper/agent-runs/missing-run/feedback",
+            json={"verdict": "rejected"},
+        )
+        self.assertEqual(missing_feedback_resp.status_code, 404)
 
     def test_approve_manual_trade_plan_endpoint_submits_paper_trade(self) -> None:
         repo = StockSelectionAgentRepository()

@@ -521,6 +521,17 @@ class VnpyPaperAutoRunResponse(BaseModel):
     messages: List[str] = Field(default_factory=list)
 
 
+class VnpyPaperAgentRunFeedback(BaseModel):
+    id: int
+    run_id: int
+    verdict: Literal["approved", "needs_changes", "rejected"]
+    note: Optional[str] = None
+    reviewer: Optional[str] = None
+    source: str = "web"
+    created_at: Optional[Any] = None
+    updated_at: Optional[Any] = None
+
+
 class VnpyPaperAgentRunSummary(BaseModel):
     id: int
     run_uid: str
@@ -540,6 +551,7 @@ class VnpyPaperAgentRunSummary(BaseModel):
     error: Optional[str] = None
     settings: Dict[str, Any] = Field(default_factory=dict)
     diagnostics: Dict[str, Any] = Field(default_factory=dict)
+    human_feedback: Optional[VnpyPaperAgentRunFeedback] = None
     started_at: Optional[Any] = None
     completed_at: Optional[Any] = None
     created_at: Optional[Any] = None
@@ -627,6 +639,19 @@ class VnpyPaperAgentRunRecapResponse(BaseModel):
     run_detail: Optional[VnpyPaperAgentRunDetail] = None
 
 
+class VnpyPaperAgentRunFeedbackRequest(BaseModel):
+    verdict: Literal["approved", "needs_changes", "rejected"]
+    note: Optional[str] = Field(None, max_length=2000)
+    reviewer: Optional[str] = Field(None, max_length=80)
+
+
+class VnpyPaperAgentRunFeedbackResponse(BaseModel):
+    accepted: bool = True
+    run_uid: str
+    human_feedback: VnpyPaperAgentRunFeedback
+    run_detail: VnpyPaperAgentRunDetail
+
+
 class VnpyPaperAgentBacktestRequest(BaseModel):
     strategy: Optional[str] = Field(None, max_length=64)
     market: Optional[str] = Field(None, max_length=16)
@@ -709,6 +734,8 @@ class VnpyPaperAgentDailySummaryResponse(BaseModel):
     review_quality_counts: Dict[str, int] = Field(default_factory=dict)
     review_quality_flag_counts: Dict[str, int] = Field(default_factory=dict)
     review_quality_score_avg: Optional[float] = None
+    human_feedback_counts: Dict[str, int] = Field(default_factory=dict)
+    human_feedback_reviewed_count: int = 0
     workflow_status_counts: Dict[str, int] = Field(default_factory=dict)
     workflow_stage_counts: Dict[str, int] = Field(default_factory=dict)
     trade_plan_status_counts: Dict[str, int] = Field(default_factory=dict)

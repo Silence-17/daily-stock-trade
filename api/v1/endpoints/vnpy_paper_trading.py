@@ -24,6 +24,8 @@ from api.v1.schemas.vnpy_paper_trading import (
     VnpyPaperAgentCrossRunQualityResponse,
     VnpyPaperAgentDailySummaryResponse,
     VnpyPaperAgentDataQualityTrendsResponse,
+    VnpyPaperAgentRunFeedbackRequest,
+    VnpyPaperAgentRunFeedbackResponse,
     VnpyPaperAgentRunRecapRequest,
     VnpyPaperAgentRunRecapResponse,
     VnpyPaperAgentRunDetail,
@@ -2442,6 +2444,42 @@ def generate_vnpy_paper_agent_run_llm_recap(
         raise
     except Exception as exc:
         raise _internal_error("Generate vn.py paper agent run LLM recap failed", exc)
+
+
+@router.put(
+    "/agent-runs/{run_uid}/feedback",
+    response_model=VnpyPaperAgentRunFeedbackResponse,
+    responses={404: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
+    summary="Upsert human acceptance feedback for one stock-selection agent run",
+)
+def put_vnpy_paper_agent_run_feedback(
+    run_uid: str,
+    payload: VnpyPaperAgentRunFeedbackRequest,
+) -> VnpyPaperAgentRunFeedbackResponse:
+    try:
+        repo = _agent_repo()
+        feedback = repo.upsert_run_feedback(
+            run_uid,
+            verdict=payload.verdict,
+            note=payload.note,
+            reviewer=payload.reviewer,
+            source="web",
+        )
+        if feedback is None:
+            raise api_error(404, "not_found", "Agent run not found.")
+        detail = repo.get_run_detail(run_uid)
+        if detail is None:
+            raise api_error(404, "not_found", "Agent run not found.")
+        return VnpyPaperAgentRunFeedbackResponse.model_validate({
+            "accepted": True,
+            "run_uid": run_uid,
+            "human_feedback": feedback,
+            "run_detail": detail,
+        })
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _internal_error("Update vn.py paper Agent run feedback failed", exc)
 
 
 @router.get(

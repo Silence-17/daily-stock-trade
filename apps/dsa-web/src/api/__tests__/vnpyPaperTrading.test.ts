@@ -991,6 +991,51 @@ describe('vnpyPaperTradingApi', () => {
     expect(result.llmRecap.content).toBe('ok');
   });
 
+  it('upserts structured human feedback for an Agent run', async () => {
+    put.mockResolvedValueOnce({
+      data: {
+        accepted: true,
+        run_uid: 'ss-agent-test',
+        human_feedback: {
+          id: 7,
+          run_id: 1,
+          verdict: 'needs_changes',
+          note: 'Reduce concentration.',
+          reviewer: 'risk-owner',
+          source: 'web',
+        },
+        run_detail: {
+          id: 1,
+          run_uid: 'ss-agent-test',
+          trigger_source: 'vnpy_paper_auto',
+          status: 'completed',
+          strategy: 'dual_low',
+          market: 'cn',
+          skip_existing_positions: true,
+          human_feedback: { id: 7, run_id: 1, verdict: 'needs_changes', source: 'web' },
+          decisions: [],
+          trade_plans: [],
+          timeline: [],
+        },
+      },
+    });
+
+    const result = await vnpyPaperTradingApi.updateAgentRunFeedback('ss-agent-test', {
+      verdict: 'needs_changes',
+      note: '  Reduce concentration.  ',
+      reviewer: ' risk-owner ',
+    });
+
+    expect(put).toHaveBeenCalledWith('/api/v1/vnpy-paper/agent-runs/ss-agent-test/feedback', {
+      verdict: 'needs_changes',
+      note: 'Reduce concentration.',
+      reviewer: 'risk-owner',
+    });
+    expect(result.humanFeedback.verdict).toBe('needs_changes');
+    expect(result.humanFeedback.runId).toBe(1);
+    expect(result.runDetail.humanFeedback?.verdict).toBe('needs_changes');
+  });
+
   it('sends settings updates as snake_case and preserves explicit null thresholds', async () => {
     put.mockResolvedValueOnce({ data: { enabled: true, settings: {}, recent_trades: [] } });
 

@@ -66,7 +66,7 @@
 - Web 模拟交易页的“任务趋势”会读取 `GET /api/v1/vnpy-paper/task-event-summary`，基于最近持久化任务事件展示 completed/skipped/failed/started 分布、任务级失败率、平均耗时和最近失败/跳过时间，用于判断后台自动化是否持续健康。
 - Web 模拟交易页的“长期稳定性”会读取 `GET /api/v1/vnpy-paper/task-metrics`，可切换 7/30/90 天窗口，展示终态运行数、成功/失败/跳过率、平均与 P95 耗时、当前连续失败、任务级明细和逐日趋势。成功率分母只包含 `completed`、`skipped`、`failed` 终态事件，`started` 仅单独计数，避免一次运行被重复计算。
 - Agent 控制台会读取 `GET /api/v1/vnpy-paper/agent-runs/data-quality-trends`，按 7/30/90 天窗口展示跨 run 的 `ok`、`partial`、`stale`、`unavailable`、`unknown` 分布、降级率、警告、source error、逐日趋势和 `snapshot/daily + source` 来源健康观测。来源级结果返回观测数、降级次数/比例、最新状态和最新/最大失败计数；旧 run 没有整体质量或来源快照时分别归入 `unknown` 或“无快照”，不会被误算成健康。
-- 每轮自动选股会在 `diagnostics.agent_plan.recent_run_context` 保存同触发源、策略和市场最近 5 次 run 的确定性摘要，包括状态/数据质量分布、候选/计划/成交/跳过总数、历史成交率、连续失败和逐 run 摘要。该上下文不依赖 LLM；开启 `auto_llm_plan_enabled` 后，`vnpy_paper_dynamic_agent_plan_v2` 提示词复用同一份上下文，Agent 控制台计划卡展示最近运行数、成交率和最近状态。
+- 每轮自动选股会在 `diagnostics.agent_plan.recent_run_context` 保存同触发源、策略和市场最近 5 次 run 的确定性摘要，包括状态/数据质量分布、候选/计划/成交/跳过总数、历史成交率、连续失败、人工验收结论和逐 run 摘要。Agent 控制台可把每轮标记为 `approved`、`needs_changes` 或 `rejected`，并保存审阅人和备注；日总结聚合验收分布。该反馈只作为后续规则计划审计和可选 LLM 动态计划上下文，固定使用 `context_only_never_bypasses_risk_gates` 策略，不会放宽或绕过数据质量、仓位和交易风控。
 - Agent 控制台可调用 `POST /api/v1/vnpy-paper/agent-runs/backtest`，按当前策略、市场和运行时间筛选已持久化买入候选，返回 1/5/10/20 个交易日的覆盖率、胜率、平均/中位收益和平均最大有利/不利波动。评价锚点使用候选价格与决策日期，只读取严格晚于决策日期的 `stock_daily`；默认 `refresh_missing=false`，不会联网补数、重跑历史策略、修改 Agent run 或触发交易。缺价和缺少未来日线会进入 `unable_reason_counts` 并降低覆盖率。该结果不包含手续费、滑点、基准超额收益或 point-in-time 全市场策略重放。
 - 每轮自动选股还会把同策略、同市场的持久化买入候选汇总为 `diagnostics.cross_run_quality`。状态使用配置的前瞻交易日、成熟样本阈值、最低胜率和有界扫描数，记录覆盖率、胜率、平均/中位收益、平均最大不利波动、前一状态和状态迁移。`auto_cross_run_quality_gate_enabled` 默认关闭；开启后，成熟样本胜率不足或本地评价异常会以 `cross_run_quality_gate_blocked` 阻断新增买入并告警，`insufficient_evidence` 不阻断，自动止损/止盈等卖出检查仍先执行。该闭环只使用本地持久化决策与严格晚于决策日的 `stock_daily`，不联网补数、不让 LLM决定状态，也不等同完整历史全市场回测。
 - 持久化后台任务事件默认保留 30 天，runtime scheduler 写入新事件后会按 `DSA_RUNTIME_SCHEDULER_TASK_EVENT_RETENTION_DAYS` 和 `DSA_RUNTIME_SCHEDULER_TASK_EVENT_CLEANUP_INTERVAL_SECONDS` 做低频清理；该清理只删除 `runtime_scheduler_task_events` 中的任务日志，不删除 Agent run、交易计划、Portfolio 成交或资金流水。保留天数设为 `0` 时不自动清理，适合由外部归档策略接管的部署。
@@ -121,6 +121,7 @@
 - `GET /agent-runs/export?limit=50&include_details=true`：导出最近 Agent run；`include_details=true` 时内联候选决策、交易计划和时间线；同样支持 `trigger_source`、`strategy`、`market`、`status`、`created_from` 和 `created_to` 过滤。
 - `GET /agent-runs/{run_uid}`：读取单次运行的候选决策、交易计划、风控/跳过原因和模拟成交关联。
 - `POST /agent-runs/{run_uid}/llm-recap`：基于该 run 的结构化审计数据生成一次可选 LLM 复盘，并写入 `diagnostics.llm_recap`；请求体支持 `max_output_tokens`（200~2000，默认 800）。LLM 不可用、空响应或调用失败时返回 `accepted=false` 和失败原因，不改变订单、交易计划或自动交易状态。
+- `PUT /agent-runs/{run_uid}/feedback`：幂等保存该 run 最新的人工验收结论，`verdict` 取 `approved` / `needs_changes` / `rejected`，可附 `reviewer` 和最多 2000 字备注；返回更新后的完整 run 详情和人工反馈时间线事件。
 
 ## 可选 vn.py runtime 配置
 

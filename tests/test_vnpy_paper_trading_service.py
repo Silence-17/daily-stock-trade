@@ -585,6 +585,12 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
             skipped_count=1,
             diagnostics={"data_quality": {"status": "ok"}},
         )
+        self.service.agent_repo.upsert_run_feedback(
+            "recent-context-completed",
+            verdict="approved",
+            note="Keep the risk sizing.",
+            reviewer="qa-one",
+        )
         second = self.service.agent_repo.create_run(
             run_uid="recent-context-failed",
             trigger_source="vnpy_paper_auto",
@@ -601,6 +607,12 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
             error="source timeout",
             diagnostics={"data_quality": {"status": "unavailable"}},
         )
+        self.service.agent_repo.upsert_run_feedback(
+            "recent-context-failed",
+            verdict="needs_changes",
+            note="Source timeout needs a safer fallback.",
+            reviewer="qa-two",
+        )
 
         context = self.service._recent_agent_run_context(self.service.get_settings())
 
@@ -614,6 +626,22 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertEqual(context["current_failure_streak"], 1)
         self.assertEqual(context["latest_run_uid"], "recent-context-failed")
         self.assertEqual(context["runs"][0]["error"], "source timeout")
+        self.assertEqual(context["schema_version"], 2)
+        self.assertEqual(
+            context["human_feedback_counts"],
+            {"approved": 1, "needs_changes": 1},
+        )
+        self.assertEqual(context["human_feedback_reviewed_count"], 2)
+        self.assertTrue(context["human_feedback_attention_required"])
+        self.assertEqual(
+            context["human_feedback_policy"],
+            "context_only_never_bypasses_risk_gates",
+        )
+        self.assertEqual(
+            context["latest_human_feedback"]["verdict"],
+            "needs_changes",
+        )
+        self.assertIn("safer fallback", context["runs"][0]["human_feedback"]["note"])
 
     def test_reset_account_archives_old_paper_account_and_creates_clean_ledger(self) -> None:
         with patch(
