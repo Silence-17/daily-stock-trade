@@ -581,6 +581,7 @@ export const alphasiftApi = {
     minimumCommission?: number;
     sellTaxBps?: number;
     corporateActions?: AlphaSiftPortfolioCorporateActionInput[];
+    includePersistedCorporateActions?: boolean;
   }): Promise<AlphaSiftPortfolioBacktestResponse> {
     const response = await apiClient.post<Record<string, unknown>>(
       '/api/v1/alphasift/replay/portfolio-backtest',
@@ -607,6 +608,7 @@ export const alphasiftApi = {
           cash_dividend_per_share: item.cashDividendPerShare ?? null,
           split_ratio: item.splitRatio ?? null,
         })),
+        include_persisted_corporate_actions: payload.includePersistedCorporateActions ?? true,
       },
     );
     return toCamelCase<AlphaSiftPortfolioBacktestResponse>(response.data);

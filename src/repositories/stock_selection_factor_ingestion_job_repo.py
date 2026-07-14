@@ -110,6 +110,14 @@ class StockSelectionFactorIngestionJobRepository:
             row.inserted_count += int(batch_result.get("inserted") or 0)
             row.updated_count += int(batch_result.get("updated") or 0)
             row.source_error_count += int(batch_result.get("error_count") or 0)
+            result = self._loads(row.result_json, {})
+            for key in (
+                "corporate_action_count",
+                "corporate_action_inserted",
+                "corporate_action_updated",
+            ):
+                result[key] = int(result.get(key) or 0) + int(batch_result.get(key) or 0)
+            row.result_json = self._dumps(result)
             row.errors_json = self._dumps(errors[-1000:])
             row.heartbeat_at = utc_naive_now()
             row.updated_at = row.heartbeat_at
@@ -126,12 +134,14 @@ class StockSelectionFactorIngestionJobRepository:
             row.completed_at = now
             row.heartbeat_at = now
             row.updated_at = now
-            row.result_json = self._dumps({
+            result = self._loads(row.result_json, {})
+            result.update({
                 "row_count": row.row_count,
                 "inserted": row.inserted_count,
                 "updated": row.updated_count,
                 "error_count": row.source_error_count,
             })
+            row.result_json = self._dumps(result)
             session.commit()
             session.refresh(row)
             return self._to_dict(row)

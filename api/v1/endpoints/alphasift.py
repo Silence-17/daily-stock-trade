@@ -135,6 +135,7 @@ class AlphaSiftPortfolioBacktestRequest(BaseModel):
     accounting_mode: str = Field("cash_ledger", pattern="^(cash_ledger|equal_weight_approximation)$")
     target_weights: Dict[str, float] = Field(default_factory=dict)
     corporate_actions: List[AlphaSiftPortfolioCorporateAction] = Field(default_factory=list, max_length=500)
+    include_persisted_corporate_actions: bool = True
     min_hard_coverage: float = Field(0.95, gt=0, le=1)
     min_score_coverage: float = Field(0.80, gt=0, le=1)
 
@@ -425,6 +426,7 @@ def alphasift_run_portfolio_backtest(
             accounting_mode=payload.accounting_mode,
             target_weights=payload.target_weights,
             corporate_actions=[item.model_dump() for item in payload.corporate_actions],
+            include_persisted_corporate_actions=payload.include_persisted_corporate_actions,
             min_hard_coverage=payload.min_hard_coverage,
             min_score_coverage=payload.min_score_coverage,
         )

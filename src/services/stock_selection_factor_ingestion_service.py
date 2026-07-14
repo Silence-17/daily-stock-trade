@@ -11,6 +11,9 @@ import pandas as pd
 from src.repositories.stock_selection_factor_snapshot_repo import (
     StockSelectionFactorSnapshotRepository,
 )
+from src.repositories.stock_selection_corporate_action_repo import (
+    StockSelectionCorporateActionRepository,
+)
 
 
 class StockSelectionFactorIngestionService:
@@ -27,10 +30,14 @@ class StockSelectionFactorIngestionService:
         repository: Optional[StockSelectionFactorSnapshotRepository] = None,
         daily_fetcher: Optional[Callable[..., pd.DataFrame]] = None,
         valuation_fetcher: Optional[Callable[..., pd.DataFrame]] = None,
+        corporate_action_repository: Optional[StockSelectionCorporateActionRepository] = None,
+        corporate_action_fetcher: Optional[Callable[..., List[Dict[str, Any]]]] = None,
     ) -> None:
         self.repository = repository or StockSelectionFactorSnapshotRepository()
         self.daily_fetcher = daily_fetcher
         self.valuation_fetcher = valuation_fetcher
+        self.corporate_action_repository = corporate_action_repository
+        self.corporate_action_fetcher = corporate_action_fetcher
 
     def ingest(
         self,
@@ -52,7 +59,9 @@ class StockSelectionFactorIngestionService:
             raise ValueError("snapshot_dates must contain dates")
 
         daily_fetcher, valuation_fetcher = self._fetchers()
+        corporate_action_fetcher = self._resolve_corporate_action_fetcher()
         rows_by_date: Dict[date, List[Dict[str, Any]]] = {item: [] for item in dates}
+        corporate_action_rows: List[Dict[str, Any]] = []
         errors: List[Dict[str, str]] = []
         for item in symbols:
             symbol = str(item.get("symbol") or item.get("code") or "").strip()
@@ -71,6 +80,16 @@ class StockSelectionFactorIngestionService:
             except Exception as exc:
                 errors.append({"symbol": symbol, "stage": "daily", "error": str(exc)})
                 normalized_daily = pd.DataFrame()
+
+            if corporate_action_fetcher is not None:
+                try:
+                    corporate_action_rows.extend(corporate_action_fetcher(
+                        stock_code=symbol,
+                        start_date=dates[0] - timedelta(days=7),
+                        end_date=dates[-1] + timedelta(days=400),
+                    ))
+                except Exception as exc:
+                    errors.append({"symbol": symbol, "stage": "corporate_actions", "error": str(exc)})
 
             valuations = {}
             valuation_dates = {}
@@ -104,6 +123,13 @@ class StockSelectionFactorIngestionService:
             )
             inserted += result["inserted"]
             updated += result["updated"]
+        corporate_action_result = {"inserted": 0, "updated": 0, "total": 0}
+        if corporate_action_rows:
+            repository = self.corporate_action_repository or StockSelectionCorporateActionRepository()
+            corporate_action_result = repository.upsert_many(
+                market=market_value,
+                rows=corporate_action_rows,
+            )
         return {
             "market": market_value,
             "snapshot_dates": [item.isoformat() for item in dates],
@@ -111,16 +137,24 @@ class StockSelectionFactorIngestionService:
             "row_count": sum(len(rows) for rows in rows_by_date.values()),
             "inserted": inserted,
             "updated": updated,
+            "corporate_action_count": corporate_action_result["total"],
+            "corporate_action_inserted": corporate_action_result["inserted"],
+            "corporate_action_updated": corporate_action_result["updated"],
             "error_count": len(errors),
             "errors": errors,
             "methodology": {
                 "universe_source": "caller_supplied_point_in_time_universe",
                 "daily_source": "akshare.stock_zh_a_hist",
                 "valuation_source": "akshare.stock_zh_valuation_baidu",
+                "corporate_action_source": (
+                    "tushare.dividend" if corporate_action_fetcher is not None else "unavailable"
+                ),
+                "corporate_action_horizon_days": 400,
                 "valuation_asof_rule": "latest_value_on_or_before_snapshot_date",
                 "technical_feature_rule": "daily_bars_on_or_before_snapshot_date",
                 "uses_current_universe_fallback": False,
                 "uses_future_values": False,
+                "corporate_actions_do_not_feed_selection_factors": True,
             },
         }
 
@@ -240,3 +274,17 @@ class StockSelectionFactorIngestionService:
         except ImportError as exc:
             raise RuntimeError("AKShare is unavailable") from exc
         return self.daily_fetcher or ak.stock_zh_a_hist, self.valuation_fetcher or ak.stock_zh_valuation_baidu
+
+    def _resolve_corporate_action_fetcher(self) -> Optional[Callable[..., List[Dict[str, Any]]]]:
+        if self.corporate_action_fetcher is not None:
+            return self.corporate_action_fetcher
+        if self.daily_fetcher is not None or self.valuation_fetcher is not None:
+            return None
+        from src.config import get_config
+
+        if not get_config().tushare_token:
+            return None
+        from data_provider.tushare_fetcher import TushareFetcher
+
+        fetcher = TushareFetcher()
+        return fetcher.get_stock_corporate_actions if fetcher.is_available() else None

@@ -106,6 +106,68 @@ class StockSelectionFactorIngestionServiceTestCase(unittest.TestCase):
         self.assertIsNone(row["price"])
         self.assertEqual(row["pe_ratio"], 10)
 
+    def test_ingest_persists_tushare_corporate_actions_outside_selection_factors(self) -> None:
+        action_repository = MagicMock()
+        action_repository.upsert_many.return_value = {"inserted": 2, "updated": 0, "total": 2}
+        action_fetcher = MagicMock(return_value=[
+            {
+                "symbol": "600519",
+                "effective_date": date(2024, 1, 10),
+                "action_type": "cash_dividend",
+                "cash_dividend_per_share": 1.5,
+                "source": "tushare.dividend",
+                "source_record_key": "600519.SH|2024-01-10|cash_dividend",
+            },
+            {
+                "symbol": "600519",
+                "effective_date": date(2024, 1, 10),
+                "action_type": "split_adjustment",
+                "split_ratio": 1.2,
+                "source": "tushare.dividend",
+                "source_record_key": "600519.SH|2024-01-10|split_adjustment",
+            },
+        ])
+        service = StockSelectionFactorIngestionService(
+            repository=self.repository,
+            daily_fetcher=MagicMock(return_value=self._daily_frame()),
+            valuation_fetcher=MagicMock(return_value=self._valuation_frame(10)),
+            corporate_action_repository=action_repository,
+            corporate_action_fetcher=action_fetcher,
+        )
+
+        result = service.ingest(
+            market="cn",
+            snapshot_dates=[date(2024, 1, 5)],
+            universe=[{"symbol": "600519", "name": "贵州茅台"}],
+        )
+
+        self.assertEqual(result["corporate_action_count"], 2)
+        self.assertTrue(result["methodology"]["corporate_actions_do_not_feed_selection_factors"])
+        action_fetcher.assert_called_once_with(
+            stock_code="600519",
+            start_date=date(2023, 12, 29),
+            end_date=date(2025, 2, 8),
+        )
+        self.assertEqual(action_repository.upsert_many.call_args.kwargs["market"], "cn")
+        self.assertEqual(len(action_repository.upsert_many.call_args.kwargs["rows"]), 2)
+
+    def test_corporate_action_failure_is_audited_without_losing_factor_rows(self) -> None:
+        service = StockSelectionFactorIngestionService(
+            repository=self.repository,
+            daily_fetcher=MagicMock(return_value=self._daily_frame()),
+            valuation_fetcher=MagicMock(return_value=self._valuation_frame(10)),
+            corporate_action_fetcher=MagicMock(side_effect=RuntimeError("dividend permission denied")),
+        )
+        result = service.ingest(
+            market="cn",
+            snapshot_dates=[date(2024, 1, 5)],
+            universe=[{"symbol": "600519", "name": "贵州茅台"}],
+        )
+
+        self.assertEqual(result["row_count"], 1)
+        self.assertEqual(result["corporate_action_count"], 0)
+        self.assertIn("corporate_actions", [item["stage"] for item in result["errors"]])
+
     def test_requires_explicit_point_in_time_names_and_bounded_cn_inputs(self) -> None:
         service = StockSelectionFactorIngestionService(
             repository=self.repository,

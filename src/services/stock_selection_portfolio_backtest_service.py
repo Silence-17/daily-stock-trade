@@ -5,13 +5,16 @@ from __future__ import annotations
 
 import math
 import statistics
-from datetime import date
+from datetime import date, timedelta
 from typing import Any, Dict, List, Optional, Sequence
 
 from sqlalchemy import select
 
 from src.repositories.stock_selection_factor_snapshot_repo import (
     StockSelectionFactorSnapshotRepository,
+)
+from src.repositories.stock_selection_corporate_action_repo import (
+    StockSelectionCorporateActionRepository,
 )
 from src.services.stock_selection_strategy_replay_service import (
     StockSelectionStrategyReplayService,
@@ -27,6 +30,7 @@ class StockSelectionPortfolioBacktestService:
         db_manager: Optional[DatabaseManager] = None,
         repository: Optional[StockSelectionFactorSnapshotRepository] = None,
         replay_service: Optional[StockSelectionStrategyReplayService] = None,
+        corporate_action_repository: Optional[StockSelectionCorporateActionRepository] = None,
     ) -> None:
         self.db = db_manager or DatabaseManager.get_instance()
         self.repository = repository or StockSelectionFactorSnapshotRepository(self.db)
@@ -34,6 +38,7 @@ class StockSelectionPortfolioBacktestService:
             db_manager=self.db,
             repository=self.repository,
         )
+        self.corporate_action_repository = corporate_action_repository or StockSelectionCorporateActionRepository(self.db)
 
     def run(
         self,
@@ -54,6 +59,7 @@ class StockSelectionPortfolioBacktestService:
         accounting_mode: str = "equal_weight_approximation",
         target_weights: Optional[Dict[str, float]] = None,
         corporate_actions: Optional[List[Dict[str, Any]]] = None,
+        include_persisted_corporate_actions: bool = True,
         min_hard_coverage: float = 0.95,
         min_score_coverage: float = 0.80,
     ) -> Dict[str, Any]:
@@ -73,7 +79,27 @@ class StockSelectionPortfolioBacktestService:
             raise ValueError("no point-in-time factor snapshots exist in the requested range")
 
         normalized_target_weights = self._normalize_target_weights(target_weights)
-        normalized_corporate_actions = self._normalize_corporate_actions(corporate_actions)
+        persisted_corporate_actions = (
+            self.corporate_action_repository.list_range(
+                market=market,
+                date_from=date_from,
+                date_to=date_to + timedelta(days=400),
+            )
+            if include_persisted_corporate_actions
+            else []
+        )
+        merged_corporate_actions: Dict[tuple[str, str, str], Dict[str, Any]] = {}
+        for raw in [*persisted_corporate_actions, *list(corporate_actions or [])]:
+            payload = dict(raw or {})
+            key = (
+                str(payload.get("symbol") or "").strip().upper(),
+                str(payload.get("effective_date") or ""),
+                str(payload.get("action_type") or "").strip().lower(),
+            )
+            merged_corporate_actions[key] = payload
+        normalized_corporate_actions = self._normalize_corporate_actions(
+            list(merged_corporate_actions.values())
+        )
         if normalized_target_weights and accounting_mode != "cash_ledger":
             raise ValueError("target_weights are supported only in cash_ledger mode")
         if normalized_corporate_actions and accounting_mode != "cash_ledger":
@@ -100,6 +126,9 @@ class StockSelectionPortfolioBacktestService:
                 date_to=date_to,
                 target_weights=normalized_target_weights,
                 corporate_actions=normalized_corporate_actions,
+                persisted_corporate_action_count=len(persisted_corporate_actions),
+                explicit_corporate_action_count=len(corporate_actions or []),
+                include_persisted_corporate_actions=include_persisted_corporate_actions,
             )
         if accounting_mode != "equal_weight_approximation":
             raise ValueError("accounting_mode must be cash_ledger or equal_weight_approximation")
@@ -320,6 +349,9 @@ class StockSelectionPortfolioBacktestService:
         date_to: date,
         target_weights: Dict[str, float],
         corporate_actions: List[Dict[str, Any]],
+        persisted_corporate_action_count: int,
+        explicit_corporate_action_count: int,
+        include_persisted_corporate_actions: bool,
     ) -> Dict[str, Any]:
         cash = float(initial_capital)
         equity = float(initial_capital)
@@ -778,7 +810,18 @@ class StockSelectionPortfolioBacktestService:
                 ),
                 "target_weight_mode": "explicit_symbol_weights" if target_weights else "equal_weight",
                 "configured_target_weights": dict(target_weights),
-                "corporate_action_source": "explicit_request_unadjusted_price_ledger",
+                "corporate_action_source": (
+                    "persisted_and_explicit"
+                    if persisted_corporate_action_count and explicit_corporate_action_count
+                    else "persisted_tushare_dividend"
+                    if persisted_corporate_action_count
+                    else "explicit_request"
+                    if explicit_corporate_action_count
+                    else "none"
+                ),
+                "include_persisted_corporate_actions": include_persisted_corporate_actions,
+                "persisted_corporate_action_count": persisted_corporate_action_count,
+                "explicit_corporate_action_count": explicit_corporate_action_count,
                 "configured_corporate_action_count": len(corporate_actions),
                 "unprocessed_corporate_actions": [
                     self._public_corporate_action(item)
@@ -850,6 +893,8 @@ class StockSelectionPortfolioBacktestService:
                 "symbol": symbol,
                 "effective_date": effective_date,
                 "action_type": action_type,
+                "source": str(raw.get("source") or "explicit_request"),
+                "source_record_key": str(raw.get("source_record_key") or ""),
             }
             if action_type == "cash_dividend":
                 if raw.get("split_ratio") is not None:

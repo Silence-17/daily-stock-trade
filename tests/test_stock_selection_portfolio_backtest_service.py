@@ -533,6 +533,61 @@ class StockSelectionPortfolioBacktestServiceTestCase(unittest.TestCase):
         self.assertEqual(result["metrics"]["cash_dividends_received"], 0)
         self.assertEqual(result["final_equity"], 100_000)
 
+    def test_persisted_corporate_actions_are_loaded_and_explicit_events_override(self) -> None:
+        with self.db.get_session() as session:
+            session.add_all([
+                StockDaily(code="600001", date=date(2024, 1, 2), open=10, close=10, volume=1000, pct_chg=0),
+                StockDaily(code="600001", date=date(2024, 1, 3), open=10, close=10, volume=1000, pct_chg=0),
+            ])
+            session.commit()
+        action_repository = MagicMock()
+        action_repository.list_range.return_value = [{
+            "symbol": "600001",
+            "effective_date": date(2024, 1, 3),
+            "action_type": "cash_dividend",
+            "cash_dividend_per_share": 1,
+            "source": "tushare.dividend",
+            "source_record_key": "persisted",
+        }]
+        service = StockSelectionPortfolioBacktestService(
+            db_manager=self.db,
+            repository=self.repository,
+            replay_service=self.replay,
+            corporate_action_repository=action_repository,
+        )
+        self.repository.list_dates.return_value = [date(2024, 1, 1)]
+        self.replay.replay.return_value = {
+            "candidates": [{"symbol": "600001", "name": "persisted", "screen_score": 90}],
+            "compatibility": {},
+        }
+
+        result = service.run(
+            strategy="dual_low",
+            market="cn",
+            date_from=date(2024, 1, 1),
+            date_to=date(2024, 1, 1),
+            final_holding_bars=2,
+            commission_bps=0,
+            slippage_bps=0,
+            accounting_mode="cash_ledger",
+            corporate_actions=[{
+                "symbol": "600001",
+                "effective_date": date(2024, 1, 3),
+                "action_type": "cash_dividend",
+                "cash_dividend_per_share": 2,
+            }],
+        )
+
+        self.assertEqual(result["metrics"]["cash_dividends_received"], 20_000)
+        self.assertEqual(result["final_equity"], 120_000)
+        self.assertEqual(result["methodology"]["corporate_action_source"], "persisted_and_explicit")
+        self.assertEqual(result["methodology"]["configured_corporate_action_count"], 1)
+        action_repository.list_range.assert_called_once_with(
+            market="cn",
+            date_from=date(2024, 1, 1),
+            date_to=date(2025, 2, 4),
+        )
+
     def test_rejects_invalid_target_weight_contracts(self) -> None:
         self.repository.list_dates.return_value = [date(2024, 1, 1)]
 

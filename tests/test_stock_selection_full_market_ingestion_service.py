@@ -36,6 +36,9 @@ class _FakeIngestion:
             "updated": 0,
             "error_count": 0,
             "errors": [],
+            "corporate_action_count": len(symbols),
+            "corporate_action_inserted": len(symbols),
+            "corporate_action_updated": 0,
         }
 
 
@@ -104,6 +107,9 @@ class StockSelectionFullMarketIngestionServiceTestCase(unittest.TestCase):
         self.assertEqual(result["total_symbols"], 5)
         self.assertEqual(result["total_work_items"], 10)
         self.assertEqual(result["progress_pct"], 100)
+        self.assertEqual(result["result"]["corporate_action_count"], 10)
+        self.assertEqual(result["result"]["corporate_action_inserted"], 10)
+        self.assertEqual(result["result"]["corporate_action_updated"], 0)
         self.assertTrue(progress)
         self.assertEqual(service.list_recent(limit=1)[0]["job_id"], job["job_id"])
 

@@ -887,6 +887,7 @@ describe('AgentConsolePage', () => {
         actionType: 'cash_dividend',
         cashDividendPerShare: 1.5,
       }],
+      includePersistedCorporateActions: true,
     }));
     const results = await screen.findByTestId('agent-portfolio-backtest-results');
     expect(results).toHaveTextContent('8.0%');

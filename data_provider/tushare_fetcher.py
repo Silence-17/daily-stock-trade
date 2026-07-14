@@ -18,7 +18,7 @@ import json as _json
 import logging
 import re
 import time
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Optional, Tuple, List, Dict, Any
 
 import pandas as pd
@@ -694,6 +694,74 @@ class TushareFetcher(BaseFetcher):
         result = pd.concat(frames, ignore_index=True)
         result["code"] = result["ts_code"].astype(str).str.split(".").str[0]
         return result.drop_duplicates(subset=["code", "list_status"], keep="last")
+
+    def get_stock_corporate_actions(
+        self,
+        stock_code: str,
+        *,
+        start_date: Optional[date] = None,
+        end_date: Optional[date] = None,
+    ) -> List[Dict[str, Any]]:
+        """Return implemented cash-dividend and split events keyed by ex-date."""
+        if self._api is None:
+            raise DataFetchError("Tushare API is not initialized; corporate actions are unavailable")
+        ts_code = self._convert_stock_code(stock_code)
+        fields = (
+            "ts_code,ann_date,imp_ann_date,div_proc,stk_div,stk_bo_rate,stk_co_rate,"
+            "cash_div_tax,record_date,ex_date,pay_date"
+        )
+        self._check_rate_limit()
+        frame = self._api.dividend(ts_code=ts_code, fields=fields)
+        if frame is None or frame.empty:
+            return []
+        work = frame.copy()
+        if "div_proc" in work.columns:
+            work = work[work["div_proc"].astype(str).str.contains("实施", na=False)]
+        if work.empty or "ex_date" not in work.columns:
+            return []
+        work["effective_date"] = pd.to_datetime(work["ex_date"], format="%Y%m%d", errors="coerce")
+        work = work.dropna(subset=["effective_date"])
+        if start_date is not None:
+            work = work[work["effective_date"] >= pd.Timestamp(start_date)]
+        if end_date is not None:
+            work = work[work["effective_date"] <= pd.Timestamp(end_date)]
+        if work.empty:
+            return []
+        order_field = "imp_ann_date" if "imp_ann_date" in work.columns else "ann_date"
+        if order_field in work.columns:
+            work = work.sort_values(order_field)
+        work = work.drop_duplicates(subset=["ex_date"], keep="last")
+
+        def positive(row: Any, field: str) -> float:
+            value = pd.to_numeric(row.get(field), errors="coerce")
+            return float(value) if pd.notna(value) and float(value) > 0 else 0.0
+
+        events: List[Dict[str, Any]] = []
+        for _, row in work.sort_values("effective_date").iterrows():
+            effective_date = row["effective_date"].date()
+            cash_dividend = positive(row, "cash_div_tax")
+            if cash_dividend > 0:
+                events.append({
+                    "symbol": normalize_stock_code(stock_code),
+                    "effective_date": effective_date,
+                    "action_type": "cash_dividend",
+                    "cash_dividend_per_share": cash_dividend,
+                    "source": "tushare.dividend",
+                    "source_record_key": f"{ts_code}|{effective_date.isoformat()}|cash_dividend",
+                })
+            stock_dividend = positive(row, "stk_div")
+            if stock_dividend <= 0:
+                stock_dividend = positive(row, "stk_bo_rate") + positive(row, "stk_co_rate")
+            if stock_dividend > 0:
+                events.append({
+                    "symbol": normalize_stock_code(stock_code),
+                    "effective_date": effective_date,
+                    "action_type": "split_adjustment",
+                    "split_ratio": 1.0 + stock_dividend,
+                    "source": "tushare.dividend",
+                    "source_record_key": f"{ts_code}|{effective_date.isoformat()}|split_adjustment",
+                })
+        return events
     
     def get_realtime_quote(self, stock_code: str) -> Optional[UnifiedRealtimeQuote]:
         """
