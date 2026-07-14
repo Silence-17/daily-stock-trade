@@ -581,6 +581,9 @@ describe('AgentConsolePage', () => {
         averageTurnoverPct: 125,
         endingOpenPositionCount: 1,
         endingCash: 12000,
+        totalFees: 20,
+        totalTaxes: 10,
+        totalSlippageCost: 30,
       },
       periods: [{
         signalDate: '2024-01-05',
@@ -846,6 +849,12 @@ describe('AgentConsolePage', () => {
     fireEvent.change(screen.getByTestId('agent-portfolio-target-weights'), {
       target: { value: '600519=60, 000001=30' },
     });
+    fireEvent.change(screen.getByTestId('agent-portfolio-minimum-commission'), {
+      target: { value: '5' },
+    });
+    fireEvent.change(screen.getByTestId('agent-portfolio-sell-tax-bps'), {
+      target: { value: '5' },
+    });
     fireEvent.click(screen.getByTestId('agent-portfolio-backtest-run'));
 
     await waitFor(() => expect(runPortfolioBacktest).toHaveBeenCalledWith({
@@ -856,6 +865,8 @@ describe('AgentConsolePage', () => {
       topK: 5,
       benchmarkSymbol: '000300',
       targetWeights: { '600519': 60, '000001': 30 },
+      minimumCommission: 5,
+      sellTaxBps: 5,
     }));
     const results = await screen.findByTestId('agent-portfolio-backtest-results');
     expect(results).toHaveTextContent('8.0%');
@@ -867,6 +878,8 @@ describe('AgentConsolePage', () => {
     expect(results).toHaveTextContent('期末未平 1');
     expect(screen.getByTestId('agent-portfolio-target-audit')).toHaveTextContent('600519 60.0%');
     expect(screen.getByTestId('agent-portfolio-target-audit')).toHaveTextContent('000001 30.0%');
+    expect(results).toHaveTextContent('成本费用');
+    expect(results).toHaveTextContent('¥60.00');
   });
 
   it('submits and observes bounded historical factor ingestion', async () => {

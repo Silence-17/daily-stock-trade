@@ -363,6 +363,8 @@ describe('alphasiftApi', () => {
       topK: 5,
       benchmarkSymbol: '000300',
       targetWeights: { '600519': 60, '000001': 30 },
+      minimumCommission: 5,
+      sellTaxBps: 5,
     });
 
     expect(post).toHaveBeenCalledWith('/api/v1/alphasift/replay/portfolio-backtest', {
@@ -374,6 +376,8 @@ describe('alphasiftApi', () => {
       final_holding_bars: 20,
       initial_capital: 100000,
       commission_bps: 3,
+      minimum_commission: 5,
+      sell_tax_bps: 5,
       slippage_bps: 5,
       benchmark_symbol: '000300',
       enforce_tradeability: true,

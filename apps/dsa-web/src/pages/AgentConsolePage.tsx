@@ -295,6 +295,8 @@ const AgentConsolePage: React.FC = () => {
   const [portfolioDateFrom, setPortfolioDateFrom] = useState('');
   const [portfolioDateTo, setPortfolioDateTo] = useState('');
   const [portfolioTargetWeights, setPortfolioTargetWeights] = useState('');
+  const [portfolioMinimumCommission, setPortfolioMinimumCommission] = useState('');
+  const [portfolioSellTaxBps, setPortfolioSellTaxBps] = useState('');
   const [portfolioBacktest, setPortfolioBacktest] = useState<AlphaSiftPortfolioBacktestResponse | null>(null);
   const [ingestionDates, setIngestionDates] = useState('');
   const [ingestionUniverse, setIngestionUniverse] = useState('');
@@ -635,6 +637,14 @@ const AgentConsolePage: React.FC = () => {
     setError('');
     setSuccess('');
     try {
+      const minimumCommission = Number(portfolioMinimumCommission);
+      const sellTaxBps = Number(portfolioSellTaxBps);
+      if (!Number.isFinite(minimumCommission) || minimumCommission < 0) {
+        throw new Error('最低佣金必须是不小于 0 的数字');
+      }
+      if (!Number.isFinite(sellTaxBps) || sellTaxBps < 0 || sellTaxBps > 1000) {
+        throw new Error('卖出税率必须在 0 到 1000 bps 之间');
+      }
       const payload = await alphasiftApi.runPortfolioBacktest({
         strategy: filters.strategy.trim() || 'dual_low',
         market: filters.market || 'cn',
@@ -643,6 +653,8 @@ const AgentConsolePage: React.FC = () => {
         topK: 5,
         benchmarkSymbol: (filters.market || 'cn') === 'cn' ? '000300' : undefined,
         targetWeights: parsePortfolioTargetWeights(portfolioTargetWeights),
+        minimumCommission,
+        sellTaxBps,
       });
       setPortfolioBacktest(payload);
       setSuccess(`组合回测完成，覆盖 ${payload.snapshotCount} 个快照日期`);
@@ -1156,10 +1168,10 @@ const AgentConsolePage: React.FC = () => {
             <div>
               <h3 className="text-sm font-semibold text-foreground">跨日期组合回测</h3>
               <p className="mt-1 text-xs text-secondary-text">
-                下一交易日开盘成交，双边手续费 3 bps、滑点 5 bps，A 股默认对比沪深 300
+                下一交易日开盘成交，手续费 3 bps、滑点 5 bps；最低佣金和卖出税按账户口径填写
               </p>
             </div>
-            <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+            <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center lg:justify-end">
               <input
                 data-testid="agent-portfolio-date-from"
                 className={`${INPUT_CLASS} sm:w-40`}
@@ -1183,6 +1195,29 @@ const AgentConsolePage: React.FC = () => {
                 onChange={(event) => setPortfolioTargetWeights(event.target.value)}
                 aria-label="组合目标权重"
                 placeholder="600519=60, 000001=30"
+              />
+              <input
+                data-testid="agent-portfolio-minimum-commission"
+                className={`${INPUT_CLASS} sm:w-32`}
+                type="number"
+                min="0"
+                step="0.01"
+                value={portfolioMinimumCommission}
+                onChange={(event) => setPortfolioMinimumCommission(event.target.value)}
+                aria-label="每笔最低佣金"
+                placeholder="最低佣金"
+              />
+              <input
+                data-testid="agent-portfolio-sell-tax-bps"
+                className={`${INPUT_CLASS} sm:w-32`}
+                type="number"
+                min="0"
+                max="1000"
+                step="0.1"
+                value={portfolioSellTaxBps}
+                onChange={(event) => setPortfolioSellTaxBps(event.target.value)}
+                aria-label="卖出税率 bps"
+                placeholder="卖出税 bps"
               />
               <Button
                 data-testid="agent-portfolio-backtest-run"
@@ -1215,7 +1250,7 @@ const AgentConsolePage: React.FC = () => {
                   ))}
                 </div>
               ) : null}
-              <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+              <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
                 <StatTile
                   label="组合收益"
                   value={formatPercent(portfolioBacktest.metrics.totalReturnPct)}
@@ -1239,6 +1274,15 @@ const AgentConsolePage: React.FC = () => {
                   label="平均换手"
                   value={formatPercent(portfolioBacktest.metrics.averageTurnoverPct)}
                   hint={`累计 ${formatPercent(portfolioBacktest.metrics.totalTurnoverPct)} · 期末未平 ${portfolioBacktest.metrics.endingOpenPositionCount ?? 0}`}
+                />
+                <StatTile
+                  label="成本费用"
+                  value={formatMoney(
+                    Number(portfolioBacktest.metrics.totalFees || 0)
+                    + Number(portfolioBacktest.metrics.totalTaxes || 0)
+                    + Number(portfolioBacktest.metrics.totalSlippageCost || 0),
+                  )}
+                  hint={`佣金 ${formatMoney(portfolioBacktest.metrics.totalFees)} · 税 ${formatMoney(portfolioBacktest.metrics.totalTaxes)}`}
                 />
               </div>
               <div className="overflow-x-auto rounded-lg border border-border">

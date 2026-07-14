@@ -138,6 +138,8 @@ class AlphaSiftReplayApiTestCase(unittest.TestCase):
                     "final_holding_bars": 10,
                     "initial_capital": 200000,
                     "commission_bps": 4,
+                    "minimum_commission": 5,
+                    "sell_tax_bps": 5,
                     "slippage_bps": 6,
                     "benchmark_symbol": "000300",
                     "enforce_tradeability": True,
@@ -151,6 +153,8 @@ class AlphaSiftReplayApiTestCase(unittest.TestCase):
         call = service.run.call_args.kwargs
         self.assertEqual(call["top_k"], 3)
         self.assertEqual(call["commission_bps"], 4)
+        self.assertEqual(call["minimum_commission"], 5)
+        self.assertEqual(call["sell_tax_bps"], 5)
         self.assertEqual(call["benchmark_symbol"], "000300")
         self.assertTrue(call["enforce_tradeability"])
         self.assertEqual(call["accounting_mode"], "cash_ledger")
