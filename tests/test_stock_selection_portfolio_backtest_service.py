@@ -405,6 +405,49 @@ class StockSelectionPortfolioBacktestServiceTestCase(unittest.TestCase):
         self.assertEqual(result["methodology"]["configured_target_weights"]["600004"], 10.0)
         self.assertEqual(result["final_equity"], 100_000)
 
+    def test_cash_ledger_applies_minimum_commission_and_sell_tax(self) -> None:
+        with self.db.get_session() as session:
+            session.add_all([
+                StockDaily(code="600001", date=date(2024, 1, 2), open=1, close=1, volume=1000, pct_chg=0),
+                StockDaily(code="600001", date=date(2024, 1, 3), open=1, close=1, volume=1000, pct_chg=0),
+            ])
+            session.commit()
+        self.repository.list_dates.return_value = [date(2024, 1, 1)]
+        self.replay.replay.return_value = {
+            "candidates": [{"symbol": "600001", "name": "fees", "screen_score": 90}],
+            "compatibility": {},
+        }
+
+        result = self.service.run(
+            strategy="dual_low",
+            market="cn",
+            date_from=date(2024, 1, 1),
+            date_to=date(2024, 1, 1),
+            final_holding_bars=2,
+            initial_capital=1000,
+            commission_bps=0,
+            minimum_commission=5,
+            sell_tax_bps=100,
+            slippage_bps=0,
+            accounting_mode="cash_ledger",
+        )
+
+        trades = result["periods"][0]["trades"]
+        buy = next(item for item in trades if item["side"] == "buy")
+        sell = next(item for item in trades if item["side"] == "sell")
+        self.assertEqual(buy["quantity"], 900)
+        self.assertEqual(buy["fee"], 5)
+        self.assertEqual(buy["tax"], 0)
+        self.assertEqual(buy["cash_effect"], -905)
+        self.assertEqual(sell["fee"], 5)
+        self.assertEqual(sell["tax"], 9)
+        self.assertEqual(sell["cash_effect"], 886)
+        self.assertEqual(result["metrics"]["total_fees"], 10)
+        self.assertEqual(result["metrics"]["total_taxes"], 9)
+        self.assertEqual(result["final_equity"], 981)
+        self.assertEqual(result["methodology"]["minimum_commission_per_trade"], 5)
+        self.assertEqual(result["methodology"]["sell_tax_bps"], 100)
+
     def test_rejects_invalid_target_weight_contracts(self) -> None:
         self.repository.list_dates.return_value = [date(2024, 1, 1)]
 
@@ -425,6 +468,16 @@ class StockSelectionPortfolioBacktestServiceTestCase(unittest.TestCase):
                 date_to=date(2024, 1, 1),
                 accounting_mode="equal_weight_approximation",
                 target_weights={"600001": 50},
+            )
+        with self.assertRaisesRegex(ValueError, "minimum_commission and sell_tax_bps"):
+            self.service.run(
+                strategy="dual_low",
+                market="cn",
+                date_from=date(2024, 1, 1),
+                date_to=date(2024, 1, 1),
+                accounting_mode="equal_weight_approximation",
+                minimum_commission=5,
+                sell_tax_bps=5,
             )
 
 

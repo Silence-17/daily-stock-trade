@@ -46,6 +46,8 @@ class StockSelectionPortfolioBacktestService:
         final_holding_bars: int = 20,
         initial_capital: float = 100_000.0,
         commission_bps: float = 3.0,
+        minimum_commission: float = 0.0,
+        sell_tax_bps: float = 0.0,
         slippage_bps: float = 5.0,
         benchmark_symbol: Optional[str] = None,
         enforce_tradeability: bool = True,
@@ -61,6 +63,8 @@ class StockSelectionPortfolioBacktestService:
             final_holding_bars=final_holding_bars,
             initial_capital=initial_capital,
             commission_bps=commission_bps,
+            minimum_commission=minimum_commission,
+            sell_tax_bps=sell_tax_bps,
             slippage_bps=slippage_bps,
         )
         dates = self.repository.list_dates(market=market, date_from=date_from, date_to=date_to)
@@ -70,6 +74,8 @@ class StockSelectionPortfolioBacktestService:
         normalized_target_weights = self._normalize_target_weights(target_weights)
         if normalized_target_weights and accounting_mode != "cash_ledger":
             raise ValueError("target_weights are supported only in cash_ledger mode")
+        if (minimum_commission > 0 or sell_tax_bps > 0) and accounting_mode != "cash_ledger":
+            raise ValueError("minimum_commission and sell_tax_bps are supported only in cash_ledger mode")
         if accounting_mode == "cash_ledger":
             return self._run_cash_ledger(
                 strategy=strategy,
@@ -79,6 +85,8 @@ class StockSelectionPortfolioBacktestService:
                 final_holding_bars=final_holding_bars,
                 initial_capital=initial_capital,
                 commission_bps=commission_bps,
+                minimum_commission=minimum_commission,
+                sell_tax_bps=sell_tax_bps,
                 slippage_bps=slippage_bps,
                 benchmark_symbol=benchmark_symbol,
                 enforce_tradeability=enforce_tradeability,
@@ -296,6 +304,8 @@ class StockSelectionPortfolioBacktestService:
         final_holding_bars: int,
         initial_capital: float,
         commission_bps: float,
+        minimum_commission: float,
+        sell_tax_bps: float,
         slippage_bps: float,
         benchmark_symbol: Optional[str],
         enforce_tradeability: bool,
@@ -316,9 +326,13 @@ class StockSelectionPortfolioBacktestService:
         total_selected = 0
         total_evaluated = 0
         total_turnover_pct = 0.0
+        total_fees = 0.0
+        total_taxes = 0.0
+        total_slippage_cost = 0.0
         first_entry_date: Optional[date] = None
         last_exit_date: Optional[date] = None
         commission = commission_bps / 10_000
+        sell_tax = sell_tax_bps / 10_000
         slippage = slippage_bps / 10_000
         lot_size = 100 if str(market).lower() == "cn" else 1
 
@@ -378,14 +392,22 @@ class StockSelectionPortfolioBacktestService:
                     desired_quantities[symbol] = int(positions.get(symbol, {}).get("quantity") or 0)
                     continue
                 evaluated_symbols += 1
-                buy_unit_cost = price * (1 + slippage) * (1 + commission)
                 target_value = pretrade_equity * target_weight_pcts[symbol] / 100.0
-                desired_quantities[symbol] = self._floor_lot(target_value / buy_unit_cost, lot_size)
+                desired_quantities[symbol] = self._max_affordable_lot(
+                    budget=target_value,
+                    execution_price=price * (1 + slippage),
+                    commission_rate=commission,
+                    minimum_commission=minimum_commission,
+                    lot_size=lot_size,
+                )
             total_evaluated += evaluated_symbols
 
             trades: List[Dict[str, Any]] = []
             blocked: List[Dict[str, Any]] = []
             traded_notional = 0.0
+            period_fees = 0.0
+            period_taxes = 0.0
+            period_slippage_cost = 0.0
             for symbol in list(positions):
                 position = positions[symbol]
                 current_quantity = int(position["quantity"])
@@ -412,11 +434,32 @@ class StockSelectionPortfolioBacktestService:
                 if reason:
                     blocked.append({"symbol": symbol, "side": "sell", "reason": reason})
                     continue
-                effective_price = price * (1 - slippage) * (1 - commission)
-                cash += sell_quantity * effective_price
+                execution_price = price * (1 - slippage)
+                execution_notional = sell_quantity * execution_price
+                fee = self._commission_fee(
+                    notional=execution_notional,
+                    commission_rate=commission,
+                    minimum_commission=minimum_commission,
+                )
+                tax = execution_notional * sell_tax
+                cash_effect = execution_notional - fee - tax
+                cash += cash_effect
                 position["quantity"] = current_quantity - sell_quantity
                 traded_notional += sell_quantity * price
-                trades.append(self._trade_record(symbol, "sell", sell_quantity, price, effective_price, bar.date))
+                period_fees += fee
+                period_taxes += tax
+                period_slippage_cost += sell_quantity * (price - execution_price)
+                trades.append(self._trade_record(
+                    symbol=symbol,
+                    side="sell",
+                    quantity=sell_quantity,
+                    price=price,
+                    execution_price=execution_price,
+                    fee=fee,
+                    tax=tax,
+                    cash_effect=cash_effect,
+                    trade_date=bar.date,
+                ))
                 if position["quantity"] <= 0:
                     del positions[symbol]
 
@@ -448,14 +491,29 @@ class StockSelectionPortfolioBacktestService:
                 if reason:
                     blocked.append({"symbol": symbol, "side": "buy", "reason": reason})
                     continue
-                effective_price = price * (1 + slippage) * (1 + commission)
-                affordable = self._floor_lot(cash / effective_price, lot_size)
+                execution_price = price * (1 + slippage)
+                affordable = self._max_affordable_lot(
+                    budget=cash,
+                    execution_price=execution_price,
+                    commission_rate=commission,
+                    minimum_commission=minimum_commission,
+                    lot_size=lot_size,
+                )
                 executed = min(buy_quantity, affordable)
                 if executed <= 0:
                     blocked.append({"symbol": symbol, "side": "buy", "reason": "insufficient_cash_for_lot"})
                     continue
-                cash -= executed * effective_price
+                execution_notional = executed * execution_price
+                fee = self._commission_fee(
+                    notional=execution_notional,
+                    commission_rate=commission,
+                    minimum_commission=minimum_commission,
+                )
+                cash_effect = -(execution_notional + fee)
+                cash += cash_effect
                 traded_notional += executed * price
+                period_fees += fee
+                period_slippage_cost += executed * (execution_price - price)
                 existing = positions.get(symbol)
                 if existing is None:
                     positions[symbol] = {
@@ -467,7 +525,17 @@ class StockSelectionPortfolioBacktestService:
                 else:
                     existing["quantity"] = current_quantity + executed
                     existing["name"] = candidate.get("name") or existing.get("name")
-                trades.append(self._trade_record(symbol, "buy", executed, price, effective_price, bar.date))
+                trades.append(self._trade_record(
+                    symbol=symbol,
+                    side="buy",
+                    quantity=executed,
+                    price=price,
+                    execution_price=execution_price,
+                    fee=fee,
+                    tax=0.0,
+                    cash_effect=cash_effect,
+                    trade_date=bar.date,
+                ))
                 first_entry_date = min(first_entry_date, bar.date) if first_entry_date else bar.date
 
             marks: List[Dict[str, Any]] = []
@@ -527,10 +595,31 @@ class StockSelectionPortfolioBacktestService:
                         continue
                     quantity = int(position["quantity"])
                     price = float(item["mark_price"])
-                    effective_price = price * (1 - slippage) * (1 - commission)
-                    cash += quantity * effective_price
+                    execution_price = price * (1 - slippage)
+                    execution_notional = quantity * execution_price
+                    fee = self._commission_fee(
+                        notional=execution_notional,
+                        commission_rate=commission,
+                        minimum_commission=minimum_commission,
+                    )
+                    tax = execution_notional * sell_tax
+                    cash_effect = execution_notional - fee - tax
+                    cash += cash_effect
                     traded_notional += quantity * price
-                    trades.append(self._trade_record(symbol, "sell", quantity, price, effective_price, item["mark_date"]))
+                    period_fees += fee
+                    period_taxes += tax
+                    period_slippage_cost += quantity * (price - execution_price)
+                    trades.append(self._trade_record(
+                        symbol=symbol,
+                        side="sell",
+                        quantity=quantity,
+                        price=price,
+                        execution_price=execution_price,
+                        fee=fee,
+                        tax=tax,
+                        cash_effect=cash_effect,
+                        trade_date=item["mark_date"],
+                    ))
                     del positions[symbol]
 
             market_value = sum(
@@ -543,6 +632,9 @@ class StockSelectionPortfolioBacktestService:
             equity_points.append(equity)
             turnover_pct = traded_notional / pretrade_equity * 100 if pretrade_equity > 0 else 0.0
             total_turnover_pct += turnover_pct
+            total_fees += period_fees
+            total_taxes += period_taxes
+            total_slippage_cost += period_slippage_cost
 
             benchmark = self._evaluate_benchmark(
                 symbol=benchmark_symbol,
@@ -573,6 +665,9 @@ class StockSelectionPortfolioBacktestService:
                 "equity": round(equity, 4),
                 "net_return_pct": round(period_return, 6),
                 "turnover_pct": round(turnover_pct, 4),
+                "fees": round(period_fees, 4),
+                "taxes": round(period_taxes, 4),
+                "slippage_cost": round(period_slippage_cost, 4),
                 "position_count": len(positions),
                 "trade_count": len(trades),
                 "blocked_trade_count": len(blocked),
@@ -598,6 +693,9 @@ class StockSelectionPortfolioBacktestService:
             "benchmark_period_count": len(benchmark_returns),
             "total_turnover_pct": round(total_turnover_pct, 4),
             "average_turnover_pct": round(total_turnover_pct / len(periods), 4) if periods else 0.0,
+            "total_fees": round(total_fees, 4),
+            "total_taxes": round(total_taxes, 4),
+            "total_slippage_cost": round(total_slippage_cost, 4),
             "ending_open_position_count": len(positions),
             "ending_cash": round(cash, 4),
             "ending_market_value": round(
@@ -633,6 +731,8 @@ class StockSelectionPortfolioBacktestService:
                 "lot_size": lot_size,
                 "cash_constraint": "buys_capped_by_available_cash",
                 "commission_bps_per_side": commission_bps,
+                "minimum_commission_per_trade": minimum_commission,
+                "sell_tax_bps": sell_tax_bps,
                 "slippage_bps_per_side": slippage_bps,
                 "tradeability_gate_enabled": enforce_tradeability,
                 "places_orders": False,
@@ -666,22 +766,72 @@ class StockSelectionPortfolioBacktestService:
         return int(quantity // lot_size) * lot_size
 
     @staticmethod
+    def _commission_fee(
+        *,
+        notional: float,
+        commission_rate: float,
+        minimum_commission: float,
+    ) -> float:
+        if notional <= 0:
+            return 0.0
+        return max(notional * commission_rate, minimum_commission)
+
+    @classmethod
+    def _max_affordable_lot(
+        cls,
+        *,
+        budget: float,
+        execution_price: float,
+        commission_rate: float,
+        minimum_commission: float,
+        lot_size: int,
+    ) -> int:
+        if budget <= 0 or execution_price <= 0 or lot_size <= 0:
+            return 0
+        high = int(budget // execution_price // lot_size)
+        low = 0
+        while low < high:
+            midpoint = (low + high + 1) // 2
+            quantity = midpoint * lot_size
+            notional = quantity * execution_price
+            total_cost = notional + cls._commission_fee(
+                notional=notional,
+                commission_rate=commission_rate,
+                minimum_commission=minimum_commission,
+            )
+            if total_cost <= budget + 1e-9:
+                low = midpoint
+            else:
+                high = midpoint - 1
+        return low * lot_size
+
+    @staticmethod
     def _trade_record(
+        *,
         symbol: str,
         side: str,
         quantity: int,
         price: float,
-        effective_price: float,
+        execution_price: float,
+        fee: float,
+        tax: float,
+        cash_effect: float,
         trade_date: date,
     ) -> Dict[str, Any]:
+        effective_price = abs(cash_effect) / quantity if quantity > 0 else 0.0
         return {
             "symbol": symbol,
             "side": side,
             "quantity": quantity,
             "price": round(price, 6),
+            "execution_price": round(execution_price, 6),
             "effective_price": round(effective_price, 6),
             "gross_notional": round(quantity * price, 4),
-            "cash_effect": round(quantity * effective_price * (1 if side == "sell" else -1), 4),
+            "execution_notional": round(quantity * execution_price, 4),
+            "fee": round(fee, 4),
+            "tax": round(tax, 4),
+            "slippage_cost": round(quantity * abs(execution_price - price), 4),
+            "cash_effect": round(cash_effect, 4),
             "trade_date": trade_date,
         }
 
@@ -965,6 +1115,8 @@ class StockSelectionPortfolioBacktestService:
         final_holding_bars: int,
         initial_capital: float,
         commission_bps: float,
+        minimum_commission: float,
+        sell_tax_bps: float,
         slippage_bps: float,
     ) -> None:
         if date_from > date_to:
@@ -977,3 +1129,7 @@ class StockSelectionPortfolioBacktestService:
             raise ValueError("initial_capital must be positive")
         if not 0 <= commission_bps <= 1000 or not 0 <= slippage_bps <= 1000:
             raise ValueError("commission_bps and slippage_bps must be between 0 and 1000")
+        if not math.isfinite(minimum_commission) or not 0 <= minimum_commission <= initial_capital:
+            raise ValueError("minimum_commission must be between 0 and initial_capital")
+        if not math.isfinite(sell_tax_bps) or not 0 <= sell_tax_bps <= 1000:
+            raise ValueError("sell_tax_bps must be between 0 and 1000")

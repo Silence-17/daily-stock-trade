@@ -319,6 +319,9 @@ export type AlphaSiftPortfolioBacktestResponse = {
     endingOpenPositionCount?: number;
     endingCash?: number;
     endingMarketValue?: number;
+    totalFees?: number;
+    totalTaxes?: number;
+    totalSlippageCost?: number;
   };
   periods: Array<{
     signalDate: string;
@@ -338,6 +341,9 @@ export type AlphaSiftPortfolioBacktestResponse = {
     positionCount?: number;
     tradeCount?: number;
     blockedTradeCount?: number;
+    fees?: number;
+    taxes?: number;
+    slippageCost?: number;
     replayCandidateCount?: number;
     targetWeights?: Record<string, number>;
     configuredTargetsNotSelected?: string[];
@@ -558,6 +564,8 @@ export const alphasiftApi = {
     topK?: number;
     benchmarkSymbol?: string;
     targetWeights?: Record<string, number>;
+    minimumCommission?: number;
+    sellTaxBps?: number;
   }): Promise<AlphaSiftPortfolioBacktestResponse> {
     const response = await apiClient.post<Record<string, unknown>>(
       '/api/v1/alphasift/replay/portfolio-backtest',
@@ -570,6 +578,8 @@ export const alphasiftApi = {
         final_holding_bars: 20,
         initial_capital: 100000,
         commission_bps: 3,
+        minimum_commission: payload.minimumCommission ?? 0,
+        sell_tax_bps: payload.sellTaxBps ?? 0,
         slippage_bps: 5,
         benchmark_symbol: payload.benchmarkSymbol || null,
         enforce_tradeability: true,

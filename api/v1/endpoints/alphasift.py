@@ -119,6 +119,8 @@ class AlphaSiftPortfolioBacktestRequest(BaseModel):
     final_holding_bars: int = Field(20, ge=1, le=250)
     initial_capital: float = Field(100000, gt=0)
     commission_bps: float = Field(3, ge=0, le=1000)
+    minimum_commission: float = Field(0, ge=0)
+    sell_tax_bps: float = Field(0, ge=0, le=1000)
     slippage_bps: float = Field(5, ge=0, le=1000)
     benchmark_symbol: Optional[str] = Field(None, min_length=1, max_length=16)
     enforce_tradeability: bool = True
@@ -406,6 +408,8 @@ def alphasift_run_portfolio_backtest(
             final_holding_bars=payload.final_holding_bars,
             initial_capital=payload.initial_capital,
             commission_bps=payload.commission_bps,
+            minimum_commission=payload.minimum_commission,
+            sell_tax_bps=payload.sell_tax_bps,
             slippage_bps=payload.slippage_bps,
             benchmark_symbol=payload.benchmark_symbol,
             enforce_tradeability=payload.enforce_tradeability,
