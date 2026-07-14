@@ -263,6 +263,7 @@
 - Python 3.13.14 隔离环境已完成真实 vn.py 验收：`OrderRequest` 构造、EventEngine/MainEngine 启停、四类事件 attach 和 API lifespan runtime 注入均通过；后台恢复任务注册由 scheduler/API 回归测试覆盖。
 - runtime 会准备部署工作目录下的 `.vntrader/`，避免受限服务账户尝试写用户主目录导致 MainEngine bootstrap 失败。
 - 新增默认关闭的内置 `DsaSimulatedGateway`：无需账户参数即可通过真实 MainEngine/EventEngine 延迟即时成交，并已验证 Agent 自动交易计划经订单/成交事件回写为 Portfolio 成交。
+- 内置 `DsaSimulatedGateway` 已支持默认保留状态的断线重连：资金、持仓、订单和计数器保持连续，在途延迟订单会恢复并恰好成交一次；`check_vnpy_adapter.py --require-vnpy --reconnect-cycles 3` 已验证三轮缓存保留、成交去重和编号唯一性，安装脚本默认执行该验收。
 - 新增 `POST /api/v1/vnpy-paper/trade-plans/{plan_uid}/cancel` 和 Web “撤单”入口：`vnpy_paper` 的 `submitted` / `part_filled` 计划可映射为 vn.py `CancelRequest` 并调用 `MainEngine.cancel_order`，计划进入 `cancel_requested`，终态仍以 vn.py 订单回报为准。
 
 未完成：
@@ -270,7 +271,7 @@
 - 系统默认 Python 3.14.6 未安装 vn.py，继续保持本地 paper fallback；完整 vn.py 能力使用已验证的 Python 3.13.14 隔离环境。
 - 已有 opt-in Gateway add/connect bootstrap，但尚未安装和配置具体 gateway 插件/账户，真实 gateway 运行态、连接参数、回报、重连和长期事件订阅稳定性未验证。
 - 已能调用注入或启动期创建的 `MainEngine.send_order`，并支持订单状态、成交、账户和持仓回报通过 API 手动/外部同步；注入或启动期创建的 EventEngine 可自动 attach 回调，但真实 gateway 连接仍未验收。
-- `vnpy_paper` 当前覆盖买入委托提交、自动按比例卖出提交、主动撤单请求、订单/成交状态回写、多笔成交累计、MainEngine 漏回报对账、对账异常保护、提交态/部分成交/撤单请求超时安全归档和活跃委托防重复；真实 gateway 长运行、重连和迟到回报验收仍未完成。
+- `vnpy_paper` 当前覆盖买入委托提交、自动按比例卖出提交、主动撤单请求、订单/成交状态回写、多笔成交累计、MainEngine 漏回报对账、对账异常保护、提交态/部分成交/撤单请求超时安全归档和活跃委托防重复；内置模拟 gateway 的重连、缓存保留和延迟成交去重已完成，真实 gateway 的长运行、重连和迟到回报验收仍未完成。
 - 安装脚本已处理 Python 版本、GUI/数值依赖、LiteLLM wheel 和受限 pip 缓存；Docker、Desktop 安装体积与打包影响仍未验收。
 
 需要做：

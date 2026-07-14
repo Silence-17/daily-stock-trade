@@ -53,7 +53,7 @@
 - 页面交易设置持久化到 `data/vnpy_paper_trading.json`；可选 vn.py runtime 托管通过 `.env` 中的 `VNPY_RUNTIME_*` 配置显式开启，默认关闭。
 - 成交、资金流水、持仓快照复用 Portfolio 表；因此模拟成交也会出现在现有持仓页和持仓风险计算中。
 - 重置账户会更新 `settings.account_id` 指向新模拟账户，并清空 `auto_trailing_peaks`，避免新账户继承旧持仓的移动止损峰值；不会删除旧 Agent run、候选决策或交易计划审计。
-- 可执行 `python scripts/check_vnpy_adapter.py` 验证当前 Python 环境的 vn.py adapter 状态；未安装 vn.py 时脚本输出 `local_paper_fallback` 诊断并以 0 退出，安装 vn.py 后会尝试实例化真实 `OrderRequest`。桥接提交可以由宿主进程注入 `MainEngine`，也可以显式设置 `VNPY_RUNTIME_ENABLED=true` 让 DSA 在启动时创建 EventEngine/MainEngine，并按需 add gateway/connect。
+- 可执行 `python scripts/check_vnpy_adapter.py` 验证当前 Python 环境的 vn.py adapter 状态；未安装 vn.py 时脚本输出 `local_paper_fallback` 诊断并以 0 退出，安装 vn.py 后会尝试实例化真实 `OrderRequest`。使用 `--require-vnpy --reconnect-cycles 3` 还会对内置 `DSA_SIM` 执行三轮在途订单断线重连，校验订单缓存保留、恢复后恰好成交一次、订单/成交编号不重复以及资金和持仓连续性。桥接提交可以由宿主进程注入 `MainEngine`，也可以显式设置 `VNPY_RUNTIME_ENABLED=true` 让 DSA 在启动时创建 EventEngine/MainEngine，并按需 add gateway/connect。
 - 每次自动模拟交易会写入 `stock_selection_agent_runs`、`stock_selection_agent_decisions` 和 `stock_selection_agent_trade_plans`，保存策略、候选/持仓、买入或卖出动作、评分、跳过原因、计划金额、执行模式、数据质量诊断、结构化 `agent_plan`、结构化 `agent_summary`、候选级 `position_plan`、规则 `risk_review`、规则 Agent 买入前 `agent_review`、可选 LLM 买入前 `llm_review`、成交 `trade_id` 和候选原始载荷，供页面审计。`agent_plan` 会记录规则派生的 `plan_profile`、`execution_policy`、`sizing_plan`、`adaptive_controls` 和可选 `llm_dynamic_plan`，用于说明本轮计划档位、执行路由、预算上限、已启用风控层、LLM 是否调参和降级动作。`agent_summary.review_quality` 会基于规则 Agent 复核、可选 LLM 复核和数据质量生成 `audited`、`guarded`、`needs_review` 或 `idle` 状态、质量分、覆盖率和风险标记，便于判断是否需要人工确认。手动触发 LLM 复盘后，结果会写入 run 诊断中的 `llm_recap`，失败只记录错误原因，不影响交易计划和成交状态。
 - vn.py 事件同步已提供外部回写 API：订单状态回报会按 `vt_orderid` 更新提交态/失败态审计；成交回报按 `vt_tradeid` 幂等写入 Portfolio，支持一张委托分多笔累计成交，只有累计数量达到计划数量才标记 `filled`，期间保留 `part_filled`、累计数量、加权均价、剩余数量和成交明细。账户和持仓快照会写入 `diagnostics.vnpy_sync_state` 供状态页和后续风控诊断读取；未匹配到计划、重复回报或本地账本校验失败会以明确 reason code 返回，不会静默写入。
 - Agent run 详情会从运行状态、结构化 `agent_plan`、结构化 `agent_summary`、结构化 `agent_workflow`、数据质量、候选决策和交易计划合成 `timeline` 时间线；候选决策和交易计划的 `order_result` 会保存候选级 `position_plan`、`risk_review` 与 `agent_review`；Web 页面直接展示“Agent 计划”“运行总结”“Agent 工作流”“运行时间线”和候选级“Agent 复核”，用于解释本轮任务为何按该策略、市场、预算和执行模式运行，以及最终为何成交、计划、警告或跳过。
@@ -128,10 +128,10 @@
 
 ```powershell
 .\scripts\setup_vnpy_runtime.ps1 -PythonExecutable "python"
-.\.venv-vnpy\Scripts\python.exe scripts\check_vnpy_adapter.py --require-vnpy
+.\.venv-vnpy\Scripts\python.exe scripts\check_vnpy_adapter.py --require-vnpy --reconnect-cycles 3
 ```
 
-安装脚本会校验 Python 版本，安装项目依赖与 `requirements-vnpy.txt`，优先选择 LiteLLM wheel，并把 pip 构建缓存放在 `.venv-vnpy/.pip-cache`。若 AlphaSift 的远程 Git 安装受限，可先准备固定提交的本地源码，再传 `-AlphaSiftSource <repo-relative-path>`；仅诊断 adapter 时可传 `-SkipProjectDependencies`，但该模式不能作为完整 DSA API 运行环境。验收脚本会构造真实 `OrderRequest`，调用测试 MainEngine bridge，启动内置 `DsaSimulatedGateway` 完成一笔标准订单/成交事件，并关闭 vn.py EventEngine/MainEngine。
+安装脚本会校验 Python 版本，安装项目依赖与 `requirements-vnpy.txt`，优先选择 LiteLLM wheel，并把 pip 构建缓存放在 `.venv-vnpy/.pip-cache`。若 AlphaSift 的远程 Git 安装受限，可先准备固定提交的本地源码，再传 `-AlphaSiftSource <repo-relative-path>`；仅诊断 adapter 时可传 `-SkipProjectDependencies`，但该模式不能作为完整 DSA API 运行环境。验收脚本会构造真实 `OrderRequest`，调用测试 MainEngine bridge，启动内置 `DsaSimulatedGateway` 完成一笔标准订单/成交事件和三轮在途订单重连，再关闭 vn.py EventEngine/MainEngine。
 
 runtime 启动前会创建部署工作目录下已忽略的 `.vntrader/`，供 vn.py 保存本地运行状态，避免受限服务账户回退写入用户主目录。需要由 DSA 托管 vn.py EventEngine/MainEngine 时，显式设置：
 
@@ -160,7 +160,7 @@ VNPY_AUTO_ATTACH_EVENTS=true
 
 ## vn.py bridge 边界
 
-- `vnpy_paper` 模式负责把 DSA 通过风控后的买入计划和自动卖出计划转换为 vn.py `OrderRequest` 并调用 `MainEngine.send_order`，也可把提交态计划转换为 vn.py `CancelRequest` 并调用 `MainEngine.cancel_order` 发起撤单；订单状态、成交、账户和持仓回报可通过 `/vnpy-events/*` 同步回 DSA，或在宿主进程注入 EventEngine 后通过 `/vnpy-events/attach` 注册自动回调。DSA 也可以在 `VNPY_RUNTIME_ENABLED=true` 时创建 EventEngine/MainEngine 并按配置 add gateway/connect；内置 `DsaSimulatedGateway` 已完成自动交易事件回写验收，真实券商 gateway 的连接参数、重连和长跑仍需部署方显式验证。
+- `vnpy_paper` 模式负责把 DSA 通过风控后的买入计划和自动卖出计划转换为 vn.py `OrderRequest` 并调用 `MainEngine.send_order`，也可把提交态计划转换为 vn.py `CancelRequest` 并调用 `MainEngine.cancel_order` 发起撤单；订单状态、成交、账户和持仓回报可通过 `/vnpy-events/*` 同步回 DSA，或在宿主进程注入 EventEngine 后通过 `/vnpy-events/attach` 注册自动回调。DSA 也可以在 `VNPY_RUNTIME_ENABLED=true` 时创建 EventEngine/MainEngine 并按配置 add gateway/connect；内置 `DsaSimulatedGateway` 默认在重连时保留资金、持仓、订单和计数器，恢复未完成延迟成交且保证单次成交，设置 `preserve_state_on_reconnect=false` 可显式重置。该模拟网关已完成事件回写与循环重连验收；真实券商 gateway 的连接参数、重连和长跑仍需部署方显式验证。
 - bridge 提交成功只代表 vn.py 接收了委托请求，交易计划状态会记录为 `submitted`；订单状态中的部分成交会记录为 `part_filled` 供审计；只有收到并同步成交回报后，本地 Portfolio 才会写入成交并更新现金和持仓。
 - bridge 不可用、gateway 未配置、`OrderRequest` 构造失败或 `send_order` 抛错时，自动交易会把该计划记录为 `failed` 或 `skipped`，不会让整轮 Agent 运行变成 500。
 

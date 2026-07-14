@@ -47,6 +47,96 @@ def _installed_vnpy_version() -> str | None:
         return None
 
 
+def _wait_for_terminal_order(main_engine: Any, vt_orderid: str, *, timeout: float = 3.0) -> Any:
+    deadline = time.monotonic() + timeout
+    order = None
+    while time.monotonic() < deadline:
+        order = main_engine.get_order(vt_orderid)
+        status_name = getattr(getattr(order, "status", None), "name", "")
+        if status_name in {"ALLTRADED", "REJECTED", "CANCELLED"}:
+            break
+        time.sleep(0.05)
+    return order
+
+
+def _run_reconnect_soak(
+    *,
+    main_engine: Any,
+    payload: Dict[str, Any],
+    cycles: int,
+) -> Dict[str, Any]:
+    gateway = main_engine.get_gateway("DSA_SIM")
+    if gateway is None or not callable(getattr(gateway, "get_state_snapshot", None)):
+        raise VnpyAdapterError("built-in simulated gateway state diagnostics are unavailable")
+
+    records = []
+    order_ids: set[str] = set()
+    trade_ids: set[str] = set()
+    bridge = VnpyMainEngineBridge(main_engine=main_engine, gateway_name="DSA_SIM")
+    for index in range(1, cycles + 1):
+        cycle_payload = {
+            **payload,
+            "source": "adapter_reconnect_soak",
+            "plan_uid": f"reconnect-soak-{index}",
+            "reference": f"dsa:adapter_reconnect_soak:reconnect-soak-{index}",
+        }
+        submission = bridge.send_order(cycle_payload)
+        vt_orderid = str(submission.get("vt_orderid") or "")
+        if not submission.get("accepted") or not vt_orderid or vt_orderid in order_ids:
+            raise VnpyAdapterError(f"reconnect cycle {index} did not create a unique order")
+        order_ids.add(vt_orderid)
+        time.sleep(0.05)
+
+        gateway.close()
+        disconnected_state = gateway.get_state_snapshot()
+        pending_retained = vt_orderid.rsplit(".", 1)[-1] in set(
+            disconnected_state.get("active_order_ids") or []
+        )
+        if not pending_retained:
+            raise VnpyAdapterError(
+                f"reconnect cycle {index} lost its in-flight order while disconnected"
+            )
+        main_engine.connect({}, "DSA_SIM")
+        order = _wait_for_terminal_order(main_engine, vt_orderid)
+        status_name = getattr(getattr(order, "status", None), "name", None)
+        trades = [
+            trade
+            for trade in main_engine.get_all_trades()
+            if str(getattr(trade, "vt_orderid", "")) == vt_orderid
+        ]
+        if status_name != "ALLTRADED" or len(trades) != 1:
+            raise VnpyAdapterError(
+                f"reconnect cycle {index} expected one fill, got status={status_name} trades={len(trades)}"
+            )
+        vt_tradeid = str(getattr(trades[0], "vt_tradeid", ""))
+        if not vt_tradeid or vt_tradeid in trade_ids:
+            raise VnpyAdapterError(f"reconnect cycle {index} produced a duplicate trade id")
+        trade_ids.add(vt_tradeid)
+        records.append(
+            {
+                "cycle": index,
+                "vt_orderid": vt_orderid,
+                "vt_tradeid": vt_tradeid,
+                "pending_retained": pending_retained,
+                "order_status": status_name,
+                "trade_count": len(trades),
+                "state_after": gateway.get_state_snapshot(),
+            }
+        )
+
+    final_state = gateway.get_state_snapshot()
+    return {
+        "cycles": cycles,
+        "completed_cycles": len(records),
+        "all_filled_once": len(records) == cycles,
+        "all_pending_retained": all(item["pending_retained"] for item in records),
+        "unique_order_count": len(order_ids),
+        "unique_trade_count": len(trade_ids),
+        "final_state": final_state,
+        "records": records,
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -54,7 +144,15 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Return a non-zero exit code when the optional vn.py runtime is unavailable.",
     )
+    parser.add_argument(
+        "--reconnect-cycles",
+        type=int,
+        default=0,
+        help="Run N disconnect/reconnect cycles with an in-flight DSA_SIM order (0-50).",
+    )
     args = parser.parse_args(argv)
+    if args.reconnect_cycles < 0 or args.reconnect_cycles > 50:
+        parser.error("--reconnect-cycles must be between 0 and 50")
     status = get_vnpy_adapter_status()
     payload = build_vnpy_order_request_payload(
         symbol="600519",
@@ -137,14 +235,10 @@ def main(argv: list[str] | None = None) -> int:
                 gateway_name="DSA_SIM",
             ).send_order(payload)
             simulated_orderid = str(simulated_submission.get("vt_orderid") or "")
-            deadline = time.monotonic() + 3.0
-            simulated_order = None
-            while time.monotonic() < deadline:
-                simulated_order = runtime_handle.main_engine.get_order(simulated_orderid)
-                status_name = getattr(getattr(simulated_order, "status", None), "name", "")
-                if status_name in {"ALLTRADED", "REJECTED", "CANCELLED"}:
-                    break
-                time.sleep(0.05)
+            simulated_order = _wait_for_terminal_order(
+                runtime_handle.main_engine,
+                simulated_orderid,
+            )
             simulated_trades = [
                 trade
                 for trade in runtime_handle.main_engine.get_all_trades()
@@ -162,6 +256,12 @@ def main(argv: list[str] | None = None) -> int:
             }
             if not result["simulated_gateway_smoke"]["filled"]:
                 raise VnpyAdapterError("built-in vn.py simulated gateway did not fill the smoke order")
+            if args.reconnect_cycles:
+                result["reconnect_soak"] = _run_reconnect_soak(
+                    main_engine=runtime_handle.main_engine,
+                    payload=payload,
+                    cycles=args.reconnect_cycles,
+                )
         except Exception as exc:  # noqa: BLE001 - script should print actionable diagnostics.
             result["ok"] = False
             result["error"] = {
@@ -173,7 +273,7 @@ def main(argv: list[str] | None = None) -> int:
                 runtime_handle.close()
     else:
         result["fallback"] = "vnpy is not importable; DSA local paper mode remains usable."
-        if args.require_vnpy:
+        if args.require_vnpy or args.reconnect_cycles:
             result["ok"] = False
             result["error"] = {
                 "type": "VnpyRuntimeUnavailable",
