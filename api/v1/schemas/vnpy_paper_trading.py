@@ -56,6 +56,8 @@ class VnpyPaperSettings(BaseModel):
     auto_market_light_block_statuses: List[Literal["red", "yellow"]] = Field(default_factory=lambda: ["red"])
     auto_failure_fuse_enabled: bool = False
     auto_failure_fuse_threshold: int = Field(3, ge=2, le=20)
+    auto_failure_fuse_auto_recovery_enabled: bool = False
+    auto_failure_fuse_cooldown_minutes: int = Field(1440, ge=1, le=10080)
     auto_sell_enabled: bool = False
     auto_stop_loss_pct: Optional[float] = Field(None, gt=0, le=1000)
     auto_take_profit_pct: Optional[float] = Field(None, gt=0, le=1000)
@@ -120,6 +122,8 @@ class VnpyPaperSettingsUpdate(BaseModel):
     auto_market_light_block_statuses: Optional[List[Literal["red", "yellow"]]] = None
     auto_failure_fuse_enabled: Optional[bool] = None
     auto_failure_fuse_threshold: Optional[int] = Field(None, ge=2, le=20)
+    auto_failure_fuse_auto_recovery_enabled: Optional[bool] = None
+    auto_failure_fuse_cooldown_minutes: Optional[int] = Field(None, ge=1, le=10080)
     auto_sell_enabled: Optional[bool] = None
     auto_stop_loss_pct: Optional[float] = Field(None, gt=0, le=1000)
     auto_take_profit_pct: Optional[float] = Field(None, gt=0, le=1000)

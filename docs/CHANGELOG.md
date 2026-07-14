@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [改进] 自动模拟交易连续失败熔断新增默认关闭的持久化冷却自动恢复；冷却到期只放行单轮探测，再次失败重新熔断，Web 展示预计恢复时间并保留手动恢复入口。
+- [测试] 扩展 vn.py paper 服务、API 和 Web 回归，覆盖熔断冷却计时、到期复位、设置字段映射与页面保存。
+
 - [新功能] AlphaSift 现金账本新增 `cn_historical_stamp_duty` 卖出税模式，按卖出成交日在 2008-09-19 起使用 10 bps、2023-08-28 起使用 5 bps，并保留 `explicit` 固定税率兼容模式。
 - [改进] 每笔成交新增实际 `tax_bps` 和政策 `tax_source` 审计，方法论返回生效制度表；历史模式仅允许中国市场，早于已覆盖制度起点的实际卖出 fail-closed。
 - [测试] 新增官方生效日边界、固定/历史模式税额、非中国市场和未覆盖历史日期阻断，以及 API/Web 模式映射回归。

@@ -165,6 +165,8 @@ class VnpyPaperSettings:
     auto_market_light_block_statuses: List[str] = field(default_factory=lambda: ["red"])
     auto_failure_fuse_enabled: bool = False
     auto_failure_fuse_threshold: int = 3
+    auto_failure_fuse_auto_recovery_enabled: bool = False
+    auto_failure_fuse_cooldown_minutes: int = 1440
     auto_sell_enabled: bool = False
     auto_stop_loss_pct: Optional[float] = None
     auto_take_profit_pct: Optional[float] = None
@@ -546,8 +548,10 @@ class VnpyPaperTradingService:
             payload = self._read_config_payload()
             if not isinstance(payload, dict):
                 payload = {}
-            reset_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            reset_at = self._now_utc().astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
             payload["failure_fuse_reset_at"] = reset_at
+            payload["failure_fuse_last_manual_reset_at"] = reset_at
+            payload.pop("failure_fuse_opened_at", None)
             payload["updated_at"] = reset_at
             self._write_config_payload(payload)
         return self.get_status(include_snapshot=False, include_recent_trades=False)
@@ -2228,6 +2232,23 @@ class VnpyPaperTradingService:
             settings,
             current_run_id=run_id,
         )
+        if failure_fuse_diagnostics:
+            run_diagnostics["failure_fuse"] = failure_fuse_diagnostics
+        if failure_fuse_diagnostics.get("auto_recovered"):
+            self._record_auto_trade_alert_event(
+                "failure_fuse_auto_recovered",
+                status="resolved",
+                reason="failure_fuse_cooldown_elapsed",
+                observed_value=failure_fuse_diagnostics.get("opened_at"),
+                threshold=failure_fuse_diagnostics.get("recover_at"),
+                diagnostics={
+                    "agent_run_uid": run_uid,
+                    "agent_run_id": run_id,
+                    "strategy": settings.auto_strategy,
+                    "market": settings.auto_market,
+                    "failure_fuse": failure_fuse_diagnostics,
+                },
+            )
         if failure_fuse_reason:
             result = {
                 "accepted": False,
@@ -4326,6 +4347,9 @@ class VnpyPaperTradingService:
         auto_min_cash_balance = _safe_float(raw.get("auto_min_cash_balance"))
         auto_max_drawdown_pct = _safe_float(raw.get("auto_max_drawdown_pct"))
         auto_failure_fuse_threshold = _safe_int(raw.get("auto_failure_fuse_threshold"))
+        auto_failure_fuse_cooldown_minutes = _safe_int(
+            raw.get("auto_failure_fuse_cooldown_minutes")
+        )
         auto_stop_loss_pct = _safe_float(raw.get("auto_stop_loss_pct"))
         auto_take_profit_pct = _safe_float(raw.get("auto_take_profit_pct"))
         auto_trailing_stop_pct = _safe_float(raw.get("auto_trailing_stop_pct"))
@@ -4532,6 +4556,20 @@ class VnpyPaperTradingService:
             auto_failure_fuse_threshold=max(
                 2,
                 min(20, auto_failure_fuse_threshold or defaults.auto_failure_fuse_threshold),
+            ),
+            auto_failure_fuse_auto_recovery_enabled=bool(
+                raw.get(
+                    "auto_failure_fuse_auto_recovery_enabled",
+                    defaults.auto_failure_fuse_auto_recovery_enabled,
+                )
+            ),
+            auto_failure_fuse_cooldown_minutes=max(
+                1,
+                min(
+                    10080,
+                    auto_failure_fuse_cooldown_minutes
+                    or defaults.auto_failure_fuse_cooldown_minutes,
+                ),
             ),
             auto_sell_enabled=bool(raw.get("auto_sell_enabled", defaults.auto_sell_enabled)),
             auto_stop_loss_pct=(
@@ -6017,11 +6055,45 @@ class VnpyPaperTradingService:
             "recent_statuses": [item.get("status") for item in recent],
             "recent_errors": [item.get("error") for item in recent],
         }
-        if len(recent) < threshold:
+        is_open = len(recent) >= threshold and all(
+            self._run_counts_for_failure_fuse(item) for item in recent[:threshold]
+        )
+        if not is_open:
+            self._clear_failure_fuse_opened_at()
+            return None, {
+                **diagnostics,
+                **self._failure_fuse_recovery_diagnostics(settings, is_open=False),
+            }
+
+        recovery = self._failure_fuse_recovery_diagnostics(
+            settings,
+            is_open=True,
+            persist_opened_at=True,
+        )
+        diagnostics.update(recovery)
+        if recovery.get("auto_recovery_due"):
+            recovered_at = self._now_utc()
+            recovered_at_text = recovered_at.astimezone(timezone.utc).isoformat().replace(
+                "+00:00", "Z"
+            )
+            with self._lock:
+                payload = self._read_config_payload()
+                payload["failure_fuse_reset_at"] = recovered_at_text
+                payload["failure_fuse_last_auto_recovered_at"] = recovered_at_text
+                payload.pop("failure_fuse_opened_at", None)
+                payload["updated_at"] = recovered_at_text
+                self._write_config_payload(payload)
+            diagnostics.update(
+                {
+                    "open": False,
+                    "auto_recovered": True,
+                    "auto_recovered_at": recovered_at_text,
+                    "reset_at": recovered_at_text,
+                    "remaining_cooldown_seconds": 0,
+                }
+            )
             return None, diagnostics
-        if all(self._run_counts_for_failure_fuse(item) for item in recent[:threshold]):
-            return "failure_fuse_open", diagnostics
-        return None, diagnostics
+        return "failure_fuse_open", diagnostics
 
     def _failure_fuse_status(self, settings: VnpyPaperSettings) -> Dict[str, Any]:
         if not settings.auto_failure_fuse_enabled:
@@ -6030,6 +6102,7 @@ class VnpyPaperTradingService:
                 "open": False,
                 "threshold": max(2, min(20, int(settings.auto_failure_fuse_threshold or 3))),
                 "consecutive_failure_count": 0,
+                **self._failure_fuse_recovery_diagnostics(settings, is_open=False),
             }
         threshold = max(2, min(20, int(settings.auto_failure_fuse_threshold or 3)))
         recent = self.agent_repo.list_recent_runs(
@@ -6055,7 +6128,71 @@ class VnpyPaperTradingService:
             "recent_run_uids": [item.get("run_uid") for item in recent],
             "recent_statuses": [item.get("status") for item in recent],
             "recent_errors": [item.get("error") for item in recent],
+            **self._failure_fuse_recovery_diagnostics(settings, is_open=is_open),
         }
+
+    def _failure_fuse_recovery_diagnostics(
+        self,
+        settings: VnpyPaperSettings,
+        *,
+        is_open: bool,
+        persist_opened_at: bool = False,
+    ) -> Dict[str, Any]:
+        cooldown_minutes = max(
+            1,
+            min(10080, int(settings.auto_failure_fuse_cooldown_minutes or 1440)),
+        )
+        payload = self._read_config_payload()
+        opened_at = self._parse_utc_datetime(payload.get("failure_fuse_opened_at"))
+        if not is_open:
+            opened_at = None
+        now = self._now_utc()
+        if is_open and opened_at is None and persist_opened_at:
+            opened_at = now
+            opened_at_text = self._format_utc_datetime(opened_at)
+            with self._lock:
+                latest = self._read_config_payload()
+                existing = self._parse_utc_datetime(latest.get("failure_fuse_opened_at"))
+                if existing is None:
+                    latest["failure_fuse_opened_at"] = opened_at_text
+                    latest["updated_at"] = opened_at_text
+                    self._write_config_payload(latest)
+                else:
+                    opened_at = existing
+        recover_at = opened_at + timedelta(minutes=cooldown_minutes) if opened_at else None
+        remaining_seconds = (
+            max(0, int(math.ceil((recover_at - now).total_seconds())))
+            if recover_at is not None and is_open
+            else None
+        )
+        auto_recovery_enabled = bool(settings.auto_failure_fuse_auto_recovery_enabled)
+        return {
+            "auto_recovery_enabled": auto_recovery_enabled,
+            "cooldown_minutes": cooldown_minutes,
+            "opened_at": self._format_utc_datetime(opened_at) if opened_at else None,
+            "recover_at": self._format_utc_datetime(recover_at) if recover_at else None,
+            "remaining_cooldown_seconds": remaining_seconds,
+            "auto_recovery_due": bool(
+                is_open
+                and auto_recovery_enabled
+                and recover_at is not None
+                and now >= recover_at
+            ),
+            "last_auto_recovered_at": payload.get("failure_fuse_last_auto_recovered_at"),
+        }
+
+    def _clear_failure_fuse_opened_at(self) -> None:
+        with self._lock:
+            payload = self._read_config_payload()
+            if "failure_fuse_opened_at" not in payload:
+                return
+            payload.pop("failure_fuse_opened_at", None)
+            payload["updated_at"] = self._format_utc_datetime(self._now_utc())
+            self._write_config_payload(payload)
+
+    @staticmethod
+    def _now_utc() -> datetime:
+        return datetime.now(timezone.utc)
 
     def _failure_fuse_reset_at(self) -> Optional[datetime]:
         payload = self._read_config_payload()
