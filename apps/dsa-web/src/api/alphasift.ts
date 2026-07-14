@@ -250,6 +250,164 @@ export type AlphaSiftScreenTaskStatus = {
   result?: AlphaSiftScreenResponse | null;
 };
 
+export type AlphaSiftReplayCompatibility = {
+  strategy: string;
+  market: string;
+  snapshotDate: string;
+  universeCount: number;
+  requiredHardFields: string[];
+  requiredScoreFields: string[];
+  hardCompleteRows: number;
+  scoreCompleteRows: number;
+  hardCoverageRatio: number;
+  scoreCoverageRatio: number;
+  hardMissingCounts: Record<string, number>;
+  scoreMissingCounts: Record<string, number>;
+};
+
+export type AlphaSiftReplayCandidate = {
+  symbol: string;
+  name?: string | null;
+  industry?: string | null;
+  price?: number | null;
+  changePct?: number | null;
+  screenScore: number;
+  [key: string]: unknown;
+};
+
+export type AlphaSiftReplayResponse = {
+  strategy: string;
+  market: string;
+  snapshotDate: string;
+  universeCount: number;
+  completeRowCount: number;
+  filteredCount: number;
+  candidateCount: number;
+  candidates: AlphaSiftReplayCandidate[];
+  compatibility: AlphaSiftReplayCompatibility;
+  methodology: {
+    pointInTime: boolean;
+    lookaheadProtection: boolean;
+    usesCurrentSnapshotFallback: boolean;
+    llmRankingEnabled: boolean;
+    ranking: string;
+  };
+};
+
+export type AlphaSiftPortfolioBacktestResponse = {
+  strategy: string;
+  market: string;
+  dateFrom: string;
+  dateTo: string;
+  snapshotCount: number;
+  selectedCount: number;
+  evaluatedCount: number;
+  coveragePct: number;
+  initialCapital: number;
+  finalEquity: number;
+  benchmarkSymbol?: string | null;
+  metrics: {
+    totalReturnPct?: number | null;
+    annualizedReturnPct?: number | null;
+    benchmarkReturnPct?: number | null;
+    excessReturnPct?: number | null;
+    maxDrawdownPct?: number | null;
+    periodWinRatePct?: number | null;
+    periodCount: number;
+    totalTurnoverPct?: number | null;
+    averageTurnoverPct?: number | null;
+    endingOpenPositionCount?: number;
+    endingCash?: number;
+    endingMarketValue?: number;
+  };
+  periods: Array<{
+    signalDate: string;
+    selectedCount: number;
+    holdingCount?: number;
+    evaluatedCount: number;
+    coveragePct: number;
+    turnoverPct?: number | null;
+    retainedCount?: number;
+    forcedRetainedCount?: number;
+    entryTradeCount?: number;
+    exitTradeCount?: number;
+    netReturnPct?: number | null;
+    equity: number;
+    cash?: number;
+    marketValue?: number;
+    positionCount?: number;
+    tradeCount?: number;
+    blockedTradeCount?: number;
+  }>;
+  methodology: Record<string, unknown>;
+};
+
+export type AlphaSiftHistoricalUniverseResponse = {
+  market: string;
+  snapshotDate: string;
+  totalCount: number;
+  returnedCount: number;
+  truncated: boolean;
+  items: Array<{
+    symbol: string;
+    name: string;
+    industry?: string | null;
+    listDate: string;
+    delistDate?: string | null;
+  }>;
+  methodology: Record<string, unknown>;
+};
+
+export type AlphaSiftFactorIngestionAccepted = {
+  taskId: string;
+  traceId: string;
+  status: string;
+  message: string;
+  market: string;
+  snapshotCount: number;
+  symbolCount: number;
+};
+
+export type AlphaSiftFactorIngestionTask = {
+  taskId: string;
+  traceId?: string | null;
+  status: string;
+  progress?: number | null;
+  message?: string | null;
+  error?: string | null;
+  result?: {
+    rowCount?: number;
+    inserted?: number;
+    updated?: number;
+    errorCount?: number;
+    errors?: Array<Record<string, string>>;
+  } | null;
+};
+
+export type AlphaSiftFullMarketIngestionJob = {
+  jobId: string;
+  market: string;
+  snapshotDates: string[];
+  universeSource: string;
+  status: string;
+  batchSize: number;
+  totalSymbols: number;
+  totalWorkItems: number;
+  nextOffset: number;
+  remainingWorkItems: number;
+  progressPct: number;
+  completedBatches: number;
+  rowCount: number;
+  inserted: number;
+  updated: number;
+  sourceErrorCount: number;
+  errors: Array<Record<string, unknown>>;
+  taskId?: string | null;
+  error?: string | null;
+  heartbeatAt?: string | null;
+  completedAt?: string | null;
+};
+
 export function notifyAlphaSiftConfigChanged(): void {
   window.dispatchEvent(new Event(ALPHASIFT_CONFIG_CHANGED_EVENT));
   notifySystemConfigChanged();
@@ -302,6 +460,142 @@ export const alphasiftApi = {
   async getStrategies(): Promise<AlphaSiftStrategiesResponse> {
     const response = await apiClient.get<Record<string, unknown>>('/api/v1/alphasift/strategies', { timeout: ALPHASIFT_INSTALL_TIMEOUT_MS });
     return toCamelCase<AlphaSiftStrategiesResponse>(response.data);
+  },
+
+  async getReplayCompatibility(payload: {
+    strategy: string;
+    market: string;
+    snapshotDate: string;
+  }): Promise<AlphaSiftReplayCompatibility> {
+    const response = await apiClient.get<Record<string, unknown>>('/api/v1/alphasift/replay/compatibility', {
+      params: {
+        strategy: payload.strategy,
+        market: payload.market,
+        snapshot_date: payload.snapshotDate,
+      },
+    });
+    return toCamelCase<AlphaSiftReplayCompatibility>(response.data);
+  },
+
+  async runReplay(payload: {
+    strategy: string;
+    market: string;
+    snapshotDate: string;
+    maxResults?: number;
+  }): Promise<AlphaSiftReplayResponse> {
+    const response = await apiClient.post<Record<string, unknown>>('/api/v1/alphasift/replay/run', {
+      strategy: payload.strategy,
+      market: payload.market,
+      snapshot_date: payload.snapshotDate,
+      max_results: payload.maxResults ?? 20,
+    });
+    return toCamelCase<AlphaSiftReplayResponse>(response.data);
+  },
+
+  async resolveHistoricalUniverse(payload: {
+    market: string;
+    snapshotDate: string;
+    limit?: number;
+  }): Promise<AlphaSiftHistoricalUniverseResponse> {
+    const response = await apiClient.get<Record<string, unknown>>('/api/v1/alphasift/replay/universe', {
+      params: {
+        market: payload.market,
+        snapshot_date: payload.snapshotDate,
+        limit: payload.limit ?? 6000,
+      },
+    });
+    return toCamelCase<AlphaSiftHistoricalUniverseResponse>(response.data);
+  },
+
+  async startFullMarketIngestion(payload: {
+    market: string;
+    snapshotDates: string[];
+    batchSize?: number;
+  }): Promise<AlphaSiftFullMarketIngestionJob> {
+    const response = await apiClient.post<Record<string, unknown>>(
+      '/api/v1/alphasift/replay/full-market-ingestion/jobs',
+      {
+        market: payload.market,
+        snapshot_dates: payload.snapshotDates,
+        batch_size: payload.batchSize ?? 25,
+      },
+    );
+    return toCamelCase<AlphaSiftFullMarketIngestionJob>(response.data);
+  },
+
+  async getFullMarketIngestion(jobId: string): Promise<AlphaSiftFullMarketIngestionJob> {
+    const response = await apiClient.get<Record<string, unknown>>(
+      `/api/v1/alphasift/replay/full-market-ingestion/jobs/${encodeURIComponent(jobId)}`,
+    );
+    return toCamelCase<AlphaSiftFullMarketIngestionJob>(response.data);
+  },
+
+  async listFullMarketIngestions(limit = 20): Promise<{ items: AlphaSiftFullMarketIngestionJob[]; limit: number }> {
+    const response = await apiClient.get<Record<string, unknown>>(
+      '/api/v1/alphasift/replay/full-market-ingestion/jobs',
+      { params: { limit } },
+    );
+    return toCamelCase<{ items: AlphaSiftFullMarketIngestionJob[]; limit: number }>(response.data);
+  },
+
+  async resumeFullMarketIngestion(jobId: string, force = false): Promise<AlphaSiftFullMarketIngestionJob> {
+    const response = await apiClient.post<Record<string, unknown>>(
+      `/api/v1/alphasift/replay/full-market-ingestion/jobs/${encodeURIComponent(jobId)}/resume`,
+      undefined,
+      { params: { force } },
+    );
+    return toCamelCase<AlphaSiftFullMarketIngestionJob>(response.data);
+  },
+
+  async runPortfolioBacktest(payload: {
+    strategy: string;
+    market: string;
+    dateFrom: string;
+    dateTo: string;
+    topK?: number;
+    benchmarkSymbol?: string;
+  }): Promise<AlphaSiftPortfolioBacktestResponse> {
+    const response = await apiClient.post<Record<string, unknown>>(
+      '/api/v1/alphasift/replay/portfolio-backtest',
+      {
+        strategy: payload.strategy,
+        market: payload.market,
+        date_from: payload.dateFrom,
+        date_to: payload.dateTo,
+        top_k: payload.topK ?? 5,
+        final_holding_bars: 20,
+        initial_capital: 100000,
+        commission_bps: 3,
+        slippage_bps: 5,
+        benchmark_symbol: payload.benchmarkSymbol || null,
+        enforce_tradeability: true,
+        accounting_mode: 'cash_ledger',
+      },
+    );
+    return toCamelCase<AlphaSiftPortfolioBacktestResponse>(response.data);
+  },
+
+  async startFactorIngestion(payload: {
+    market: string;
+    snapshotDates: string[];
+    universe: Array<{ symbol: string; name: string; industry?: string }>;
+  }): Promise<AlphaSiftFactorIngestionAccepted> {
+    const response = await apiClient.post<Record<string, unknown>>(
+      '/api/v1/alphasift/replay/ingestion/tasks',
+      {
+        market: payload.market,
+        snapshot_dates: payload.snapshotDates,
+        universe: payload.universe,
+      },
+    );
+    return toCamelCase<AlphaSiftFactorIngestionAccepted>(response.data);
+  },
+
+  async getFactorIngestionTask(taskId: string): Promise<AlphaSiftFactorIngestionTask> {
+    const response = await apiClient.get<Record<string, unknown>>(
+      `/api/v1/alphasift/replay/ingestion/tasks/${encodeURIComponent(taskId)}`,
+    );
+    return toCamelCase<AlphaSiftFactorIngestionTask>(response.data);
   },
 
   async getHotspots(payload: { provider?: string; top?: number; refresh?: boolean; includeDetails?: boolean } = {}): Promise<AlphaSiftHotspotsResponse> {

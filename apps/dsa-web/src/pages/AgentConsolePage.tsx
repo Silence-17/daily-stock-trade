@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import {
   Bot,
+  ChartNoAxesCombined,
   Clock3,
   Download,
   ListChecks,
@@ -14,6 +15,7 @@ import {
 import {
   vnpyPaperTradingApi,
   type VnpyPaperAgentDailySummary,
+  type VnpyPaperAgentBacktestResponse,
   type VnpyPaperAgentDataQualityTrends,
   type VnpyPaperAgentDecision,
   type VnpyPaperAgentRunDetail,
@@ -22,6 +24,15 @@ import {
   type VnpyPaperAgentTimelineEvent,
   type VnpyPaperAgentTradePlan,
 } from '../api/vnpyPaperTrading';
+import {
+  alphasiftApi,
+  type AlphaSiftFactorIngestionTask,
+  type AlphaSiftFullMarketIngestionJob,
+  type AlphaSiftHistoricalUniverseResponse,
+  type AlphaSiftPortfolioBacktestResponse,
+  type AlphaSiftReplayCompatibility,
+  type AlphaSiftReplayResponse,
+} from '../api/alphasift';
 import { toApiErrorMessage } from '../api/error';
 import { AppPage, Button, InlineAlert } from '../components/common';
 
@@ -241,6 +252,24 @@ const AgentConsolePage: React.FC = () => {
   const [detailLoading, setDetailLoading] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [recapLoading, setRecapLoading] = useState(false);
+  const [backtestLoading, setBacktestLoading] = useState(false);
+  const [backtestIncludeSkipped, setBacktestIncludeSkipped] = useState(true);
+  const [backtestResult, setBacktestResult] = useState<VnpyPaperAgentBacktestResponse | null>(null);
+  const [replayDate, setReplayDate] = useState('');
+  const [replayLoading, setReplayLoading] = useState(false);
+  const [replayCompatibility, setReplayCompatibility] = useState<AlphaSiftReplayCompatibility | null>(null);
+  const [replayResult, setReplayResult] = useState<AlphaSiftReplayResponse | null>(null);
+  const [portfolioDateFrom, setPortfolioDateFrom] = useState('');
+  const [portfolioDateTo, setPortfolioDateTo] = useState('');
+  const [portfolioBacktest, setPortfolioBacktest] = useState<AlphaSiftPortfolioBacktestResponse | null>(null);
+  const [ingestionDates, setIngestionDates] = useState('');
+  const [ingestionUniverse, setIngestionUniverse] = useState('');
+  const [historicalUniverse, setHistoricalUniverse] = useState<AlphaSiftHistoricalUniverseResponse | null>(null);
+  const [historicalUniverseLoading, setHistoricalUniverseLoading] = useState(false);
+  const [ingestionLoading, setIngestionLoading] = useState(false);
+  const [ingestionTask, setIngestionTask] = useState<AlphaSiftFactorIngestionTask | null>(null);
+  const [fullMarketJob, setFullMarketJob] = useState<AlphaSiftFullMarketIngestionJob | null>(null);
+  const [fullMarketLoading, setFullMarketLoading] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
 
@@ -383,6 +412,10 @@ const AgentConsolePage: React.FC = () => {
   );
   const selectedDynamicRecommendation = asRecord(selectedDynamicPlan?.recommendation);
   const selectedDynamicVersionHint = versionHint(selectedDynamicPlan);
+  const selectedRecentRunContext = (
+    asRecord(selectedPlan?.recentRunContext)
+    ?? asRecord(selectedPlan?.recent_run_context)
+  );
   const selectedTopSkips = asRecordList(
     selectedSummary?.topSkipReasons ?? selectedSummary?.top_skip_reasons,
   );
@@ -465,6 +498,242 @@ const AgentConsolePage: React.FC = () => {
     }
   };
 
+  const handleRunBacktest = async () => {
+    setBacktestLoading(true);
+    setError('');
+    setSuccess('');
+    try {
+      const payload = await vnpyPaperTradingApi.runAgentBacktest({
+        strategy: filters.strategy.trim() || undefined,
+        market: filters.market || undefined,
+        createdFrom: filters.createdFrom || undefined,
+        createdTo: filters.createdTo || undefined,
+        evalWindows: [1, 5, 10, 20],
+        includeSkipped: backtestIncludeSkipped,
+        maxDecisions: 500,
+        refreshMissing: false,
+      });
+      setBacktestResult(payload);
+      setSuccess(`前瞻评价完成：${payload.scannedCount} 个候选`);
+    } catch (err) {
+      setError(toApiErrorMessage(err, 'Agent 前瞻评价失败'));
+    } finally {
+      setBacktestLoading(false);
+    }
+  };
+
+  const handleReplayCompatibility = async () => {
+    if (!replayDate) {
+      setError('请选择因子快照日期');
+      return;
+    }
+    setReplayLoading(true);
+    setError('');
+    setSuccess('');
+    setReplayResult(null);
+    try {
+      const payload = await alphasiftApi.getReplayCompatibility({
+        strategy: filters.strategy.trim() || 'dual_low',
+        market: filters.market || 'cn',
+        snapshotDate: replayDate,
+      });
+      setReplayCompatibility(payload);
+      setSuccess(`已检查 ${payload.universeCount} 条时间点因子记录`);
+    } catch (err) {
+      setReplayCompatibility(null);
+      setError(toApiErrorMessage(err, '历史策略兼容性检查失败'));
+    } finally {
+      setReplayLoading(false);
+    }
+  };
+
+  const handleRunReplay = async () => {
+    if (!replayDate) {
+      setError('请选择因子快照日期');
+      return;
+    }
+    setReplayLoading(true);
+    setError('');
+    setSuccess('');
+    try {
+      const payload = await alphasiftApi.runReplay({
+        strategy: filters.strategy.trim() || 'dual_low',
+        market: filters.market || 'cn',
+        snapshotDate: replayDate,
+        maxResults: 20,
+      });
+      setReplayCompatibility(payload.compatibility);
+      setReplayResult(payload);
+      setSuccess(`历史策略重放完成，得到 ${payload.candidateCount} 个候选`);
+    } catch (err) {
+      setReplayResult(null);
+      setError(toApiErrorMessage(err, '历史策略重放失败'));
+    } finally {
+      setReplayLoading(false);
+    }
+  };
+
+  const handleRunPortfolioBacktest = async () => {
+    if (!portfolioDateFrom || !portfolioDateTo) {
+      setError('请选择组合回测的开始和结束日期');
+      return;
+    }
+    setReplayLoading(true);
+    setError('');
+    setSuccess('');
+    try {
+      const payload = await alphasiftApi.runPortfolioBacktest({
+        strategy: filters.strategy.trim() || 'dual_low',
+        market: filters.market || 'cn',
+        dateFrom: portfolioDateFrom,
+        dateTo: portfolioDateTo,
+        topK: 5,
+        benchmarkSymbol: (filters.market || 'cn') === 'cn' ? '000300' : undefined,
+      });
+      setPortfolioBacktest(payload);
+      setSuccess(`组合回测完成，覆盖 ${payload.snapshotCount} 个快照日期`);
+    } catch (err) {
+      setPortfolioBacktest(null);
+      setError(toApiErrorMessage(err, '组合回测失败'));
+    } finally {
+      setReplayLoading(false);
+    }
+  };
+
+  const handleResolveHistoricalUniverse = async () => {
+    const snapshotDate = ingestionDates.split(/[\s,]+/).map((item) => item.trim()).find(Boolean);
+    if (!snapshotDate) {
+      setError('请先填写一个历史快照日期');
+      return;
+    }
+    setHistoricalUniverseLoading(true);
+    setError('');
+    try {
+      const payload = await alphasiftApi.resolveHistoricalUniverse({
+        market: filters.market || 'cn',
+        snapshotDate,
+        limit: 6000,
+      });
+      setHistoricalUniverse(payload);
+      setSuccess(`已还原 ${payload.snapshotDate} 的 ${payload.totalCount} 只 A 股成员`);
+    } catch (err) {
+      setHistoricalUniverse(null);
+      setError(toApiErrorMessage(err, '历史股票池校验失败'));
+    } finally {
+      setHistoricalUniverseLoading(false);
+    }
+  };
+
+  const handleStartFactorIngestion = async () => {
+    setIngestionLoading(true);
+    setError('');
+    setSuccess('');
+    try {
+      const snapshotDates = ingestionDates
+        .split(/[\s,]+/)
+        .map((item) => item.trim())
+        .filter(Boolean);
+      const parsedUniverse = JSON.parse(ingestionUniverse || '[]') as unknown;
+      if (snapshotDates.length === 0 || !Array.isArray(parsedUniverse) || parsedUniverse.length === 0) {
+        throw new Error('请填写快照日期和历史股票池');
+      }
+      const universe = parsedUniverse.map((item) => {
+        const record = asRecord(item);
+        const symbol = String(record?.symbol || '').trim();
+        const name = String(record?.name || '').trim();
+        if (!symbol || !name) throw new Error('股票池每项都需要 symbol 和 name');
+        const industry = String(record?.industry || '').trim();
+        return { symbol, name, ...(industry ? { industry } : {}) };
+      });
+      const accepted = await alphasiftApi.startFactorIngestion({
+        market: filters.market || 'cn',
+        snapshotDates,
+        universe,
+      });
+      let task = await alphasiftApi.getFactorIngestionTask(accepted.taskId);
+      for (let attempt = 0; attempt < 60 && !['completed', 'failed'].includes(task.status); attempt += 1) {
+        await new Promise((resolve) => window.setTimeout(resolve, 2000));
+        task = await alphasiftApi.getFactorIngestionTask(accepted.taskId);
+      }
+      setIngestionTask(task);
+      if (task.status === 'completed') {
+        setSuccess(`历史因子采集完成，写入 ${task.result?.rowCount ?? 0} 行`);
+      } else if (task.status === 'failed') {
+        setError(task.error || '历史因子采集失败');
+      } else {
+        setError('历史因子采集仍在后台运行，可稍后重新检查');
+      }
+    } catch (err) {
+      setError(toApiErrorMessage(err, '历史因子采集失败'));
+    } finally {
+      setIngestionLoading(false);
+    }
+  };
+
+  const handleStartFullMarketIngestion = async () => {
+    const snapshotDates = ingestionDates
+      .split(/[\s,]+/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+    if (snapshotDates.length === 0) {
+      setError('请先填写历史快照日期');
+      return;
+    }
+    setFullMarketLoading(true);
+    setError('');
+    setSuccess('');
+    try {
+      const job = await alphasiftApi.startFullMarketIngestion({
+        market: filters.market || 'cn',
+        snapshotDates,
+        batchSize: 25,
+      });
+      setFullMarketJob(job);
+      setSuccess(`全市场采集作业已创建，共 ${job.totalWorkItems} 个日期股票工作项`);
+    } catch (err) {
+      setError(toApiErrorMessage(err, '全市场历史因子采集启动失败'));
+    } finally {
+      setFullMarketLoading(false);
+    }
+  };
+
+  const handleResumeFullMarketIngestion = async (force = false) => {
+    if (!fullMarketJob) return;
+    setFullMarketLoading(true);
+    setError('');
+    try {
+      const job = await alphasiftApi.resumeFullMarketIngestion(fullMarketJob.jobId, force);
+      setFullMarketJob(job);
+      setSuccess('全市场采集已从最近检查点继续');
+    } catch (err) {
+      setError(toApiErrorMessage(err, '全市场采集恢复失败'));
+    } finally {
+      setFullMarketLoading(false);
+    }
+  };
+
+  const fullMarketJobId = fullMarketJob?.jobId;
+  const fullMarketJobStatus = fullMarketJob?.status;
+  useEffect(() => {
+    void alphasiftApi.listFullMarketIngestions(1)
+      .then((payload) => {
+        if (payload.items[0]) setFullMarketJob(payload.items[0]);
+      })
+      .catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
+    if (!fullMarketJobId || !fullMarketJobStatus || !['pending', 'processing'].includes(fullMarketJobStatus)) {
+      return undefined;
+    }
+    const timer = window.setInterval(() => {
+      void alphasiftApi.getFullMarketIngestion(fullMarketJobId)
+        .then((job) => setFullMarketJob(job))
+        .catch(() => undefined);
+    }, 5000);
+    return () => window.clearInterval(timer);
+  }, [fullMarketJobId, fullMarketJobStatus]);
+
   const renderStatusBadge = (status: string, label?: string) => (
     <span className={`inline-flex items-center rounded-full border px-2 py-1 text-xs ${statusTone(status)}`}>
       {label || status || '-'}
@@ -513,6 +782,387 @@ const AgentConsolePage: React.FC = () => {
 
       {error ? <InlineAlert variant="danger" title="Agent 控制台加载失败" message={error} /> : null}
       {success ? <InlineAlert variant="success" title="操作完成" message={success} /> : null}
+
+      <section className="space-y-3" data-testid="agent-backtest-panel">
+        <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+          <div>
+            <div className="flex items-center gap-2">
+              <ChartNoAxesCombined className="h-4 w-4 text-cyan" />
+              <h2 className="text-sm font-semibold text-foreground">Agent 候选前瞻评价</h2>
+            </div>
+            <p className="mt-1 text-xs text-secondary-text">
+              严格后向日线 · 1 / 5 / 10 / 20 个交易日 · 不含手续费与滑点
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-3">
+            <label className="flex items-center gap-2 text-xs text-secondary-text">
+              <input
+                data-testid="agent-backtest-include-skipped"
+                type="checkbox"
+                checked={backtestIncludeSkipped}
+                onChange={(event) => setBacktestIncludeSkipped(event.target.checked)}
+              />
+              包含风控跳过候选
+            </label>
+            <Button
+              data-testid="agent-backtest-run"
+              variant="secondary"
+              onClick={() => void handleRunBacktest()}
+              isLoading={backtestLoading}
+              loadingText="评价中..."
+            >
+              <ChartNoAxesCombined className="h-4 w-4" />
+              运行评价
+            </Button>
+          </div>
+        </div>
+        {backtestResult ? (
+          <>
+            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4" data-testid="agent-backtest-matrix">
+              {Object.entries(backtestResult.matrix)
+                .sort(([left], [right]) => Number(left) - Number(right))
+                .map(([window, metric]) => (
+                  <div key={window} className="rounded-lg border border-border bg-card/95 px-4 py-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-xs font-medium text-secondary-text">{window} 日</span>
+                      <span className="text-xs text-secondary-text">
+                        覆盖 {formatPercent(metric.coveragePct)}
+                      </span>
+                    </div>
+                    <div className="mt-2 text-2xl font-semibold text-foreground">
+                      {formatPercent(metric.averageReturnPct)}
+                    </div>
+                    <div className="mt-2 grid grid-cols-2 gap-2 text-xs text-secondary-text">
+                      <span>胜率 {formatPercent(metric.winRatePct)}</span>
+                      <span>中位 {formatPercent(metric.medianReturnPct)}</span>
+                      <span>样本 {metric.completedCount}/{metric.sampleCount}</span>
+                      <span>最大不利均值 {formatPercent(metric.averageMaxAdverseExcursionPct)}</span>
+                    </div>
+                  </div>
+                ))}
+            </div>
+            <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-secondary-text">
+              <span>扫描 {backtestResult.scannedCount}/{backtestResult.total}</span>
+              <span>引擎 {String(backtestResult.methodology.engineVersion || '-')}</span>
+              <span>前视保护 {backtestResult.methodology.lookaheadProtection ? '已启用' : '未启用'}</span>
+              {backtestResult.truncated ? <span className="text-warning">结果已截断</span> : null}
+            </div>
+          </>
+        ) : (
+          <div className="border-t border-border pt-3 text-sm text-secondary-text">尚未运行评价</div>
+        )}
+      </section>
+
+      <section className="space-y-3" data-testid="agent-strategy-replay-panel">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+          <div>
+            <div className="flex items-center gap-2">
+              <ShieldAlert className="h-4 w-4 text-cyan" />
+              <h2 className="text-sm font-semibold text-foreground">AlphaSift 时间点策略重放</h2>
+            </div>
+            <p className="mt-1 text-xs text-secondary-text">
+              仅使用指定日期的历史因子快照，不读取当前行情，不启用 LLM 排序
+            </p>
+          </div>
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+            <input
+              data-testid="agent-replay-date"
+              className={`${INPUT_CLASS} sm:w-44`}
+              type="date"
+              value={replayDate}
+              onChange={(event) => setReplayDate(event.target.value)}
+              aria-label="因子快照日期"
+            />
+            <Button
+              data-testid="agent-replay-check"
+              variant="outline"
+              onClick={() => void handleReplayCompatibility()}
+              isLoading={replayLoading}
+              loadingText="检查中..."
+            >
+              <Search className="h-4 w-4" />
+              检查数据
+            </Button>
+            <Button
+              data-testid="agent-replay-run"
+              variant="secondary"
+              onClick={() => void handleRunReplay()}
+              isLoading={replayLoading}
+              loadingText="重放中..."
+            >
+              <ChartNoAxesCombined className="h-4 w-4" />
+              执行重放
+            </Button>
+          </div>
+        </div>
+        {replayCompatibility ? (
+          <div className="grid gap-3 sm:grid-cols-3" data-testid="agent-replay-compatibility">
+            <StatTile label="快照股票数" value={replayCompatibility.universeCount} />
+            <StatTile
+              label="硬过滤覆盖"
+              value={formatPercent(replayCompatibility.hardCoverageRatio * 100)}
+              hint={`${replayCompatibility.hardCompleteRows}/${replayCompatibility.universeCount} 完整`}
+            />
+            <StatTile
+              label="评分覆盖"
+              value={formatPercent(replayCompatibility.scoreCoverageRatio * 100)}
+              hint={`${replayCompatibility.scoreCompleteRows}/${replayCompatibility.universeCount} 完整`}
+            />
+          </div>
+        ) : (
+          <div className="border-t border-border pt-3 text-sm text-secondary-text">尚未检查历史因子快照</div>
+        )}
+        <div className="grid gap-3 border-t border-border pt-3 lg:grid-cols-[0.8fr_1.4fr_auto] lg:items-end">
+          <label className="space-y-1 text-xs text-secondary-text">
+            <span>快照日期</span>
+            <textarea
+              data-testid="agent-ingestion-dates"
+              className="min-h-24 w-full resize-y rounded-lg border border-border bg-surface p-3 font-mono text-sm text-foreground outline-none focus:border-cyan"
+              value={ingestionDates}
+              onChange={(event) => setIngestionDates(event.target.value)}
+              placeholder={'2024-01-05\n2024-01-12'}
+            />
+          </label>
+          <label className="space-y-1 text-xs text-secondary-text">
+            <span>当时股票池 JSON</span>
+            <textarea
+              data-testid="agent-ingestion-universe"
+              className="min-h-24 w-full resize-y rounded-lg border border-border bg-surface p-3 font-mono text-sm text-foreground outline-none focus:border-cyan"
+              value={ingestionUniverse}
+              onChange={(event) => setIngestionUniverse(event.target.value)}
+              placeholder={'[{"symbol":"600519","name":"贵州茅台","industry":"白酒"}]'}
+            />
+          </label>
+          <div className="flex flex-wrap gap-2">
+            <Button
+              data-testid="agent-historical-universe-resolve"
+              variant="secondary"
+              onClick={() => void handleResolveHistoricalUniverse()}
+              isLoading={historicalUniverseLoading}
+              loadingText="校验中..."
+            >
+              校验历史股票池
+            </Button>
+            <Button
+              data-testid="agent-full-market-ingestion-start"
+              variant="secondary"
+              onClick={() => void handleStartFullMarketIngestion()}
+              isLoading={fullMarketLoading}
+              loadingText="创建中..."
+            >
+              全市场采集
+            </Button>
+            <Button
+              data-testid="agent-ingestion-start"
+              variant="outline"
+              onClick={() => void handleStartFactorIngestion()}
+              isLoading={ingestionLoading}
+              loadingText="采集中..."
+            >
+              <Download className="h-4 w-4" />
+              采集历史因子
+            </Button>
+          </div>
+        </div>
+        {historicalUniverse ? (
+          <div className="flex flex-wrap gap-3 text-xs text-secondary-text" data-testid="agent-historical-universe-result">
+            <span>{historicalUniverse.snapshotDate}</span>
+            <span>成员 {historicalUniverse.totalCount}</span>
+            <span>返回 {historicalUniverse.returnedCount}</span>
+            <span>{historicalUniverse.truncated ? '结果已截断' : '完整结果'}</span>
+            <span>来源 Tushare stock_basic</span>
+          </div>
+        ) : null}
+        {fullMarketJob ? (
+          <div className="space-y-2 border-l-2 border-cyan/40 pl-3 text-xs text-secondary-text" data-testid="agent-full-market-ingestion-result">
+            <div className="flex flex-wrap gap-3">
+              <span>状态 {fullMarketJob.status}</span>
+              <span>进度 {fullMarketJob.progressPct.toFixed(1)}%</span>
+              <span>股票 {fullMarketJob.totalSymbols}</span>
+              <span>工作项 {fullMarketJob.nextOffset}/{fullMarketJob.totalWorkItems}</span>
+              <span>批次 {fullMarketJob.completedBatches}</span>
+              <span>源错误 {fullMarketJob.sourceErrorCount}</span>
+            </div>
+            {fullMarketJob.error ? <div className="text-danger">{fullMarketJob.error}</div> : null}
+            {['failed', 'processing'].includes(fullMarketJob.status) ? (
+              <Button
+                data-testid="agent-full-market-ingestion-resume"
+                variant="outline"
+                onClick={() => void handleResumeFullMarketIngestion(fullMarketJob.status === 'processing')}
+                isLoading={fullMarketLoading}
+                loadingText="恢复中..."
+              >
+                <RefreshCw className="h-4 w-4" />
+                {fullMarketJob.status === 'processing' ? '强制从检查点接管' : '从检查点继续'}
+              </Button>
+            ) : null}
+          </div>
+        ) : null}
+        {ingestionTask ? (
+          <div className="flex flex-wrap gap-3 text-xs text-secondary-text" data-testid="agent-ingestion-result">
+            <span>状态 {ingestionTask.status}</span>
+            <span>写入 {ingestionTask.result?.rowCount ?? 0}</span>
+            <span>错误 {ingestionTask.result?.errorCount ?? 0}</span>
+          </div>
+        ) : null}
+        {replayCompatibility && (
+          Object.keys(replayCompatibility.hardMissingCounts).length > 0
+          || Object.keys(replayCompatibility.scoreMissingCounts).length > 0
+        ) ? (
+          <div className="flex flex-wrap gap-2 text-xs" data-testid="agent-replay-missing-fields">
+            {Object.entries({
+              ...replayCompatibility.scoreMissingCounts,
+              ...replayCompatibility.hardMissingCounts,
+            }).map(([field, count]) => (
+              <span key={field} className="rounded-full border border-warning/30 bg-warning/10 px-2 py-1 text-warning">
+                {field} 缺失 {count}
+              </span>
+            ))}
+          </div>
+        ) : null}
+        {replayResult ? (
+          <div className="overflow-x-auto rounded-lg border border-border" data-testid="agent-replay-results">
+            <table className="min-w-full text-left text-sm">
+              <thead className="bg-surface text-xs text-secondary-text">
+                <tr>
+                  <th className="px-3 py-2">代码</th>
+                  <th className="px-3 py-2">名称</th>
+                  <th className="px-3 py-2">行业</th>
+                  <th className="px-3 py-2 text-right">价格</th>
+                  <th className="px-3 py-2 text-right">评分</th>
+                </tr>
+              </thead>
+              <tbody>
+                {replayResult.candidates.map((candidate) => (
+                  <tr key={candidate.symbol} className="border-t border-border">
+                    <td className="px-3 py-2 font-mono text-foreground">{candidate.symbol}</td>
+                    <td className="px-3 py-2 text-foreground">{candidate.name || '-'}</td>
+                    <td className="px-3 py-2 text-secondary-text">{candidate.industry || '-'}</td>
+                    <td className="px-3 py-2 text-right text-foreground">{formatNumber(candidate.price)}</td>
+                    <td className="px-3 py-2 text-right font-semibold text-cyan">
+                      {formatNumber(candidate.screenScore)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : null}
+        <div className="border-t border-border pt-3">
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+            <div>
+              <h3 className="text-sm font-semibold text-foreground">跨日期等权组合回测</h3>
+              <p className="mt-1 text-xs text-secondary-text">
+                下一交易日开盘成交，双边手续费 3 bps、滑点 5 bps，A 股默认对比沪深 300
+              </p>
+            </div>
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+              <input
+                data-testid="agent-portfolio-date-from"
+                className={`${INPUT_CLASS} sm:w-40`}
+                type="date"
+                value={portfolioDateFrom}
+                onChange={(event) => setPortfolioDateFrom(event.target.value)}
+                aria-label="组合回测开始日期"
+              />
+              <input
+                data-testid="agent-portfolio-date-to"
+                className={`${INPUT_CLASS} sm:w-40`}
+                type="date"
+                value={portfolioDateTo}
+                onChange={(event) => setPortfolioDateTo(event.target.value)}
+                aria-label="组合回测结束日期"
+              />
+              <Button
+                data-testid="agent-portfolio-backtest-run"
+                variant="secondary"
+                onClick={() => void handleRunPortfolioBacktest()}
+                isLoading={replayLoading}
+                loadingText="回测中..."
+              >
+                <ChartNoAxesCombined className="h-4 w-4" />
+                运行组合回测
+              </Button>
+            </div>
+          </div>
+          {portfolioBacktest ? (
+            <div className="mt-3 space-y-3" data-testid="agent-portfolio-backtest-results">
+              <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+                <StatTile
+                  label="组合收益"
+                  value={formatPercent(portfolioBacktest.metrics.totalReturnPct)}
+                  hint={`期末 ${formatMoney(portfolioBacktest.finalEquity)} · 现金 ${formatMoney(portfolioBacktest.metrics.endingCash)}`}
+                />
+                <StatTile
+                  label="超额收益"
+                  value={formatPercent(portfolioBacktest.metrics.excessReturnPct)}
+                  hint={portfolioBacktest.benchmarkSymbol || '未配置基准'}
+                />
+                <StatTile
+                  label="最大回撤"
+                  value={formatPercent(portfolioBacktest.metrics.maxDrawdownPct)}
+                />
+                <StatTile
+                  label="数据覆盖"
+                  value={formatPercent(portfolioBacktest.coveragePct)}
+                  hint={`${portfolioBacktest.evaluatedCount}/${portfolioBacktest.selectedCount} 持仓`}
+                />
+                <StatTile
+                  label="平均换手"
+                  value={formatPercent(portfolioBacktest.metrics.averageTurnoverPct)}
+                  hint={`累计 ${formatPercent(portfolioBacktest.metrics.totalTurnoverPct)} · 期末未平 ${portfolioBacktest.metrics.endingOpenPositionCount ?? 0}`}
+                />
+              </div>
+              <div className="overflow-x-auto rounded-lg border border-border">
+                <table className="min-w-full text-left text-sm">
+                  <thead className="bg-surface text-xs text-secondary-text">
+                    <tr>
+                      <th className="px-3 py-2">信号日</th>
+                      <th className="px-3 py-2 text-right">覆盖</th>
+                      <th className="px-3 py-2 text-right">净收益</th>
+                      <th className="px-3 py-2 text-right">换手</th>
+                      <th className="px-3 py-2 text-right">延续</th>
+                      <th className="px-3 py-2 text-right">被动</th>
+                      <th className="px-3 py-2 text-right">现金</th>
+                      <th className="px-3 py-2 text-right">持仓</th>
+                      <th className="px-3 py-2 text-right">权益</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {portfolioBacktest.periods.map((period) => (
+                      <tr key={period.signalDate} className="border-t border-border">
+                        <td className="px-3 py-2 text-foreground">{period.signalDate}</td>
+                        <td className="px-3 py-2 text-right text-secondary-text">
+                          {period.evaluatedCount}/{period.selectedCount}
+                        </td>
+                        <td className="px-3 py-2 text-right text-foreground">
+                          {formatPercent(period.netReturnPct)}
+                        </td>
+                        <td className="px-3 py-2 text-right text-secondary-text">
+                          {formatPercent(period.turnoverPct)}
+                        </td>
+                        <td className="px-3 py-2 text-right text-secondary-text">
+                          {period.retainedCount ?? 0}
+                        </td>
+                        <td className="px-3 py-2 text-right text-secondary-text">
+                          {period.forcedRetainedCount ?? 0}
+                        </td>
+                        <td className="px-3 py-2 text-right text-secondary-text">
+                          {formatMoney(period.cash)}
+                        </td>
+                        <td className="px-3 py-2 text-right text-secondary-text">
+                          {period.positionCount ?? 0}
+                        </td>
+                        <td className="px-3 py-2 text-right text-foreground">{formatMoney(period.equity)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ) : null}
+        </div>
+      </section>
 
       <section className="space-y-3" data-testid="agent-daily-summary">
         <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
@@ -692,6 +1342,45 @@ const AgentConsolePage: React.FC = () => {
               ))}
               {(dataQualityTrends?.daily.length ?? 0) === 0 ? (
                 <tr><td className="py-4 text-secondary-text" colSpan={4}>当前窗口暂无 Agent run</td></tr>
+              ) : null}
+            </tbody>
+          </table>
+        </div>
+        <div className="overflow-x-auto border-b border-border" data-testid="agent-source-health-trends">
+          <div className="flex items-center justify-between gap-3 py-2">
+            <h3 className="text-xs font-semibold text-foreground">来源健康观测</h3>
+            <span className="text-xs text-secondary-text">
+              {dataQualityTrends?.sourceHealthItems?.length ?? 0} 个来源
+            </span>
+          </div>
+          <table className="min-w-full text-left text-xs">
+            <thead className="text-secondary-text">
+              <tr>
+                <th className="py-2 pr-3 font-medium">来源</th>
+                <th className="py-2 pr-3 font-medium">最新状态</th>
+                <th className="py-2 pr-3 font-medium">降级 / 观测</th>
+                <th className="py-2 pr-3 font-medium">降级率</th>
+                <th className="py-2 pr-3 font-medium">失败计数</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-border">
+              {(dataQualityTrends?.sourceHealthItems || []).slice(0, 12).map((item) => (
+                <tr key={item.key}>
+                  <td className="py-2 pr-3 text-foreground">{item.group} / {item.source}</td>
+                  <td className="py-2 pr-3 text-secondary-text">{item.latestStatus || 'unknown'}</td>
+                  <td className="py-2 pr-3 text-secondary-text">
+                    {item.degradedObservationCount} / {item.observationCount}
+                  </td>
+                  <td className="py-2 pr-3 text-secondary-text">
+                    {formatNumber(item.degradedRatePct, 2)}%
+                  </td>
+                  <td className="py-2 pr-3 text-secondary-text">
+                    {item.latestFailures} latest / {item.maxFailures} max
+                  </td>
+                </tr>
+              ))}
+              {(dataQualityTrends?.sourceHealthItems?.length ?? 0) === 0 ? (
+                <tr><td className="py-4 text-secondary-text" colSpan={5}>当前窗口没有来源健康快照</td></tr>
               ) : null}
             </tbody>
           </table>
@@ -964,6 +1653,38 @@ const AgentConsolePage: React.FC = () => {
                             )}
                           </dd>
                         </div>
+                        <div>
+                          <dt>最近运行</dt>
+                          <dd className="mt-1 font-semibold text-foreground">
+                            {String(selectedRecentRunContext?.runCount ?? selectedRecentRunContext?.run_count ?? 0)} 次
+                          </dd>
+                        </div>
+                        <div>
+                          <dt>历史成交率</dt>
+                          <dd className="mt-1 font-semibold text-foreground">
+                            {formatPercent(
+                              selectedRecentRunContext?.submissionRatePct
+                              ?? selectedRecentRunContext?.submission_rate_pct,
+                              1,
+                            )}
+                          </dd>
+                        </div>
+                        {selectedRecentRunContext?.latestRunUid || selectedRecentRunContext?.latest_run_uid ? (
+                          <div className="sm:col-span-2">
+                            <dt>最近状态</dt>
+                            <dd className="mt-1 break-all font-semibold text-foreground">
+                              {String(selectedRecentRunContext.latestStatus || selectedRecentRunContext.latest_status || '-')}
+                              {' · '}
+                              {String(selectedRecentRunContext.latestRunUid || selectedRecentRunContext.latest_run_uid)}
+                              {' · 连续失败 '}
+                              {String(
+                                selectedRecentRunContext.currentFailureStreak
+                                ?? selectedRecentRunContext.current_failure_streak
+                                ?? 0,
+                              )}
+                            </dd>
+                          </div>
+                        ) : null}
                         {selectedDynamicPlan ? (
                           <div className="sm:col-span-2">
                             <dt>LLM 动态计划</dt>

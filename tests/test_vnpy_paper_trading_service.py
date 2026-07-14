@@ -11,6 +11,7 @@ import tempfile
 import time
 import types
 import unittest
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -221,6 +222,73 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertFalse(status["diagnostics"]["recent_trades_requested"])
         self.assertIn("vnpy_adapter", status["diagnostics"])
         self.assertIn("order_request_supported", status["diagnostics"]["vnpy_adapter"])
+        self.assertEqual(
+            status["diagnostics"]["industry_exposure"]["status"],
+            "snapshot_not_requested",
+        )
+
+    def test_industry_exposure_diagnostics_reports_coverage_and_missing_symbols(self) -> None:
+        settings = self.service.get_settings()
+        diagnostics = self.service._industry_exposure_diagnostics(
+            settings=settings,
+            evaluated=True,
+            snapshot={
+                "accounts": [{
+                    "positions": [
+                        {
+                            "symbol": "600519",
+                            "market": "cn",
+                            "quantity": 100,
+                            "market_value_base": 1000,
+                            "industry": "白酒",
+                        },
+                        {
+                            "symbol": "000001",
+                            "market": "hk",
+                            "quantity": 200,
+                            "market_value_base": 2000,
+                        },
+                    ],
+                }],
+            },
+        )
+
+        self.assertEqual(diagnostics["status"], "partial")
+        self.assertEqual(diagnostics["position_count"], 2)
+        self.assertEqual(diagnostics["resolved_position_count"], 1)
+        self.assertEqual(diagnostics["missing_position_count"], 1)
+        self.assertEqual(diagnostics["coverage_pct"], 50.0)
+        self.assertEqual(diagnostics["industry_values"], {"白酒": 1000.0})
+        self.assertEqual(diagnostics["missing_symbols"], ["000001"])
+        self.assertEqual(diagnostics["resolution_mode"], "snapshot_only")
+
+    def test_industry_exposure_diagnostics_resolves_boards_when_guard_is_configured(self) -> None:
+        self.service.data_fetcher_manager.boards_by_symbol = {
+            "600519": [{"name": "白酒", "type": "行业"}],
+        }
+        settings = replace(
+            self.service.get_settings(),
+            auto_max_industry_position_pct=30.0,
+        )
+        diagnostics = self.service._industry_exposure_diagnostics(
+            settings=settings,
+            evaluated=True,
+            snapshot={
+                "accounts": [{
+                    "positions": [{
+                        "symbol": "600519",
+                        "market": "cn",
+                        "quantity": 100,
+                        "market_value_base": 1000,
+                    }],
+                }],
+            },
+        )
+
+        self.assertEqual(diagnostics["status"], "complete")
+        self.assertEqual(diagnostics["coverage_pct"], 100.0)
+        self.assertEqual(diagnostics["industry_values"], {"白酒": 1000.0})
+        self.assertEqual(diagnostics["resolution_mode"], "risk_guard")
 
     def test_status_snapshot_uses_short_ttl_cache_and_invalidates_after_trade(self) -> None:
         account = self.service.ensure_account()
@@ -423,6 +491,11 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertEqual(dynamic_plan["applied_overrides"]["auto_max_results"], 1)
         self.assertEqual(dynamic_plan["applied_overrides"]["auto_cash_per_order"], 1200.0)
         self.assertEqual(dynamic_plan["applied_overrides"]["auto_min_score"], 75.0)
+        self.assertEqual(plan["recent_run_context"]["run_count"], 0)
+        self.assertIn(
+            '"recent_run_context"',
+            fake_analyzer._call_litellm.call_args.args[0],
+        )
         audit_context = fake_analyzer._call_litellm.call_args.kwargs["audit_context"]
         self.assertEqual(audit_context["prompt_version"], LLM_DYNAMIC_AGENT_PLAN_PROMPT_VERSION)
         self.assertEqual(audit_context["evaluator_version"], LLM_DYNAMIC_AGENT_PLAN_EVALUATOR_VERSION)
@@ -434,6 +507,52 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertEqual(settings_after.auto_max_results, 3)
         self.assertEqual(settings_after.auto_cash_per_order, 5000)
         self.assertIsNone(settings_after.auto_min_score)
+
+    def test_recent_agent_run_context_summarizes_same_strategy_history(self) -> None:
+        first = self.service.agent_repo.create_run(
+            run_uid="recent-context-completed",
+            trigger_source="vnpy_paper_auto",
+            strategy="dual_low",
+            market="cn",
+        )
+        self.service.agent_repo.complete_run(
+            run_id=int(first["id"]),
+            status="completed",
+            candidate_count=4,
+            planned_count=1,
+            submitted_count=2,
+            skipped_count=1,
+            diagnostics={"data_quality": {"status": "ok"}},
+        )
+        second = self.service.agent_repo.create_run(
+            run_uid="recent-context-failed",
+            trigger_source="vnpy_paper_auto",
+            strategy="dual_low",
+            market="cn",
+        )
+        self.service.agent_repo.complete_run(
+            run_id=int(second["id"]),
+            status="failed",
+            candidate_count=1,
+            planned_count=0,
+            submitted_count=0,
+            skipped_count=1,
+            error="source timeout",
+            diagnostics={"data_quality": {"status": "unavailable"}},
+        )
+
+        context = self.service._recent_agent_run_context(self.service.get_settings())
+
+        self.assertEqual(context["scope"], "same_trigger_strategy_market")
+        self.assertEqual(context["run_count"], 2)
+        self.assertEqual(context["status_counts"], {"completed": 1, "failed": 1})
+        self.assertEqual(context["data_quality_counts"], {"ok": 1, "unavailable": 1})
+        self.assertEqual(context["candidate_count"], 5)
+        self.assertEqual(context["submitted_count"], 2)
+        self.assertEqual(context["submission_rate_pct"], 40.0)
+        self.assertEqual(context["current_failure_streak"], 1)
+        self.assertEqual(context["latest_run_uid"], "recent-context-failed")
+        self.assertEqual(context["runs"][0]["error"], "source timeout")
 
     def test_reset_account_archives_old_paper_account_and_creates_clean_ledger(self) -> None:
         with patch(
@@ -667,6 +786,47 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         account_id = int(self.service.get_settings().account_id)
         trades = self.service.portfolio.list_trade_events(account_id=account_id, page=1)
         self.assertEqual(trades["items"][0]["currency"], "HKD")
+
+    def test_target_weight_gap_scales_cross_currency_and_daily_budget(self) -> None:
+        self.service.portfolio.repo.save_fx_rate(
+            from_currency="CNY",
+            to_currency="HKD",
+            rate_date=date.today(),
+            rate=1.1,
+            source="unit-test",
+        )
+        self.service.update_settings(
+            {
+                "auto_trade_enabled": True,
+                "auto_trade_time_gate_enabled": False,
+                "auto_market": "hk",
+                "auto_execution_mode": "dry_run",
+                "auto_cash_per_order": 1000,
+                "auto_daily_budget": 600,
+                "auto_target_position_weights": {"00700": 0.5},
+                "auto_max_results": 1,
+            }
+        )
+        fake_alphasift = MagicMock()
+        fake_alphasift.screen.return_value = {
+            "quality_status": "ok",
+            "candidates": [{"code": "00700", "name": "Tencent", "score": 80, "price": 11.0}],
+            "warnings": [],
+            "source_errors": [],
+        }
+
+        with patch(
+            "src.services.vnpy_paper_trading_service.AlphaSiftService",
+            return_value=fake_alphasift,
+        ):
+            result = self.service.run_auto_trade_once()
+
+        order = result["orders"][0]
+        self.assertEqual(result["planned_count"], 1)
+        self.assertAlmostEqual(order["cash_amount"], 550.0)
+        self.assertAlmostEqual(order["cash_amount_base"], 500.0)
+        self.assertEqual(order["quantity"], 50.0)
+        self.assertEqual(order["raw"]["target_weight_sizing"]["resolved_base_amount"], 500.0)
 
     def test_auto_trade_daily_budget_converts_existing_hk_notional_to_base_currency(self) -> None:
         self.service.portfolio.repo.save_fx_rate(
@@ -1157,6 +1317,47 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertEqual(triggers[0]["threshold"], 10.0)
         self.assertIn('"event_type": "account_drawdown_limit_reached"', triggers[0]["diagnostics"])
         self.assertIn('"account_risk"', triggers[0]["diagnostics"])
+
+    def test_account_drawdown_uses_persisted_observed_equity_peak(self) -> None:
+        self.service.update_settings({"auto_max_drawdown_pct": 10})
+        settings = self.service.get_settings()
+        peak_snapshot = {
+            "total_equity": 120000,
+            "accounts": [{"total_equity": 120000, "positions": []}],
+        }
+        with patch.object(
+            self.service.portfolio,
+            "get_portfolio_snapshot",
+            return_value=peak_snapshot,
+        ):
+            reason, diagnostics = self.service._account_pre_trade_risk(settings)
+
+        self.assertIsNone(reason)
+        self.assertEqual(diagnostics["basis"], "observed_equity_peak")
+        self.assertEqual(diagnostics["peak_equity"], 120000.0)
+        self.assertEqual(diagnostics["drawdown_pct"], 0.0)
+
+        reconstructed = VnpyPaperTradingService(
+            data_fetcher_manager=_FakeDataFetcherManager(price=10.0),
+            config_path=self.config_path,
+        )
+        lower_snapshot = {
+            "total_equity": 105000,
+            "accounts": [{"total_equity": 105000, "positions": []}],
+        }
+        with patch.object(
+            reconstructed.portfolio,
+            "get_portfolio_snapshot",
+            return_value=lower_snapshot,
+        ):
+            reason, diagnostics = reconstructed._account_pre_trade_risk(
+                reconstructed.get_settings()
+            )
+
+        self.assertEqual(reason, "account_drawdown_limit_reached")
+        self.assertEqual(diagnostics["peak_equity"], 120000.0)
+        self.assertEqual(diagnostics["equity"], 105000.0)
+        self.assertEqual(diagnostics["drawdown_pct"], 12.5)
 
     def test_auto_trade_respects_market_light_gate(self) -> None:
         self.service.update_settings(
@@ -3938,7 +4139,7 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertEqual(audit["decisions"][0]["reason"], "single_position_value_limit_reached")
         self.assertEqual(audit["trade_plans"][0]["skip_reason"], "single_position_value_limit_reached")
 
-    def test_auto_trade_respects_target_position_weight_limit(self) -> None:
+    def test_auto_trade_sizes_buy_to_target_position_weight_gap(self) -> None:
         self.service.update_settings(
             {
                 "auto_trade_enabled": True,
@@ -3964,14 +4165,98 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         ):
             result = self.service.run_auto_trade_once()
 
-        self.assertEqual(result["planned_count"], 0)
-        self.assertEqual(result["skipped_count"], 1)
-        self.assertEqual(result["orders"][0]["reason"], "target_position_weight_limit_reached")
+        self.assertEqual(result["planned_count"], 1)
+        self.assertEqual(result["skipped_count"], 0)
+        self.assertEqual(result["orders"][0]["cash_amount"], 5000.0)
+        self.assertEqual(result["orders"][0]["quantity"], 500.0)
+        sizing = result["orders"][0]["raw"]["target_weight_sizing"]
+        self.assertTrue(sizing["adjusted"])
+        self.assertEqual(sizing["resolved_base_amount"], 5000.0)
+        self.assertEqual(sizing["constraints"][0]["remaining_value"], 5000.0)
         audit = self.service.agent_repo.get_run_detail(result["agent_run_uid"])
         self.assertIsNotNone(audit)
         assert audit is not None
-        self.assertEqual(audit["decisions"][0]["reason"], "target_position_weight_limit_reached")
-        self.assertEqual(audit["trade_plans"][0]["skip_reason"], "target_position_weight_limit_reached")
+        self.assertEqual(audit["decisions"][0]["status"], "planned")
+        self.assertEqual(audit["trade_plans"][0]["planned_cash_amount"], 5000.0)
+
+    def test_auto_trade_replenishes_existing_explicit_target_at_max_positions(self) -> None:
+        self.service.submit_order(
+            symbol="600519",
+            side="buy",
+            market="cn",
+            quantity=100,
+            price=10.0,
+        )
+        self.service.update_settings(
+            {
+                "auto_trade_enabled": True,
+                "auto_trade_time_gate_enabled": False,
+                "auto_execution_mode": "dry_run",
+                "auto_target_position_weights": {"600519": 5},
+                "auto_strategy": "dual_low",
+                "auto_max_positions": 1,
+                "auto_skip_existing_positions": True,
+                "auto_max_results": 1,
+                "auto_cash_per_order": 10000,
+            }
+        )
+        fake_alphasift = MagicMock()
+        fake_alphasift.screen.return_value = {
+            "candidates": [{"code": "600519", "score": 80, "price": 10.0}],
+            "warnings": [],
+        }
+
+        with patch(
+            "src.services.vnpy_paper_trading_service.AlphaSiftService",
+            return_value=fake_alphasift,
+        ):
+            result = self.service.run_auto_trade_once()
+
+        self.assertEqual(result["planned_count"], 1)
+        self.assertEqual(result["skipped_count"], 0)
+        self.assertEqual(result["orders"][0]["cash_amount"], 3000.0)
+        self.assertEqual(result["orders"][0]["quantity"], 300.0)
+        sizing = result["orders"][0]["raw"]["target_weight_sizing"]
+        self.assertEqual(sizing["constraints"][0]["current_value"], 1000.0)
+        self.assertEqual(sizing["constraints"][0]["remaining_value"], 3950.0)
+        self.assertEqual(sizing["executable_base_amount"], 3000.0)
+        self.assertTrue(sizing["lot_adjusted"])
+
+    def test_auto_trade_skips_when_explicit_position_target_is_already_reached(self) -> None:
+        self.service.submit_order(
+            symbol="600519",
+            side="buy",
+            market="cn",
+            quantity=500,
+            price=10.0,
+        )
+        self.service.update_settings(
+            {
+                "auto_trade_enabled": True,
+                "auto_trade_time_gate_enabled": False,
+                "auto_execution_mode": "dry_run",
+                "auto_target_position_weights": {"600519": 5},
+                "auto_strategy": "dual_low",
+                "auto_skip_existing_positions": True,
+                "auto_max_results": 1,
+                "auto_cash_per_order": 10000,
+            }
+        )
+        fake_alphasift = MagicMock()
+        fake_alphasift.screen.return_value = {
+            "candidates": [{"code": "600519", "score": 80, "price": 10.0}],
+            "warnings": [],
+        }
+
+        with patch(
+            "src.services.vnpy_paper_trading_service.AlphaSiftService",
+            return_value=fake_alphasift,
+        ):
+            result = self.service.run_auto_trade_once()
+
+        self.assertEqual(result["planned_count"], 0)
+        self.assertEqual(result["skipped_count"], 1)
+        self.assertEqual(result["orders"][0]["reason"], "target_position_weight_reached")
 
     def test_auto_trade_respects_total_position_value_limit_for_plans(self) -> None:
         self.service.update_settings(
@@ -4154,12 +4439,15 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertEqual(result["submitted_count"], 0)
         self.assertEqual(result["skipped_count"], 1)
         self.assertEqual(result["orders"][0]["status"], "planned")
-        self.assertEqual(result["orders"][1]["reason"], "target_industry_weight_limit_reached")
+        self.assertEqual(result["orders"][1]["reason"], "target_weight_below_min_lot")
+        sizing = result["orders"][1]["raw"]["target_weight_sizing"]
+        self.assertEqual(sizing["resolved_base_amount"], 500.0)
+        self.assertEqual(sizing["constraints"][0]["remaining_value"], 500.0)
         audit = self.service.agent_repo.get_run_detail(result["agent_run_uid"])
         self.assertIsNotNone(audit)
         assert audit is not None
-        self.assertEqual(audit["decisions"][1]["reason"], "target_industry_weight_limit_reached")
-        self.assertEqual(audit["trade_plans"][1]["skip_reason"], "target_industry_weight_limit_reached")
+        self.assertEqual(audit["decisions"][1]["reason"], "target_weight_below_min_lot")
+        self.assertEqual(audit["trade_plans"][1]["skip_reason"], "target_weight_below_min_lot")
 
     def test_auto_trade_respects_daily_order_limit(self) -> None:
         self.service.submit_order(

@@ -22,6 +22,7 @@ except ModuleNotFoundError:
 
 import src.auth as auth
 from api.app import create_app
+from api.v1.endpoints.vnpy_paper_trading import _system_health_payload
 from src.config import Config
 from src.repositories.runtime_scheduler_repo import RuntimeSchedulerRepository
 from src.repositories.stock_selection_agent_repo import StockSelectionAgentRepository
@@ -81,6 +82,68 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
     def _service(self) -> VnpyPaperTradingService:
         return VnpyPaperTradingService(config_path=self.config_path)
 
+    def test_system_health_blocks_incomplete_required_industry_coverage(self) -> None:
+        health = _system_health_payload({
+            "enabled": True,
+            "available": True,
+            "settings": {
+                "enabled": True,
+                "auto_trade_enabled": True,
+                "auto_execution_mode": "paper",
+                "auto_max_industry_position_pct": 30,
+            },
+            "diagnostics": {
+                "industry_exposure": {
+                    "status": "partial",
+                    "position_count": 2,
+                    "resolved_position_count": 1,
+                    "missing_position_count": 1,
+                    "coverage_pct": 50,
+                    "missing_symbols": ["000001"],
+                    "resolution_mode": "risk_guard",
+                },
+            },
+        })
+
+        components = {item["key"]: item for item in health["components"]}
+        industry = components["industry_exposure"]
+        self.assertEqual(industry["status"], "blocked")
+        self.assertTrue(industry["required"])
+        self.assertEqual(industry["reason"], "industry_coverage_incomplete")
+        self.assertEqual(industry["coverage_pct"], 50)
+        self.assertIn("industry_coverage_incomplete", health["required_blockers"])
+
+    def test_system_health_blocks_observed_peak_drawdown_limit(self) -> None:
+        health = _system_health_payload({
+            "enabled": True,
+            "available": True,
+            "settings": {
+                "enabled": True,
+                "auto_trade_enabled": True,
+                "auto_execution_mode": "paper",
+                "auto_max_drawdown_pct": 10,
+            },
+            "diagnostics": {
+                "account_drawdown": {
+                    "configured": True,
+                    "status": "limit_reached",
+                    "basis": "observed_equity_peak",
+                    "equity": 105000,
+                    "peak_equity": 120000,
+                    "drawdown_pct": 12.5,
+                    "threshold_pct": 10,
+                },
+            },
+        })
+
+        components = {item["key"]: item for item in health["components"]}
+        drawdown = components["account_drawdown"]
+        self.assertEqual(drawdown["status"], "blocked")
+        self.assertTrue(drawdown["required"])
+        self.assertEqual(drawdown["basis"], "observed_equity_peak")
+        self.assertEqual(drawdown["peak_equity"], 120000)
+        self.assertIn("account_drawdown_limit_reached", health["required_blockers"])
+
     def test_status_and_manual_order_use_local_paper_account(self) -> None:
         with patch(
             "api.v1.endpoints.vnpy_paper_trading.VnpyPaperTradingService",
@@ -104,6 +167,16 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
         self.assertEqual(status_resp.status_code, 200)
         self.assertTrue(status_resp.json()["enabled"])
         self.assertTrue(status_resp.json()["available"])
+        health_components = {
+            item["key"]: item
+            for item in status_resp.json()["diagnostics"]["system_health"]["components"]
+        }
+        self.assertEqual(health_components["industry_exposure"]["status"], "disabled")
+        self.assertEqual(
+            health_components["industry_exposure"]["reason"],
+            "industry_snapshot_unavailable",
+        )
+        self.assertEqual(health_components["industry_exposure"]["position_count"], 0)
         self.assertEqual(order_resp.status_code, 200)
         payload = order_resp.json()
         self.assertTrue(payload["accepted"])
@@ -1475,6 +1548,12 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
                 "data_quality": {"status": "ok"},
                 "warnings": ["daily_source_fallback"],
                 "source_errors": ["snapshot_timeout"],
+                "source_health": {
+                    "snapshot": {
+                        "sina": {"failures": 2, "disabled": False},
+                        "eastmoney": {"failures": 0, "disabled": False},
+                    },
+                },
             },
         )
         decision = repo.record_decision(
@@ -1661,6 +1740,12 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
         self.assertEqual(quality_trends["degraded_rate_pct"], 0.0)
         self.assertEqual(quality_trends["warning_counts"], {"daily_source_fallback": 1})
         self.assertEqual(quality_trends["source_error_counts"], {"snapshot_timeout": 1})
+        source_health = {
+            item["key"]: item for item in quality_trends["source_health_items"]
+        }
+        self.assertEqual(source_health["snapshot/sina"]["degraded_rate_pct"], 100.0)
+        self.assertEqual(source_health["snapshot/sina"]["max_failures"], 2)
+        self.assertEqual(source_health["snapshot/eastmoney"]["latest_status"], "ok")
         self.assertEqual(quality_trends["daily"][0]["quality_counts"], {"ok": 1})
         all_quality_trends = all_quality_trends_resp.json()
         self.assertEqual(all_quality_trends["quality_counts"], {"ok": 1, "unavailable": 1})
@@ -1794,6 +1879,69 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
         self.assertTrue(response.json()["accepted"])
         self.assertEqual(response.json()["status"], "cancel_requested")
         service.cancel_trade_plan.assert_called_once_with("plan-api-cancel")
+
+    def test_agent_backtest_endpoint_forwards_filters_and_returns_matrix(self) -> None:
+        service = MagicMock()
+        service.evaluate.return_value = {
+            "generated_at": datetime(2026, 7, 14, 10, 0),
+            "methodology": {
+                "type": "point_in_time_candidate_forward_evaluation",
+                "lookahead_protection": True,
+            },
+            "filters": {"strategy": "dual_low", "eval_windows": [1, 5]},
+            "total": 2,
+            "scanned_count": 2,
+            "truncated": False,
+            "refresh_attempted_count": 0,
+            "status_counts": {"filled": 1, "skipped": 1},
+            "matrix": {
+                "1": {
+                    "eval_window_days": 1,
+                    "sample_count": 2,
+                    "completed_count": 1,
+                    "coverage_pct": 50.0,
+                    "win_rate_pct": 100.0,
+                }
+            },
+            "strategy_matrix": {},
+            "items": [],
+        }
+
+        with patch(
+            "api.v1.endpoints.vnpy_paper_trading.StockSelectionAgentBacktestService",
+            return_value=service,
+        ):
+            response = self.client.post(
+                "/api/v1/vnpy-paper/agent-runs/backtest",
+                json={
+                    "strategy": "dual_low",
+                    "market": "cn",
+                    "created_from": "2026-07-01T00:00:00",
+                    "created_to": "2026-07-14T23:59:59",
+                    "eval_windows": [1, 5],
+                    "include_skipped": True,
+                    "max_decisions": 200,
+                    "refresh_missing": False,
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["methodology"]["lookahead_protection"])
+        self.assertEqual(response.json()["matrix"]["1"]["coverage_pct"], 50.0)
+        service.evaluate.assert_called_once()
+        call = service.evaluate.call_args.kwargs
+        self.assertEqual(call["strategy"], "dual_low")
+        self.assertEqual(call["eval_windows"], [1, 5])
+        self.assertEqual(call["max_decisions"], 200)
+
+    def test_agent_backtest_endpoint_rejects_invalid_window(self) -> None:
+        response = self.client.post(
+            "/api/v1/vnpy-paper/agent-runs/backtest",
+            json={"eval_windows": [0]},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"], "validation_error")
 
 
 def _install_fake_vnpy_modules() -> dict[str, object]:

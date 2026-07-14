@@ -16,6 +16,8 @@ from api.v1.schemas.vnpy_paper_trading import (
     VnpyPaperAccountListResponse,
     VnpyPaperArchivedAccountCleanupRequest,
     VnpyPaperArchivedAccountCleanupResponse,
+    VnpyPaperAgentBacktestRequest,
+    VnpyPaperAgentBacktestResponse,
     VnpyPaperAgentDailySummaryResponse,
     VnpyPaperAgentDataQualityTrendsResponse,
     VnpyPaperAgentRunRecapRequest,
@@ -45,6 +47,7 @@ from api.v1.schemas.vnpy_paper_trading import (
 from src.repositories.stock_selection_agent_repo import StockSelectionAgentRepository
 from src.services.portfolio_service import PortfolioBusyError
 from src.services.runtime_scheduler import RuntimeSchedulerService
+from src.services.stock_selection_agent_backtest_service import StockSelectionAgentBacktestService
 from src.services.vnpy_paper_trading_service import VnpyPaperTradingService
 
 logger = logging.getLogger(__name__)
@@ -411,6 +414,123 @@ def _system_health_payload(status_payload: Dict[str, Any]) -> Dict[str, Any]:
             key: value
             for key, value in valuation.items()
             if key not in {"status", "reason", "detail", "required"}
+        },
+    )
+
+    industry_exposure = (
+        diagnostics.get("industry_exposure")
+        if isinstance(diagnostics.get("industry_exposure"), dict)
+        else {}
+    )
+    industry_required = bool(
+        settings.get("auto_max_industry_position_value") is not None
+        or settings.get("auto_max_industry_position_pct") is not None
+        or settings.get("auto_target_industry_weights")
+    )
+    industry_status = str(industry_exposure.get("status") or "snapshot_not_requested")
+    industry_position_count = int(industry_exposure.get("position_count") or 0)
+    industry_resolved_count = int(industry_exposure.get("resolved_position_count") or 0)
+    industry_missing_count = int(industry_exposure.get("missing_position_count") or 0)
+    industry_coverage_pct = industry_exposure.get("coverage_pct")
+    industry_missing_symbols = list(industry_exposure.get("missing_symbols") or [])
+    if industry_status == "snapshot_not_requested":
+        industry_health_status = "disabled"
+        industry_reason = "industry_snapshot_not_requested"
+        industry_detail = "轻量状态未解析持仓行业"
+    elif industry_status == "snapshot_unavailable":
+        industry_health_status = "disabled"
+        industry_reason = "industry_snapshot_unavailable"
+        industry_detail = "账户或持仓快照尚未加载，暂未解析行业"
+    elif industry_status == "no_positions":
+        industry_health_status = "ready"
+        industry_reason = "no_positions"
+        industry_detail = "当前没有需要解析行业的持仓"
+    elif industry_status == "complete":
+        industry_health_status = "ready"
+        industry_reason = "industry_coverage_complete"
+        industry_detail = f"已解析 {industry_resolved_count}/{industry_position_count} 笔持仓（100%）"
+    else:
+        industry_health_status = "blocked" if industry_required else "disabled"
+        industry_reason = (
+            "industry_coverage_incomplete"
+            if industry_required
+            else "industry_coverage_not_required"
+        )
+        coverage_label = f"{industry_coverage_pct}%" if industry_coverage_pct is not None else "-"
+        missing_label = "、".join(str(item) for item in industry_missing_symbols[:3])
+        coverage_detail = (
+            f"已解析 {industry_resolved_count}/{industry_position_count} 笔（{coverage_label}），"
+            f"缺失 {industry_missing_count} 笔"
+            f"：{missing_label}" if missing_label else
+            f"已解析 {industry_resolved_count}/{industry_position_count} 笔（{coverage_label}），缺失 {industry_missing_count} 笔"
+        )
+        industry_detail = (
+            coverage_detail
+            if industry_required
+            else f"行业风控未启用；快照字段{coverage_detail}"
+        )
+    add_component(
+        key="industry_exposure",
+        label="行业归属",
+        status=industry_health_status,
+        reason=industry_reason,
+        detail=industry_detail,
+        required=industry_required,
+        extra={
+            "configured": industry_required,
+            "position_count": industry_position_count,
+            "resolved_position_count": industry_resolved_count,
+            "missing_position_count": industry_missing_count,
+            "coverage_pct": industry_coverage_pct,
+            "industry_count": int(industry_exposure.get("industry_count") or 0),
+            "missing_symbols": industry_missing_symbols,
+            "resolution_mode": industry_exposure.get("resolution_mode"),
+        },
+    )
+
+    account_drawdown = (
+        diagnostics.get("account_drawdown")
+        if isinstance(diagnostics.get("account_drawdown"), dict)
+        else {}
+    )
+    drawdown_configured = bool(account_drawdown.get("configured"))
+    drawdown_status = str(account_drawdown.get("status") or "disabled")
+    drawdown_pct = account_drawdown.get("drawdown_pct")
+    drawdown_threshold = account_drawdown.get("threshold_pct")
+    drawdown_peak = account_drawdown.get("peak_equity")
+    if not drawdown_configured:
+        drawdown_health_status = "disabled"
+        drawdown_reason = "account_drawdown_not_configured"
+        drawdown_detail = "未配置账户最大回撤"
+    elif drawdown_status == "snapshot_not_requested":
+        drawdown_health_status = "disabled"
+        drawdown_reason = "account_drawdown_snapshot_not_requested"
+        drawdown_detail = "轻量状态未计算账户回撤"
+    elif drawdown_status == "unavailable":
+        drawdown_health_status = "blocked"
+        drawdown_reason = "account_drawdown_unavailable"
+        drawdown_detail = "账户权益或历史峰值不可用"
+    elif drawdown_status == "limit_reached":
+        drawdown_health_status = "blocked"
+        drawdown_reason = "account_drawdown_limit_reached"
+        drawdown_detail = f"当前回撤 {drawdown_pct}% 已达到上限 {drawdown_threshold}%"
+    else:
+        drawdown_health_status = "ready"
+        drawdown_reason = "account_drawdown_ready"
+        drawdown_detail = f"当前回撤 {drawdown_pct}% / 上限 {drawdown_threshold}%"
+    add_component(
+        key="account_drawdown",
+        label="账户回撤",
+        status=drawdown_health_status,
+        reason=drawdown_reason,
+        detail=drawdown_detail,
+        required=drawdown_configured,
+        extra={
+            "basis": account_drawdown.get("basis"),
+            "equity": account_drawdown.get("equity"),
+            "peak_equity": drawdown_peak,
+            "drawdown_pct": drawdown_pct,
+            "threshold_pct": drawdown_threshold,
         },
     )
 
@@ -1973,6 +2093,34 @@ def get_vnpy_paper_agent_data_quality_trends(
         )
     except Exception as exc:
         raise _internal_error("Summarize vn.py paper agent data quality trends failed", exc)
+
+
+@router.post(
+    "/agent-runs/backtest",
+    response_model=VnpyPaperAgentBacktestResponse,
+    responses={400: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
+    summary="Evaluate persisted Agent candidates against forward daily bars",
+)
+def run_vnpy_paper_agent_backtest(
+    payload: VnpyPaperAgentBacktestRequest,
+) -> VnpyPaperAgentBacktestResponse:
+    try:
+        result = StockSelectionAgentBacktestService().evaluate(
+            strategy=payload.strategy,
+            market=payload.market,
+            created_from=payload.created_from,
+            created_to=payload.created_to,
+            eval_windows=payload.eval_windows,
+            include_skipped=payload.include_skipped,
+            max_decisions=payload.max_decisions,
+            refresh_missing=payload.refresh_missing,
+            neutral_band_pct=payload.neutral_band_pct,
+        )
+        return VnpyPaperAgentBacktestResponse.model_validate(result)
+    except ValueError as exc:
+        raise _bad_request(exc) from exc
+    except Exception as exc:
+        raise _internal_error("Run Agent forward evaluation failed", exc)
 
 
 @router.post(

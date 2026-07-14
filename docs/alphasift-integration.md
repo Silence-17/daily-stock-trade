@@ -134,6 +134,15 @@ AlphaSift 侧已在 `ZhuLinsen/alphasift@0a7b9cd59e81718f851890535241bc105d4ddc6
 - `/api/v1/alphasift/screen`：调用适配层 `screen(..., use_llm=True)`，并在调用期间临时注入 DSA 已解析的 LLM 运行环境，同时向适配层传入结构化 LLM/DSA provider 配置；AlphaSift 在 LLM 前只消费轻量 DSA provider context，并优先通过 DSA 日线链路补齐 AlphaSift 因子特征，DSA 返回阶段对最终 Top 候选补新闻并复用已增强字段。适配层缺失或运行时异常返回 `424 + diagnostics` 并保留原始错误边界。
 - `/api/v1/alphasift/screen/tasks`：Web/桌面选股页使用的后台任务入口，提交后立即返回 `task_id`，实际选股在共享任务队列中继续执行，避免浏览器长请求被外部快照、行情、新闻或 LLM 延迟拖到超时。
 - `/api/v1/alphasift/screen/tasks/{task_id}`：查询后台选股任务状态。进行中返回 `pending/processing + progress/message`，完成后在 `result` 中返回与 `/screen` 相同的候选结构，失败时返回 `failed + error`；仅接受 `report_type=alphasift_screen` 的任务 ID，普通分析任务不会被误读为选股结果。
+- `POST /api/v1/alphasift/replay/snapshots`：导入标准化的时间点因子记录，按 `market + symbol + snapshot_date` 幂等保存。接口不会联网抓取当前行情；技术因子放在 `factors`，来源与质量信息分别放在 `source`、`quality_status` 和 `missing_fields`。
+- `GET /api/v1/alphasift/replay/compatibility`：按策略和日期检查硬过滤字段、评分字段的完整行覆盖率及逐字段缺失计数，不执行筛选。
+- `POST /api/v1/alphasift/replay/run`：只读取指定日期的因子快照，执行 AlphaSift 原始硬过滤和 `screen_score` 排序。默认要求硬过滤完整行覆盖率不少于 95%、评分完整行覆盖率不少于 80%，不满足时 fail-closed；不会回退当前快照、调用在线数据源、启用 LLM 排序或触发交易。
+- `GET /api/v1/alphasift/replay/universe?snapshot_date=YYYY-MM-DD`：使用 Tushare `stock_basic` 的上市、退市和暂停上市记录按 `list_date <= snapshot_date <= delist_date_or_open_ended` 还原指定日期 A 股股票池，可返回最多 6000 条并明确标注截断。该接口需要配置具备 `stock_basic` 权限的 `TUSHARE_TOKEN`；不可用时返回 424，不回退当前股票列表。接口返回的是当前维护的名称和行业，不声称名称/行业也具备时间点语义。
+- `POST /api/v1/alphasift/replay/ingestion/tasks`：为调用方显式提供的历史股票池提交有界后台采集任务，单次最多 50 个日期、50 只股票；使用 `stock_zh_a_hist` 获取历史日线/换手率，使用 `stock_zh_valuation_baidu` 获取历史 PE(TTM)、PB 和总市值，并只取快照日当日或之前的估值。`GET /api/v1/alphasift/replay/ingestion/tasks/{task_id}` 查询进度和写入/错误摘要。
+- `POST /api/v1/alphasift/replay/full-market-ingestion/jobs`：针对 1-50 个快照日期一次加载 Tushare 生命周期元数据，并为每个日期独立还原当日成员；冻结“日期+股票”工作项后以 1-50 只一批调用同一历史因子采集器，每批成功后持久化游标、写入统计、源错误和心跳。`GET /replay/full-market-ingestion/jobs`、`GET /jobs/{job_id}` 查询刷新后仍可恢复的作业；`POST /jobs/{job_id}/resume` 从最后成功游标继续，`force=true` 可接管服务重启后遗留的 processing 作业。任务租约会拒绝旧执行者在接管后继续写检查点。
+- `POST /api/v1/alphasift/replay/portfolio-backtest`：在多个已保存快照日期上逐次重放策略，默认取 Top 5，并默认使用 `cash_ledger`：从初始现金出发，按每期等权目标金额计算数量，A 股向下取整为 100 股整手，先卖出超配/剔除仓位再用实际可用现金补买低配/新增仓位。信号日之后首根日线开盘调仓，最后一期在第 20 根后向交易 bar 收盘尝试退出；默认买卖每边手续费 3 bps、滑点 5 bps，并启用 A 股停牌、涨停不可买和跌停不可卖门禁。最终卖出受阻或缺少退出行情时保留仓位市值和期末未平仓数，不伪造成交。接口返回现金、市值、股数、成交、阻断、总收益、基准/超额收益、最大回撤和真实成交额换手；旧 `equal_weight_approximation` 可显式选择用于兼容。该接口只计算，不下单。
+
+当前重放边界：系统可以用 Tushare 上市/退市生命周期为每个快照日期独立还原全 A 股成员，并通过持久化作业分批、可恢复地采集行情/估值因子，再以现金、整手股数和等权目标执行跨日组合回测。全市场成功在线运行仍依赖具备 `stock_basic` 权限的 Tushare token 和长期可用的 AKShare 上游；当前尚未处理分红送转/复权、A 股最低佣金与印花税细则，也未提供任意目标权重或多约束组合优化器。
 
 ## 配置兼容边界（LLM / LiteLLM / Base URL）
 

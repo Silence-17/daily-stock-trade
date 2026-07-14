@@ -314,6 +314,32 @@ const statusResponse = {
         required: false,
         tone: 'info',
       }, {
+        key: 'industry_exposure',
+        label: '行业归属',
+        status: 'disabled',
+        reason: 'industry_coverage_not_required',
+        detail: '行业风控未启用；快照字段已解析 1/2 笔（50%），缺失 1 笔：000001',
+        required: false,
+        tone: 'info',
+        positionCount: 2,
+        resolvedPositionCount: 1,
+        missingPositionCount: 1,
+        coveragePct: 50,
+        missingSymbols: ['000001'],
+      }, {
+        key: 'account_drawdown',
+        label: '账户回撤',
+        status: 'ready',
+        reason: 'account_drawdown_ready',
+        detail: '当前回撤 4.5% / 上限 10%',
+        required: true,
+        tone: 'success',
+        basis: 'observed_equity_peak',
+        equity: 114600,
+        peakEquity: 120000,
+        drawdownPct: 4.5,
+        thresholdPct: 10,
+      }, {
         key: 'vnpy_bridge',
         label: 'vn.py bridge',
         status: 'ready',
@@ -1275,6 +1301,10 @@ describe('VnpyPaperTradingPage', () => {
     expect(availabilityDiagnostics).toHaveTextContent('交易窗口');
     expect(availabilityDiagnostics).toHaveTextContent('持仓估值');
     expect(availabilityDiagnostics).toHaveTextContent('轻量状态未拉取持仓估值');
+    expect(availabilityDiagnostics).toHaveTextContent('行业归属');
+    expect(availabilityDiagnostics).toHaveTextContent('行业风控未启用；快照字段已解析 1/2 笔（50%），缺失 1 笔：000001');
+    expect(availabilityDiagnostics).toHaveTextContent('账户回撤');
+    expect(availabilityDiagnostics).toHaveTextContent('当前回撤 4.5% / 上限 10%');
     expect(availabilityDiagnostics).toHaveTextContent('paper 模式不要求 vn.py bridge');
     expect(screen.getByText('执行引擎')).toBeInTheDocument();
     expect(screen.getByText('Runtime')).toBeInTheDocument();

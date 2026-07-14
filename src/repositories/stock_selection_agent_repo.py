@@ -211,6 +211,70 @@ class StockSelectionAgentRepository:
             session.refresh(row)
             return self._trade_plan_to_dict(row)
 
+    def list_forward_evaluation_decisions(
+        self,
+        *,
+        strategy: Optional[str] = None,
+        market: Optional[str] = None,
+        created_from: Optional[datetime] = None,
+        created_to: Optional[datetime] = None,
+        include_skipped: bool = True,
+        limit: int = 500,
+    ) -> Dict[str, Any]:
+        """Return persisted buy decisions with their run metadata for forward evaluation."""
+
+        limit = max(1, min(2000, int(limit or 500)))
+        strategy_value = str(strategy or "").strip()
+        market_value = str(market or "").strip().lower()
+        created_from_norm = self._datetime_filter_value(created_from)
+        created_to_norm = self._datetime_filter_value(created_to)
+
+        with self.db.get_session() as session:
+            query = (
+                select(StockSelectionAgentDecision, StockSelectionAgentRun)
+                .join(StockSelectionAgentRun, StockSelectionAgentRun.id == StockSelectionAgentDecision.run_id)
+                .where(StockSelectionAgentDecision.action == "buy")
+                .where(StockSelectionAgentDecision.symbol.is_not(None))
+            )
+            if strategy_value:
+                query = query.where(StockSelectionAgentRun.strategy == strategy_value)
+            if market_value:
+                query = query.where(StockSelectionAgentDecision.market == market_value)
+            if created_from_norm is not None:
+                query = query.where(StockSelectionAgentDecision.created_at >= created_from_norm)
+            if created_to_norm is not None:
+                query = query.where(StockSelectionAgentDecision.created_at <= created_to_norm)
+            if not include_skipped:
+                query = query.where(
+                    StockSelectionAgentDecision.status.in_(
+                        ["planned", "submitted", "part_filled", "filled", "executed"]
+                    )
+                )
+
+            total = int(session.execute(select(func.count()).select_from(query.subquery())).scalar_one() or 0)
+            rows = session.execute(
+                query.order_by(
+                    desc(StockSelectionAgentDecision.created_at),
+                    desc(StockSelectionAgentDecision.id),
+                ).limit(limit)
+            ).all()
+            items = []
+            for decision, run in rows:
+                payload = self._decision_to_dict(decision)
+                payload["run_uid"] = run.run_uid
+                payload["strategy"] = run.strategy
+                payload["trigger_source"] = run.trigger_source
+                payload["run_status"] = run.status
+                payload["run_created_at"] = run.created_at
+                items.append(payload)
+            return {
+                "items": items,
+                "total": total,
+                "scanned_count": len(items),
+                "truncated": total > len(items),
+                "limit": limit,
+            }
+
     def get_trade_plan(self, plan_uid: str) -> Optional[Dict[str, Any]]:
         with self.db.get_session() as session:
             row = session.execute(
@@ -775,6 +839,7 @@ class StockSelectionAgentRepository:
         quality_counts: Counter[str] = Counter()
         warning_counts: Counter[str] = Counter()
         source_error_counts: Counter[str] = Counter()
+        source_health_stats: Dict[str, Dict[str, Any]] = {}
         daily: Dict[str, Dict[str, Any]] = {}
         latest_quality = "unknown"
         accepted_quality = {"ok", "partial", "stale", "unavailable"}
@@ -813,6 +878,65 @@ class StockSelectionAgentRepository:
                 if text:
                     source_error_counts[text] += 1
 
+            source_health = diagnostics.get("source_health")
+            if isinstance(source_health, dict):
+                for source_group, raw_sources in source_health.items():
+                    if not isinstance(raw_sources, dict):
+                        continue
+                    for source_name, raw_state in raw_sources.items():
+                        if not isinstance(raw_state, dict):
+                            continue
+                        key = f"{source_group}/{source_name}"
+                        item = source_health_stats.setdefault(
+                            key,
+                            {
+                                "key": key,
+                                "group": str(source_group),
+                                "source": str(source_name),
+                                "observation_count": 0,
+                                "degraded_observation_count": 0,
+                                "max_failures": 0,
+                                "latest_status": "unknown",
+                                "latest_failures": 0,
+                                "last_observed_at": None,
+                            },
+                        )
+                        failures = self._safe_non_negative_int(raw_state.get("failures"))
+                        state_text = str(
+                            raw_state.get("status")
+                            or raw_state.get("state")
+                            or raw_state.get("circuit_state")
+                            or ""
+                        ).strip().lower()
+                        disabled = bool(raw_state.get("disabled"))
+                        degraded = disabled or failures > 0 or state_text in {
+                            "open",
+                            "degraded",
+                            "failed",
+                            "error",
+                            "unavailable",
+                            "disabled",
+                        }
+                        item["observation_count"] += 1
+                        if degraded:
+                            item["degraded_observation_count"] += 1
+                        item["max_failures"] = max(int(item["max_failures"]), failures)
+                        item["latest_status"] = (
+                            "disabled"
+                            if disabled
+                            else state_text
+                            if state_text
+                            else "degraded"
+                            if failures > 0
+                            else "ok"
+                        )
+                        item["latest_failures"] = failures
+                        item["last_observed_at"] = (
+                            created_at.isoformat(timespec="seconds")
+                            if isinstance(created_at, datetime)
+                            else None
+                        )
+
         degraded_statuses = {"partial", "stale", "unavailable"}
         degraded_count = sum(quality_counts.get(key, 0) for key in degraded_statuses)
         known_count = len(rows) - quality_counts.get("unknown", 0)
@@ -840,6 +964,25 @@ class StockSelectionAgentRepository:
                 "degraded_rate_pct": round(bucket_degraded / bucket["run_count"] * 100, 2),
             })
 
+        source_health_items: List[Dict[str, Any]] = []
+        for item in source_health_stats.values():
+            observations = int(item["observation_count"])
+            degraded_observations = int(item["degraded_observation_count"])
+            source_health_items.append({
+                **item,
+                "degraded_rate_pct": round(
+                    degraded_observations / observations * 100,
+                    2,
+                ) if observations else 0.0,
+            })
+        source_health_items.sort(
+            key=lambda item: (
+                -float(item["degraded_rate_pct"]),
+                -int(item["degraded_observation_count"]),
+                str(item["key"]),
+            )
+        )
+
         return {
             "generated_at": datetime.now().isoformat(timespec="seconds"),
             "window_days": days,
@@ -855,6 +998,7 @@ class StockSelectionAgentRepository:
             "latest_quality": latest_quality if rows else None,
             "warning_counts": dict(sorted(warning_counts.items(), key=lambda item: (-item[1], item[0]))[:20]),
             "source_error_counts": dict(sorted(source_error_counts.items(), key=lambda item: (-item[1], item[0]))[:20]),
+            "source_health_items": source_health_items[:50],
             "truncated": total > len(rows),
             "daily": daily_items,
             "filters": {
@@ -864,6 +1008,13 @@ class StockSelectionAgentRepository:
                 "status": status,
             },
         }
+
+    @staticmethod
+    def _safe_non_negative_int(value: Any) -> int:
+        try:
+            return max(0, int(value or 0))
+        except (TypeError, ValueError):
+            return 0
 
     def get_run_detail(self, run_uid: str) -> Optional[Dict[str, Any]]:
         with self.db.get_session() as session:

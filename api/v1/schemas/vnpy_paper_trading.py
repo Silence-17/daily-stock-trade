@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
@@ -589,6 +589,32 @@ class VnpyPaperAgentRunRecapResponse(BaseModel):
     run_detail: Optional[VnpyPaperAgentRunDetail] = None
 
 
+class VnpyPaperAgentBacktestRequest(BaseModel):
+    strategy: Optional[str] = Field(None, max_length=64)
+    market: Optional[str] = Field(None, max_length=16)
+    created_from: Optional[datetime] = None
+    created_to: Optional[datetime] = None
+    eval_windows: List[int] = Field(default_factory=lambda: [1, 5, 10, 20], min_length=1, max_length=6)
+    include_skipped: bool = True
+    max_decisions: int = Field(500, ge=1, le=2000)
+    refresh_missing: bool = False
+    neutral_band_pct: float = Field(2.0, ge=0, le=25)
+
+
+class VnpyPaperAgentBacktestResponse(BaseModel):
+    generated_at: datetime
+    methodology: Dict[str, Any] = Field(default_factory=dict)
+    filters: Dict[str, Any] = Field(default_factory=dict)
+    total: int = 0
+    scanned_count: int = 0
+    truncated: bool = False
+    refresh_attempted_count: int = 0
+    status_counts: Dict[str, int] = Field(default_factory=dict)
+    matrix: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
+    strategy_matrix: Dict[str, Dict[str, Dict[str, Any]]] = Field(default_factory=dict)
+    items: List[Dict[str, Any]] = Field(default_factory=list)
+
+
 class VnpyPaperAgentDailySummaryResponse(BaseModel):
     generated_at: Optional[Any] = None
     date: str
@@ -647,6 +673,7 @@ class VnpyPaperAgentDataQualityTrendsResponse(BaseModel):
     latest_quality: Optional[str] = None
     warning_counts: Dict[str, int] = Field(default_factory=dict)
     source_error_counts: Dict[str, int] = Field(default_factory=dict)
+    source_health_items: List[Dict[str, Any]] = Field(default_factory=list)
     truncated: bool = False
     daily: List[VnpyPaperAgentDataQualityDailyItem] = Field(default_factory=list)
     filters: Dict[str, Any] = Field(default_factory=dict)

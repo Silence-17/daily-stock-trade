@@ -666,6 +666,34 @@ class TushareFetcher(BaseFetcher):
             logger.warning(f"Tushare 获取股票列表失败: {e}")
 
         return None
+
+    def get_stock_lifecycle_list(self) -> Optional[pd.DataFrame]:
+        """Return A-share listing lifecycle rows for point-in-time universes."""
+        if self._api is None:
+            logger.warning("Tushare API is not initialized; lifecycle stock list is unavailable")
+            return None
+
+        frames = []
+        fields = "ts_code,symbol,name,industry,market,exchange,list_status,list_date,delist_date"
+        try:
+            for list_status in ("L", "D", "P"):
+                self._check_rate_limit()
+                frame = self._api.stock_basic(
+                    exchange="",
+                    list_status=list_status,
+                    fields=fields,
+                )
+                if frame is not None and not frame.empty:
+                    frames.append(frame.copy())
+        except Exception as exc:
+            logger.warning("Tushare lifecycle stock list lookup failed: %s", exc)
+            return None
+        if not frames:
+            return None
+
+        result = pd.concat(frames, ignore_index=True)
+        result["code"] = result["ts_code"].astype(str).str.split(".").str[0]
+        return result.drop_duplicates(subset=["code", "list_status"], keep="last")
     
     def get_realtime_quote(self, stock_code: str) -> Optional[UnifiedRealtimeQuote]:
         """

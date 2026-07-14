@@ -882,6 +882,18 @@ describe('vnpyPaperTradingApi', () => {
         latest_quality: 'partial',
         warning_counts: { daily_source_fallback: 1 },
         source_error_counts: { snapshot_timeout: 1 },
+        source_health_items: [{
+          key: 'snapshot/sina',
+          group: 'snapshot',
+          source: 'sina',
+          observation_count: 3,
+          degraded_observation_count: 2,
+          degraded_rate_pct: 66.67,
+          max_failures: 2,
+          latest_status: 'degraded',
+          latest_failures: 1,
+          last_observed_at: '2026-07-13T16:00:00',
+        }],
         truncated: false,
         daily: [{
           date: '2026-07-13',
@@ -908,6 +920,12 @@ describe('vnpyPaperTradingApi', () => {
     expect(result.degradedRatePct).toBe(33.33);
     expect(result.daily[0].runCount).toBe(3);
     expect(result.sourceErrorCounts).toEqual({ snapshotTimeout: 1 });
+    expect(result.sourceHealthItems?.[0]).toMatchObject({
+      key: 'snapshot/sina',
+      observationCount: 3,
+      degradedObservationCount: 2,
+      degradedRatePct: 66.67,
+    });
   });
 
   it('generates an Agent run LLM recap', async () => {
@@ -1411,5 +1429,67 @@ describe('vnpyPaperTradingApi', () => {
     expect(result.accepted).toBe(true);
     expect(result.status).toBe('cancel_requested');
     expect(result.reason).toBe('vnpy_order_cancel_requested');
+  });
+
+  it('runs Agent forward evaluation with snake-case filters and camelCases the matrix', async () => {
+    post.mockResolvedValueOnce({
+      data: {
+        generated_at: '2026-07-14T10:00:00',
+        methodology: { lookahead_protection: true },
+        filters: { eval_windows: [1, 5] },
+        total: 2,
+        scanned_count: 2,
+        truncated: false,
+        refresh_attempted_count: 0,
+        status_counts: { filled: 2 },
+        matrix: {
+          1: {
+            eval_window_days: 1,
+            sample_count: 2,
+            completed_count: 2,
+            insufficient_count: 0,
+            coverage_pct: 100,
+            win_count: 1,
+            loss_count: 1,
+            neutral_count: 0,
+            win_rate_pct: 50,
+            direction_accuracy_pct: 50,
+            average_return_pct: 1.25,
+            median_return_pct: 1.25,
+            average_max_favorable_excursion_pct: 3,
+            average_max_adverse_excursion_pct: -2,
+            neutral_band_pct: 2,
+            unable_reason_counts: {},
+          },
+        },
+        strategy_matrix: {},
+        items: [],
+      },
+    });
+
+    const result = await vnpyPaperTradingApi.runAgentBacktest({
+      strategy: 'dual_low',
+      market: 'cn',
+      createdFrom: '2026-07-01T00:00:00',
+      createdTo: '2026-07-14T23:59:59',
+      evalWindows: [1, 5],
+      includeSkipped: false,
+      maxDecisions: 200,
+    });
+
+    expect(post).toHaveBeenCalledWith('/api/v1/vnpy-paper/agent-runs/backtest', {
+      strategy: 'dual_low',
+      market: 'cn',
+      created_from: '2026-07-01T00:00:00',
+      created_to: '2026-07-14T23:59:59',
+      eval_windows: [1, 5],
+      include_skipped: false,
+      max_decisions: 200,
+      refresh_missing: false,
+      neutral_band_pct: 2,
+    });
+    expect(result.scannedCount).toBe(2);
+    expect(result.methodology.lookaheadProtection).toBe(true);
+    expect(result.matrix['1'].averageReturnPct).toBe(1.25);
   });
 });

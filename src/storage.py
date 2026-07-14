@@ -298,6 +298,80 @@ class FundamentalSnapshot(Base):
         return f"<FundamentalSnapshot(query_id={self.query_id}, code={self.code})>"
 
 
+class StockSelectionFactorSnapshot(Base):
+    """Point-in-time factor row used for reproducible stock-selection replay."""
+
+    __tablename__ = 'stock_selection_factor_snapshots'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    market = Column(String(16), nullable=False, default='cn', index=True)
+    symbol = Column(String(16), nullable=False, index=True)
+    snapshot_date = Column(Date, nullable=False, index=True)
+    name = Column(String(100))
+    industry = Column(String(100))
+    price = Column(Float)
+    change_pct = Column(Float)
+    amount = Column(Float)
+    volume = Column(Float)
+    turnover_rate = Column(Float)
+    volume_ratio = Column(Float)
+    pe_ratio = Column(Float)
+    pb_ratio = Column(Float)
+    total_mv = Column(Float)
+    factors_json = Column(Text, nullable=False, default='{}')
+    source_json = Column(Text, nullable=False, default='{}')
+    quality_status = Column(String(32), nullable=False, default='unknown', index=True)
+    missing_fields_json = Column(Text, nullable=False, default='[]')
+    created_at = Column(DateTime, default=utc_naive_now, nullable=False, index=True)
+    updated_at = Column(DateTime, default=utc_naive_now, onupdate=utc_naive_now, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            'market',
+            'symbol',
+            'snapshot_date',
+            name='uix_stock_selection_factor_market_symbol_date',
+        ),
+        Index(
+            'ix_stock_selection_factor_market_date',
+            'market',
+            'snapshot_date',
+        ),
+    )
+
+
+class StockSelectionFactorIngestionJob(Base):
+    """Persistent checkpoint for full-market historical factor ingestion."""
+
+    __tablename__ = 'stock_selection_factor_ingestion_jobs'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    job_id = Column(String(64), nullable=False, unique=True, index=True)
+    market = Column(String(16), nullable=False, default='cn', index=True)
+    snapshot_dates_json = Column(Text, nullable=False, default='[]')
+    universe_json = Column(Text, nullable=False, default='[]')
+    universe_source = Column(String(64), nullable=False, default='tushare_stock_basic')
+    status = Column(String(32), nullable=False, default='pending', index=True)
+    batch_size = Column(Integer, nullable=False, default=25)
+    total_symbols = Column(Integer, nullable=False, default=0)
+    total_work_items = Column(Integer, nullable=False, default=0)
+    next_offset = Column(Integer, nullable=False, default=0)
+    completed_batches = Column(Integer, nullable=False, default=0)
+    row_count = Column(Integer, nullable=False, default=0)
+    inserted_count = Column(Integer, nullable=False, default=0)
+    updated_count = Column(Integer, nullable=False, default=0)
+    source_error_count = Column(Integer, nullable=False, default=0)
+    errors_json = Column(Text, nullable=False, default='[]')
+    result_json = Column(Text, nullable=False, default='{}')
+    task_id = Column(String(64), index=True)
+    error = Column(Text)
+    started_at = Column(DateTime)
+    heartbeat_at = Column(DateTime)
+    completed_at = Column(DateTime)
+    created_at = Column(DateTime, default=utc_naive_now, nullable=False, index=True)
+    updated_at = Column(DateTime, default=utc_naive_now, onupdate=utc_naive_now, nullable=False)
+
+
 class AnalysisHistory(Base):
     """
     分析结果历史记录模型

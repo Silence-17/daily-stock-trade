@@ -98,6 +98,33 @@ class TestTushareFetcherGetStockList(unittest.TestCase):
 
         self.assertIsNone(df)
 
+    def test_get_stock_lifecycle_list_combines_listing_statuses(self) -> None:
+        fetcher = self._make_fetcher()
+        fetcher._api.stock_basic.side_effect = [
+            pd.DataFrame({
+                "ts_code": ["600001.SH"], "symbol": ["600001"], "name": ["active"],
+                "industry": ["bank"], "market": ["main"], "exchange": ["SSE"],
+                "list_status": ["L"], "list_date": ["19910101"], "delist_date": [None],
+            }),
+            pd.DataFrame({
+                "ts_code": ["600002.SH"], "symbol": ["600002"], "name": ["delisted"],
+                "industry": ["trade"], "market": ["main"], "exchange": ["SSE"],
+                "list_status": ["D"], "list_date": ["20000101"], "delist_date": ["20240131"],
+            }),
+            pd.DataFrame(),
+        ]
+
+        with patch.object(fetcher, "_check_rate_limit"):
+            frame = fetcher.get_stock_lifecycle_list()
+
+        self.assertIsNotNone(frame)
+        assert frame is not None
+        self.assertEqual(frame["code"].tolist(), ["600001", "600002"])
+        self.assertEqual(
+            [call.kwargs["list_status"] for call in fetcher._api.stock_basic.call_args_list],
+            ["L", "D", "P"],
+        )
+
 
 class TestTushareFetcherFetchRawData(unittest.TestCase):
     """TushareFetcher._fetch_raw_data: API routing and error handling."""

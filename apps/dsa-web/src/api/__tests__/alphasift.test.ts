@@ -292,4 +292,188 @@ describe('alphasiftApi', () => {
     expect(result.result?.dailyEnrichCount).toBe(4);
     expect(result.result?.postAnalyzers).toEqual(['scorecard']);
   });
+
+  it('loads point-in-time replay compatibility', async () => {
+    get.mockResolvedValueOnce({
+      data: {
+        strategy: 'dual_low',
+        market: 'cn',
+        snapshot_date: '2024-01-05',
+        universe_count: 100,
+        hard_coverage_ratio: 0.98,
+        score_coverage_ratio: 0.9,
+      },
+    });
+
+    const result = await alphasiftApi.getReplayCompatibility({
+      strategy: 'dual_low',
+      market: 'cn',
+      snapshotDate: '2024-01-05',
+    });
+
+    expect(get).toHaveBeenCalledWith('/api/v1/alphasift/replay/compatibility', {
+      params: { strategy: 'dual_low', market: 'cn', snapshot_date: '2024-01-05' },
+    });
+    expect(result.hardCoverageRatio).toBe(0.98);
+  });
+
+  it('runs a point-in-time strategy replay', async () => {
+    post.mockResolvedValueOnce({
+      data: {
+        strategy: 'dual_low',
+        market: 'cn',
+        snapshot_date: '2024-01-05',
+        candidate_count: 1,
+        candidates: [{ symbol: '600519', screen_score: 88.5 }],
+      },
+    });
+
+    const result = await alphasiftApi.runReplay({
+      strategy: 'dual_low',
+      market: 'cn',
+      snapshotDate: '2024-01-05',
+      maxResults: 10,
+    });
+
+    expect(post).toHaveBeenCalledWith('/api/v1/alphasift/replay/run', {
+      strategy: 'dual_low',
+      market: 'cn',
+      snapshot_date: '2024-01-05',
+      max_results: 10,
+    });
+    expect(result.candidates[0].screenScore).toBe(88.5);
+  });
+
+  it('runs a cost-aware point-in-time portfolio backtest', async () => {
+    post.mockResolvedValueOnce({
+      data: {
+        strategy: 'dual_low',
+        market: 'cn',
+        snapshot_count: 2,
+        metrics: { total_return_pct: 8, excess_return_pct: 5 },
+        periods: [],
+      },
+    });
+
+    const result = await alphasiftApi.runPortfolioBacktest({
+      strategy: 'dual_low',
+      market: 'cn',
+      dateFrom: '2024-01-01',
+      dateTo: '2024-02-01',
+      topK: 5,
+      benchmarkSymbol: '000300',
+    });
+
+    expect(post).toHaveBeenCalledWith('/api/v1/alphasift/replay/portfolio-backtest', {
+      strategy: 'dual_low',
+      market: 'cn',
+      date_from: '2024-01-01',
+      date_to: '2024-02-01',
+      top_k: 5,
+      final_holding_bars: 20,
+      initial_capital: 100000,
+      commission_bps: 3,
+      slippage_bps: 5,
+      benchmark_symbol: '000300',
+      enforce_tradeability: true,
+      accounting_mode: 'cash_ledger',
+    });
+    expect(result.metrics.excessReturnPct).toBe(5);
+  });
+
+  it('resolves a dated A-share universe without current-list fallback', async () => {
+    get.mockResolvedValueOnce({
+      data: {
+        market: 'cn',
+        snapshot_date: '2024-01-05',
+        total_count: 5100,
+        returned_count: 5100,
+        truncated: false,
+        items: [],
+        methodology: { uses_current_universe_fallback: false },
+      },
+    });
+
+    const result = await alphasiftApi.resolveHistoricalUniverse({
+      market: 'cn',
+      snapshotDate: '2024-01-05',
+    });
+
+    expect(get).toHaveBeenCalledWith('/api/v1/alphasift/replay/universe', {
+      params: { market: 'cn', snapshot_date: '2024-01-05', limit: 6000 },
+    });
+    expect(result.totalCount).toBe(5100);
+    expect(result.methodology.usesCurrentUniverseFallback).toBe(false);
+  });
+
+  it('creates and resumes a checkpointed full-market ingestion job', async () => {
+    post
+      .mockResolvedValueOnce({ data: { job_id: 'full-job-1', status: 'pending', total_work_items: 5000 } })
+      .mockResolvedValueOnce({ data: { job_id: 'full-job-1', status: 'pending', next_offset: 50 } });
+
+    const created = await alphasiftApi.startFullMarketIngestion({
+      market: 'cn', snapshotDates: ['2024-01-05'], batchSize: 25,
+    });
+    const resumed = await alphasiftApi.resumeFullMarketIngestion('full-job-1');
+
+    expect(post).toHaveBeenNthCalledWith(1, '/api/v1/alphasift/replay/full-market-ingestion/jobs', {
+      market: 'cn', snapshot_dates: ['2024-01-05'], batch_size: 25,
+    });
+    expect(post).toHaveBeenNthCalledWith(
+      2,
+      '/api/v1/alphasift/replay/full-market-ingestion/jobs/full-job-1/resume',
+      undefined,
+      { params: { force: false } },
+    );
+    expect(created.totalWorkItems).toBe(5000);
+    expect(resumed.nextOffset).toBe(50);
+  });
+
+  it('lists persisted full-market ingestion jobs', async () => {
+    get.mockResolvedValueOnce({
+      data: { items: [{ job_id: 'full-job-1', status: 'failed' }], limit: 1 },
+    });
+
+    const result = await alphasiftApi.listFullMarketIngestions(1);
+
+    expect(get).toHaveBeenCalledWith(
+      '/api/v1/alphasift/replay/full-market-ingestion/jobs',
+      { params: { limit: 1 } },
+    );
+    expect(result.items[0].jobId).toBe('full-job-1');
+  });
+
+  it('starts and checks a historical factor ingestion task', async () => {
+    post.mockResolvedValueOnce({
+      data: {
+        task_id: 'factor-task-1',
+        trace_id: 'factor-task-1',
+        status: 'pending',
+        snapshot_count: 1,
+        symbol_count: 1,
+      },
+    });
+    get.mockResolvedValueOnce({
+      data: {
+        task_id: 'factor-task-1',
+        status: 'completed',
+        result: { row_count: 1, error_count: 0 },
+      },
+    });
+
+    const accepted = await alphasiftApi.startFactorIngestion({
+      market: 'cn',
+      snapshotDates: ['2024-01-05'],
+      universe: [{ symbol: '600519', name: '贵州茅台' }],
+    });
+    const task = await alphasiftApi.getFactorIngestionTask(accepted.taskId);
+
+    expect(post).toHaveBeenCalledWith('/api/v1/alphasift/replay/ingestion/tasks', {
+      market: 'cn',
+      snapshot_dates: ['2024-01-05'],
+      universe: [{ symbol: '600519', name: '贵州茅台' }],
+    });
+    expect(get).toHaveBeenCalledWith('/api/v1/alphasift/replay/ingestion/tasks/factor-task-1');
+    expect(task.result?.rowCount).toBe(1);
+  });
 });

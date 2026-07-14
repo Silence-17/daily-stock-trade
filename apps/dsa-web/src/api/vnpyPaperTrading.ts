@@ -702,6 +702,18 @@ export type VnpyPaperAgentDataQualityTrends = {
   latestQuality?: string | null;
   warningCounts: Record<string, number>;
   sourceErrorCounts: Record<string, number>;
+  sourceHealthItems?: Array<{
+    key: string;
+    group: string;
+    source: string;
+    observationCount: number;
+    degradedObservationCount: number;
+    degradedRatePct: number;
+    maxFailures: number;
+    latestStatus: string;
+    latestFailures: number;
+    lastObservedAt?: string | null;
+  }>;
   truncated: boolean;
   daily: VnpyPaperAgentDataQualityDailyItem[];
   filters?: Record<string, unknown>;
@@ -714,6 +726,51 @@ export type VnpyPaperAgentRunFilters = {
   status?: string;
   createdFrom?: string;
   createdTo?: string;
+};
+
+export type VnpyPaperAgentBacktestRequest = {
+  strategy?: string;
+  market?: string;
+  createdFrom?: string;
+  createdTo?: string;
+  evalWindows?: number[];
+  includeSkipped?: boolean;
+  maxDecisions?: number;
+  refreshMissing?: boolean;
+  neutralBandPct?: number;
+};
+
+export type VnpyPaperAgentBacktestMetric = {
+  evalWindowDays: number;
+  sampleCount: number;
+  completedCount: number;
+  insufficientCount: number;
+  coveragePct?: number | null;
+  winCount: number;
+  lossCount: number;
+  neutralCount: number;
+  winRatePct?: number | null;
+  directionAccuracyPct?: number | null;
+  averageReturnPct?: number | null;
+  medianReturnPct?: number | null;
+  averageMaxFavorableExcursionPct?: number | null;
+  averageMaxAdverseExcursionPct?: number | null;
+  neutralBandPct: number;
+  unableReasonCounts: Record<string, number>;
+};
+
+export type VnpyPaperAgentBacktestResponse = {
+  generatedAt: string;
+  methodology: Record<string, unknown>;
+  filters: Record<string, unknown>;
+  total: number;
+  scannedCount: number;
+  truncated: boolean;
+  refreshAttemptedCount: number;
+  statusCounts: Record<string, number>;
+  matrix: Record<string, VnpyPaperAgentBacktestMetric>;
+  strategyMatrix: Record<string, Record<string, VnpyPaperAgentBacktestMetric>>;
+  items: Array<Record<string, unknown>>;
 };
 
 export type VnpyPaperAgentRunExportResponse = {
@@ -1321,6 +1378,26 @@ export const vnpyPaperTradingApi = {
       { params },
     );
     return toCamelCase<VnpyPaperAgentDataQualityTrends>(response.data);
+  },
+
+  async runAgentBacktest(
+    payload: VnpyPaperAgentBacktestRequest = {},
+  ): Promise<VnpyPaperAgentBacktestResponse> {
+    const response = await apiClient.post<Record<string, unknown>>(
+      '/api/v1/vnpy-paper/agent-runs/backtest',
+      {
+        strategy: payload.strategy || null,
+        market: payload.market || null,
+        created_from: payload.createdFrom || null,
+        created_to: payload.createdTo || null,
+        eval_windows: payload.evalWindows ?? [1, 5, 10, 20],
+        include_skipped: payload.includeSkipped ?? true,
+        max_decisions: payload.maxDecisions ?? 500,
+        refresh_missing: payload.refreshMissing ?? false,
+        neutral_band_pct: payload.neutralBandPct ?? 2,
+      },
+    );
+    return toCamelCase<VnpyPaperAgentBacktestResponse>(response.data);
   },
 
   async generateAgentRunRecap(

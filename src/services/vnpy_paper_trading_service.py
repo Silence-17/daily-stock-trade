@@ -83,7 +83,7 @@ ALPHASIFT_FALLBACK_STRATEGIES = (
     "volume_breakout",
 )
 ALLOWED_AUTO_MARKETS = {"cn", "hk", "us", "jp", "kr", "tw"}
-LLM_DYNAMIC_AGENT_PLAN_PROMPT_VERSION = "vnpy_paper_dynamic_agent_plan_v1"
+LLM_DYNAMIC_AGENT_PLAN_PROMPT_VERSION = "vnpy_paper_dynamic_agent_plan_v2"
 LLM_DYNAMIC_AGENT_PLAN_EVALUATOR_VERSION = "dynamic_plan_guardrails_v1"
 LLM_PRE_TRADE_REVIEW_PROMPT_VERSION = "vnpy_paper_pre_trade_review_v1"
 LLM_PRE_TRADE_REVIEW_EVALUATOR_VERSION = "pre_trade_fail_closed_v1"
@@ -559,12 +559,34 @@ class VnpyPaperTradingService:
             "vnpy_sync_state": self._vnpy_sync_state_summary(),
             "trading_window": self._trading_window_diagnostics(settings),
             "failure_fuse": self._failure_fuse_status(settings),
+            "account_drawdown": self._account_drawdown_diagnostics(
+                settings=settings,
+                account=account,
+                snapshot=None,
+                requested=include_snapshot,
+                update_peak=False,
+            ),
+            "industry_exposure": self._industry_exposure_diagnostics(
+                settings=settings,
+                snapshot=None,
+                evaluated=False,
+                requested=include_snapshot,
+            ),
         }
         if ensure_account:
             account = self.ensure_account(settings=settings)
             settings = replace(settings, account_id=int(account["id"]))
         elif settings.account_id is not None:
             account = self._find_account(settings.account_id)
+
+        if not include_snapshot:
+            diagnostics["account_drawdown"] = self._account_drawdown_diagnostics(
+                settings=settings,
+                account=account,
+                snapshot=None,
+                requested=False,
+                update_peak=False,
+            )
 
         if account is not None:
             account_id = int(account["id"])
@@ -573,6 +595,19 @@ class VnpyPaperTradingService:
                     snapshot, cache_hit = self._get_cached_status_snapshot(account_id)
                     diagnostics["snapshot_loaded"] = snapshot is not None
                     diagnostics["snapshot_cache_hit"] = cache_hit
+                    diagnostics["industry_exposure"] = self._industry_exposure_diagnostics(
+                        settings=settings,
+                        snapshot=snapshot,
+                        evaluated=snapshot is not None,
+                        requested=True,
+                    )
+                    diagnostics["account_drawdown"] = self._account_drawdown_diagnostics(
+                        settings=settings,
+                        account=account,
+                        snapshot=snapshot,
+                        requested=True,
+                        update_peak=True,
+                    )
                 except Exception as exc:  # noqa: BLE001 - status must remain readable.
                     logger.warning("Failed to build vn.py paper snapshot: %s", exc)
                     diagnostics["snapshot_error"] = str(exc)
@@ -2087,11 +2122,13 @@ class VnpyPaperTradingService:
         if ignore_auto_trade_enabled:
             settings = replace(settings, auto_trade_enabled=True)
         run_uid = f"ss-agent-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:8]}"
+        recent_run_context = self._recent_agent_run_context(settings)
         llm_dynamic_plan = self._generate_llm_dynamic_agent_plan(
             settings=settings,
             run_uid=run_uid,
             execution_mode_override=override_mode or None,
             ignore_auto_trade_enabled=bool(ignore_auto_trade_enabled),
+            recent_run_context=recent_run_context,
         )
         settings = self._apply_llm_dynamic_agent_plan(settings, llm_dynamic_plan)
         run_diagnostics = {
@@ -2104,6 +2141,7 @@ class VnpyPaperTradingService:
                 execution_mode_override=override_mode or None,
                 ignore_auto_trade_enabled=bool(ignore_auto_trade_enabled),
                 llm_dynamic_plan=llm_dynamic_plan,
+                recent_run_context=recent_run_context,
             ),
             "llm_dynamic_plan": llm_dynamic_plan,
         }
@@ -2376,6 +2414,7 @@ class VnpyPaperTradingService:
         daily_cash_used = float(daily_usage["cash_amount"])
         daily_usage_fx_unavailable = bool(daily_usage.get("fx_unavailable"))
         account_risk_reason, account_risk_diagnostics = self._account_pre_trade_risk(settings)
+        run_diagnostics["account_risk"] = account_risk_diagnostics
         market_risk_reason = self._market_light_pre_trade_risk_reason(settings)
         if account_risk_reason:
             self._record_auto_trade_alert_event(
@@ -2556,7 +2595,8 @@ class VnpyPaperTradingService:
                     risk_flags=["score_below_threshold"],
                 )
                 continue
-            if settings.auto_skip_existing_positions and symbol in held_symbols:
+            has_position_target = symbol in dict(settings.auto_target_position_weights or {})
+            if settings.auto_skip_existing_positions and symbol in held_symbols and not has_position_target:
                 order = self._skipped_order(symbol=symbol, side="buy", reason="position_exists", raw=candidate)
                 orders.append(order)
                 self._record_agent_decision(
@@ -2592,7 +2632,11 @@ class VnpyPaperTradingService:
                     risk_flags=["active_vnpy_order_exists"],
                 )
                 continue
-            if settings.auto_max_positions > 0 and len(held_symbols) >= settings.auto_max_positions:
+            if (
+                settings.auto_max_positions > 0
+                and symbol not in held_symbols
+                and len(held_symbols) >= settings.auto_max_positions
+            ):
                 order = self._skipped_order(symbol=symbol, side="buy", reason="max_positions_reached", raw=candidate)
                 orders.append(order)
                 self._record_agent_decision(
@@ -2607,19 +2651,85 @@ class VnpyPaperTradingService:
                     risk_flags=["max_positions_reached"],
                 )
                 continue
+            target_budget, target_sizing, target_budget_reason = self._target_weight_buy_budget(
+                settings=settings,
+                exposure_state=exposure_state,
+                symbol=symbol,
+                candidate=candidate,
+                configured_base_amount=float(settings.auto_cash_per_order),
+            )
+            if target_budget_reason:
+                order = self._skipped_order(
+                    symbol=symbol,
+                    side="buy",
+                    reason=target_budget_reason,
+                    raw={**candidate, "target_weight_sizing": target_sizing},
+                )
+                orders.append(order)
+                self._record_agent_decision(
+                    run_id=run_id,
+                    sequence=index,
+                    candidate=candidate,
+                    symbol=symbol,
+                    settings=settings,
+                    action="skip",
+                    order=order,
+                    reason=target_budget_reason,
+                    risk_flags=[target_budget_reason],
+                )
+                continue
+            candidate_currency_budget = self._scaled_currency_budget(
+                currency_budget,
+                base_cash_amount=target_budget,
+            )
+            candidate_price = _safe_float(candidate.get("price"))
+            target_budget, candidate_currency_budget, target_lot_reason = (
+                self._executable_target_weight_budget(
+                    settings=settings,
+                    budget=candidate_currency_budget,
+                    sizing=target_sizing,
+                    price=candidate_price,
+                )
+            )
+            if target_lot_reason:
+                order = self._skipped_order(
+                    symbol=symbol,
+                    side="buy",
+                    price=candidate_price,
+                    reason=target_lot_reason,
+                    raw={
+                        **candidate,
+                        "fx_conversion": candidate_currency_budget,
+                        "target_weight_sizing": target_sizing,
+                    },
+                )
+                self._annotate_order_currency_budget(order, candidate_currency_budget)
+                orders.append(order)
+                self._record_agent_decision(
+                    run_id=run_id,
+                    sequence=index,
+                    candidate=candidate,
+                    symbol=symbol,
+                    settings=settings,
+                    action="skip",
+                    order=order,
+                    reason=target_lot_reason,
+                    risk_flags=[target_lot_reason],
+                )
+                continue
             exposure_limit_reason = self._position_exposure_limit_reason(
                 settings=settings,
                 exposure_state=exposure_state,
                 symbol=symbol,
                 candidate=candidate,
-                next_cash_amount=settings.auto_cash_per_order,
+                next_cash_amount=target_budget,
             )
             if exposure_limit_reason:
                 order = self._skipped_order(
                     symbol=symbol,
                     side="buy",
                     reason=exposure_limit_reason,
-                    raw=candidate,
+                    raw={**candidate, "target_weight_sizing": target_sizing},
                 )
                 orders.append(order)
                 self._record_agent_decision(
@@ -2638,10 +2748,15 @@ class VnpyPaperTradingService:
                 settings=settings,
                 order_count=daily_order_count,
                 cash_used=daily_cash_used,
-                next_cash_amount=settings.auto_cash_per_order,
+                next_cash_amount=target_budget,
             )
             if daily_limit_reason:
-                order = self._skipped_order(symbol=symbol, side="buy", reason=daily_limit_reason, raw=candidate)
+                order = self._skipped_order(
+                    symbol=symbol,
+                    side="buy",
+                    reason=daily_limit_reason,
+                    raw={**candidate, "target_weight_sizing": target_sizing},
+                )
                 orders.append(order)
                 self._record_agent_decision(
                     run_id=run_id,
@@ -2679,17 +2794,20 @@ class VnpyPaperTradingService:
                     risk_flags=[llm_reason],
                 )
                 continue
-            candidate_price = _safe_float(candidate.get("price"))
             dedup_key = f"{date.today().isoformat()}:{settings.auto_strategy}:{settings.auto_market}:{symbol}"
             if settings.auto_execution_mode in {"dry_run", "manual_approval"}:
                 plan_reason = "pending_approval" if settings.auto_execution_mode == "manual_approval" else "dry_run"
                 order = self._planned_order(
                     symbol=symbol,
                     market=settings.auto_market,
-                    cash_amount=float(currency_budget["quote_cash_amount"]),
+                    cash_amount=float(candidate_currency_budget["quote_cash_amount"]),
                     price=candidate_price,
                     reason=plan_reason,
-                    raw={**candidate, "fx_conversion": currency_budget},
+                    raw={
+                        **candidate,
+                        "fx_conversion": candidate_currency_budget,
+                        "target_weight_sizing": target_sizing,
+                    },
                 )
             else:
                 execution_route = "vnpy_bridge" if settings.auto_execution_mode == "vnpy_paper" else "local_paper"
@@ -2697,15 +2815,19 @@ class VnpyPaperTradingService:
                     symbol=symbol,
                     side="buy",
                     market=settings.auto_market,
-                    cash_amount=float(currency_budget["quote_cash_amount"]),
+                    cash_amount=float(candidate_currency_budget["quote_cash_amount"]),
                     price=candidate_price,
                     source="alphasift_auto",
                     dedup_key=dedup_key,
                     note=f"AlphaSift {settings.auto_strategy}",
-                    raw={**candidate, "fx_conversion": currency_budget},
+                    raw={
+                        **candidate,
+                        "fx_conversion": candidate_currency_budget,
+                        "target_weight_sizing": target_sizing,
+                    },
                     execution_route=execution_route,
                 )
-            self._annotate_order_currency_budget(order, currency_budget)
+            self._annotate_order_currency_budget(order, candidate_currency_budget)
             if llm_review is not None:
                 order["llm_review"] = llm_review
             orders.append(order)
@@ -4314,6 +4436,78 @@ class VnpyPaperTradingService:
         }
 
     @staticmethod
+    def _scaled_currency_budget(
+        budget: Dict[str, Any],
+        *,
+        base_cash_amount: float,
+    ) -> Dict[str, Any]:
+        scaled = dict(budget)
+        base_amount = max(0.0, float(base_cash_amount or 0.0))
+        base_currency = str(budget.get("base_currency") or "").strip().upper()
+        quote_currency = str(budget.get("quote_currency") or "").strip().upper()
+        rate = _safe_float(budget.get("rate"))
+        quote_amount = base_amount
+        if base_currency != quote_currency:
+            quote_amount = base_amount * float(rate or 0.0)
+        scaled["base_cash_amount"] = round(base_amount, 6)
+        scaled["quote_cash_amount"] = round(quote_amount, 6)
+        return scaled
+
+    def _executable_target_weight_budget(
+        self,
+        *,
+        settings: VnpyPaperSettings,
+        budget: Dict[str, Any],
+        sizing: Dict[str, Any],
+        price: Optional[float],
+    ) -> Tuple[float, Dict[str, Any], Optional[str]]:
+        base_amount = _safe_float(budget.get("base_cash_amount")) or 0.0
+        if not sizing.get("adjusted") or price is None or price <= 0:
+            return base_amount, budget, None
+
+        quote_amount = _safe_float(budget.get("quote_cash_amount")) or 0.0
+        quantity = self._resolve_order_quantity(
+            market=settings.auto_market,
+            side="buy",
+            quantity=None,
+            cash_amount=quote_amount,
+            price=price,
+        )
+        if quantity <= 0:
+            sizing.update(
+                {
+                    "executable_quantity": 0.0,
+                    "executable_quote_amount": 0.0,
+                    "executable_base_amount": 0.0,
+                    "lot_adjusted": True,
+                }
+            )
+            return 0.0, budget, "target_weight_below_min_lot"
+
+        executable_quote = quantity * price
+        base_currency = str(budget.get("base_currency") or "").strip().upper()
+        quote_currency = str(budget.get("quote_currency") or "").strip().upper()
+        rate = _safe_float(budget.get("rate"))
+        if base_currency == quote_currency:
+            executable_base = executable_quote
+        elif rate is None or rate <= 0:
+            return 0.0, budget, "fx_rate_unavailable"
+        else:
+            executable_base = executable_quote / rate
+        executable_budget = dict(budget)
+        executable_budget["base_cash_amount"] = round(executable_base, 6)
+        executable_budget["quote_cash_amount"] = round(executable_quote, 6)
+        sizing.update(
+            {
+                "executable_quantity": round(quantity, 6),
+                "executable_quote_amount": round(executable_quote, 6),
+                "executable_base_amount": round(executable_base, 6),
+                "lot_adjusted": executable_base + PAPER_EPS < base_amount,
+            }
+        )
+        return executable_base, executable_budget, None
+
+    @staticmethod
     def _annotate_order_currency_budget(order: Dict[str, Any], budget: Dict[str, Any]) -> None:
         order["cash_amount_base"] = budget.get("base_cash_amount")
         order["cash_amount_quote"] = order.get("cash_amount")
@@ -4362,6 +4556,7 @@ class VnpyPaperTradingService:
         execution_mode_override: Optional[str],
         ignore_auto_trade_enabled: bool,
         llm_dynamic_plan: Optional[Dict[str, Any]] = None,
+        recent_run_context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         configured_layers = self._agent_plan_configured_layers(settings)
         execution_policy = self._agent_plan_execution_policy(settings)
@@ -4455,6 +4650,7 @@ class VnpyPaperTradingService:
                 "acceptable_data_quality": ["ok", "partial"],
             },
             "llm_dynamic_plan": llm_dynamic_plan,
+            "recent_run_context": recent_run_context or self._recent_agent_run_context(settings),
             "adaptive_controls": {
                 "risk_level": risk_level,
                 "configured_layers": configured_layers,
@@ -4502,6 +4698,78 @@ class VnpyPaperTradingService:
                 "agent_review",
                 "llm_review",
             ],
+        }
+
+    def _recent_agent_run_context(
+        self,
+        settings: VnpyPaperSettings,
+        *,
+        limit: int = 5,
+    ) -> Dict[str, Any]:
+        recent = self.agent_repo.list_recent_runs(
+            trigger_source="vnpy_paper_auto",
+            strategy=settings.auto_strategy,
+            market=settings.auto_market,
+            limit=limit,
+        )
+        status_counts: Counter[str] = Counter()
+        quality_counts: Counter[str] = Counter()
+        candidate_count = 0
+        planned_count = 0
+        submitted_count = 0
+        skipped_count = 0
+        failure_streak = 0
+        compact_runs: List[Dict[str, Any]] = []
+        for index, item in enumerate(recent):
+            status = str(item.get("status") or "unknown").strip().lower() or "unknown"
+            status_counts[status] += 1
+            if index == failure_streak and status == "failed":
+                failure_streak += 1
+            diagnostics = item.get("diagnostics") if isinstance(item.get("diagnostics"), dict) else {}
+            data_quality = diagnostics.get("data_quality") if isinstance(diagnostics.get("data_quality"), dict) else {}
+            quality = str(data_quality.get("status") or "unknown").strip().lower() or "unknown"
+            quality_counts[quality] += 1
+            item_candidates = int(item.get("candidate_count") or 0)
+            item_planned = int(item.get("planned_count") or 0)
+            item_submitted = int(item.get("submitted_count") or 0)
+            item_skipped = int(item.get("skipped_count") or 0)
+            candidate_count += item_candidates
+            planned_count += item_planned
+            submitted_count += item_submitted
+            skipped_count += item_skipped
+            compact_runs.append({
+                "run_uid": item.get("run_uid"),
+                "created_at": item.get("created_at"),
+                "status": status,
+                "data_quality": quality,
+                "candidate_count": item_candidates,
+                "planned_count": item_planned,
+                "submitted_count": item_submitted,
+                "skipped_count": item_skipped,
+                "error": str(item.get("error") or "")[:160] or None,
+            })
+        return {
+            "schema_version": 1,
+            "scope": "same_trigger_strategy_market",
+            "strategy": settings.auto_strategy,
+            "market": settings.auto_market,
+            "limit": limit,
+            "run_count": len(recent),
+            "status_counts": dict(sorted(status_counts.items())),
+            "data_quality_counts": dict(sorted(quality_counts.items())),
+            "candidate_count": candidate_count,
+            "planned_count": planned_count,
+            "submitted_count": submitted_count,
+            "skipped_count": skipped_count,
+            "submission_rate_pct": (
+                round(submitted_count / candidate_count * 100.0, 2)
+                if candidate_count > 0
+                else None
+            ),
+            "current_failure_streak": failure_streak,
+            "latest_run_uid": compact_runs[0]["run_uid"] if compact_runs else None,
+            "latest_status": compact_runs[0]["status"] if compact_runs else None,
+            "runs": compact_runs,
         }
 
     @staticmethod
@@ -4693,6 +4961,7 @@ class VnpyPaperTradingService:
         run_uid: str,
         execution_mode_override: Optional[str],
         ignore_auto_trade_enabled: bool,
+        recent_run_context: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict[str, Any]]:
         if not settings.auto_llm_plan_enabled or not settings.auto_trade_enabled:
             return None
@@ -4727,6 +4996,7 @@ class VnpyPaperTradingService:
                 run_uid=run_uid,
                 strategy_options=strategy_options,
                 strategy_warnings=strategy_warnings,
+                recent_run_context=recent_run_context,
             )
             system_prompt, prompt = self._llm_dynamic_agent_plan_prompts(prompt_payload)
 
@@ -4843,13 +5113,9 @@ class VnpyPaperTradingService:
         run_uid: str,
         strategy_options: List[Dict[str, Any]],
         strategy_warnings: List[str],
+        recent_run_context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        recent = self.agent_repo.list_recent_runs(
-            trigger_source="vnpy_paper_auto",
-            strategy=settings.auto_strategy,
-            market=settings.auto_market,
-            limit=5,
-        )
+        context = recent_run_context or self._recent_agent_run_context(settings)
         return {
             "run": {
                 "run_uid": run_uid,
@@ -4878,18 +5144,7 @@ class VnpyPaperTradingService:
             },
             "strategy_options": strategy_options[:20],
             "strategy_warnings": strategy_warnings,
-            "recent_runs": [
-                {
-                    "run_uid": item.get("run_uid"),
-                    "status": item.get("status"),
-                    "candidate_count": item.get("candidate_count"),
-                    "planned_count": item.get("planned_count"),
-                    "submitted_count": item.get("submitted_count"),
-                    "skipped_count": item.get("skipped_count"),
-                    "error": item.get("error"),
-                }
-                for item in recent
-            ],
+            "recent_run_context": context,
             "output_contract": {
                 "schema_version": 1,
                 "prompt_version": LLM_DYNAMIC_AGENT_PLAN_PROMPT_VERSION,
@@ -5688,6 +5943,99 @@ class VnpyPaperTradingService:
         )
         return state
 
+    def _industry_exposure_diagnostics(
+        self,
+        *,
+        settings: VnpyPaperSettings,
+        snapshot: Optional[Dict[str, Any]],
+        evaluated: bool,
+        requested: bool = True,
+    ) -> Dict[str, Any]:
+        configured = self._industry_exposure_configured(settings) or bool(
+            settings.auto_target_industry_weights
+        )
+        result: Dict[str, Any] = {
+            "evaluated": evaluated,
+            "configured": configured,
+            "status": (
+                "snapshot_not_requested"
+                if not evaluated and not requested
+                else "snapshot_unavailable"
+                if not evaluated
+                else "no_positions"
+            ),
+            "position_count": 0,
+            "resolved_position_count": 0,
+            "missing_position_count": 0,
+            "coverage_pct": None,
+            "industry_count": 0,
+            "industry_values": {},
+            "missing_symbols": [],
+            "resolution_mode": "risk_guard" if configured else "snapshot_only",
+        }
+        if not evaluated or not isinstance(snapshot, dict):
+            return result
+
+        accounts = snapshot.get("accounts")
+        account_payloads = accounts if isinstance(accounts, list) else [snapshot]
+        industry_values: Dict[str, float] = {}
+        missing_symbols: List[str] = []
+        position_count = 0
+        resolved_count = 0
+        for account in account_payloads:
+            if not isinstance(account, dict):
+                continue
+            positions = account.get("positions")
+            if not isinstance(positions, list):
+                continue
+            for position in positions:
+                if not isinstance(position, dict):
+                    continue
+                symbol = self._normalize_symbol(position.get("symbol"))
+                quantity = _safe_float(position.get("quantity"))
+                if not symbol or quantity is None or quantity <= 0:
+                    continue
+                position_count += 1
+                industry = self._industry_name_from_mapping(position)
+                if not industry and configured:
+                    industry = self._fetch_symbol_primary_industry(
+                        symbol,
+                        market=str(position.get("market") or settings.auto_market),
+                    )
+                if not industry:
+                    missing_symbols.append(symbol)
+                    continue
+                resolved_count += 1
+                market_value = self._position_market_value(position)
+                industry_values[industry] = industry_values.get(industry, 0.0) + market_value
+
+        missing_count = position_count - resolved_count
+        result.update(
+            {
+                "status": (
+                    "no_positions"
+                    if position_count == 0
+                    else "complete"
+                    if missing_count == 0
+                    else "partial"
+                ),
+                "position_count": position_count,
+                "resolved_position_count": resolved_count,
+                "missing_position_count": missing_count,
+                "coverage_pct": (
+                    round(resolved_count / position_count * 100.0, 2)
+                    if position_count > 0
+                    else None
+                ),
+                "industry_count": len(industry_values),
+                "industry_values": dict(
+                    sorted(industry_values.items(), key=lambda item: (-item[1], item[0]))
+                ),
+                "missing_symbols": sorted(set(missing_symbols))[:20],
+            }
+        )
+        return result
+
     @staticmethod
     def _position_market_value(position: Dict[str, Any]) -> float:
         quantity = _safe_float(position.get("quantity")) or 0.0
@@ -5790,6 +6138,92 @@ class VnpyPaperTradingService:
                 if current_industry_value + next_amount > target_value + 1e-8:
                     return "target_industry_weight_limit_reached"
         return None
+
+    def _target_weight_buy_budget(
+        self,
+        *,
+        settings: VnpyPaperSettings,
+        exposure_state: Dict[str, Any],
+        symbol: str,
+        candidate: Dict[str, Any],
+        configured_base_amount: float,
+    ) -> Tuple[float, Dict[str, Any], Optional[str]]:
+        configured_amount = max(0.0, float(configured_base_amount or 0.0))
+        position_targets = dict(settings.auto_target_position_weights or {})
+        industry_targets = dict(settings.auto_target_industry_weights or {})
+        diagnostics: Dict[str, Any] = {
+            "method": "target_weight_gap_cap",
+            "configured_base_amount": round(configured_amount, 6),
+            "resolved_base_amount": round(configured_amount, 6),
+            "adjusted": False,
+            "constraints": [],
+        }
+        if symbol not in position_targets and not industry_targets:
+            return configured_amount, diagnostics, None
+        if not exposure_state.get("available", True):
+            return 0.0, diagnostics, "position_exposure_unavailable"
+
+        total_equity = _safe_float(exposure_state.get("total_equity"))
+        amount = configured_amount
+        reached_reason: Optional[str] = None
+        position_values = exposure_state.get("position_values")
+        if not isinstance(position_values, dict):
+            position_values = {}
+        if symbol in position_targets:
+            if total_equity is None or total_equity <= 0:
+                return 0.0, diagnostics, "position_exposure_unavailable"
+            target_weight = float(position_targets[symbol])
+            target_value = total_equity * target_weight / 100.0
+            current_value = _safe_float(position_values.get(symbol)) or 0.0
+            remaining = max(0.0, target_value - current_value)
+            diagnostics["constraints"].append({
+                "type": "position_target",
+                "key": symbol,
+                "target_weight_pct": target_weight,
+                "target_value": round(target_value, 6),
+                "current_value": round(current_value, 6),
+                "remaining_value": round(remaining, 6),
+            })
+            amount = min(amount, remaining)
+            if remaining <= PAPER_EPS:
+                reached_reason = "target_position_weight_reached"
+
+        if industry_targets:
+            if not exposure_state.get("industry_available", True):
+                return 0.0, diagnostics, "industry_exposure_unavailable"
+            industry = self._candidate_primary_industry(candidate)
+            if not industry:
+                industry = self._fetch_symbol_primary_industry(symbol, market=settings.auto_market)
+            if not industry:
+                return 0.0, diagnostics, "industry_exposure_unavailable"
+            diagnostics["industry"] = industry
+            if industry in industry_targets:
+                if total_equity is None or total_equity <= 0:
+                    return 0.0, diagnostics, "position_exposure_unavailable"
+                industry_values = exposure_state.get("industry_values")
+                if not isinstance(industry_values, dict):
+                    industry_values = {}
+                target_weight = float(industry_targets[industry])
+                target_value = total_equity * target_weight / 100.0
+                current_value = _safe_float(industry_values.get(industry)) or 0.0
+                remaining = max(0.0, target_value - current_value)
+                diagnostics["constraints"].append({
+                    "type": "industry_target",
+                    "key": industry,
+                    "target_weight_pct": target_weight,
+                    "target_value": round(target_value, 6),
+                    "current_value": round(current_value, 6),
+                    "remaining_value": round(remaining, 6),
+                })
+                amount = min(amount, remaining)
+                if remaining <= PAPER_EPS and reached_reason is None:
+                    reached_reason = "target_industry_weight_reached"
+
+        diagnostics["resolved_base_amount"] = round(amount, 6)
+        diagnostics["adjusted"] = amount + PAPER_EPS < configured_amount
+        if amount <= PAPER_EPS:
+            return 0.0, diagnostics, reached_reason or "target_weight_reached"
+        return amount, diagnostics, None
 
     def _apply_planned_exposure(
         self,
@@ -6643,24 +7077,110 @@ class VnpyPaperTradingService:
                 return "cash_low_watermark", diagnostics
 
         if settings.auto_max_drawdown_pct is not None:
-            initial_cash = _safe_float(settings.initial_cash)
-            equity = _safe_float(account_snapshot.get("total_equity"))
-            if equity is None:
-                equity = _safe_float(snapshot.get("total_equity"))
-            diagnostics["initial_cash"] = initial_cash
-            diagnostics["equity"] = equity
-            if initial_cash is None or initial_cash <= 0 or equity is None:
+            drawdown = self._account_drawdown_diagnostics(
+                settings=settings,
+                account=account,
+                snapshot=snapshot,
+                requested=True,
+                update_peak=True,
+            )
+            diagnostics.update(drawdown)
+            if drawdown.get("status") == "unavailable":
                 diagnostics["observed_value"] = None
                 diagnostics["threshold"] = settings.auto_max_drawdown_pct
                 return "account_risk_unavailable", diagnostics
-            drawdown_pct = max(0.0, (initial_cash - equity) / initial_cash * 100.0)
-            diagnostics["drawdown_pct"] = drawdown_pct
+            drawdown_pct = _safe_float(drawdown.get("drawdown_pct")) or 0.0
             if drawdown_pct >= settings.auto_max_drawdown_pct:
                 diagnostics["observed_value"] = drawdown_pct
                 diagnostics["threshold"] = settings.auto_max_drawdown_pct
                 return "account_drawdown_limit_reached", diagnostics
 
         return None, diagnostics
+
+    def _account_drawdown_diagnostics(
+        self,
+        *,
+        settings: VnpyPaperSettings,
+        account: Optional[Dict[str, Any]],
+        snapshot: Optional[Dict[str, Any]],
+        requested: bool,
+        update_peak: bool,
+    ) -> Dict[str, Any]:
+        configured = settings.auto_max_drawdown_pct is not None
+        account_id = _safe_int(account.get("id")) if isinstance(account, dict) else _safe_int(settings.account_id)
+        result: Dict[str, Any] = {
+            "configured": configured,
+            "status": "disabled" if not configured else "snapshot_not_requested",
+            "basis": "observed_equity_peak",
+            "account_id": account_id,
+            "initial_cash": _safe_float(settings.initial_cash),
+            "equity": None,
+            "peak_equity": None,
+            "drawdown_pct": None,
+            "threshold_pct": settings.auto_max_drawdown_pct,
+        }
+        if not configured:
+            return result
+        if not requested:
+            return result
+        if account_id is None or not isinstance(snapshot, dict):
+            result["status"] = "unavailable"
+            return result
+
+        accounts = snapshot.get("accounts") or []
+        account_snapshot = accounts[0] if accounts and isinstance(accounts[0], dict) else snapshot
+        equity = _safe_float(account_snapshot.get("total_equity"))
+        if equity is None:
+            equity = _safe_float(snapshot.get("total_equity"))
+        initial_cash = _safe_float(settings.initial_cash)
+        if equity is None or initial_cash is None or initial_cash <= 0:
+            result["status"] = "unavailable"
+            result["equity"] = equity
+            return result
+
+        peak_equity = self._resolve_account_equity_peak(
+            account_id=account_id,
+            initial_cash=initial_cash,
+            equity=equity,
+            update=update_peak,
+        )
+        drawdown_pct = max(0.0, (peak_equity - equity) / peak_equity * 100.0)
+        result.update(
+            {
+                "status": (
+                    "limit_reached"
+                    if drawdown_pct >= float(settings.auto_max_drawdown_pct or 0.0)
+                    else "ready"
+                ),
+                "equity": equity,
+                "peak_equity": peak_equity,
+                "drawdown_pct": round(drawdown_pct, 6),
+            }
+        )
+        return result
+
+    def _resolve_account_equity_peak(
+        self,
+        *,
+        account_id: int,
+        initial_cash: float,
+        equity: float,
+        update: bool,
+    ) -> float:
+        with self._lock:
+            payload = self._read_config_payload()
+            peaks = payload.get("auto_account_equity_peaks") if isinstance(payload, dict) else None
+            peak_map = dict(peaks) if isinstance(peaks, dict) else {}
+            stored_peak = _safe_float(peak_map.get(str(account_id)))
+            peak = max(initial_cash, equity, stored_peak or 0.0)
+            if update and (stored_peak is None or peak > stored_peak + 1e-8):
+                if not isinstance(payload, dict):
+                    payload = {}
+                peak_map[str(account_id)] = peak
+                payload["auto_account_equity_peaks"] = peak_map
+                payload["updated_at"] = _utc_now_iso()
+                self._write_config_payload(payload)
+            return peak
 
     @staticmethod
     def _market_light_pre_trade_risk_reason(settings: VnpyPaperSettings) -> Optional[str]:

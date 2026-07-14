@@ -9,7 +9,18 @@ const exportAgentRuns = vi.hoisted(() => vi.fn());
 const getAgentRun = vi.hoisted(() => vi.fn());
 const getAgentDailySummary = vi.hoisted(() => vi.fn());
 const getAgentDataQualityTrends = vi.hoisted(() => vi.fn());
+const runAgentBacktest = vi.hoisted(() => vi.fn());
 const generateAgentRunRecap = vi.hoisted(() => vi.fn());
+const getReplayCompatibility = vi.hoisted(() => vi.fn());
+const runReplay = vi.hoisted(() => vi.fn());
+const runPortfolioBacktest = vi.hoisted(() => vi.fn());
+const resolveHistoricalUniverse = vi.hoisted(() => vi.fn());
+const startFactorIngestion = vi.hoisted(() => vi.fn());
+const getFactorIngestionTask = vi.hoisted(() => vi.fn());
+const startFullMarketIngestion = vi.hoisted(() => vi.fn());
+const getFullMarketIngestion = vi.hoisted(() => vi.fn());
+const resumeFullMarketIngestion = vi.hoisted(() => vi.fn());
+const listFullMarketIngestions = vi.hoisted(() => vi.fn());
 
 vi.mock('../../api/vnpyPaperTrading', () => ({
   vnpyPaperTradingApi: {
@@ -18,7 +29,23 @@ vi.mock('../../api/vnpyPaperTrading', () => ({
     getAgentRun,
     getAgentDailySummary,
     getAgentDataQualityTrends,
+    runAgentBacktest,
     generateAgentRunRecap,
+  },
+}));
+
+vi.mock('../../api/alphasift', () => ({
+  alphasiftApi: {
+    getReplayCompatibility,
+    runReplay,
+    runPortfolioBacktest,
+    resolveHistoricalUniverse,
+    startFactorIngestion,
+    getFactorIngestionTask,
+    startFullMarketIngestion,
+    getFullMarketIngestion,
+    resumeFullMarketIngestion,
+    listFullMarketIngestions,
   },
 }));
 
@@ -69,9 +96,16 @@ const runSummary = {
         riskLevel: 'guarded',
         configuredLayers: ['time_gate', 'candidate_filters', 'portfolio_limits'],
       },
+      recentRunContext: {
+        runCount: 5,
+        submissionRatePct: 40,
+        currentFailureStreak: 1,
+        latestRunUid: 'ss-agent-previous',
+        latestStatus: 'failed',
+      },
       llmDynamicPlan: {
         status: 'accepted',
-        promptVersion: 'vnpy_paper_dynamic_agent_plan_v1',
+        promptVersion: 'vnpy_paper_dynamic_agent_plan_v2',
         evaluatorVersion: 'dynamic_plan_guardrails_v1',
         appliedOverrides: {
           autoStrategy: 'capital_heat',
@@ -307,6 +341,18 @@ const dataQualityTrends = {
   latestQuality: 'partial',
   warningCounts: { dailySourceFallback: 1 },
   sourceErrorCounts: { snapshotTimeout: 1 },
+  sourceHealthItems: [{
+    key: 'snapshot/sina',
+    group: 'snapshot',
+    source: 'sina',
+    observationCount: 3,
+    degradedObservationCount: 2,
+    degradedRatePct: 66.67,
+    maxFailures: 2,
+    latestStatus: 'degraded',
+    latestFailures: 1,
+    lastObservedAt: '2026-07-13T16:00:00',
+  }],
   truncated: false,
   daily: [{
     date: '2026-07-13',
@@ -325,7 +371,19 @@ describe('AgentConsolePage', () => {
     getAgentRun.mockReset();
     getAgentDailySummary.mockReset();
     getAgentDataQualityTrends.mockReset();
+    runAgentBacktest.mockReset();
     generateAgentRunRecap.mockReset();
+    getReplayCompatibility.mockReset();
+    runReplay.mockReset();
+    runPortfolioBacktest.mockReset();
+    resolveHistoricalUniverse.mockReset();
+    startFactorIngestion.mockReset();
+    getFactorIngestionTask.mockReset();
+    startFullMarketIngestion.mockReset();
+    getFullMarketIngestion.mockReset();
+    resumeFullMarketIngestion.mockReset();
+    listFullMarketIngestions.mockReset();
+    listFullMarketIngestions.mockResolvedValue({ items: [], limit: 1 });
     listAgentRuns.mockResolvedValue({
       items: [runSummary, failedRunSummary],
       limit: 25,
@@ -334,6 +392,157 @@ describe('AgentConsolePage', () => {
     });
     getAgentDailySummary.mockResolvedValue(dailySummary);
     getAgentDataQualityTrends.mockResolvedValue(dataQualityTrends);
+    runAgentBacktest.mockResolvedValue({
+      generatedAt: '2026-07-14T10:00:00',
+      methodology: {
+        engineVersion: 'agent-forward-v1',
+        lookaheadProtection: true,
+      },
+      filters: {},
+      total: 2,
+      scannedCount: 2,
+      truncated: false,
+      refreshAttemptedCount: 0,
+      statusCounts: { filled: 1, skipped: 1 },
+      matrix: {
+        1: {
+          evalWindowDays: 1,
+          sampleCount: 2,
+          completedCount: 1,
+          insufficientCount: 1,
+          coveragePct: 50,
+          winCount: 1,
+          lossCount: 0,
+          neutralCount: 0,
+          winRatePct: 100,
+          directionAccuracyPct: 100,
+          averageReturnPct: 3.5,
+          medianReturnPct: 3.5,
+          averageMaxFavorableExcursionPct: 5,
+          averageMaxAdverseExcursionPct: -1.2,
+          neutralBandPct: 2,
+          unableReasonCounts: { insufficientForwardBars: 1 },
+        },
+      },
+      strategyMatrix: {},
+      items: [],
+    });
+    const replayCompatibility = {
+      strategy: 'dual_low',
+      market: 'cn',
+      snapshotDate: '2024-01-05',
+      universeCount: 100,
+      requiredHardFields: ['amount', 'pe_ratio'],
+      requiredScoreFields: ['rsi14'],
+      hardCompleteRows: 98,
+      scoreCompleteRows: 90,
+      hardCoverageRatio: 0.98,
+      scoreCoverageRatio: 0.9,
+      hardMissingCounts: { peRatio: 2 },
+      scoreMissingCounts: { rsi14: 10 },
+    };
+    getReplayCompatibility.mockResolvedValue(replayCompatibility);
+    runReplay.mockResolvedValue({
+      strategy: 'dual_low',
+      market: 'cn',
+      snapshotDate: '2024-01-05',
+      universeCount: 100,
+      completeRowCount: 90,
+      filteredCount: 4,
+      candidateCount: 1,
+      candidates: [{
+        symbol: '600519',
+        name: '贵州茅台',
+        industry: '白酒',
+        price: 1600,
+        screenScore: 88.5,
+      }],
+      compatibility: replayCompatibility,
+      methodology: {
+        pointInTime: true,
+        lookaheadProtection: true,
+        usesCurrentSnapshotFallback: false,
+        llmRankingEnabled: false,
+        ranking: 'alphasift_hard_filters_and_screen_score',
+      },
+    });
+    runPortfolioBacktest.mockResolvedValue({
+      strategy: 'dual_low',
+      market: 'cn',
+      dateFrom: '2024-01-01',
+      dateTo: '2024-02-01',
+      snapshotCount: 2,
+      selectedCount: 10,
+      evaluatedCount: 9,
+      coveragePct: 90,
+      initialCapital: 100000,
+      finalEquity: 108000,
+      benchmarkSymbol: '000300',
+      metrics: {
+        totalReturnPct: 8,
+        benchmarkReturnPct: 3,
+        excessReturnPct: 5,
+        maxDrawdownPct: -2,
+        periodWinRatePct: 50,
+        periodCount: 2,
+        totalTurnoverPct: 250,
+        averageTurnoverPct: 125,
+        endingOpenPositionCount: 1,
+        endingCash: 12000,
+      },
+      periods: [{
+        signalDate: '2024-01-05',
+        selectedCount: 5,
+        evaluatedCount: 5,
+        coveragePct: 100,
+        netReturnPct: 4,
+        turnoverPct: 100,
+        retainedCount: 2,
+        forcedRetainedCount: 1,
+        entryTradeCount: 3,
+        exitTradeCount: 3,
+        cash: 12000,
+        positionCount: 4,
+        equity: 104000,
+      }],
+      methodology: { lookaheadProtection: true },
+    });
+    resolveHistoricalUniverse.mockResolvedValue({
+      market: 'cn',
+      snapshotDate: '2024-01-05',
+      totalCount: 5100,
+      returnedCount: 5100,
+      truncated: false,
+      items: [],
+      methodology: { usesCurrentUniverseFallback: false },
+    });
+    startFullMarketIngestion.mockResolvedValue({
+      jobId: 'full-job-1', market: 'cn', snapshotDates: ['2024-01-05'], universeSource: 'tushare_stock_basic',
+      status: 'failed', batchSize: 25, totalSymbols: 5000, totalWorkItems: 5000, nextOffset: 50,
+      remainingWorkItems: 4950, progressPct: 1, completedBatches: 2, rowCount: 50, inserted: 50,
+      updated: 0, sourceErrorCount: 1, errors: [], error: 'source timeout',
+    });
+    resumeFullMarketIngestion.mockResolvedValue({
+      jobId: 'full-job-1', market: 'cn', snapshotDates: ['2024-01-05'], universeSource: 'tushare_stock_basic',
+      status: 'pending', batchSize: 25, totalSymbols: 5000, totalWorkItems: 5000, nextOffset: 50,
+      remainingWorkItems: 4950, progressPct: 1, completedBatches: 2, rowCount: 50, inserted: 50,
+      updated: 0, sourceErrorCount: 1, errors: [],
+    });
+    startFactorIngestion.mockResolvedValue({
+      taskId: 'factor-task-1',
+      traceId: 'factor-task-1',
+      status: 'pending',
+      message: 'submitted',
+      market: 'cn',
+      snapshotCount: 1,
+      symbolCount: 1,
+    });
+    getFactorIngestionTask.mockResolvedValue({
+      taskId: 'factor-task-1',
+      status: 'completed',
+      progress: 100,
+      result: { rowCount: 1, inserted: 1, updated: 0, errorCount: 0, errors: [] },
+    });
     exportAgentRuns.mockResolvedValue({
       generatedAt: '2026-07-02T00:00:00Z',
       limit: 50,
@@ -371,6 +580,9 @@ describe('AgentConsolePage', () => {
     expect(screen.getByTestId('agent-data-quality-trends')).toHaveTextContent('跨 run 数据质量趋势');
     expect(screen.getByTestId('agent-data-quality-trends')).toHaveTextContent('33.33%');
     expect(screen.getByTestId('agent-data-quality-trends')).toHaveTextContent('1 / 1 / 0 / 0 / 1');
+    expect(screen.getByTestId('agent-source-health-trends')).toHaveTextContent('snapshot / sina');
+    expect(screen.getByTestId('agent-source-health-trends')).toHaveTextContent('2 / 3');
+    expect(screen.getByTestId('agent-source-health-trends')).toHaveTextContent('66.67%');
     fireEvent.click(screen.getByRole('button', { name: '7天' }));
     await waitFor(() => expect(getAgentDataQualityTrends).toHaveBeenCalledWith(7, undefined));
     expect(screen.getByText('LLM 复核')).toBeInTheDocument();
@@ -391,6 +603,11 @@ describe('AgentConsolePage', () => {
     expect(screen.getByText('local_paper_execution')).toBeInTheDocument();
     expect(screen.getAllByText('guarded').length).toBeGreaterThan(0);
     expect(screen.getByText('LLM 动态计划')).toBeInTheDocument();
+    expect(screen.getByText('最近运行')).toBeInTheDocument();
+    expect(screen.getByText('5 次')).toBeInTheDocument();
+    expect(screen.getByText('历史成交率')).toBeInTheDocument();
+    expect(screen.getByText('40.0%')).toBeInTheDocument();
+    expect(screen.getByText(/failed · ss-agent-previous · 连续失败 1/)).toBeInTheDocument();
     expect(screen.getAllByText('score 85.0').length).toBeGreaterThan(0);
     expect(screen.getByText('建议人工确认')).toBeInTheDocument();
     expect(screen.getByText('100.0%')).toBeInTheDocument();
@@ -399,7 +616,7 @@ describe('AgentConsolePage', () => {
     expect(screen.getByText(/autoStrategy=capital_heat/)).toBeInTheDocument();
     expect(screen.getByText(/autoMaxResults=1/)).toBeInTheDocument();
     expect(screen.getByText('Prefer a narrower heat strategy today.')).toBeInTheDocument();
-    expect(screen.getByText('prompt=vnpy_paper_dynamic_agent_plan_v1 / eval=dynamic_plan_guardrails_v1')).toBeInTheDocument();
+    expect(screen.getByText('prompt=vnpy_paper_dynamic_agent_plan_v2 / eval=dynamic_plan_guardrails_v1')).toBeInTheDocument();
     expect(screen.getByTestId('agent-llm-recap')).toHaveTextContent('LLM recap generated');
     expect(screen.getByTestId('agent-review-1')).toHaveTextContent('Agent 复核 passed');
     expect(screen.getByText('Pre-trade Agent review passed')).toBeInTheDocument();
@@ -445,6 +662,136 @@ describe('AgentConsolePage', () => {
       createdFrom: '2026-07-01T09:00',
       createdTo: '2026-07-01T15:00',
     }));
+  });
+
+  it('runs forward evaluation with the current strategy, market, and date filters', async () => {
+    renderPage();
+
+    await waitFor(() => expect(listAgentRuns).toHaveBeenCalled());
+    fireEvent.change(screen.getByTestId('agent-run-strategy-filter'), { target: { value: 'dual_low' } });
+    fireEvent.change(screen.getByTestId('agent-run-market-filter'), { target: { value: 'cn' } });
+    fireEvent.change(screen.getByTestId('agent-run-created-from-filter'), { target: { value: '2026-07-01T09:00' } });
+    fireEvent.change(screen.getByTestId('agent-run-created-to-filter'), { target: { value: '2026-07-10T15:00' } });
+    fireEvent.click(screen.getByTestId('agent-backtest-include-skipped'));
+    fireEvent.click(screen.getByTestId('agent-backtest-run'));
+
+    await waitFor(() => expect(runAgentBacktest).toHaveBeenCalledWith({
+      strategy: 'dual_low',
+      market: 'cn',
+      createdFrom: '2026-07-01T09:00',
+      createdTo: '2026-07-10T15:00',
+      evalWindows: [1, 5, 10, 20],
+      includeSkipped: false,
+      maxDecisions: 500,
+      refreshMissing: false,
+    }));
+    expect(await screen.findByTestId('agent-backtest-matrix')).toHaveTextContent('3.5%');
+    expect(screen.getByTestId('agent-backtest-panel')).toHaveTextContent('前视保护 已启用');
+  });
+
+  it('checks point-in-time factor coverage and runs strategy replay', async () => {
+    renderPage();
+
+    await waitFor(() => expect(listAgentRuns).toHaveBeenCalled());
+    fireEvent.change(screen.getByTestId('agent-run-strategy-filter'), { target: { value: 'dual_low' } });
+    fireEvent.change(screen.getByTestId('agent-run-market-filter'), { target: { value: 'cn' } });
+    fireEvent.change(screen.getByTestId('agent-replay-date'), { target: { value: '2024-01-05' } });
+    fireEvent.click(screen.getByTestId('agent-replay-check'));
+
+    await waitFor(() => expect(getReplayCompatibility).toHaveBeenCalledWith({
+      strategy: 'dual_low',
+      market: 'cn',
+      snapshotDate: '2024-01-05',
+    }));
+    expect(await screen.findByTestId('agent-replay-compatibility')).toHaveTextContent('98.0%');
+    expect(screen.getByTestId('agent-replay-missing-fields')).toHaveTextContent('rsi14 缺失 10');
+
+    fireEvent.click(screen.getByTestId('agent-replay-run'));
+    await waitFor(() => expect(runReplay).toHaveBeenCalledWith({
+      strategy: 'dual_low',
+      market: 'cn',
+      snapshotDate: '2024-01-05',
+      maxResults: 20,
+    }));
+    expect(await screen.findByTestId('agent-replay-results')).toHaveTextContent('600519');
+    expect(screen.getByTestId('agent-replay-results')).toHaveTextContent('88.50');
+  });
+
+  it('runs a cost-aware point-in-time portfolio backtest', async () => {
+    renderPage();
+
+    await waitFor(() => expect(listAgentRuns).toHaveBeenCalled());
+    fireEvent.change(screen.getByTestId('agent-run-strategy-filter'), { target: { value: 'dual_low' } });
+    fireEvent.change(screen.getByTestId('agent-run-market-filter'), { target: { value: 'cn' } });
+    fireEvent.change(screen.getByTestId('agent-portfolio-date-from'), { target: { value: '2024-01-01' } });
+    fireEvent.change(screen.getByTestId('agent-portfolio-date-to'), { target: { value: '2024-02-01' } });
+    fireEvent.click(screen.getByTestId('agent-portfolio-backtest-run'));
+
+    await waitFor(() => expect(runPortfolioBacktest).toHaveBeenCalledWith({
+      strategy: 'dual_low',
+      market: 'cn',
+      dateFrom: '2024-01-01',
+      dateTo: '2024-02-01',
+      topK: 5,
+      benchmarkSymbol: '000300',
+    }));
+    const results = await screen.findByTestId('agent-portfolio-backtest-results');
+    expect(results).toHaveTextContent('8.0%');
+    expect(results).toHaveTextContent('5.0%');
+    expect(results).toHaveTextContent('2024-01-05');
+    expect(results).toHaveTextContent('125.0%');
+    expect(results).toHaveTextContent('延续');
+    expect(results).toHaveTextContent('被动');
+    expect(results).toHaveTextContent('期末未平 1');
+  });
+
+  it('submits and observes bounded historical factor ingestion', async () => {
+    renderPage();
+
+    await waitFor(() => expect(listAgentRuns).toHaveBeenCalled());
+    fireEvent.change(screen.getByTestId('agent-run-market-filter'), { target: { value: 'cn' } });
+    fireEvent.change(screen.getByTestId('agent-ingestion-dates'), { target: { value: '2024-01-05' } });
+    fireEvent.change(screen.getByTestId('agent-ingestion-universe'), {
+      target: { value: '[{"symbol":"600519","name":"贵州茅台","industry":"白酒"}]' },
+    });
+    fireEvent.click(screen.getByTestId('agent-ingestion-start'));
+
+    await waitFor(() => expect(startFactorIngestion).toHaveBeenCalledWith({
+      market: 'cn',
+      snapshotDates: ['2024-01-05'],
+      universe: [{ symbol: '600519', name: '贵州茅台', industry: '白酒' }],
+    }));
+    await waitFor(() => expect(getFactorIngestionTask).toHaveBeenCalledWith('factor-task-1'));
+    expect(await screen.findByTestId('agent-ingestion-result')).toHaveTextContent('写入 1');
+  });
+
+  it('previews a survivor-bias-aware historical universe', async () => {
+    renderPage();
+
+    await waitFor(() => expect(listAgentRuns).toHaveBeenCalled());
+    fireEvent.change(screen.getByTestId('agent-ingestion-dates'), { target: { value: '2024-01-05' } });
+    fireEvent.click(screen.getByTestId('agent-historical-universe-resolve'));
+
+    await waitFor(() => expect(resolveHistoricalUniverse).toHaveBeenCalledWith({
+      market: 'cn',
+      snapshotDate: '2024-01-05',
+      limit: 6000,
+    }));
+    expect(await screen.findByTestId('agent-historical-universe-result')).toHaveTextContent('成员 5100');
+  });
+
+  it('starts and resumes a checkpointed full-market ingestion job', async () => {
+    renderPage();
+    await waitFor(() => expect(listAgentRuns).toHaveBeenCalled());
+    fireEvent.change(screen.getByTestId('agent-ingestion-dates'), { target: { value: '2024-01-05' } });
+    fireEvent.click(screen.getByTestId('agent-full-market-ingestion-start'));
+
+    await waitFor(() => expect(startFullMarketIngestion).toHaveBeenCalledWith({
+      market: 'cn', snapshotDates: ['2024-01-05'], batchSize: 25,
+    }));
+    expect(await screen.findByTestId('agent-full-market-ingestion-result')).toHaveTextContent('工作项 50/5000');
+    fireEvent.click(screen.getByTestId('agent-full-market-ingestion-resume'));
+    await waitFor(() => expect(resumeFullMarketIngestion).toHaveBeenCalledWith('full-job-1', false));
   });
 
   it('pages through Agent run history with offset', async () => {
