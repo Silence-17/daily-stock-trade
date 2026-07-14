@@ -88,8 +88,17 @@ beforeEach(() => {
         triggeredAt: '2026-05-18T09:30:01',
         status: 'triggered',
       },
+      {
+        id: 11,
+        ruleId: null,
+        target: 'vnpy_paper',
+        reason: 'account_drawdown_recovered',
+        dataSource: 'vnpy_paper_auto',
+        triggeredAt: '2026-05-18T09:31:01',
+        status: 'resolved',
+      },
     ],
-    total: 1,
+    total: 2,
     page: 1,
     pageSize: 20,
   });
@@ -114,6 +123,8 @@ describe('AlertsPage', () => {
     expect(screen.getByText('管理事件告警、日线技术指标、自选股、持仓/账户联动和大盘红绿灯规则，执行一次性测试，并查看后台评估任务记录的触发历史。')).toBeInTheDocument();
     expect(await screen.findByText('茅台价格突破')).toBeInTheDocument();
     expect(await screen.findByText('600519 price above 1800')).toBeInTheDocument();
+    expect(await screen.findByText('已恢复')).toBeInTheDocument();
+    expect(await screen.findByText('account_drawdown_recovered')).toBeInTheDocument();
     expect(await screen.findByText('暂无通知尝试记录')).toBeInTheDocument();
     expect(listRules).toHaveBeenCalledWith({
       enabled: undefined,

@@ -650,6 +650,8 @@ def _system_health_payload(status_payload: Dict[str, Any]) -> Dict[str, Any]:
     drawdown_pct = account_drawdown.get("drawdown_pct")
     drawdown_threshold = account_drawdown.get("threshold_pct")
     drawdown_peak = account_drawdown.get("peak_equity")
+    drawdown_recovery_threshold = account_drawdown.get("recovery_threshold_pct")
+    drawdown_guard_latched = bool(account_drawdown.get("drawdown_guard_latched"))
     if not drawdown_configured:
         drawdown_health_status = "disabled"
         drawdown_reason = "account_drawdown_not_configured"
@@ -666,6 +668,20 @@ def _system_health_payload(status_payload: Dict[str, Any]) -> Dict[str, Any]:
         drawdown_health_status = "blocked"
         drawdown_reason = "account_drawdown_limit_reached"
         drawdown_detail = f"当前回撤 {drawdown_pct}% 已达到上限 {drawdown_threshold}%"
+    elif drawdown_status == "recovery_pending":
+        drawdown_health_status = "blocked"
+        drawdown_reason = "account_drawdown_recovery_pending"
+        drawdown_detail = (
+            f"当前回撤 {drawdown_pct}% 已低于上限，但需恢复到 "
+            f"{drawdown_recovery_threshold}% 以内才重新允许买入"
+        )
+    elif drawdown_status == "recovery_ready":
+        drawdown_health_status = "warning"
+        drawdown_reason = "account_drawdown_recovery_ready"
+        drawdown_detail = (
+            f"当前回撤 {drawdown_pct}% 已达到恢复线 {drawdown_recovery_threshold}%；"
+            "下一次自动交易风控检查将解除门禁"
+        )
     else:
         drawdown_health_status = "ready"
         drawdown_reason = "account_drawdown_ready"
@@ -683,6 +699,13 @@ def _system_health_payload(status_payload: Dict[str, Any]) -> Dict[str, Any]:
             "peak_equity": drawdown_peak,
             "drawdown_pct": drawdown_pct,
             "threshold_pct": drawdown_threshold,
+            "recovery_hysteresis_pct": account_drawdown.get("recovery_hysteresis_pct"),
+            "recovery_threshold_pct": drawdown_recovery_threshold,
+            "drawdown_guard_latched": drawdown_guard_latched,
+            "drawdown_guard_opened_at": account_drawdown.get("drawdown_guard_opened_at"),
+            "drawdown_guard_last_recovered_at": account_drawdown.get(
+                "drawdown_guard_last_recovered_at"
+            ),
         },
     )
 

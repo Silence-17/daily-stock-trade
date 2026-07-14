@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [新功能] 自动模拟交易最大回撤新增按账户持久化的锁存恢复机制；触发后仅在回撤降至“阈值 - 恢复缓冲”时重新放行自动买入。
+- [改进] 模拟交易设置页新增回撤恢复缓冲，系统健康展示锁存与待恢复状态；恢复时写入告警中心 `resolved` 系统事件。
+- [测试] 新增回撤锁存跨服务实例持久化、恢复缓冲、恢复告警及 API/Web 设置映射回归。
 - [改进] vn.py paper 状态新增 API/contract/build/Python/进程启动诊断，Web 以 contract 3 检测旧后端进程并在可用性诊断中显示兼容或需更新；可选 `DSA_BUILD_ID` 同步加入配置模板。
 - [测试] 新增后端版本契约、Web 当前/旧后端显示和高交互设置保存用例的稳定时限回归。
 - [改进] vn.py paper readiness、统一系统健康和 Web 可用性诊断新增持久化最近自动运行结果，展示 run id、时间、原始跳过/失败原因和候选/提交计数，不再依赖 scheduler task event 保留期。

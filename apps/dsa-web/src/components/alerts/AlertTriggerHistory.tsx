@@ -10,10 +10,11 @@ const statusLabel: Record<string, string> = {
   skipped: '已跳过',
   degraded: '降级',
   failed: '失败',
+  resolved: '已恢复',
 };
 
 function statusVariant(status: string): 'success' | 'warning' | 'danger' | 'default' {
-  if (status === 'triggered') return 'success';
+  if (status === 'triggered' || status === 'resolved') return 'success';
   if (status === 'skipped' || status === 'degraded') return 'warning';
   if (status === 'failed') return 'danger';
   return 'default';
@@ -55,7 +56,7 @@ export const AlertTriggerHistory: React.FC<AlertTriggerHistoryProps> = ({ trigge
         <EmptyState
           icon={<Activity className="h-6 w-6" />}
           title="暂无触发历史"
-          description="后台评估会记录 triggered、skipped、degraded 和 failed 状态；正常未触发不会写入历史。"
+          description="后台评估会记录 triggered、skipped、degraded、failed 和 resolved 状态；正常未触发不会写入历史。"
         />
       ) : null}
       {!isLoading && triggers.length > 0 ? (

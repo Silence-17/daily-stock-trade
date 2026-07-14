@@ -117,6 +117,7 @@ const statusResponse = {
     autoMinDataQualityScore: null,
     autoMinCashBalance: null,
     autoMaxDrawdownPct: null,
+    autoDrawdownRecoveryHysteresisPct: 0,
     autoMarketLightGateEnabled: false,
     autoMarketLightBlockStatuses: ['red'],
     autoFailureFuseEnabled: false,
@@ -1828,6 +1829,7 @@ describe('VnpyPaperTradingPage', () => {
     fireEvent.change(screen.getByLabelText('目标行业权重%'), { target: { value: '白酒:8\n银行:12' } });
     fireEvent.change(screen.getByLabelText(/最低现金余额/), { target: { value: '5000' } });
     fireEvent.change(screen.getByLabelText('最大回撤%'), { target: { value: '12' } });
+    fireEvent.change(screen.getByLabelText('回撤恢复缓冲%'), { target: { value: '2' } });
     fireEvent.click(screen.getByLabelText('大盘红绿灯风控'));
     fireEvent.change(screen.getByLabelText('红绿灯拦截'), { target: { value: 'red_yellow' } });
     fireEvent.click(screen.getByLabelText('连续失败熔断'));
@@ -1889,6 +1891,7 @@ describe('VnpyPaperTradingPage', () => {
         autoTargetIndustryWeights: { 白酒: 8, 银行: 12 },
         autoMinCashBalance: 5000,
         autoMaxDrawdownPct: 12,
+        autoDrawdownRecoveryHysteresisPct: 2,
         autoMarketLightGateEnabled: true,
         autoMarketLightBlockStatuses: ['red', 'yellow'],
         autoFailureFuseEnabled: true,

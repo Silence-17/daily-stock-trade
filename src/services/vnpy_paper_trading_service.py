@@ -161,6 +161,7 @@ class VnpyPaperSettings:
     auto_cross_run_max_decisions: int = 200
     auto_min_cash_balance: Optional[float] = None
     auto_max_drawdown_pct: Optional[float] = None
+    auto_drawdown_recovery_hysteresis_pct: float = 0.0
     auto_market_light_gate_enabled: bool = False
     auto_market_light_block_statuses: List[str] = field(default_factory=lambda: ["red"])
     auto_failure_fuse_enabled: bool = False
@@ -2568,6 +2569,22 @@ class VnpyPaperTradingService:
         account_risk_reason, account_risk_diagnostics = self._account_pre_trade_risk(settings)
         run_diagnostics["account_risk"] = account_risk_diagnostics
         market_risk_reason = self._market_light_pre_trade_risk_reason(settings)
+        if account_risk_diagnostics.get("drawdown_guard_transition") == "recovered":
+            self._record_auto_trade_alert_event(
+                "account_drawdown_recovered",
+                status="resolved",
+                reason="account_drawdown_recovered",
+                observed_value=account_risk_diagnostics.get("drawdown_pct"),
+                threshold=account_risk_diagnostics.get("recovery_threshold_pct"),
+                diagnostics={
+                    "agent_run_uid": run_uid,
+                    "agent_run_id": run_id,
+                    "strategy": settings.auto_strategy,
+                    "market": settings.auto_market,
+                    "candidate_count": len(candidates),
+                    "account_risk": account_risk_diagnostics,
+                },
+            )
         if account_risk_reason:
             self._record_auto_trade_alert_event(
                 account_risk_reason,
@@ -4348,6 +4365,9 @@ class VnpyPaperTradingService:
         auto_cross_run_max_decisions = _safe_int(raw.get("auto_cross_run_max_decisions"))
         auto_min_cash_balance = _safe_float(raw.get("auto_min_cash_balance"))
         auto_max_drawdown_pct = _safe_float(raw.get("auto_max_drawdown_pct"))
+        auto_drawdown_recovery_hysteresis_pct = _safe_float(
+            raw.get("auto_drawdown_recovery_hysteresis_pct")
+        )
         auto_failure_fuse_threshold = _safe_int(raw.get("auto_failure_fuse_threshold"))
         auto_failure_fuse_cooldown_minutes = _safe_int(
             raw.get("auto_failure_fuse_cooldown_minutes")
@@ -4547,6 +4567,15 @@ class VnpyPaperTradingService:
                 min(100.0, auto_max_drawdown_pct)
                 if auto_max_drawdown_pct is not None and auto_max_drawdown_pct > 0
                 else None
+            ),
+            auto_drawdown_recovery_hysteresis_pct=min(
+                100.0,
+                max(
+                    0.0,
+                    auto_drawdown_recovery_hysteresis_pct
+                    if auto_drawdown_recovery_hysteresis_pct is not None
+                    else defaults.auto_drawdown_recovery_hysteresis_pct,
+                ),
             ),
             auto_market_light_gate_enabled=bool(
                 raw.get("auto_market_light_gate_enabled", defaults.auto_market_light_gate_enabled)
@@ -5021,6 +5050,7 @@ class VnpyPaperTradingService:
                 "daily_budget": settings.auto_daily_budget,
                 "min_cash_balance": settings.auto_min_cash_balance,
                 "max_drawdown_pct": settings.auto_max_drawdown_pct,
+                "drawdown_recovery_hysteresis_pct": settings.auto_drawdown_recovery_hysteresis_pct,
             },
             "candidate_filters": {
                 "symbol_blacklist_count": len(settings.auto_symbol_blacklist or []),
@@ -8492,7 +8522,14 @@ class VnpyPaperTradingService:
                 diagnostics["threshold"] = settings.auto_max_drawdown_pct
                 return "account_risk_unavailable", diagnostics
             drawdown_pct = _safe_float(drawdown.get("drawdown_pct")) or 0.0
-            if drawdown_pct >= settings.auto_max_drawdown_pct:
+            drawdown_guard = self._evaluate_account_drawdown_guard(
+                account_id=int(account["id"]),
+                drawdown_pct=drawdown_pct,
+                threshold_pct=float(settings.auto_max_drawdown_pct),
+                hysteresis_pct=float(settings.auto_drawdown_recovery_hysteresis_pct or 0.0),
+            )
+            diagnostics.update(drawdown_guard)
+            if drawdown_guard.get("drawdown_guard_latched"):
                 diagnostics["observed_value"] = drawdown_pct
                 diagnostics["threshold"] = settings.auto_max_drawdown_pct
                 return "account_drawdown_limit_reached", diagnostics
@@ -8510,6 +8547,14 @@ class VnpyPaperTradingService:
     ) -> Dict[str, Any]:
         configured = settings.auto_max_drawdown_pct is not None
         account_id = _safe_int(account.get("id")) if isinstance(account, dict) else _safe_int(settings.account_id)
+        effective_hysteresis_pct = (
+            min(
+                float(settings.auto_max_drawdown_pct or 0.0),
+                float(settings.auto_drawdown_recovery_hysteresis_pct or 0.0),
+            )
+            if configured
+            else 0.0
+        )
         result: Dict[str, Any] = {
             "configured": configured,
             "status": "disabled" if not configured else "snapshot_not_requested",
@@ -8520,6 +8565,19 @@ class VnpyPaperTradingService:
             "peak_equity": None,
             "drawdown_pct": None,
             "threshold_pct": settings.auto_max_drawdown_pct,
+            "recovery_hysteresis_pct": effective_hysteresis_pct,
+            "recovery_threshold_pct": (
+                max(
+                    0.0,
+                    float(settings.auto_max_drawdown_pct or 0.0)
+                    - effective_hysteresis_pct,
+                )
+                if configured
+                else None
+            ),
+            "drawdown_guard_latched": False,
+            "drawdown_guard_opened_at": None,
+            "drawdown_guard_last_recovered_at": None,
         }
         if not configured:
             return result
@@ -8547,19 +8605,95 @@ class VnpyPaperTradingService:
             update=update_peak,
         )
         drawdown_pct = max(0.0, (peak_equity - equity) / peak_equity * 100.0)
+        guard = self._account_drawdown_guard_state(account_id)
+        guard_latched = bool(guard.get("latched"))
+        recovery_threshold_pct = float(result.get("recovery_threshold_pct") or 0.0)
+        if drawdown_pct >= float(settings.auto_max_drawdown_pct or 0.0):
+            status = "limit_reached"
+        elif guard_latched and drawdown_pct > recovery_threshold_pct:
+            status = "recovery_pending"
+        elif guard_latched:
+            status = "recovery_ready"
+        else:
+            status = "ready"
         result.update(
             {
-                "status": (
-                    "limit_reached"
-                    if drawdown_pct >= float(settings.auto_max_drawdown_pct or 0.0)
-                    else "ready"
-                ),
+                "status": status,
                 "equity": equity,
                 "peak_equity": peak_equity,
                 "drawdown_pct": round(drawdown_pct, 6),
+                "drawdown_guard_latched": guard_latched,
+                "drawdown_guard_opened_at": guard.get("opened_at"),
+                "drawdown_guard_last_recovered_at": guard.get("last_recovered_at"),
             }
         )
         return result
+
+    def _account_drawdown_guard_state(self, account_id: int) -> Dict[str, Any]:
+        with self._lock:
+            payload = self._read_config_payload()
+            raw_guards = payload.get("auto_account_drawdown_guards")
+            guards = raw_guards if isinstance(raw_guards, dict) else {}
+            guard = guards.get(str(account_id))
+            return dict(guard) if isinstance(guard, dict) else {}
+
+    def _evaluate_account_drawdown_guard(
+        self,
+        *,
+        account_id: int,
+        drawdown_pct: float,
+        threshold_pct: float,
+        hysteresis_pct: float,
+    ) -> Dict[str, Any]:
+        hysteresis = max(0.0, min(threshold_pct, hysteresis_pct))
+        recovery_threshold = max(0.0, threshold_pct - hysteresis)
+        now_text = self._format_utc_datetime(self._now_utc())
+        with self._lock:
+            payload = self._read_config_payload()
+            raw_guards = payload.get("auto_account_drawdown_guards")
+            guards = dict(raw_guards) if isinstance(raw_guards, dict) else {}
+            raw_guard = guards.get(str(account_id))
+            guard = dict(raw_guard) if isinstance(raw_guard, dict) else {}
+            latched = bool(guard.get("latched"))
+            transition = None
+
+            if drawdown_pct >= threshold_pct:
+                if not latched:
+                    transition = "opened"
+                    guard["opened_at"] = now_text
+                    guard["trigger_drawdown_pct"] = round(drawdown_pct, 6)
+                latched = True
+            elif latched and drawdown_pct <= recovery_threshold:
+                latched = False
+                transition = "recovered"
+                guard["last_recovered_at"] = now_text
+                guard["recovered_drawdown_pct"] = round(drawdown_pct, 6)
+
+            next_state = {
+                "latched": latched,
+                "threshold_pct": threshold_pct,
+                "recovery_hysteresis_pct": hysteresis,
+                "recovery_threshold_pct": recovery_threshold,
+            }
+            state_changed = transition is not None or any(
+                guard.get(key) != value for key, value in next_state.items()
+            )
+            guard.update(next_state)
+            if state_changed:
+                guard["updated_at"] = now_text
+                guards[str(account_id)] = guard
+                payload["auto_account_drawdown_guards"] = guards
+                payload["updated_at"] = now_text
+                self._write_config_payload(payload)
+
+        return {
+            "drawdown_guard_latched": latched,
+            "drawdown_guard_transition": transition,
+            "drawdown_guard_opened_at": guard.get("opened_at"),
+            "drawdown_guard_last_recovered_at": guard.get("last_recovered_at"),
+            "recovery_hysteresis_pct": hysteresis,
+            "recovery_threshold_pct": recovery_threshold,
+        }
 
     def _resolve_account_equity_peak(
         self,

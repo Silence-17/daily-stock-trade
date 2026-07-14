@@ -1420,6 +1420,122 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertEqual(diagnostics["equity"], 105000.0)
         self.assertEqual(diagnostics["drawdown_pct"], 12.5)
 
+    def test_account_drawdown_guard_persists_hysteresis_and_records_recovery(self) -> None:
+        self.service.update_settings(
+            {
+                "auto_trade_enabled": True,
+                "auto_trade_time_gate_enabled": False,
+                "auto_max_drawdown_pct": 10,
+                "auto_drawdown_recovery_hysteresis_pct": 2,
+                "auto_max_results": 1,
+                "auto_cash_per_order": 1200,
+            }
+        )
+        settings = self.service.get_settings()
+        trigger_snapshot = {
+            "total_cash": 89000,
+            "total_equity": 89000,
+            "accounts": [{"total_cash": 89000, "total_equity": 89000, "positions": []}],
+        }
+        with patch.object(
+            self.service.portfolio,
+            "get_portfolio_snapshot",
+            return_value=trigger_snapshot,
+        ):
+            reason, diagnostics = self.service._account_pre_trade_risk(settings)
+
+        self.assertEqual(reason, "account_drawdown_limit_reached")
+        self.assertTrue(diagnostics["drawdown_guard_latched"])
+        self.assertEqual(diagnostics["drawdown_guard_transition"], "opened")
+        self.assertEqual(diagnostics["recovery_threshold_pct"], 8.0)
+
+        reconstructed = VnpyPaperTradingService(
+            data_fetcher_manager=_FakeDataFetcherManager(price=10.0),
+            config_path=self.config_path,
+        )
+        partial_snapshot = {
+            "total_cash": 91000,
+            "total_equity": 91000,
+            "accounts": [{"total_cash": 91000, "total_equity": 91000, "positions": []}],
+        }
+        with patch.object(
+            reconstructed.portfolio,
+            "get_portfolio_snapshot",
+            return_value=partial_snapshot,
+        ):
+            reason, diagnostics = reconstructed._account_pre_trade_risk(
+                reconstructed.get_settings()
+            )
+
+        self.assertEqual(reason, "account_drawdown_limit_reached")
+        self.assertEqual(diagnostics["drawdown_pct"], 9.0)
+        self.assertTrue(diagnostics["drawdown_guard_latched"])
+        self.assertIsNone(diagnostics["drawdown_guard_transition"])
+
+        recovered_snapshot = {
+            "total_cash": 93000,
+            "total_equity": 93000,
+            "accounts": [{"total_cash": 93000, "total_equity": 93000, "positions": []}],
+        }
+        fake_alphasift = MagicMock()
+        fake_alphasift.screen.return_value = {
+            "candidates": [
+                {"code": "600519", "name": "贵州茅台", "score": 80, "price": 10.0},
+            ],
+            "warnings": [],
+        }
+        with patch(
+            "src.services.vnpy_paper_trading_service.AlphaSiftService",
+            return_value=fake_alphasift,
+        ), patch.object(
+            reconstructed.portfolio,
+            "get_portfolio_snapshot",
+            return_value=recovered_snapshot,
+        ):
+            result = reconstructed.run_auto_trade_once()
+
+        audit = reconstructed.agent_repo.get_run_detail(result["agent_run_uid"])
+        self.assertIsNotNone(audit)
+        assert audit is not None
+        account_risk = audit["diagnostics"]["account_risk"]
+        self.assertEqual(account_risk["drawdown_pct"], 7.0)
+        self.assertFalse(account_risk["drawdown_guard_latched"])
+        self.assertEqual(account_risk["drawdown_guard_transition"], "recovered")
+        self.assertIsNotNone(account_risk["drawdown_guard_last_recovered_at"])
+        triggers = AlertService().list_triggers(
+            target="vnpy_paper",
+            status="resolved",
+            page_size=10,
+        )["items"]
+        self.assertEqual(len(triggers), 1)
+        self.assertEqual(triggers[0]["reason"], "account_drawdown_recovered")
+        self.assertEqual(triggers[0]["observed_value"], 7.0)
+        self.assertEqual(triggers[0]["threshold"], 8.0)
+
+    def test_account_drawdown_recovery_hysteresis_is_clamped_to_limit(self) -> None:
+        self.service.update_settings(
+            {
+                "auto_max_drawdown_pct": 10,
+                "auto_drawdown_recovery_hysteresis_pct": 20,
+            }
+        )
+        snapshot = {
+            "total_equity": 100000,
+            "accounts": [{"total_equity": 100000, "positions": []}],
+        }
+        with patch.object(
+            self.service.portfolio,
+            "get_portfolio_snapshot",
+            return_value=snapshot,
+        ):
+            reason, diagnostics = self.service._account_pre_trade_risk(
+                self.service.get_settings()
+            )
+
+        self.assertIsNone(reason)
+        self.assertEqual(diagnostics["recovery_hysteresis_pct"], 10.0)
+        self.assertEqual(diagnostics["recovery_threshold_pct"], 0.0)
+
     def test_auto_trade_respects_market_light_gate(self) -> None:
         self.service.update_settings(
             {

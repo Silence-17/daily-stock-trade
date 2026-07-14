@@ -52,6 +52,7 @@ class VnpyPaperSettings(BaseModel):
     auto_cross_run_max_decisions: int = Field(200, ge=1, le=2000)
     auto_min_cash_balance: Optional[float] = Field(None, gt=0)
     auto_max_drawdown_pct: Optional[float] = Field(None, gt=0, le=100)
+    auto_drawdown_recovery_hysteresis_pct: float = Field(0.0, ge=0, le=100)
     auto_market_light_gate_enabled: bool = False
     auto_market_light_block_statuses: List[Literal["red", "yellow"]] = Field(default_factory=lambda: ["red"])
     auto_failure_fuse_enabled: bool = False
@@ -118,6 +119,7 @@ class VnpyPaperSettingsUpdate(BaseModel):
     auto_cross_run_max_decisions: Optional[int] = Field(None, ge=1, le=2000)
     auto_min_cash_balance: Optional[float] = Field(None, gt=0)
     auto_max_drawdown_pct: Optional[float] = Field(None, gt=0, le=100)
+    auto_drawdown_recovery_hysteresis_pct: Optional[float] = Field(None, ge=0, le=100)
     auto_market_light_gate_enabled: Optional[bool] = None
     auto_market_light_block_statuses: Optional[List[Literal["red", "yellow"]]] = None
     auto_failure_fuse_enabled: Optional[bool] = None

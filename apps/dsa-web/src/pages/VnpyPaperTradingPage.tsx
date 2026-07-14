@@ -112,6 +112,7 @@ type SettingsForm = {
   autoCrossRunMaxDecisions: string;
   autoMinCashBalance: string;
   autoMaxDrawdownPct: string;
+  autoDrawdownRecoveryHysteresisPct: string;
   autoMarketLightGateEnabled: boolean;
   autoMarketLightBlockMode: 'red' | 'red_yellow';
   autoFailureFuseEnabled: boolean;
@@ -208,6 +209,7 @@ const defaultSettingsForm: SettingsForm = {
   autoCrossRunMaxDecisions: '200',
   autoMinCashBalance: '',
   autoMaxDrawdownPct: '',
+  autoDrawdownRecoveryHysteresisPct: '0',
   autoMarketLightGateEnabled: false,
   autoMarketLightBlockMode: 'red',
   autoFailureFuseEnabled: false,
@@ -543,6 +545,7 @@ function settingsToForm(status: VnpyPaperStatusResponse): SettingsForm {
     autoCrossRunMaxDecisions: String(settings.autoCrossRunMaxDecisions ?? 200),
     autoMinCashBalance: settings.autoMinCashBalance == null ? '' : String(settings.autoMinCashBalance),
     autoMaxDrawdownPct: settings.autoMaxDrawdownPct == null ? '' : String(settings.autoMaxDrawdownPct),
+    autoDrawdownRecoveryHysteresisPct: String(settings.autoDrawdownRecoveryHysteresisPct ?? 0),
     autoMarketLightGateEnabled: Boolean(settings.autoMarketLightGateEnabled),
     autoMarketLightBlockMode: (settings.autoMarketLightBlockStatuses || []).includes('yellow')
       ? 'red_yellow'
@@ -638,6 +641,8 @@ function buildSettingsUpdate(settingsForm: SettingsForm): VnpyPaperSettingsUpdat
     autoMaxDrawdownPct: settingsForm.autoMaxDrawdownPct.trim()
       ? parseNumber(settingsForm.autoMaxDrawdownPct)
       : null,
+    autoDrawdownRecoveryHysteresisPct:
+      parseNumber(settingsForm.autoDrawdownRecoveryHysteresisPct) ?? 0,
     autoMarketLightGateEnabled: settingsForm.autoMarketLightGateEnabled,
     autoMarketLightBlockStatuses: settingsForm.autoMarketLightBlockMode === 'red_yellow'
       ? ['red', 'yellow']
@@ -3795,6 +3800,21 @@ const VnpyPaperTradingPage: React.FC = () => {
                 value={settingsForm.autoMaxDrawdownPct}
                 onChange={(event) => setSettingsForm((prev) => ({ ...prev, autoMaxDrawdownPct: event.target.value }))}
                 placeholder="可留空"
+              />
+            </label>
+            <label className="space-y-1 text-xs text-secondary-text">
+              回撤恢复缓冲%
+              <input
+                className={INPUT_CLASS}
+                type="number"
+                min={0}
+                max={100}
+                step="0.1"
+                value={settingsForm.autoDrawdownRecoveryHysteresisPct}
+                onChange={(event) => setSettingsForm((prev) => ({
+                  ...prev,
+                  autoDrawdownRecoveryHysteresisPct: event.target.value,
+                }))}
               />
             </label>
             <label className="space-y-1 text-xs text-secondary-text">
