@@ -162,6 +162,8 @@ class VnpyPaperSettings:
     auto_min_cash_balance: Optional[float] = None
     auto_max_drawdown_pct: Optional[float] = None
     auto_drawdown_recovery_hysteresis_pct: float = 0.0
+    auto_consecutive_loss_limit: Optional[int] = None
+    auto_consecutive_loss_cooldown_minutes: int = 1440
     auto_market_light_gate_enabled: bool = False
     auto_market_light_block_statuses: List[str] = field(default_factory=lambda: ["red"])
     auto_failure_fuse_enabled: bool = False
@@ -592,6 +594,11 @@ class VnpyPaperTradingService:
                 requested=include_snapshot,
                 update_peak=False,
             ),
+            "consecutive_losses": self._consecutive_loss_diagnostics(
+                settings=settings,
+                account=account,
+                evaluate=False,
+            ),
             "industry_exposure": self._industry_exposure_diagnostics(
                 settings=settings,
                 snapshot=None,
@@ -616,6 +623,11 @@ class VnpyPaperTradingService:
 
         if account is not None:
             account_id = int(account["id"])
+            diagnostics["consecutive_losses"] = self._consecutive_loss_diagnostics(
+                settings=settings,
+                account=account,
+                evaluate=False,
+            )
             if include_snapshot:
                 try:
                     snapshot, cache_hit = self._get_cached_status_snapshot(account_id)
@@ -2585,22 +2597,57 @@ class VnpyPaperTradingService:
                     "account_risk": account_risk_diagnostics,
                 },
             )
-        if account_risk_reason:
+        consecutive_losses = (
+            account_risk_diagnostics.get("consecutive_losses")
+            if isinstance(account_risk_diagnostics.get("consecutive_losses"), dict)
+            else {}
+        )
+        consecutive_loss_transition = consecutive_losses.get("guard_transition")
+        if consecutive_loss_transition in {"opened", "recovered"}:
+            recovered = consecutive_loss_transition == "recovered"
             self._record_auto_trade_alert_event(
-                account_risk_reason,
-                status="failed" if account_risk_reason == "account_risk_unavailable" else "triggered",
-                reason=account_risk_reason,
-                observed_value=account_risk_diagnostics.get("observed_value"),
-                threshold=account_risk_diagnostics.get("threshold"),
+                "consecutive_loss_recovered" if recovered else "consecutive_loss_limit_reached",
+                status="resolved" if recovered else "triggered",
+                reason=(
+                    str(consecutive_losses.get("recovery_reason") or "consecutive_loss_recovered")
+                    if recovered
+                    else "consecutive_loss_limit_reached"
+                ),
+                observed_value=consecutive_losses.get("current_streak"),
+                threshold=consecutive_losses.get("limit"),
                 diagnostics={
                     "agent_run_uid": run_uid,
                     "agent_run_id": run_id,
                     "strategy": settings.auto_strategy,
                     "market": settings.auto_market,
                     "candidate_count": len(candidates),
-                    "account_risk": account_risk_diagnostics,
+                    "consecutive_losses": consecutive_losses,
                 },
             )
+        if account_risk_reason:
+            if account_risk_reason != "consecutive_loss_limit_reached":
+                self._record_auto_trade_alert_event(
+                    account_risk_reason,
+                    status=(
+                        "failed"
+                        if account_risk_reason in {
+                            "account_risk_unavailable",
+                            "consecutive_loss_data_unavailable",
+                        }
+                        else "triggered"
+                    ),
+                    reason=account_risk_reason,
+                    observed_value=account_risk_diagnostics.get("observed_value"),
+                    threshold=account_risk_diagnostics.get("threshold"),
+                    diagnostics={
+                        "agent_run_uid": run_uid,
+                        "agent_run_id": run_id,
+                        "strategy": settings.auto_strategy,
+                        "market": settings.auto_market,
+                        "candidate_count": len(candidates),
+                        "account_risk": account_risk_diagnostics,
+                    },
+                )
 
         for index, candidate in enumerate(candidates[: settings.auto_max_results], start=1):
             if not isinstance(candidate, dict):
@@ -4368,6 +4415,10 @@ class VnpyPaperTradingService:
         auto_drawdown_recovery_hysteresis_pct = _safe_float(
             raw.get("auto_drawdown_recovery_hysteresis_pct")
         )
+        auto_consecutive_loss_limit = _safe_int(raw.get("auto_consecutive_loss_limit"))
+        auto_consecutive_loss_cooldown_minutes = _safe_int(
+            raw.get("auto_consecutive_loss_cooldown_minutes")
+        )
         auto_failure_fuse_threshold = _safe_int(raw.get("auto_failure_fuse_threshold"))
         auto_failure_fuse_cooldown_minutes = _safe_int(
             raw.get("auto_failure_fuse_cooldown_minutes")
@@ -4575,6 +4626,19 @@ class VnpyPaperTradingService:
                     auto_drawdown_recovery_hysteresis_pct
                     if auto_drawdown_recovery_hysteresis_pct is not None
                     else defaults.auto_drawdown_recovery_hysteresis_pct,
+                ),
+            ),
+            auto_consecutive_loss_limit=(
+                max(1, min(100, auto_consecutive_loss_limit))
+                if auto_consecutive_loss_limit is not None and auto_consecutive_loss_limit > 0
+                else None
+            ),
+            auto_consecutive_loss_cooldown_minutes=max(
+                1,
+                min(
+                    10080,
+                    auto_consecutive_loss_cooldown_minutes
+                    or defaults.auto_consecutive_loss_cooldown_minutes,
                 ),
             ),
             auto_market_light_gate_enabled=bool(
@@ -5051,6 +5115,8 @@ class VnpyPaperTradingService:
                 "min_cash_balance": settings.auto_min_cash_balance,
                 "max_drawdown_pct": settings.auto_max_drawdown_pct,
                 "drawdown_recovery_hysteresis_pct": settings.auto_drawdown_recovery_hysteresis_pct,
+                "consecutive_loss_limit": settings.auto_consecutive_loss_limit,
+                "consecutive_loss_cooldown_minutes": settings.auto_consecutive_loss_cooldown_minutes,
             },
             "candidate_filters": {
                 "symbol_blacklist_count": len(settings.auto_symbol_blacklist or []),
@@ -8482,21 +8548,35 @@ class VnpyPaperTradingService:
         diagnostics: Dict[str, Any] = {
             "min_cash_balance": settings.auto_min_cash_balance,
             "max_drawdown_pct": settings.auto_max_drawdown_pct,
+            "consecutive_loss_limit": settings.auto_consecutive_loss_limit,
         }
-        if settings.auto_min_cash_balance is None and settings.auto_max_drawdown_pct is None:
+        if (
+            settings.auto_min_cash_balance is None
+            and settings.auto_max_drawdown_pct is None
+            and settings.auto_consecutive_loss_limit is None
+        ):
             return None, diagnostics
 
         try:
             account = self.ensure_account(settings=settings)
-            snapshot = self.portfolio.get_portfolio_snapshot(account_id=int(account["id"]))
-            accounts = snapshot.get("accounts") or []
-            account_snapshot = accounts[0] if accounts and isinstance(accounts[0], dict) else snapshot
+            snapshot: Dict[str, Any] = {}
+            account_snapshot: Dict[str, Any] = {}
+            if settings.auto_min_cash_balance is not None or settings.auto_max_drawdown_pct is not None:
+                snapshot = self.portfolio.get_portfolio_snapshot(account_id=int(account["id"]))
+                accounts = snapshot.get("accounts") or []
+                account_snapshot = accounts[0] if accounts and isinstance(accounts[0], dict) else snapshot
         except Exception as exc:  # noqa: BLE001 - configured account guard should fail closed.
             logger.warning("Failed to resolve vn.py paper account risk snapshot: %s", exc)
             diagnostics["error"] = str(exc)
             return "account_risk_unavailable", diagnostics
 
         diagnostics["account_id"] = _safe_int(account.get("id")) if isinstance(account, dict) else None
+        consecutive_losses = self._consecutive_loss_diagnostics(
+            settings=settings,
+            account=account,
+            evaluate=True,
+        )
+        diagnostics["consecutive_losses"] = consecutive_losses
 
         if settings.auto_min_cash_balance is not None:
             cash = _safe_float(account_snapshot.get("total_cash"))
@@ -8533,6 +8613,15 @@ class VnpyPaperTradingService:
                 diagnostics["observed_value"] = drawdown_pct
                 diagnostics["threshold"] = settings.auto_max_drawdown_pct
                 return "account_drawdown_limit_reached", diagnostics
+
+        if consecutive_losses.get("status") == "unavailable":
+            diagnostics["observed_value"] = None
+            diagnostics["threshold"] = settings.auto_consecutive_loss_limit
+            return "consecutive_loss_data_unavailable", diagnostics
+        if consecutive_losses.get("guard_blocked"):
+            diagnostics["observed_value"] = consecutive_losses.get("current_streak")
+            diagnostics["threshold"] = settings.auto_consecutive_loss_limit
+            return "consecutive_loss_limit_reached", diagnostics
 
         return None, diagnostics
 
@@ -8628,6 +8717,185 @@ class VnpyPaperTradingService:
             }
         )
         return result
+
+    def _consecutive_loss_diagnostics(
+        self,
+        *,
+        settings: VnpyPaperSettings,
+        account: Optional[Dict[str, Any]],
+        evaluate: bool,
+    ) -> Dict[str, Any]:
+        limit = settings.auto_consecutive_loss_limit
+        account_id = _safe_int(account.get("id")) if isinstance(account, dict) else _safe_int(settings.account_id)
+        result: Dict[str, Any] = {
+            "configured": limit is not None,
+            "status": "disabled" if limit is None else "account_not_ready",
+            "account_id": account_id,
+            "limit": limit,
+            "cooldown_minutes": settings.auto_consecutive_loss_cooldown_minutes,
+            "current_streak": 0,
+            "max_streak": 0,
+            "last_closed_trade_id": None,
+            "last_closed_trade_at": None,
+            "last_closed_trade_pnl": None,
+            "recover_at": None,
+            "cooldown_remaining_seconds": 0,
+            "guard_blocked": False,
+            "guard_transition": None,
+            "guard_opened_at": None,
+            "guard_last_recovered_at": None,
+            "recovery_reason": None,
+        }
+        if limit is None:
+            return result
+        if account_id is None:
+            return result
+
+        performance = self._paper_trade_performance(
+            account_id,
+            initial_cash=settings.initial_cash,
+            current_equity=None,
+            current_market_value=None,
+        )
+        metrics = performance.get("trade_metrics") if isinstance(performance, dict) else None
+        if not isinstance(metrics, dict) or metrics.get("diagnostics"):
+            result["status"] = "unavailable"
+            if isinstance(metrics, dict):
+                result["diagnostics"] = metrics.get("diagnostics")
+            return result
+
+        current_streak = int(metrics.get("current_consecutive_loss_count") or 0)
+        max_streak = int(metrics.get("max_consecutive_loss_count") or 0)
+        last_closed_trade_id = _safe_int(metrics.get("last_closed_trade_id"))
+        last_closed_trade_at = self._parse_utc_datetime(metrics.get("last_closed_trade_at"))
+        now = self._now_utc()
+        recover_at = (
+            last_closed_trade_at
+            + timedelta(minutes=settings.auto_consecutive_loss_cooldown_minutes)
+            if current_streak >= limit and last_closed_trade_at is not None
+            else None
+        )
+        if current_streak < limit:
+            status = "ready"
+            blocked = False
+        elif recover_at is None:
+            status = "unavailable"
+            blocked = True
+        elif now < recover_at:
+            status = "cooling_down"
+            blocked = True
+        else:
+            status = "cooldown_elapsed"
+            blocked = False
+
+        result.update(
+            {
+                "status": status,
+                "current_streak": current_streak,
+                "max_streak": max_streak,
+                "last_closed_trade_id": last_closed_trade_id,
+                "last_closed_trade_at": (
+                    self._format_utc_datetime(last_closed_trade_at)
+                    if last_closed_trade_at is not None
+                    else None
+                ),
+                "last_closed_trade_pnl": metrics.get("last_closed_trade_pnl"),
+                "recover_at": self._format_utc_datetime(recover_at) if recover_at else None,
+                "cooldown_remaining_seconds": (
+                    max(0, int(math.ceil((recover_at - now).total_seconds())))
+                    if recover_at is not None and now < recover_at
+                    else 0
+                ),
+                "guard_blocked": blocked,
+            }
+        )
+        if status == "unavailable":
+            return result
+        if evaluate:
+            result.update(
+                self._evaluate_consecutive_loss_guard(
+                    account_id=account_id,
+                    blocked=blocked,
+                    current_streak=current_streak,
+                    last_closed_trade_id=last_closed_trade_id,
+                    recovery_reason=(
+                        "consecutive_loss_cooldown_elapsed"
+                        if current_streak >= limit and not blocked
+                        else "consecutive_loss_streak_reset"
+                    ),
+                )
+            )
+        else:
+            state = self._consecutive_loss_guard_state(account_id)
+            result.update(
+                {
+                    "guard_opened_at": state.get("opened_at"),
+                    "guard_last_recovered_at": state.get("last_recovered_at"),
+                }
+            )
+        return result
+
+    def _consecutive_loss_guard_state(self, account_id: int) -> Dict[str, Any]:
+        with self._lock:
+            payload = self._read_config_payload()
+            raw_guards = payload.get("auto_consecutive_loss_guards")
+            guards = raw_guards if isinstance(raw_guards, dict) else {}
+            guard = guards.get(str(account_id))
+            return dict(guard) if isinstance(guard, dict) else {}
+
+    def _evaluate_consecutive_loss_guard(
+        self,
+        *,
+        account_id: int,
+        blocked: bool,
+        current_streak: int,
+        last_closed_trade_id: Optional[int],
+        recovery_reason: str,
+    ) -> Dict[str, Any]:
+        now_text = self._format_utc_datetime(self._now_utc())
+        with self._lock:
+            payload = self._read_config_payload()
+            raw_guards = payload.get("auto_consecutive_loss_guards")
+            guards = dict(raw_guards) if isinstance(raw_guards, dict) else {}
+            raw_guard = guards.get(str(account_id))
+            guard = dict(raw_guard) if isinstance(raw_guard, dict) else {}
+            active = bool(guard.get("active"))
+            transition = None
+
+            if blocked and (not active or guard.get("blocked_trade_id") != last_closed_trade_id):
+                transition = "opened"
+                active = True
+                guard["opened_at"] = now_text
+                guard["blocked_trade_id"] = last_closed_trade_id
+            elif not blocked and active:
+                transition = "recovered"
+                active = False
+                guard["last_recovered_at"] = now_text
+                guard["recovery_reason"] = recovery_reason
+
+            next_state = {
+                "active": active,
+                "current_streak": current_streak,
+                "last_closed_trade_id": last_closed_trade_id,
+            }
+            state_changed = transition is not None or any(
+                guard.get(key) != value for key, value in next_state.items()
+            )
+            guard.update(next_state)
+            if state_changed:
+                guard["updated_at"] = now_text
+                guards[str(account_id)] = guard
+                payload["auto_consecutive_loss_guards"] = guards
+                payload["updated_at"] = now_text
+                self._write_config_payload(payload)
+
+        return {
+            "guard_blocked": blocked,
+            "guard_transition": transition,
+            "guard_opened_at": guard.get("opened_at"),
+            "guard_last_recovered_at": guard.get("last_recovered_at"),
+            "recovery_reason": guard.get("recovery_reason") if transition == "recovered" else None,
+        }
 
     def _account_drawdown_guard_state(self, account_id: int) -> Dict[str, Any]:
         with self._lock:
@@ -9018,6 +9286,11 @@ class VnpyPaperTradingService:
         cumulative_realized_pnl = 0.0
         sell_return_pct_sum = 0.0
         unmatched_sell_quantity = 0.0
+        current_consecutive_loss_count = 0
+        max_consecutive_loss_count = 0
+        last_closed_trade_id: Optional[int] = None
+        last_closed_trade_at: Optional[str] = None
+        last_closed_trade_pnl: Optional[float] = None
         peak_equity = initial_cash if initial_cash > 0 else None
         max_drawdown_value = 0.0
         max_drawdown_pct: Optional[float] = 0.0 if initial_cash > 0 else None
@@ -9086,10 +9359,23 @@ class VnpyPaperTradingService:
                 sell_return_pct_sum += sell_return_pct
                 if pnl > PAPER_EPS:
                     sell_win_count += 1
+                    current_consecutive_loss_count = 0
                 elif pnl < -PAPER_EPS:
                     sell_loss_count += 1
+                    current_consecutive_loss_count += 1
+                    max_consecutive_loss_count = max(
+                        max_consecutive_loss_count,
+                        current_consecutive_loss_count,
+                    )
                 else:
                     sell_flat_count += 1
+                    current_consecutive_loss_count = 0
+                last_closed_trade_id = _safe_int(trade.get("id"))
+                effective_at = self._trade_effective_datetime(trade)
+                last_closed_trade_at = (
+                    self._format_utc_datetime(effective_at) if effective_at is not None else None
+                )
+                last_closed_trade_pnl = round(pnl, 6)
             else:
                 continue
 
@@ -9162,6 +9448,11 @@ class VnpyPaperTradingService:
             "average_sell_return_pct": average_sell_return_pct,
             "realized_trade_pnl": round(realized_trade_pnl, 6),
             "unmatched_sell_quantity": round(unmatched_sell_quantity, 8),
+            "current_consecutive_loss_count": current_consecutive_loss_count,
+            "max_consecutive_loss_count": max_consecutive_loss_count,
+            "last_closed_trade_id": last_closed_trade_id,
+            "last_closed_trade_at": last_closed_trade_at,
+            "last_closed_trade_pnl": last_closed_trade_pnl,
         }
         risk_metrics = {
             "max_drawdown_pct": round(max_drawdown_pct, 6) if max_drawdown_pct is not None else None,
@@ -9198,7 +9489,28 @@ class VnpyPaperTradingService:
             "average_sell_return_pct": None,
             "realized_trade_pnl": 0.0,
             "unmatched_sell_quantity": 0.0,
+            "current_consecutive_loss_count": 0,
+            "max_consecutive_loss_count": 0,
+            "last_closed_trade_id": None,
+            "last_closed_trade_at": None,
+            "last_closed_trade_pnl": None,
         }
+
+    @classmethod
+    def _trade_effective_datetime(cls, trade: Dict[str, Any]) -> Optional[datetime]:
+        try:
+            trade_date = cls._coerce_trade_date(trade.get("trade_date"))
+        except ValueError:
+            trade_date = None
+        created_at = cls._parse_db_datetime(trade.get("created_at"))
+        if trade_date is None:
+            return created_at
+        local_tz = datetime.now().astimezone().tzinfo or timezone.utc
+        if created_at is not None and created_at.astimezone(local_tz).date() == trade_date:
+            return created_at
+        return datetime.combine(trade_date, datetime.min.time(), tzinfo=local_tz).replace(
+            hour=16
+        ).astimezone(timezone.utc)
 
     @staticmethod
     def _empty_risk_metrics() -> Dict[str, Any]:
@@ -10292,7 +10604,7 @@ class VnpyPaperTradingService:
 
     @staticmethod
     def _build_trade_note(*, source: str, note: Optional[str], price_source: str) -> str:
-        parts = [f"vn.py paper", f"source={source}", f"price={price_source}"]
+        parts = ["vn.py paper", f"source={source}", f"price={price_source}"]
         if note:
             parts.append(str(note).strip())
         return " | ".join(part for part in parts if part)[:255]

@@ -118,6 +118,8 @@ const statusResponse = {
     autoMinCashBalance: null,
     autoMaxDrawdownPct: null,
     autoDrawdownRecoveryHysteresisPct: 0,
+    autoConsecutiveLossLimit: null,
+    autoConsecutiveLossCooldownMinutes: 1440,
     autoMarketLightGateEnabled: false,
     autoMarketLightBlockStatuses: ['red'],
     autoFailureFuseEnabled: false,
@@ -355,6 +357,16 @@ const statusResponse = {
         peakEquity: 120000,
         drawdownPct: 4.5,
         thresholdPct: 10,
+      }, {
+        key: 'consecutive_losses',
+        label: '连续亏损',
+        status: 'ready',
+        reason: 'consecutive_loss_guard_ready',
+        detail: '当前连续已平仓亏损 1 / 3 笔',
+        required: true,
+        tone: 'success',
+        currentStreak: 1,
+        limit: 3,
       }, {
         key: 'vnpy_bridge',
         label: 'vn.py bridge',
@@ -1468,6 +1480,7 @@ describe('VnpyPaperTradingPage', () => {
     expect(screen.getByText('累计收益')).toBeInTheDocument();
     expect(screen.getByText('收益率')).toBeInTheDocument();
     expect(screen.getByText('最大回撤')).toBeInTheDocument();
+    expect(screen.getByText('当前连续已平仓亏损 1 / 3 笔')).toBeInTheDocument();
     expect(screen.getByText('换手率')).toBeInTheDocument();
     expect(screen.getByText('当前仓位')).toBeInTheDocument();
     expect(screen.getByText('成交额')).toBeInTheDocument();
@@ -1830,6 +1843,8 @@ describe('VnpyPaperTradingPage', () => {
     fireEvent.change(screen.getByLabelText(/最低现金余额/), { target: { value: '5000' } });
     fireEvent.change(screen.getByLabelText('最大回撤%'), { target: { value: '12' } });
     fireEvent.change(screen.getByLabelText('回撤恢复缓冲%'), { target: { value: '2' } });
+    fireEvent.change(screen.getByLabelText('连续亏损上限（笔）'), { target: { value: '3' } });
+    fireEvent.change(screen.getByLabelText('连续亏损冷却（分钟）'), { target: { value: '120' } });
     fireEvent.click(screen.getByLabelText('大盘红绿灯风控'));
     fireEvent.change(screen.getByLabelText('红绿灯拦截'), { target: { value: 'red_yellow' } });
     fireEvent.click(screen.getByLabelText('连续失败熔断'));
@@ -1892,6 +1907,8 @@ describe('VnpyPaperTradingPage', () => {
         autoMinCashBalance: 5000,
         autoMaxDrawdownPct: 12,
         autoDrawdownRecoveryHysteresisPct: 2,
+        autoConsecutiveLossLimit: 3,
+        autoConsecutiveLossCooldownMinutes: 120,
         autoMarketLightGateEnabled: true,
         autoMarketLightBlockStatuses: ['red', 'yellow'],
         autoFailureFuseEnabled: true,

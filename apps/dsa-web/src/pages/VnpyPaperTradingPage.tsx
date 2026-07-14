@@ -113,6 +113,8 @@ type SettingsForm = {
   autoMinCashBalance: string;
   autoMaxDrawdownPct: string;
   autoDrawdownRecoveryHysteresisPct: string;
+  autoConsecutiveLossLimit: string;
+  autoConsecutiveLossCooldownMinutes: string;
   autoMarketLightGateEnabled: boolean;
   autoMarketLightBlockMode: 'red' | 'red_yellow';
   autoFailureFuseEnabled: boolean;
@@ -210,6 +212,8 @@ const defaultSettingsForm: SettingsForm = {
   autoMinCashBalance: '',
   autoMaxDrawdownPct: '',
   autoDrawdownRecoveryHysteresisPct: '0',
+  autoConsecutiveLossLimit: '',
+  autoConsecutiveLossCooldownMinutes: '1440',
   autoMarketLightGateEnabled: false,
   autoMarketLightBlockMode: 'red',
   autoFailureFuseEnabled: false,
@@ -546,6 +550,12 @@ function settingsToForm(status: VnpyPaperStatusResponse): SettingsForm {
     autoMinCashBalance: settings.autoMinCashBalance == null ? '' : String(settings.autoMinCashBalance),
     autoMaxDrawdownPct: settings.autoMaxDrawdownPct == null ? '' : String(settings.autoMaxDrawdownPct),
     autoDrawdownRecoveryHysteresisPct: String(settings.autoDrawdownRecoveryHysteresisPct ?? 0),
+    autoConsecutiveLossLimit: settings.autoConsecutiveLossLimit == null
+      ? ''
+      : String(settings.autoConsecutiveLossLimit),
+    autoConsecutiveLossCooldownMinutes: String(
+      settings.autoConsecutiveLossCooldownMinutes ?? 1440,
+    ),
     autoMarketLightGateEnabled: Boolean(settings.autoMarketLightGateEnabled),
     autoMarketLightBlockMode: (settings.autoMarketLightBlockStatuses || []).includes('yellow')
       ? 'red_yellow'
@@ -643,6 +653,11 @@ function buildSettingsUpdate(settingsForm: SettingsForm): VnpyPaperSettingsUpdat
       : null,
     autoDrawdownRecoveryHysteresisPct:
       parseNumber(settingsForm.autoDrawdownRecoveryHysteresisPct) ?? 0,
+    autoConsecutiveLossLimit: settingsForm.autoConsecutiveLossLimit.trim()
+      ? parseNumber(settingsForm.autoConsecutiveLossLimit)
+      : null,
+    autoConsecutiveLossCooldownMinutes:
+      parseNumber(settingsForm.autoConsecutiveLossCooldownMinutes) ?? 1440,
     autoMarketLightGateEnabled: settingsForm.autoMarketLightGateEnabled,
     autoMarketLightBlockStatuses: settingsForm.autoMarketLightBlockMode === 'red_yellow'
       ? ['red', 'yellow']
@@ -3814,6 +3829,37 @@ const VnpyPaperTradingPage: React.FC = () => {
                 onChange={(event) => setSettingsForm((prev) => ({
                   ...prev,
                   autoDrawdownRecoveryHysteresisPct: event.target.value,
+                }))}
+              />
+            </label>
+            <label className="space-y-1 text-xs text-secondary-text">
+              连续亏损上限（笔）
+              <input
+                className={INPUT_CLASS}
+                type="number"
+                min={1}
+                max={100}
+                step={1}
+                value={settingsForm.autoConsecutiveLossLimit}
+                onChange={(event) => setSettingsForm((prev) => ({
+                  ...prev,
+                  autoConsecutiveLossLimit: event.target.value,
+                }))}
+                placeholder="可留空"
+              />
+            </label>
+            <label className="space-y-1 text-xs text-secondary-text">
+              连续亏损冷却（分钟）
+              <input
+                className={INPUT_CLASS}
+                type="number"
+                min={1}
+                max={10080}
+                step={1}
+                value={settingsForm.autoConsecutiveLossCooldownMinutes}
+                onChange={(event) => setSettingsForm((prev) => ({
+                  ...prev,
+                  autoConsecutiveLossCooldownMinutes: event.target.value,
                 }))}
               />
             </label>

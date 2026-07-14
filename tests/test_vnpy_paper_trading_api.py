@@ -254,6 +254,47 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
         self.assertIn("8%", drawdown["detail"])
         self.assertIn("account_drawdown_recovery_pending", health["required_blockers"])
 
+    def test_system_health_blocks_consecutive_losses_during_cooldown(self) -> None:
+        health = _system_health_payload({
+            "enabled": True,
+            "available": True,
+            "settings": {
+                "enabled": True,
+                "auto_trade_enabled": True,
+                "auto_execution_mode": "paper",
+                "auto_consecutive_loss_limit": 3,
+                "auto_consecutive_loss_cooldown_minutes": 120,
+            },
+            "diagnostics": {
+                "consecutive_losses": {
+                    "configured": True,
+                    "status": "cooling_down",
+                    "account_id": 1,
+                    "current_streak": 3,
+                    "max_streak": 4,
+                    "limit": 3,
+                    "cooldown_minutes": 120,
+                    "cooldown_remaining_seconds": 3600,
+                    "recover_at": "2026-07-15T03:00:00Z",
+                    "last_closed_trade_id": 9,
+                    "last_closed_trade_at": "2026-07-15T01:00:00Z",
+                    "last_closed_trade_pnl": -120,
+                    "guard_blocked": True,
+                    "guard_opened_at": "2026-07-15T01:00:01Z",
+                },
+            },
+        })
+
+        component = {
+            item["key"]: item for item in health["components"]
+        }["consecutive_losses"]
+        self.assertEqual(component["status"], "blocked")
+        self.assertTrue(component["required"])
+        self.assertEqual(component["reason"], "consecutive_loss_limit_reached")
+        self.assertEqual(component["current_streak"], 3)
+        self.assertEqual(component["limit"], 3)
+        self.assertIn("consecutive_loss_limit_reached", health["required_blockers"])
+
     def test_status_and_manual_order_use_local_paper_account(self) -> None:
         with patch(
             "api.v1.endpoints.vnpy_paper_trading.VnpyPaperTradingService",
@@ -642,6 +683,8 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
                     "auto_min_cash_balance": 5000,
                     "auto_max_drawdown_pct": 12,
                     "auto_drawdown_recovery_hysteresis_pct": 2,
+                    "auto_consecutive_loss_limit": 3,
+                    "auto_consecutive_loss_cooldown_minutes": 120,
                     "auto_max_single_position_value": 20000,
                     "auto_max_total_position_value": 80000,
                     "auto_max_total_position_pct": 80,
@@ -688,6 +731,11 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
         self.assertEqual(
             response.json()["settings"]["auto_drawdown_recovery_hysteresis_pct"],
             2,
+        )
+        self.assertEqual(response.json()["settings"]["auto_consecutive_loss_limit"], 3)
+        self.assertEqual(
+            response.json()["settings"]["auto_consecutive_loss_cooldown_minutes"],
+            120,
         )
         self.assertEqual(response.json()["settings"]["auto_max_single_position_value"], 20000)
         self.assertEqual(response.json()["settings"]["auto_max_total_position_value"], 80000)

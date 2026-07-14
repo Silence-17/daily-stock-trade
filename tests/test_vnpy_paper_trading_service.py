@@ -1536,6 +1536,143 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertEqual(diagnostics["recovery_hysteresis_pct"], 10.0)
         self.assertEqual(diagnostics["recovery_threshold_pct"], 0.0)
 
+    def test_consecutive_loss_guard_blocks_buys_and_recovers_after_cooldown(self) -> None:
+        self.service.update_settings(
+            {
+                "auto_trade_enabled": True,
+                "auto_trade_time_gate_enabled": False,
+                "auto_max_results": 1,
+                "auto_cash_per_order": 1200,
+                "auto_consecutive_loss_limit": 2,
+                "auto_consecutive_loss_cooldown_minutes": 60,
+            }
+        )
+        for symbol in ("600519", "000001"):
+            bought = self.service.submit_order(
+                symbol=symbol,
+                side="buy",
+                market="cn",
+                quantity=100,
+                price=10.0,
+            )
+            sold = self.service.submit_order(
+                symbol=symbol,
+                side="sell",
+                market="cn",
+                quantity=100,
+                price=9.0,
+            )
+            self.assertTrue(bought["accepted"])
+            self.assertTrue(sold["accepted"])
+
+        performance = self.service.get_performance_summary(run_limit=10)
+        metrics = performance["trade_metrics"]
+        self.assertEqual(metrics["current_consecutive_loss_count"], 2)
+        self.assertEqual(metrics["max_consecutive_loss_count"], 2)
+        self.assertEqual(metrics["last_closed_trade_pnl"], -100.0)
+
+        fake_alphasift = MagicMock()
+        fake_alphasift.screen.return_value = {
+            "quality_status": "ok",
+            "candidates": [
+                {"code": "300750", "name": "宁德时代", "score": 80, "price": 10.0},
+            ],
+            "warnings": [],
+            "source_errors": [],
+        }
+        with patch(
+            "src.services.vnpy_paper_trading_service.AlphaSiftService",
+            return_value=fake_alphasift,
+        ):
+            blocked = self.service.run_auto_trade_once()
+
+        self.assertEqual(blocked["submitted_count"], 0)
+        self.assertEqual(blocked["orders"][0]["reason"], "consecutive_loss_limit_reached")
+        blocked_audit = self.service.agent_repo.get_run_detail(blocked["agent_run_uid"])
+        self.assertIsNotNone(blocked_audit)
+        assert blocked_audit is not None
+        loss_diagnostics = blocked_audit["diagnostics"]["account_risk"]["consecutive_losses"]
+        self.assertEqual(loss_diagnostics["status"], "cooling_down")
+        self.assertEqual(loss_diagnostics["guard_transition"], "opened")
+        opened = AlertService().list_triggers(
+            target="vnpy_paper",
+            status="triggered",
+            page_size=10,
+        )["items"]
+        self.assertEqual(len(opened), 1)
+        self.assertEqual(opened[0]["reason"], "consecutive_loss_limit_reached")
+
+        future = datetime.now(timezone.utc) + timedelta(minutes=61)
+        with patch(
+            "src.services.vnpy_paper_trading_service.AlphaSiftService",
+            return_value=fake_alphasift,
+        ), patch.object(self.service, "_now_utc", return_value=future):
+            recovered = self.service.run_auto_trade_once()
+
+        self.assertEqual(recovered["submitted_count"], 1)
+        recovered_audit = self.service.agent_repo.get_run_detail(recovered["agent_run_uid"])
+        self.assertIsNotNone(recovered_audit)
+        assert recovered_audit is not None
+        recovered_losses = recovered_audit["diagnostics"]["account_risk"]["consecutive_losses"]
+        self.assertEqual(recovered_losses["status"], "cooldown_elapsed")
+        self.assertEqual(recovered_losses["guard_transition"], "recovered")
+        resolved = AlertService().list_triggers(
+            target="vnpy_paper",
+            status="resolved",
+            page_size=10,
+        )["items"]
+        self.assertEqual(len(resolved), 1)
+        self.assertEqual(resolved[0]["reason"], "consecutive_loss_cooldown_elapsed")
+
+    def test_consecutive_loss_guard_resets_after_profitable_close(self) -> None:
+        self.service.update_settings(
+            {
+                "auto_consecutive_loss_limit": 1,
+                "auto_consecutive_loss_cooldown_minutes": 1440,
+            }
+        )
+        self.service.submit_order(
+            symbol="600519",
+            side="buy",
+            market="cn",
+            quantity=100,
+            price=10.0,
+        )
+        self.service.submit_order(
+            symbol="600519",
+            side="sell",
+            market="cn",
+            quantity=100,
+            price=9.0,
+        )
+        reason, opened = self.service._account_pre_trade_risk(self.service.get_settings())
+        self.assertEqual(reason, "consecutive_loss_limit_reached")
+        self.assertEqual(opened["consecutive_losses"]["guard_transition"], "opened")
+
+        self.service.submit_order(
+            symbol="000001",
+            side="buy",
+            market="cn",
+            quantity=100,
+            price=10.0,
+        )
+        self.service.submit_order(
+            symbol="000001",
+            side="sell",
+            market="cn",
+            quantity=100,
+            price=11.0,
+        )
+        reason, recovered = self.service._account_pre_trade_risk(self.service.get_settings())
+
+        self.assertIsNone(reason)
+        self.assertEqual(recovered["consecutive_losses"]["current_streak"], 0)
+        self.assertEqual(recovered["consecutive_losses"]["guard_transition"], "recovered")
+        self.assertEqual(
+            recovered["consecutive_losses"]["recovery_reason"],
+            "consecutive_loss_streak_reset",
+        )
+
     def test_auto_trade_respects_market_light_gate(self) -> None:
         self.service.update_settings(
             {
