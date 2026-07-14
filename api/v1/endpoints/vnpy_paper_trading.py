@@ -709,6 +709,69 @@ def _system_health_payload(status_payload: Dict[str, Any]) -> Dict[str, Any]:
         },
     )
 
+    consecutive_losses = (
+        diagnostics.get("consecutive_losses")
+        if isinstance(diagnostics.get("consecutive_losses"), dict)
+        else {}
+    )
+    consecutive_configured = bool(consecutive_losses.get("configured"))
+    consecutive_status = str(consecutive_losses.get("status") or "disabled")
+    consecutive_streak = int(consecutive_losses.get("current_streak") or 0)
+    consecutive_limit = consecutive_losses.get("limit")
+    consecutive_recover_at = consecutive_losses.get("recover_at")
+    if not consecutive_configured:
+        consecutive_health_status = "disabled"
+        consecutive_reason = "consecutive_loss_guard_not_configured"
+        consecutive_detail = "未配置连续已平仓亏损门禁"
+    elif consecutive_status == "cooling_down":
+        consecutive_health_status = "blocked"
+        consecutive_reason = "consecutive_loss_limit_reached"
+        consecutive_detail = (
+            f"连续亏损 {consecutive_streak} 笔，达到上限 {consecutive_limit}；"
+            f"预计 {consecutive_recover_at or '冷却到期后'} 恢复买入"
+        )
+    elif consecutive_status in {"unavailable", "account_not_ready"}:
+        consecutive_health_status = "blocked"
+        consecutive_reason = "consecutive_loss_data_unavailable"
+        consecutive_detail = "连续亏损账本或模拟账户不可用"
+    elif consecutive_status == "cooldown_elapsed":
+        consecutive_health_status = "ready"
+        consecutive_reason = "consecutive_loss_cooldown_elapsed"
+        consecutive_detail = (
+            f"连续亏损仍为 {consecutive_streak} 笔，但冷却已到期，允许恢复买入"
+        )
+    else:
+        consecutive_health_status = "ready"
+        consecutive_reason = "consecutive_loss_guard_ready"
+        consecutive_detail = f"当前连续已平仓亏损 {consecutive_streak} / {consecutive_limit} 笔"
+    add_component(
+        key="consecutive_losses",
+        label="连续亏损",
+        status=consecutive_health_status,
+        reason=consecutive_reason,
+        detail=consecutive_detail,
+        required=consecutive_configured,
+        extra={
+            "account_id": consecutive_losses.get("account_id"),
+            "current_streak": consecutive_streak,
+            "max_streak": consecutive_losses.get("max_streak"),
+            "limit": consecutive_limit,
+            "cooldown_minutes": consecutive_losses.get("cooldown_minutes"),
+            "cooldown_remaining_seconds": consecutive_losses.get(
+                "cooldown_remaining_seconds"
+            ),
+            "recover_at": consecutive_recover_at,
+            "last_closed_trade_id": consecutive_losses.get("last_closed_trade_id"),
+            "last_closed_trade_at": consecutive_losses.get("last_closed_trade_at"),
+            "last_closed_trade_pnl": consecutive_losses.get("last_closed_trade_pnl"),
+            "guard_blocked": consecutive_losses.get("guard_blocked"),
+            "guard_opened_at": consecutive_losses.get("guard_opened_at"),
+            "guard_last_recovered_at": consecutive_losses.get(
+                "guard_last_recovered_at"
+            ),
+        },
+    )
+
     vnpy_required = execution_mode == "vnpy_paper"
     vnpy_bridge_available = bool(vnpy_bridge.get("available"))
     add_component(

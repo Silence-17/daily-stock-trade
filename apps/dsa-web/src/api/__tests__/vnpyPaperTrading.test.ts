@@ -70,6 +70,8 @@ describe('vnpyPaperTradingApi', () => {
           auto_min_cash_balance: 5000,
           auto_max_drawdown_pct: 12,
           auto_drawdown_recovery_hysteresis_pct: 2,
+          auto_consecutive_loss_limit: 3,
+          auto_consecutive_loss_cooldown_minutes: 120,
           auto_market_light_gate_enabled: true,
           auto_market_light_block_statuses: ['red', 'yellow'],
           auto_failure_fuse_enabled: true,
@@ -158,6 +160,8 @@ describe('vnpyPaperTradingApi', () => {
     expect(result.settings.autoMinCashBalance).toBe(5000);
     expect(result.settings.autoMaxDrawdownPct).toBe(12);
     expect(result.settings.autoDrawdownRecoveryHysteresisPct).toBe(2);
+    expect(result.settings.autoConsecutiveLossLimit).toBe(3);
+    expect(result.settings.autoConsecutiveLossCooldownMinutes).toBe(120);
     expect(result.settings.autoMarketLightGateEnabled).toBe(true);
     expect(result.settings.autoMarketLightBlockStatuses).toEqual(['red', 'yellow']);
     expect(result.settings.autoFailureFuseEnabled).toBe(true);
@@ -1031,6 +1035,8 @@ describe('vnpyPaperTradingApi', () => {
       autoMinCashBalance: 5000,
       autoMaxDrawdownPct: 12,
       autoDrawdownRecoveryHysteresisPct: 2,
+      autoConsecutiveLossLimit: 3,
+      autoConsecutiveLossCooldownMinutes: 120,
       autoMarketLightGateEnabled: true,
       autoMarketLightBlockStatuses: ['red', 'yellow'],
       autoFailureFuseEnabled: true,
@@ -1093,6 +1099,8 @@ describe('vnpyPaperTradingApi', () => {
       auto_min_cash_balance: 5000,
       auto_max_drawdown_pct: 12,
       auto_drawdown_recovery_hysteresis_pct: 2,
+      auto_consecutive_loss_limit: 3,
+      auto_consecutive_loss_cooldown_minutes: 120,
       auto_market_light_gate_enabled: true,
       auto_market_light_block_statuses: ['red', 'yellow'],
       auto_failure_fuse_enabled: true,

@@ -697,6 +697,8 @@ crontab -e
 >
 > When `auto_max_drawdown_pct` is configured, account drawdown uses an observed equity peak persisted per account instead of comparing only with initial cash. Full status `diagnostics.account_drawdown`, Agent run `diagnostics.account_risk`, and the Web account-drawdown health component expose peak equity, current equity, drawdown percentage, and threshold. Reaching the threshold blocks new buys while preserving sell-side risk reduction.
 
+> Optional `auto_consecutive_loss_limit` counts consecutive realized losing closes from the local paper ledger using FIFO cost basis, independently from the task-failure fuse. It blocks new buys only. The guard recovers after `auto_consecutive_loss_cooldown_minutes`, or immediately when a later profitable or flat close resets the streak. Full status `diagnostics.consecutive_losses`, system health, and Agent run diagnostics expose the streak, latest close, recovery deadline, and guard state.
+
 ### Market Phase Baseline (Issue #1386 P0)
 
 P0 only adds an internal market-phase inference baseline. It does not change the existing daily post-market report, trading-day skip behavior, effective trading date resolution, API, Web, Bot, Agent, or GitHub Actions defaults. The phase inference is preparation for the P1+ context contract. If `exchange-calendars` is unavailable or the calendar lookup fails, the phase returns `unknown`; the existing trading-day filter and effective-date helpers keep their current fail-open behavior.

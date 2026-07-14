@@ -5,7 +5,7 @@
 ## 当前基线
 
 当前运行时告警由 `src/services/alert_worker.py` 中的后台 worker 统一调度，底层规则评估复用 `src/services/alert_service.py` 与 `src/agent/events.py` 中的 EventMonitor 规则模型。
-- 非规则型系统事件可通过 `AlertService.record_system_event()` 写入 `alert_triggers` 历史，`rule_id` 为 `null`。当前 `vnpy-paper` 会把连续失败熔断、AlphaSift 筛选异常、数据质量阻断、后台自动重试失败/未成交和 vn.py 提交态订单超时写成 `target=vnpy_paper`、`data_source=vnpy_paper_auto` 的系统事件，并复用 `NotificationService.send_with_results(..., route_type="alert")` 主动外发通知；每次投递结果会写入 `alert_notifications`，未配置 alert 渠道时会记录 `__no_channel__` synthetic attempt，便于告警中心审计查询。
+- 非规则型系统事件可通过 `AlertService.record_system_event()` 写入 `alert_triggers` 历史，`rule_id` 为 `null`。当前 `vnpy-paper` 会把连续失败熔断、连续已平仓亏损门禁及恢复、AlphaSift 筛选异常、数据质量阻断、后台自动重试失败/未成交和 vn.py 提交态订单超时写成 `target=vnpy_paper`、`data_source=vnpy_paper_auto` 的系统事件，并复用 `NotificationService.send_with_results(..., route_type="alert")` 主动外发通知；每次投递结果会写入 `alert_notifications`，未配置 alert 渠道时会记录 `__no_channel__` synthetic attempt，便于告警中心审计查询。
 
 - 配置入口：`AGENT_EVENT_MONITOR_ENABLED`、`AGENT_EVENT_MONITOR_INTERVAL_MINUTES`、`AGENT_EVENT_ALERT_RULES_JSON`。
 - 运行入口：`main.py` 在 schedule 模式中注册 `agent_event_monitor` 后台任务；后台 worker 每轮读取持久化 active rules，并继续兼容 legacy `AGENT_EVENT_ALERT_RULES_JSON`。

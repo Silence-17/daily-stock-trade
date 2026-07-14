@@ -59,7 +59,7 @@ Local API: `http://127.0.0.1:8000`
   - `diagnostics.system_health.next_action=next_session`
   - `diagnostics.system_health.required_blockers=[]`
   - `diagnostics.system_health.warnings=["next_session"]`
-  - `diagnostics.system_health.components=paper_ledger,selection_source,automation_loop,scheduling_window,trading_window,valuation,industry_exposure,account_drawdown,vnpy_bridge`
+  - `diagnostics.system_health.components=paper_ledger,selection_source,automation_loop,scheduling_window,trading_window,valuation,industry_exposure,account_drawdown,consecutive_losses,vnpy_bridge`
   - `diagnostics.auto_trade_readiness.status=warning`
   - `diagnostics.auto_trade_readiness.next_action=next_session`
   - `diagnostics.auto_trade_readiness.timing_alignment.status=ready`
