@@ -589,7 +589,7 @@ conda activate stock
 pip install -r requirements.txt
 ```
 
-For the optional vn.py runtime, use an isolated Python 3.13 environment. On Windows PowerShell run `.\scripts\setup_vnpy_runtime.ps1 -PythonExecutable "python"`; the script rejects Python 3.14 unless explicitly overridden, installs `requirements-vnpy.txt`, and smoke-checks a real OrderRequest, EventEngine, MainEngine, and the built-in immediate-fill gateway. `DsaSimulatedGateway` provides a credential-free Web-to-vn.py paper order and fill path; real channels still require their own gateway plugin and external connection settings. See [vn.py paper trading](vnpy-paper-trading.md).
+For the optional vn.py runtime, use an isolated Python 3.13 environment. On Windows PowerShell run `.\scripts\setup_vnpy_runtime.ps1 -PythonExecutable "python"`; the script rejects Python 3.14 unless explicitly overridden, installs `requirements-vnpy.txt`, and smoke-checks a real OrderRequest, EventEngine, MainEngine, and the built-in immediate-fill gateway. The setup check also runs three disconnect/reconnect cycles with in-flight orders and verifies that `DsaSimulatedGateway` preserves cash, positions, and order cache while filling each order exactly once. This gateway provides a credential-free Web-to-vn.py paper order and fill path; real channels still require their own gateway plugin and external connection settings. See [vn.py paper trading](vnpy-paper-trading.md).
 
 On Windows PowerShell, if Python or pip still uses the system default code page, enable UTF-8 before the first dependency install or environment check. This keeps terminal output and third-party tooling from failing on non-ASCII text:
 

@@ -33,6 +33,7 @@ class DsaSimulatedGateway(BaseGateway):
     default_setting = {
         "initial_balance": 1_000_000.0,
         "fill_delay_ms": 500,
+        "preserve_state_on_reconnect": True,
     }
     exchanges = [Exchange.SSE, Exchange.SZSE, Exchange.SEHK, Exchange.SMART]
     connect_without_settings = True
@@ -42,6 +43,8 @@ class DsaSimulatedGateway(BaseGateway):
         self._lock = RLock()
         self._connected = False
         self._closed = False
+        self._ever_connected = False
+        self._connect_count = 0
         self._order_count = 0
         self._trade_count = 0
         self._balance = 1_000_000.0
@@ -54,14 +57,38 @@ class DsaSimulatedGateway(BaseGateway):
         """Start the local simulator and publish its initial account snapshot."""
 
         payload = setting if isinstance(setting, dict) else {}
+        timers_to_cancel: list[Timer] = []
         with self._lock:
-            self._balance = max(0.0, _as_float(payload.get("initial_balance"), 1_000_000.0))
+            preserve_state = _as_bool(payload.get("preserve_state_on_reconnect"), True)
+            reset_state = self._ever_connected and not preserve_state
+            if not self._ever_connected or reset_state:
+                timers_to_cancel = list(self._timers.values())
+                self._timers.clear()
+                self._balance = max(
+                    0.0,
+                    _as_float(payload.get("initial_balance"), 1_000_000.0),
+                )
+                self._order_count = 0
+                self._trade_count = 0
+                self._orders.clear()
+                self._positions.clear()
             delay_ms = min(10_000.0, max(10.0, _as_float(payload.get("fill_delay_ms"), 500.0)))
             self._fill_delay_seconds = delay_ms / 1000.0
             self._connected = True
             self._closed = False
+            self._ever_connected = True
+            self._connect_count += 1
+            pending_orders = [
+                copy(order) for order in self._orders.values() if order.is_active()
+            ]
+        for timer in timers_to_cancel:
+            timer.cancel()
         self.write_log("DSA built-in simulated gateway connected")
+        for order in pending_orders:
+            self.on_order(order)
+            self._schedule_fill(order.orderid)
         self._publish_account()
+        self.query_position()
 
     def close(self) -> None:
         """Stop pending fills and close the simulator."""
@@ -73,6 +100,7 @@ class DsaSimulatedGateway(BaseGateway):
             self._timers.clear()
         for timer in timers:
             timer.cancel()
+        self.write_log("DSA built-in simulated gateway disconnected; state retained")
 
     def subscribe(self, req: SubscribeRequest) -> None:
         """Accept subscriptions; prices are supplied by DSA order requests."""
@@ -98,10 +126,7 @@ class DsaSimulatedGateway(BaseGateway):
 
             order.status = Status.NOTTRADED
             self.on_order(copy(order))
-            timer = Timer(self._fill_delay_seconds, self._fill_order, args=(orderid,))
-            timer.daemon = True
-            self._timers[orderid] = timer
-            timer.start()
+            self._schedule_fill_locked(orderid)
             return order.vt_orderid
 
     def cancel_order(self, req: CancelRequest) -> None:
@@ -127,6 +152,39 @@ class DsaSimulatedGateway(BaseGateway):
             snapshots = [self._position_data(item) for item in self._positions.values()]
         for position in snapshots:
             self.on_position(position)
+
+    def get_state_snapshot(self) -> dict[str, Any]:
+        """Return a read-only state summary for diagnostics and reconnect soak tests."""
+
+        with self._lock:
+            return {
+                "connected": self._connected and not self._closed,
+                "connect_count": self._connect_count,
+                "balance": self._balance,
+                "order_count": len(self._orders),
+                "trade_count": self._trade_count,
+                "active_order_ids": sorted(
+                    orderid for orderid, order in self._orders.items() if order.is_active()
+                ),
+                "position_count": sum(
+                    1 for item in self._positions.values() if float(item["volume"]) != 0
+                ),
+            }
+
+    def _schedule_fill(self, orderid: str) -> None:
+        with self._lock:
+            if not self._connected or self._closed:
+                return
+            order = self._orders.get(orderid)
+            if order is None or not order.is_active() or orderid in self._timers:
+                return
+            self._schedule_fill_locked(orderid)
+
+    def _schedule_fill_locked(self, orderid: str) -> None:
+        timer = Timer(self._fill_delay_seconds, self._fill_order, args=(orderid,))
+        timer.daemon = True
+        self._timers[orderid] = timer
+        timer.start()
 
     def _order_rejection_reason(self, req: OrderRequest) -> str | None:
         if not self._connected or self._closed:
@@ -216,3 +274,16 @@ def _as_float(value: Any, default: float) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _as_bool(value: Any, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return default

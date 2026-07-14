@@ -157,6 +157,8 @@ The readiness and system health status are `warning` because the current time is
 - `.venv-vnpy\Scripts\python.exe scripts\check_vnpy_adapter.py --require-vnpy`
   - Python 3.13.14, vn.py 4.4.0, real `vnpy.trader.object.OrderRequest`, real `vnpy.event.engine.EventEngine`, and real `vnpy.trader.engine.MainEngine` all passed.
   - Bridge smoke returned `accepted=true`; the built-in `DsaSimulatedGateway` returned `vt_orderid=DSA_SIM.1`, `order_status=ALLTRADED`, and one real vn.py trade event; `pip check` reported no broken requirements.
+- `.venv-vnpy\Scripts\python.exe scripts\check_vnpy_adapter.py --require-vnpy --reconnect-cycles 3`
+  - Three in-flight disconnect/reconnect cycles completed with `all_pending_retained=true` and `all_filled_once=true`; all order and trade ids were unique, and the final simulator state retained four orders/trades, one position, and the expected `996000.0` balance across four connections.
 - `.venv-vnpy\Scripts\python.exe -m unittest` built-in gateway integration smoke
   - A fixed AlphaSift candidate produced an Agent `submitted` plan through real MainEngine, then EventEngine callbacks changed the plan and decision to `filled` and wrote one Portfolio trade.
   - A direct gateway test also verified order, trade, account, and position snapshots through vn.py's OMS engine.
@@ -250,11 +252,11 @@ The readiness and system health status are `warning` because the current time is
 
 ## Unfinished Goals
 
-- Real vn.py gateway validation is still not complete: the isolated runtime and event lifecycle are verified, but no concrete gateway plugin/account has been configured, so gateway connection, broker/paper acknowledgements, reconnect behavior, and long-running subscriptions remain unverified.
+- Real vn.py gateway validation is still not complete: the isolated runtime, event lifecycle, and built-in `DSA_SIM` reconnect/cache/exactly-once fill behavior are verified, but no concrete gateway plugin/account has been configured, so broker/paper acknowledgements, real-gateway reconnect behavior, and long-running subscriptions remain unverified.
 - Basic cross-currency valuation, target replenishment, and covariance target-tracking allocation are complete for supported paper-trading markets. Broader cross-market objective design and live-gateway validation remain incomplete.
 - The Agent workflow is usable but not a complete autonomous research loop: cross-market dynamic objectives, long-horizon quality evaluation, and human feedback loops still need more work.
 - Background-task long-window metrics and cross-run Agent data-quality trends are available for 7/30/90-day windows. Fine-grained per-source degradation rates are visible, and automated snapshot routing now consumes the 30-day same-strategy/market trend; extending the same weighting contract to fund-flow and news providers is still pending.
 - Persisted Agent candidates have strict forward multi-horizon evaluation; Tushare lifecycle metadata reconstructs each dated A-share universe and feeds lease-protected resumable factor ingestion, while implemented Tushare dividend/share-adjustment events are stored alongside ingestion and consumed by replay by default. Explicit request events can override stored events and provide an actual fractional-share cash-in-lieu settlement price. A-share stamp duty can resolve automatically from sell dates since 2008-09-19, including the 2023 halving; broker schedules, earlier tax regimes, and settlement prices are not inferred. A successful live full-market and corporate-action run still requires external Tushare permission and stable long-running upstream access.
-- Recovery now reconciles active MainEngine snapshots before timeout, survives service reconstruction in repository-backed tests, accepts late fills, and fails closed on query errors; real gateway reconnect behavior, gateway cache retention, and long-running lifecycle validation remain incomplete.
+- Recovery now reconciles active MainEngine snapshots before timeout, survives service reconstruction in repository-backed tests, accepts late fills, and fails closed on query errors. The built-in simulator now has deterministic reconnect/cache/late-fill evidence; equivalent real-gateway reconnect and long-running lifecycle validation remain incomplete.
 
 See [online-stock-selection-agent-goals.md](online-stock-selection-agent-goals.md) for the fuller goal breakdown.
