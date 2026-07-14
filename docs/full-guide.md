@@ -793,6 +793,8 @@ python main.py --schedule --no-run-immediately
 > Agent 控制台还可为每轮保存 `approved`、`needs_changes` 或 `rejected` 人工验收结论、审阅人和备注。详情、列表、时间线与今日总结统一展示这些结果，最近同策略/市场意见进入后续 `recent_run_context`；它们只作为规则计划审计和可选动态计划上下文，不能绕过数据质量、仓位或交易风控。
 
 > 每次自动运行还会在 LLM 动态计划之前生成确定性的跨市场目标。A 股、港股、美股、日股、韩股和台股分别使用流动性、汇率或波动风险画像；最近人工意见要求修改/拒绝、连续失败或跨运行质量降级时，只收紧候选数和单票预算。收紧后的有效值直接进入 AlphaSift 筛选与交易计划，LLM 只能在该边界内继续收紧。Agent 控制台会显示目标模式、配置值、有效值和触发原因。
+
+> Agent 候选前瞻评价还会把当时持久化的 `agent_review` 与 `llm_review` 关联到 1/5/10/20 日结果，按规则 reviewer 或 LLM model、prompt 版本和 evaluator 版本生成长周期复核质量矩阵。矩阵区分通过精度、阻断避损率、通过/阻断平均收益和收益差；缺少足够后向日线的样本只影响覆盖率，不会被推断为成功。选择“包含风控跳过候选”时会纳入真实 `action=skip` 记录。
 > `GET /api/v1/vnpy-paper/status` 会在 `diagnostics.system_health` 中返回跨模块健康视图，统一汇总本地账本、选股来源、自动化调度、调度窗口、交易窗口、持仓估值、行业归属和 vn.py bridge；模拟交易页的“可用性诊断”优先展示该结构化摘要，旧后端再回退到 `diagnostics.auto_trade_readiness`。完整状态还会通过 `diagnostics.industry_exposure` 返回持仓行业解析覆盖率、缺失代码和行业市值分布；未配置行业风控时只读快照字段且不逐股联网，配置行业风控后才启用严格解析，覆盖不完整会 fail closed。`diagnostics.auto_trade_readiness` 仍提供自动交易 readiness、阻断原因、关注项和组件状态；`scheduler.loop_running` 表示调度循环是否存活，`scheduler.running` 仅表示当前是否正在执行分析任务，readiness 会按 `loop_running` 判断定时自动交易是否可继续调度。`diagnostics.auto_trade_readiness.timing_alignment` 会对比自动任务下次触发时间和交易窗口开收盘时间；当 time gate 生效且服务启动时不在交易窗口内，首次自动买入后台任务会延迟到下一开盘窗口，避免固定间隔从盘后启动后反复错过交易时段。
 >
 > 配置 `auto_max_drawdown_pct` 后，账户最大回撤以按账户持久化的已观测权益峰值为基准，而不是只比较初始资金。完整状态的 `diagnostics.account_drawdown`、Agent run 的 `diagnostics.account_risk` 和 Web“账户回撤”健康组件会展示峰值权益、当前权益、回撤比例与阈值；达到阈值时只阻断新买入。
