@@ -167,6 +167,11 @@ function orderLlmReview(decision: VnpyPaperAgentDecision): Record<string, unknow
   return asRecord(orderResult?.llmReview) ?? asRecord(orderResult?.llm_review);
 }
 
+function orderPositionPlan(decision: VnpyPaperAgentDecision): Record<string, unknown> | null {
+  const orderResult = asRecord(decision.orderResult);
+  return asRecord(orderResult?.positionPlan) ?? asRecord(orderResult?.position_plan);
+}
+
 function versionHint(record: Record<string, unknown> | null): string {
   const promptVersion = record?.promptVersion ?? record?.prompt_version;
   const evaluatorVersion = record?.evaluatorVersion ?? record?.evaluator_version;
@@ -397,6 +402,11 @@ const AgentConsolePage: React.FC = () => {
   const selectedWorkflow = runAgentWorkflow(selectedRun);
   const selectedPlan = runAgentPlan(selectedRun);
   const selectedLlmRecap = runLlmRecap(selectedRun);
+  const selectedDiagnostics = asRecord(selectedRun?.diagnostics);
+  const selectedPortfolioAllocation = (
+    asRecord(selectedDiagnostics?.portfolioAllocation)
+    ?? asRecord(selectedDiagnostics?.portfolio_allocation)
+  );
   const selectedPlanProfile = asRecord(selectedPlan?.planProfile) ?? asRecord(selectedPlan?.plan_profile);
   const selectedAdaptiveControls = (
     asRecord(selectedPlan?.adaptiveControls)
@@ -1623,6 +1633,19 @@ const AgentConsolePage: React.FC = () => {
                             {formatMoney(selectedPlan.cashPerOrder ?? selectedPlan.cash_per_order ?? selectedRun.cashPerOrder)}
                           </dd>
                         </div>
+                        {selectedPortfolioAllocation?.enabled ? (
+                          <div>
+                            <dt>组合分配</dt>
+                            <dd className="mt-1 font-semibold text-foreground" data-testid="portfolio-allocation-summary">
+                              {String(selectedPortfolioAllocation.method || '-')}
+                              {' · '}
+                              {formatMoney(
+                                selectedPortfolioAllocation.allocatedBudget
+                                ?? selectedPortfolioAllocation.allocated_budget,
+                              )}
+                            </dd>
+                          </div>
+                        ) : null}
                         <div>
                           <dt>最大候选</dt>
                           <dd className="mt-1 font-semibold text-foreground">
@@ -1938,6 +1961,11 @@ function DecisionTable({ decisions }: { decisions: VnpyPaperAgentDecision[] }) {
                 const llmReviewStatus = String(llmReview?.status || '');
                 const llmReviewSummary = String(llmReview?.summary || llmReview?.reason || '');
                 const llmReviewVersionHint = versionHint(llmReview);
+                const positionPlan = orderPositionPlan(item);
+                const portfolioAllocation = (
+                  asRecord(positionPlan?.portfolioAllocation)
+                  ?? asRecord(positionPlan?.portfolio_allocation)
+                );
                 return (
                   <tr key={item.id} className="border-t border-border align-top">
                     <td className="px-3 py-2">
@@ -1955,6 +1983,13 @@ function DecisionTable({ decisions }: { decisions: VnpyPaperAgentDecision[] }) {
                     <td className="px-3 py-2 text-secondary-text">
                       <div>{formatMoney(item.cashAmount)}</div>
                       <div>{formatNumber(item.quantity, 0)} 股 · {formatNumber(item.price)}</div>
+                      {portfolioAllocation ? (
+                        <div className="mt-1" data-testid={`portfolio-allocation-${item.id}`}>
+                          评分权重 {formatPercent(Number(portfolioAllocation.scoreWeight ?? portfolioAllocation.score_weight) * 100)}
+                          {' · 上限 '}
+                          {formatMoney(portfolioAllocation.candidateCap ?? portfolioAllocation.candidate_cap)}
+                        </div>
+                      ) : null}
                     </td>
                     <td className="max-w-[320px] px-3 py-2 text-secondary-text">
                       <div className="line-clamp-3">{item.rationale || '-'}</div>

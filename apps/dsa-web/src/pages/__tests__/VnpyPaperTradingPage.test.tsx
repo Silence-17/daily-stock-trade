@@ -92,6 +92,8 @@ const statusResponse = {
     autoMarket: 'cn',
     autoMaxResults: 3,
     autoCashPerOrder: 10000,
+    autoScoreWeightedAllocationEnabled: false,
+    autoAllocationBudget: null,
     autoIntervalMinutes: 1440,
     autoMinScore: null,
     autoSkipExistingPositions: true,
@@ -1691,6 +1693,8 @@ describe('VnpyPaperTradingPage', () => {
     fireEvent.click(screen.getByLabelText('自动卖出风控'));
     fireEvent.click(screen.getByLabelText('信号失效卖出'));
     fireEvent.click(screen.getByLabelText('组合再平衡'));
+    fireEvent.click(screen.getByLabelText('评分加权分配'));
+    fireEvent.change(screen.getByLabelText('每轮组合预算（CNY）'), { target: { value: '25000' } });
     fireEvent.change(screen.getByLabelText('间隔分钟'), { target: { value: '5' } });
     fireEvent.change(screen.getByLabelText('止损%'), { target: { value: '8' } });
     fireEvent.change(screen.getByLabelText('止盈%'), { target: { value: '18' } });
@@ -1723,6 +1727,8 @@ describe('VnpyPaperTradingPage', () => {
     await waitFor(() => expect(updateSettings).toHaveBeenCalledWith(
       expect.objectContaining({
         autoTradeEnabled: true,
+        autoScoreWeightedAllocationEnabled: true,
+        autoAllocationBudget: 25000,
         autoIntervalMinutes: 5,
         autoMaxPositions: 10,
         autoDailyMaxOrders: null,

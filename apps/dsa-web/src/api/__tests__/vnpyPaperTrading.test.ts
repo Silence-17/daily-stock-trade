@@ -33,6 +33,8 @@ describe('vnpyPaperTradingApi', () => {
           auto_market: 'cn',
           auto_max_results: 3,
           auto_cash_per_order: 10000,
+          auto_score_weighted_allocation_enabled: true,
+          auto_allocation_budget: 25000,
           auto_interval_minutes: 1440,
           auto_min_score: null,
           auto_skip_existing_positions: true,
@@ -113,6 +115,8 @@ describe('vnpyPaperTradingApi', () => {
     expect(result.mode).toBe('local_paper');
     expect(result.settings.autoTradeEnabled).toBe(true);
     expect(result.settings.autoCashPerOrder).toBe(10000);
+    expect(result.settings.autoScoreWeightedAllocationEnabled).toBe(true);
+    expect(result.settings.autoAllocationBudget).toBe(25000);
     expect(result.settings.autoExecutionMode).toBe('paper');
     expect(result.settings.autoMaxSinglePositionValue).toBe(20000);
     expect(result.settings.autoMaxTotalPositionValue).toBe(80000);
@@ -960,6 +964,8 @@ describe('vnpyPaperTradingApi', () => {
       enabled: true,
       autoTradeEnabled: true,
       autoCashPerOrder: 12000,
+      autoScoreWeightedAllocationEnabled: true,
+      autoAllocationBudget: 25000,
       autoIntervalMinutes: 5,
       autoMinScore: null,
       autoSkipExistingPositions: false,
@@ -1005,6 +1011,8 @@ describe('vnpyPaperTradingApi', () => {
       enabled: true,
       auto_trade_enabled: true,
       auto_cash_per_order: 12000,
+      auto_score_weighted_allocation_enabled: true,
+      auto_allocation_budget: 25000,
       auto_interval_minutes: 5,
       auto_min_score: null,
       auto_skip_existing_positions: false,

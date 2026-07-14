@@ -509,6 +509,8 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
                 json={
                     "enabled": True,
                     "auto_trade_enabled": True,
+                    "auto_score_weighted_allocation_enabled": True,
+                    "auto_allocation_budget": 25000,
                     "auto_interval_minutes": 5,
                     "auto_min_score": None,
                     "auto_exclude_st": True,
@@ -536,6 +538,8 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.json()["settings"]["auto_trade_enabled"])
+        self.assertTrue(response.json()["settings"]["auto_score_weighted_allocation_enabled"])
+        self.assertEqual(response.json()["settings"]["auto_allocation_budget"], 25000)
         self.assertEqual(response.json()["settings"]["auto_interval_minutes"], 5)
         self.assertTrue(response.json()["settings"]["auto_exclude_st"])
         self.assertEqual(response.json()["settings"]["auto_min_turnover"], 100000000)

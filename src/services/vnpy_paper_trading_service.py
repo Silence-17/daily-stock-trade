@@ -120,6 +120,8 @@ class VnpyPaperSettings:
     auto_market: str = "cn"
     auto_max_results: int = 3
     auto_cash_per_order: float = 10000.0
+    auto_score_weighted_allocation_enabled: bool = False
+    auto_allocation_budget: Optional[float] = None
     auto_interval_minutes: int = 1440
     auto_min_score: Optional[float] = None
     auto_skip_existing_positions: bool = True
@@ -2413,6 +2415,18 @@ class VnpyPaperTradingService:
         daily_order_count = int(daily_usage["order_count"])
         daily_cash_used = float(daily_usage["cash_amount"])
         daily_usage_fx_unavailable = bool(daily_usage.get("fx_unavailable"))
+        portfolio_allocation = self._candidate_portfolio_allocation(
+            settings=settings,
+            candidates=candidates[: settings.auto_max_results],
+            exposure_state=exposure_state,
+            daily_order_count=daily_order_count,
+            daily_cash_used=daily_cash_used,
+        )
+        run_diagnostics["portfolio_allocation"] = {
+            key: value
+            for key, value in portfolio_allocation.items()
+            if key != "allocations_by_symbol"
+        }
         account_risk_reason, account_risk_diagnostics = self._account_pre_trade_risk(settings)
         run_diagnostics["account_risk"] = account_risk_diagnostics
         market_risk_reason = self._market_light_pre_trade_risk_reason(settings)
@@ -2651,19 +2665,61 @@ class VnpyPaperTradingService:
                     risk_flags=["max_positions_reached"],
                 )
                 continue
+            allocation_entry = None
+            configured_base_amount = float(settings.auto_cash_per_order)
+            if settings.auto_score_weighted_allocation_enabled:
+                allocations_by_symbol = portfolio_allocation.get("allocations_by_symbol")
+                if isinstance(allocations_by_symbol, dict):
+                    allocation_entry = allocations_by_symbol.get(symbol)
+                allocated_amount = (
+                    _safe_float(allocation_entry.get("allocated_base_amount"))
+                    if isinstance(allocation_entry, dict)
+                    else None
+                )
+                if allocated_amount is None or allocated_amount <= PAPER_EPS:
+                    allocation_reason = (
+                        str(allocation_entry.get("reason") or "").strip()
+                        if isinstance(allocation_entry, dict)
+                        else ""
+                    ) or str(portfolio_allocation.get("reason") or "").strip()
+                    allocation_reason = allocation_reason or "portfolio_allocation_budget_exhausted"
+                    order = self._skipped_order(
+                        symbol=symbol,
+                        side="buy",
+                        reason=allocation_reason,
+                        raw={**candidate, "portfolio_allocation": allocation_entry},
+                    )
+                    orders.append(order)
+                    self._record_agent_decision(
+                        run_id=run_id,
+                        sequence=index,
+                        candidate=candidate,
+                        symbol=symbol,
+                        settings=settings,
+                        action="skip",
+                        order=order,
+                        reason=allocation_reason,
+                        risk_flags=[allocation_reason],
+                    )
+                    continue
+                configured_base_amount = allocated_amount
             target_budget, target_sizing, target_budget_reason = self._target_weight_buy_budget(
                 settings=settings,
                 exposure_state=exposure_state,
                 symbol=symbol,
                 candidate=candidate,
-                configured_base_amount=float(settings.auto_cash_per_order),
+                configured_base_amount=configured_base_amount,
             )
             if target_budget_reason:
                 order = self._skipped_order(
                     symbol=symbol,
                     side="buy",
                     reason=target_budget_reason,
-                    raw={**candidate, "target_weight_sizing": target_sizing},
+                    raw={
+                        **candidate,
+                        "portfolio_allocation": allocation_entry,
+                        "target_weight_sizing": target_sizing,
+                    },
                 )
                 orders.append(order)
                 self._record_agent_decision(
@@ -2700,6 +2756,7 @@ class VnpyPaperTradingService:
                     raw={
                         **candidate,
                         "fx_conversion": candidate_currency_budget,
+                        "portfolio_allocation": allocation_entry,
                         "target_weight_sizing": target_sizing,
                     },
                 )
@@ -2729,7 +2786,11 @@ class VnpyPaperTradingService:
                     symbol=symbol,
                     side="buy",
                     reason=exposure_limit_reason,
-                    raw={**candidate, "target_weight_sizing": target_sizing},
+                    raw={
+                        **candidate,
+                        "portfolio_allocation": allocation_entry,
+                        "target_weight_sizing": target_sizing,
+                    },
                 )
                 orders.append(order)
                 self._record_agent_decision(
@@ -2755,7 +2816,11 @@ class VnpyPaperTradingService:
                     symbol=symbol,
                     side="buy",
                     reason=daily_limit_reason,
-                    raw={**candidate, "target_weight_sizing": target_sizing},
+                    raw={
+                        **candidate,
+                        "portfolio_allocation": allocation_entry,
+                        "target_weight_sizing": target_sizing,
+                    },
                 )
                 orders.append(order)
                 self._record_agent_decision(
@@ -2779,7 +2844,16 @@ class VnpyPaperTradingService:
             )
             if llm_review is not None and self._llm_review_blocks_trade(llm_review):
                 llm_reason = self._llm_review_block_reason(llm_review)
-                order = self._skipped_order(symbol=symbol, side="buy", reason=llm_reason, raw=candidate)
+                order = self._skipped_order(
+                    symbol=symbol,
+                    side="buy",
+                    reason=llm_reason,
+                    raw={
+                        **candidate,
+                        "portfolio_allocation": allocation_entry,
+                        "target_weight_sizing": target_sizing,
+                    },
+                )
                 order["llm_review"] = llm_review
                 orders.append(order)
                 self._record_agent_decision(
@@ -2806,6 +2880,7 @@ class VnpyPaperTradingService:
                     raw={
                         **candidate,
                         "fx_conversion": candidate_currency_budget,
+                        "portfolio_allocation": allocation_entry,
                         "target_weight_sizing": target_sizing,
                     },
                 )
@@ -2823,6 +2898,7 @@ class VnpyPaperTradingService:
                     raw={
                         **candidate,
                         "fx_conversion": candidate_currency_budget,
+                        "portfolio_allocation": allocation_entry,
                         "target_weight_sizing": target_sizing,
                     },
                     execution_route=execution_route,
@@ -2849,6 +2925,23 @@ class VnpyPaperTradingService:
             if order.get("accepted") or order.get("status") == "planned":
                 daily_order_count += 1
                 daily_cash_used += self._order_base_cash_amount(order, settings=settings)
+
+        if settings.auto_score_weighted_allocation_enabled:
+            allocation_diagnostics = run_diagnostics.get("portfolio_allocation")
+            if isinstance(allocation_diagnostics, dict):
+                executable_budget = sum(
+                    self._order_base_cash_amount(item, settings=settings)
+                    for item in orders
+                    if (item.get("accepted") or item.get("status") == "planned")
+                    and isinstance(item.get("raw"), dict)
+                    and isinstance(item["raw"].get("portfolio_allocation"), dict)
+                )
+                allocated_budget = _safe_float(allocation_diagnostics.get("allocated_budget")) or 0.0
+                allocation_diagnostics["executable_planned_budget"] = round(executable_budget, 6)
+                allocation_diagnostics["execution_residual"] = round(
+                    max(0.0, allocated_budget - executable_budget),
+                    6,
+                )
 
         planned_count = sum(1 for item in orders if item.get("status") == "planned")
         submitted_count = sum(1 for item in orders if item.get("accepted"))
@@ -4072,6 +4165,7 @@ class VnpyPaperTradingService:
         initial_cash = _safe_float(raw.get("initial_cash"))
         auto_max_results = _safe_int(raw.get("auto_max_results"))
         auto_cash_per_order = _safe_float(raw.get("auto_cash_per_order"))
+        auto_allocation_budget = _safe_float(raw.get("auto_allocation_budget"))
         auto_interval_minutes = _safe_int(raw.get("auto_interval_minutes"))
         auto_min_score = _safe_float(raw.get("auto_min_score"))
         auto_max_positions = _safe_int(raw.get("auto_max_positions"))
@@ -4125,6 +4219,17 @@ class VnpyPaperTradingService:
                 auto_cash_per_order
                 if auto_cash_per_order is not None and auto_cash_per_order > 0
                 else defaults.auto_cash_per_order
+            ),
+            auto_score_weighted_allocation_enabled=bool(
+                raw.get(
+                    "auto_score_weighted_allocation_enabled",
+                    defaults.auto_score_weighted_allocation_enabled,
+                )
+            ),
+            auto_allocation_budget=(
+                auto_allocation_budget
+                if auto_allocation_budget is not None and auto_allocation_budget > 0
+                else None
             ),
             auto_interval_minutes=max(1, min(10080, auto_interval_minutes or defaults.auto_interval_minutes)),
             auto_min_score=auto_min_score,
@@ -4462,7 +4567,10 @@ class VnpyPaperTradingService:
         price: Optional[float],
     ) -> Tuple[float, Dict[str, Any], Optional[str]]:
         base_amount = _safe_float(budget.get("base_cash_amount")) or 0.0
-        if not sizing.get("adjusted") or price is None or price <= 0:
+        if (
+            not sizing.get("adjusted")
+            and not settings.auto_score_weighted_allocation_enabled
+        ) or price is None or price <= 0:
             return base_amount, budget, None
 
         quote_amount = _safe_float(budget.get("quote_cash_amount")) or 0.0
@@ -4566,6 +4674,14 @@ class VnpyPaperTradingService:
             0.0,
             float(settings.auto_cash_per_order or 0.0),
         )
+        allocation_budget = None
+        if settings.auto_score_weighted_allocation_enabled:
+            allocation_budget = float(
+                settings.auto_allocation_budget
+                or settings.auto_cash_per_order
+                or 0.0
+            )
+            max_planned_cash = min(max_planned_cash, max(0.0, allocation_budget))
         if settings.auto_daily_budget is not None:
             max_planned_cash = min(max_planned_cash, max(0.0, float(settings.auto_daily_budget)))
         dynamic_plan_status = str((llm_dynamic_plan or {}).get("status") or "") if llm_dynamic_plan else None
@@ -4602,8 +4718,13 @@ class VnpyPaperTradingService:
                 "dedup_scope": "trade_date_strategy_market_symbol",
             },
             "sizing_plan": {
-                "method": "fixed_cash_per_candidate",
+                "method": (
+                    "score_weighted_capped"
+                    if settings.auto_score_weighted_allocation_enabled
+                    else "fixed_cash_per_candidate"
+                ),
                 "cash_per_order": settings.auto_cash_per_order,
+                "allocation_budget": allocation_budget,
                 "max_results": settings.auto_max_results,
                 "max_planned_cash": round(max_planned_cash, 6),
                 "daily_budget": settings.auto_daily_budget,
@@ -4823,6 +4944,8 @@ class VnpyPaperTradingService:
             layers.append("candidate_filters")
         if cls._position_exposure_configured(settings) or settings.auto_max_positions > 0:
             layers.append("portfolio_limits")
+        if settings.auto_score_weighted_allocation_enabled:
+            layers.append("score_weighted_allocation")
         if settings.auto_daily_max_orders is not None or settings.auto_daily_budget is not None:
             layers.append("daily_limits")
         if settings.auto_min_cash_balance is not None or settings.auto_max_drawdown_pct is not None:
@@ -5840,10 +5963,331 @@ class VnpyPaperTradingService:
             },
         }
 
+    def _candidate_portfolio_allocation(
+        self,
+        *,
+        settings: VnpyPaperSettings,
+        candidates: List[Any],
+        exposure_state: Dict[str, Any],
+        daily_order_count: int,
+        daily_cash_used: float,
+    ) -> Dict[str, Any]:
+        configured_budget = float(
+            settings.auto_allocation_budget
+            or settings.auto_cash_per_order
+            or 0.0
+        )
+        result: Dict[str, Any] = {
+            "enabled": bool(settings.auto_score_weighted_allocation_enabled),
+            "method": (
+                "score_weighted_capped"
+                if settings.auto_score_weighted_allocation_enabled
+                else "fixed_cash_per_candidate"
+            ),
+            "configured_budget": round(max(0.0, configured_budget), 6),
+            "resolved_budget": 0.0,
+            "allocated_budget": 0.0,
+            "unallocated_budget": 0.0,
+            "candidate_count": 0,
+            "constraints": [],
+            "allocations": [],
+            "excluded": [],
+            "allocations_by_symbol": {},
+            "reason": None,
+        }
+        if not settings.auto_score_weighted_allocation_enabled:
+            return result
+        if not exposure_state.get("available", True):
+            result["reason"] = "portfolio_allocation_exposure_unavailable"
+            return result
+
+        total_equity = _safe_float(exposure_state.get("total_equity"))
+        total_cash = _safe_float(exposure_state.get("total_cash"))
+        total_market_value = _safe_float(exposure_state.get("total_market_value")) or 0.0
+        if total_equity is None or total_equity <= 0 or total_cash is None:
+            result["reason"] = "portfolio_allocation_exposure_unavailable"
+            return result
+
+        budget_limits: List[Tuple[str, float]] = [
+            ("configured_round_budget", max(0.0, configured_budget)),
+            (
+                "cash_headroom",
+                max(0.0, total_cash - float(settings.auto_min_cash_balance or 0.0)),
+            ),
+        ]
+        if settings.auto_daily_budget is not None:
+            budget_limits.append((
+                "daily_budget_headroom",
+                max(0.0, float(settings.auto_daily_budget) - max(0.0, daily_cash_used)),
+            ))
+        if settings.auto_max_total_position_value is not None:
+            budget_limits.append((
+                "total_position_value_headroom",
+                max(0.0, float(settings.auto_max_total_position_value) - total_market_value),
+            ))
+        if settings.auto_max_total_position_pct is not None:
+            target_value = total_equity * float(settings.auto_max_total_position_pct) / 100.0
+            budget_limits.append((
+                "total_position_pct_headroom",
+                max(0.0, target_value - total_market_value),
+            ))
+        for name, value in budget_limits:
+            result["constraints"].append({"type": name, "headroom": round(value, 6)})
+        resolved_budget = min(value for _, value in budget_limits)
+        result["resolved_budget"] = round(resolved_budget, 6)
+        if resolved_budget <= PAPER_EPS:
+            result["reason"] = "portfolio_allocation_budget_exhausted"
+            return result
+
+        held_symbols = set(exposure_state.get("held_symbols") or set())
+        position_values = exposure_state.get("position_values")
+        if not isinstance(position_values, dict):
+            position_values = {}
+        industry_values = exposure_state.get("industry_values")
+        if not isinstance(industry_values, dict):
+            industry_values = {}
+        position_targets = dict(settings.auto_target_position_weights or {})
+        industry_targets = dict(settings.auto_target_industry_weights or {})
+        industry_constraints_enabled = bool(
+            settings.auto_max_industry_position_value is not None
+            or settings.auto_max_industry_position_pct is not None
+            or industry_targets
+        )
+        blacklisted_symbols = set(settings.auto_symbol_blacklist or [])
+        remaining_new_slots = max(0, int(settings.auto_max_positions) - len(held_symbols))
+        remaining_order_slots = (
+            max(0, int(settings.auto_daily_max_orders) - max(0, daily_order_count))
+            if settings.auto_daily_max_orders is not None
+            else len(candidates)
+        )
+        seen_symbols: set[str] = set()
+        records: List[Dict[str, Any]] = []
+        industry_caps: Dict[str, float] = {}
+
+        def exclude(symbol: Optional[str], reason: str) -> None:
+            result["excluded"].append({"symbol": symbol, "reason": reason})
+            if symbol and symbol not in result["allocations_by_symbol"]:
+                result["allocations_by_symbol"][symbol] = {
+                    "enabled": True,
+                    "method": "score_weighted_capped",
+                    "symbol": symbol,
+                    "allocated_base_amount": 0.0,
+                    "reason": reason,
+                }
+
+        for index, candidate in enumerate(candidates, start=1):
+            if not isinstance(candidate, dict):
+                exclude(None, "invalid_candidate")
+                continue
+            symbol = self._normalize_symbol(candidate.get("code") or candidate.get("symbol") or "")
+            if not symbol:
+                exclude(None, "missing_symbol")
+                continue
+            if symbol in seen_symbols:
+                exclude(symbol, "duplicate_candidate")
+                continue
+            seen_symbols.add(symbol)
+            if symbol in blacklisted_symbols:
+                exclude(symbol, "symbol_blacklisted")
+                continue
+            risk_reason = self._candidate_pre_trade_risk_reason(candidate, settings)
+            if risk_reason:
+                exclude(symbol, risk_reason)
+                continue
+            score = self._candidate_score(candidate)
+            if score is None:
+                exclude(symbol, "portfolio_allocation_score_unavailable")
+                continue
+            if settings.auto_min_score is not None and score < settings.auto_min_score:
+                exclude(symbol, "score_below_threshold")
+                continue
+            has_position_target = symbol in position_targets
+            if settings.auto_skip_existing_positions and symbol in held_symbols and not has_position_target:
+                exclude(symbol, "position_exists")
+                continue
+            if self._active_vnpy_trade_plan(symbol=symbol, side="buy", settings=settings) is not None:
+                exclude(symbol, "active_vnpy_order_exists")
+                continue
+            is_new_position = symbol not in held_symbols
+            if is_new_position:
+                if remaining_new_slots <= 0:
+                    exclude(symbol, "max_positions_reached")
+                    continue
+            if remaining_order_slots <= 0:
+                exclude(symbol, "daily_order_limit_reached")
+                continue
+
+            current_value = _safe_float(position_values.get(symbol)) or 0.0
+            cap = max(0.0, float(settings.auto_cash_per_order or 0.0))
+            cap_constraints: List[Dict[str, Any]] = [{
+                "type": "cash_per_order",
+                "headroom": round(cap, 6),
+            }]
+            if settings.auto_max_single_position_value is not None:
+                headroom = max(
+                    0.0,
+                    float(settings.auto_max_single_position_value) - current_value,
+                )
+                cap = min(cap, headroom)
+                cap_constraints.append({"type": "single_position", "headroom": round(headroom, 6)})
+            if symbol in position_targets:
+                target_value = total_equity * float(position_targets[symbol]) / 100.0
+                headroom = max(0.0, target_value - current_value)
+                cap = min(cap, headroom)
+                cap_constraints.append({"type": "position_target", "headroom": round(headroom, 6)})
+
+            industry: Optional[str] = None
+            if industry_constraints_enabled:
+                industry = self._candidate_primary_industry(candidate)
+                if not industry:
+                    industry = self._fetch_symbol_primary_industry(symbol, market=settings.auto_market)
+                if not industry:
+                    exclude(symbol, "industry_exposure_unavailable")
+                    continue
+                if industry not in industry_caps:
+                    current_industry_value = _safe_float(industry_values.get(industry)) or 0.0
+                    limits: List[float] = []
+                    if settings.auto_max_industry_position_value is not None:
+                        limits.append(max(
+                            0.0,
+                            float(settings.auto_max_industry_position_value) - current_industry_value,
+                        ))
+                    if settings.auto_max_industry_position_pct is not None:
+                        target_value = total_equity * float(settings.auto_max_industry_position_pct) / 100.0
+                        limits.append(max(0.0, target_value - current_industry_value))
+                    if industry in industry_targets:
+                        target_value = total_equity * float(industry_targets[industry]) / 100.0
+                        limits.append(max(0.0, target_value - current_industry_value))
+                    industry_caps[industry] = min(limits) if limits else resolved_budget
+                cap_constraints.append({
+                    "type": "industry_shared",
+                    "key": industry,
+                    "headroom": round(industry_caps[industry], 6),
+                })
+
+            if cap <= PAPER_EPS:
+                exclude(symbol, "portfolio_allocation_candidate_cap_reached")
+                continue
+            records.append({
+                "rank": index,
+                "symbol": symbol,
+                "score": float(score),
+                "weight": max(0.0, float(score)),
+                "cap": cap,
+                "industry": industry,
+                "constraints": cap_constraints,
+            })
+            if is_new_position:
+                remaining_new_slots -= 1
+            remaining_order_slots -= 1
+
+        result["candidate_count"] = len(records)
+        if not records:
+            result["reason"] = "portfolio_allocation_no_eligible_candidates"
+            return result
+
+        allocations = {record["symbol"]: 0.0 for record in records}
+        allocated_by_industry: Dict[str, float] = {}
+        remaining = min(resolved_budget, sum(float(record["cap"]) for record in records))
+        active = list(records)
+        for _ in range(len(records) + 2):
+            if remaining <= PAPER_EPS or not active:
+                break
+            weight_sum = sum(float(record["weight"]) for record in active)
+            use_equal_weights = weight_sum <= PAPER_EPS
+            if use_equal_weights:
+                weight_sum = float(len(active))
+            proposals: Dict[str, float] = {}
+            for record in active:
+                symbol = str(record["symbol"])
+                weight = 1.0 if use_equal_weights else float(record["weight"])
+                individual_remaining = max(0.0, float(record["cap"]) - allocations[symbol])
+                proposals[symbol] = min(remaining * weight / weight_sum, individual_remaining)
+
+            for industry in {record.get("industry") for record in active if record.get("industry")}:
+                industry_records = [record for record in active if record.get("industry") == industry]
+                proposed = sum(proposals[str(record["symbol"])] for record in industry_records)
+                industry_remaining = max(
+                    0.0,
+                    industry_caps.get(str(industry), resolved_budget)
+                    - allocated_by_industry.get(str(industry), 0.0),
+                )
+                if proposed > industry_remaining + PAPER_EPS and proposed > 0:
+                    scale = industry_remaining / proposed
+                    for record in industry_records:
+                        symbol = str(record["symbol"])
+                        proposals[symbol] *= scale
+
+            allocated_this_round = 0.0
+            for record in active:
+                symbol = str(record["symbol"])
+                amount = max(0.0, proposals[symbol])
+                allocations[symbol] += amount
+                allocated_this_round += amount
+                industry = record.get("industry")
+                if industry:
+                    allocated_by_industry[str(industry)] = (
+                        allocated_by_industry.get(str(industry), 0.0) + amount
+                    )
+            remaining = max(0.0, remaining - allocated_this_round)
+            if allocated_this_round <= PAPER_EPS:
+                break
+            next_active: List[Dict[str, Any]] = []
+            for record in active:
+                symbol = str(record["symbol"])
+                individual_open = allocations[symbol] + PAPER_EPS < float(record["cap"])
+                industry = record.get("industry")
+                industry_open = (
+                    not industry
+                    or allocated_by_industry.get(str(industry), 0.0) + PAPER_EPS
+                    < industry_caps.get(str(industry), resolved_budget)
+                )
+                if individual_open and industry_open:
+                    next_active.append(record)
+            if len(next_active) == len(active) and allocated_this_round + PAPER_EPS >= remaining:
+                break
+            active = next_active
+
+        allocation_rows: List[Dict[str, Any]] = []
+        total_score_weight = sum(float(item["weight"]) for item in records)
+        for record in records:
+            symbol = str(record["symbol"])
+            amount = max(0.0, allocations[symbol])
+            row = {
+                "enabled": True,
+                "method": "score_weighted_capped",
+                "rank": record["rank"],
+                "symbol": symbol,
+                "score": round(float(record["score"]), 6),
+                "score_weight": round(
+                    (
+                        float(record["weight"]) / total_score_weight
+                        if total_score_weight > PAPER_EPS
+                        else 1.0 / len(records)
+                    ),
+                    8,
+                ),
+                "candidate_cap": round(float(record["cap"]), 6),
+                "allocated_base_amount": round(amount, 6),
+                "industry": record.get("industry"),
+                "constraints": record["constraints"],
+                "reason": None if amount > PAPER_EPS else "portfolio_allocation_budget_exhausted",
+            }
+            allocation_rows.append(row)
+            result["allocations_by_symbol"][symbol] = row
+        allocated_budget = sum(allocations.values())
+        result["allocations"] = allocation_rows
+        result["allocated_budget"] = round(allocated_budget, 6)
+        result["unallocated_budget"] = round(max(0.0, resolved_budget - allocated_budget), 6)
+        if allocated_budget <= PAPER_EPS:
+            result["reason"] = "portfolio_allocation_budget_exhausted"
+        return result
+
     @staticmethod
     def _position_exposure_configured(settings: VnpyPaperSettings) -> bool:
         return (
-            settings.auto_max_single_position_value is not None
+            settings.auto_score_weighted_allocation_enabled
+            or settings.auto_max_single_position_value is not None
             or settings.auto_max_total_position_value is not None
             or settings.auto_max_total_position_pct is not None
             or settings.auto_max_industry_position_value is not None
@@ -5877,6 +6321,7 @@ class VnpyPaperTradingService:
             "industry_available": True,
             "total_market_value": 0.0,
             "total_equity": None,
+            "total_cash": None,
             "base_currency": None,
             "fx_stale": False,
         }
@@ -5937,6 +6382,9 @@ class VnpyPaperTradingService:
                 "total_market_value": total_market_value if total_market_value is not None else total_from_positions,
                 "total_equity": _safe_float(account_snapshot.get("total_equity"))
                 or _safe_float(snapshot.get("total_equity")),
+                "total_cash": _safe_float(account_snapshot.get("total_cash"))
+                if _safe_float(account_snapshot.get("total_cash")) is not None
+                else _safe_float(snapshot.get("total_cash")),
                 "base_currency": account_snapshot.get("base_currency"),
                 "fx_stale": fx_stale,
             }
@@ -6236,6 +6684,9 @@ class VnpyPaperTradingService:
     ) -> None:
         cash_amount = self._order_base_cash_amount(order, settings=settings)
         cash_amount = max(0.0, float(cash_amount or 0.0))
+        held_symbols = exposure_state.setdefault("held_symbols", set())
+        if isinstance(held_symbols, set):
+            held_symbols.add(symbol)
         position_values = exposure_state.setdefault("position_values", {})
         if isinstance(position_values, dict):
             position_values[symbol] = (_safe_float(position_values.get(symbol)) or 0.0) + cash_amount
@@ -8139,6 +8590,12 @@ class VnpyPaperTradingService:
         planned_quantity = _safe_float(order.get("quantity"))
         position_quantity = _safe_float(candidate.get("position_quantity"))
         sell_position_pct = _safe_float(candidate.get("sell_position_pct"))
+        raw_order = order.get("raw") if isinstance(order.get("raw"), dict) else {}
+        portfolio_allocation = (
+            raw_order.get("portfolio_allocation")
+            if isinstance(raw_order.get("portfolio_allocation"), dict)
+            else None
+        )
         trade_status = self._trade_plan_status(order)
         resolved_reason = reason or order.get("reason")
         benign_plan_reasons = {"dry_run", "pending_approval"}
@@ -8210,9 +8667,12 @@ class VnpyPaperTradingService:
             "sizing_method": (
                 "position_pct"
                 if side == "sell" and position_quantity is not None
+                else "score_weighted_allocation"
+                if side == "buy" and portfolio_allocation
                 else "cash_per_order"
             ),
             "cash_per_order": settings.auto_cash_per_order,
+            "portfolio_allocation": portfolio_allocation,
             "position_quantity": position_quantity,
             "sell_position_pct": sell_position_pct if side == "sell" else None,
             "execution_mode": settings.auto_execution_mode,

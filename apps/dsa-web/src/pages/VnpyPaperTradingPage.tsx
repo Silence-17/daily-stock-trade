@@ -68,6 +68,8 @@ type SettingsForm = {
   autoMarket: VnpyPaperMarket;
   autoMaxResults: string;
   autoCashPerOrder: string;
+  autoScoreWeightedAllocationEnabled: boolean;
+  autoAllocationBudget: string;
   autoIntervalMinutes: string;
   autoMinScore: string;
   autoSkipExistingPositions: boolean;
@@ -148,6 +150,8 @@ const defaultSettingsForm: SettingsForm = {
   autoMarket: 'cn',
   autoMaxResults: '3',
   autoCashPerOrder: '10000',
+  autoScoreWeightedAllocationEnabled: false,
+  autoAllocationBudget: '',
   autoIntervalMinutes: '1440',
   autoMinScore: '',
   autoSkipExistingPositions: true,
@@ -449,6 +453,10 @@ function settingsToForm(status: VnpyPaperStatusResponse): SettingsForm {
     autoMarket: (settings.autoMarket || 'cn') as VnpyPaperMarket,
     autoMaxResults: String(settings.autoMaxResults ?? 3),
     autoCashPerOrder: String(settings.autoCashPerOrder ?? 10000),
+    autoScoreWeightedAllocationEnabled: Boolean(settings.autoScoreWeightedAllocationEnabled),
+    autoAllocationBudget: settings.autoAllocationBudget == null
+      ? ''
+      : String(settings.autoAllocationBudget),
     autoIntervalMinutes: String(settings.autoIntervalMinutes ?? 1440),
     autoMinScore: settings.autoMinScore == null ? '' : String(settings.autoMinScore),
     autoSkipExistingPositions: Boolean(settings.autoSkipExistingPositions),
@@ -514,6 +522,10 @@ function buildSettingsUpdate(settingsForm: SettingsForm): VnpyPaperSettingsUpdat
     autoMarket: settingsForm.autoMarket,
     autoMaxResults: parseNumber(settingsForm.autoMaxResults) ?? 3,
     autoCashPerOrder: parseNumber(settingsForm.autoCashPerOrder) ?? 10000,
+    autoScoreWeightedAllocationEnabled: settingsForm.autoScoreWeightedAllocationEnabled,
+    autoAllocationBudget: settingsForm.autoAllocationBudget.trim()
+      ? parseNumber(settingsForm.autoAllocationBudget)
+      : null,
     autoIntervalMinutes: parseNumber(settingsForm.autoIntervalMinutes) ?? 1440,
     autoMinScore: settingsForm.autoMinScore.trim() ? parseNumber(settingsForm.autoMinScore) : null,
     autoSkipExistingPositions: settingsForm.autoSkipExistingPositions,
@@ -3266,6 +3278,18 @@ const VnpyPaperTradingPage: React.FC = () => {
               <input
                 type="checkbox"
                 className={CHECKBOX_CLASS}
+                checked={settingsForm.autoScoreWeightedAllocationEnabled}
+                onChange={(event) => setSettingsForm((prev) => ({
+                  ...prev,
+                  autoScoreWeightedAllocationEnabled: event.target.checked,
+                }))}
+              />
+              评分加权分配
+            </label>
+            <label className="flex items-center gap-2 text-sm text-foreground">
+              <input
+                type="checkbox"
+                className={CHECKBOX_CLASS}
                 checked={settingsForm.autoLlmPlanEnabled}
                 onChange={(event) => setSettingsForm((prev) => ({
                   ...prev,
@@ -3661,6 +3685,22 @@ const VnpyPaperTradingPage: React.FC = () => {
                 step="100"
                 value={settingsForm.autoCashPerOrder}
                 onChange={(event) => setSettingsForm((prev) => ({ ...prev, autoCashPerOrder: event.target.value }))}
+              />
+            </label>
+            <label className="space-y-1 text-xs text-secondary-text">
+              每轮组合预算（{currency}）
+              <input
+                className={INPUT_CLASS}
+                type="number"
+                min={1}
+                step="100"
+                value={settingsForm.autoAllocationBudget}
+                disabled={!settingsForm.autoScoreWeightedAllocationEnabled}
+                onChange={(event) => setSettingsForm((prev) => ({
+                  ...prev,
+                  autoAllocationBudget: event.target.value,
+                }))}
+                placeholder={settingsForm.autoCashPerOrder || '10000'}
               />
             </label>
             <label className="space-y-1 text-xs text-secondary-text">

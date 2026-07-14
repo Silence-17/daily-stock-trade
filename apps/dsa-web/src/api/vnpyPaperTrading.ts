@@ -15,6 +15,8 @@ export type VnpyPaperSettings = {
   autoMarket: VnpyPaperMarket | string;
   autoMaxResults: number;
   autoCashPerOrder: number;
+  autoScoreWeightedAllocationEnabled: boolean;
+  autoAllocationBudget?: number | null;
   autoIntervalMinutes: number;
   autoMinScore?: number | null;
   autoSkipExistingPositions: boolean;
@@ -883,6 +885,12 @@ function buildSettingsPayload(payload: VnpyPaperSettingsUpdate): Record<string, 
   if (hasOwn(payload, 'autoMarket')) body.auto_market = payload.autoMarket;
   if (hasOwn(payload, 'autoMaxResults')) body.auto_max_results = payload.autoMaxResults;
   if (hasOwn(payload, 'autoCashPerOrder')) body.auto_cash_per_order = payload.autoCashPerOrder;
+  if (hasOwn(payload, 'autoScoreWeightedAllocationEnabled')) {
+    body.auto_score_weighted_allocation_enabled = payload.autoScoreWeightedAllocationEnabled;
+  }
+  if (hasOwn(payload, 'autoAllocationBudget')) {
+    body.auto_allocation_budget = payload.autoAllocationBudget;
+  }
   if (hasOwn(payload, 'autoIntervalMinutes')) body.auto_interval_minutes = payload.autoIntervalMinutes;
   if (hasOwn(payload, 'autoMinScore')) body.auto_min_score = payload.autoMinScore ?? null;
   if (hasOwn(payload, 'autoSkipExistingPositions')) {

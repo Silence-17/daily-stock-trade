@@ -82,6 +82,13 @@ const runSummary = {
   settings: {},
   diagnostics: {
     dataQuality: { status: 'partial' },
+    portfolioAllocation: {
+      enabled: true,
+      method: 'score_weighted_capped',
+      configuredBudget: 10000,
+      resolvedBudget: 10000,
+      allocatedBudget: 10000,
+    },
     agentPlan: {
       strategy: 'dual_low',
       market: 'cn',
@@ -202,6 +209,16 @@ const runDetail = {
     rationale: 'low valuation and improving momentum',
     riskFlags: [],
     orderResult: {
+      positionPlan: {
+        sizingMethod: 'score_weighted_allocation',
+        portfolioAllocation: {
+          enabled: true,
+          method: 'score_weighted_capped',
+          scoreWeight: 0.8,
+          candidateCap: 10000,
+          allocatedBaseAmount: 8000,
+        },
+      },
       agentReview: {
         status: 'passed',
         summary: 'Pre-trade Agent review passed',
@@ -617,6 +634,10 @@ describe('AgentConsolePage', () => {
     expect(screen.getByText(/autoMaxResults=1/)).toBeInTheDocument();
     expect(screen.getByText('Prefer a narrower heat strategy today.')).toBeInTheDocument();
     expect(screen.getByText('prompt=vnpy_paper_dynamic_agent_plan_v2 / eval=dynamic_plan_guardrails_v1')).toBeInTheDocument();
+    expect(screen.getByTestId('portfolio-allocation-summary')).toHaveTextContent('score_weighted_capped');
+    expect(screen.getByTestId('portfolio-allocation-summary')).toHaveTextContent('10,000');
+    expect(screen.getByTestId('portfolio-allocation-1')).toHaveTextContent('80.0%');
+    expect(screen.getByTestId('portfolio-allocation-1')).toHaveTextContent('10,000');
     expect(screen.getByTestId('agent-llm-recap')).toHaveTextContent('LLM recap generated');
     expect(screen.getByTestId('agent-review-1')).toHaveTextContent('Agent 复核 passed');
     expect(screen.getByText('Pre-trade Agent review passed')).toBeInTheDocument();

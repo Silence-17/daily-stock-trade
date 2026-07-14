@@ -18,6 +18,8 @@ class VnpyPaperSettings(BaseModel):
     auto_market: str = Field("cn", min_length=1, max_length=16)
     auto_max_results: int = Field(3, ge=1, le=50)
     auto_cash_per_order: float = Field(10000.0, gt=0)
+    auto_score_weighted_allocation_enabled: bool = False
+    auto_allocation_budget: Optional[float] = Field(None, gt=0)
     auto_interval_minutes: int = Field(1440, ge=1, le=10080)
     auto_min_score: Optional[float] = None
     auto_skip_existing_positions: bool = True
@@ -68,6 +70,8 @@ class VnpyPaperSettingsUpdate(BaseModel):
     auto_market: Optional[str] = Field(None, min_length=1, max_length=16)
     auto_max_results: Optional[int] = Field(None, ge=1, le=50)
     auto_cash_per_order: Optional[float] = Field(None, gt=0)
+    auto_score_weighted_allocation_enabled: Optional[bool] = None
+    auto_allocation_budget: Optional[float] = Field(None, gt=0)
     auto_interval_minutes: Optional[int] = Field(None, ge=1, le=10080)
     auto_min_score: Optional[float] = None
     auto_skip_existing_positions: Optional[bool] = None

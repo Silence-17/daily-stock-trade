@@ -14,6 +14,7 @@ Snapshot date: 2026-07-14
 - The latest scheduler alignment fix delays the first `vnpy_paper_auto_trade` run to the next trading window when the time gate is enforced and the service starts outside market hours.
 - Paper-trading budgets, cash checks, position exposure, and daily usage now use the account base currency. Foreign-market orders convert through the Portfolio FX table, fail closed for new buys when rates are missing or more than seven calendar days old, preserve sell-side risk reduction, and record both base and quote amounts for audit.
 - Explicit stock and industry target weights now cap each automatic buy to the remaining target gap instead of rejecting the whole candidate. Existing positions can be replenished toward an explicit stock target even when the maximum position count is reached or existing positions are normally skipped; the final amount is reduced to an executable market lot and audited in `target_weight_sizing`. Arbitrary-weight, multi-constraint portfolio optimization remains incomplete.
+- Automatic buys now have an optional score-weighted portfolio allocation stage. A configured round budget is distributed by candidate score and reallocated when a candidate reaches its per-order, single-position, industry, or explicit target cap; cash reserve, remaining daily budget/order slots, maximum positions, and total exposure constrain the whole round. Agent diagnostics distinguish intended allocation from executable A-share-lot budget. This is a deterministic constrained allocator, not yet a covariance/risk-model or arbitrary-objective optimizer.
 - The Agent console now runs an on-demand 1/5/10/20-trading-day forward evaluation for persisted buy candidates. It anchors on the recorded decision price, reads only local daily bars strictly later than the decision date, reports coverage and return/excursion metrics, and never reruns a strategy or places an order by default.
 - AlphaSift now has a persisted point-in-time factor snapshot table and single-date replay APIs. Hard-filter and scoring-field coverage are audited separately, incomplete datasets fail closed, and the Agent console can inspect coverage and run deterministic hard-filter plus `screen_score` replay without current-data fallback or LLM ranking.
 - For an explicitly supplied historical universe, a bounded background task now collects AKShare daily/turnover and historical valuation factors with strict as-of dates. The Agent console can then run a cross-date equal-weight portfolio backtest with per-side costs, benchmark/excess return, drawdown, coverage, and period equity; it never places orders.
@@ -77,12 +78,18 @@ Local API: `http://127.0.0.1:8000`
   - `truncated=false`
 - `GET /paper-trading` returned HTTP 200.
 
-The latest post-change runtime smoke uses process PID `19964`; vn.py runtime, built-in `DSA_SIM` gateway, bridge, and event callbacks are available while the saved execution mode remains `paper`. The paper-trading and Agent-console pages both return HTTP 200. Full status previously completed in 6.14 seconds for six positions without per-symbol industry lookups; no orders were triggered during verification.
+The latest post-change runtime smoke uses process PID `23396`; vn.py runtime, built-in `DSA_SIM` gateway, bridge, and event callbacks are available while the saved execution mode remains `paper`. The paper-trading and Agent-console pages both return HTTP 200. Score-weighted allocation remains disabled by default with no saved round budget, and no orders were triggered during verification. Full status previously completed in 6.14 seconds for six positions without per-symbol industry lookups.
 
 The readiness and system health status are `warning` because the current time is outside the A-share trading session and the next action is to wait for the next session. There are no required blockers; the scheduling alignment itself is ready.
 
 ## Recent Validation
 
+- `python -m pytest tests/test_vnpy_paper_trading_service.py tests/test_vnpy_paper_trading_api.py -q -p no:cacheprovider`
+  - 133 passed and 1 optional test skipped after adding score-weighted constrained portfolio allocation, lot residual audit, settings/API contracts, and Agent position-plan coverage.
+- `npm.cmd test -- --run src/api/__tests__/vnpyPaperTrading.test.ts src/pages/__tests__/VnpyPaperTradingPage.test.tsx src/pages/__tests__/AgentConsolePage.test.tsx`
+  - 66 passed; `npm.cmd run lint` completed with zero errors and the pre-existing `SettingsPage.tsx:553` warning, and `npm.cmd run build` passed.
+- `python -m flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics --exclude=.git,.tools,.venv-vnpy,.uv-cache-vnpy,.vntrader,node_modules,static`
+  - 0 critical findings in repository-controlled source. The unmodified `scripts/ci_gate.sh` cannot complete locally because `flake8 .` and pytest collect ignored `.tools` runtimes; its deterministic shell check also hits a Windows GBK emoji encoding error. The broad local offline run still completed 4551 passes and 3 skips with 31 failures outside the changed vn.py paths, while the focused suite above is green.
 - `python -m pytest tests/test_vnpy_paper_trading_service.py tests/test_vnpy_paper_trading_api.py -q -p no:cacheprovider`
   - 119 passed and 1 optional test skipped before the final strict-industry health assertion was added; the final focused service run passed 91 tests with 1 optional skip.
 - `npm.cmd run test -- --run src/pages/__tests__/VnpyPaperTradingPage.test.tsx src/api/__tests__/vnpyPaperTrading.test.ts`
