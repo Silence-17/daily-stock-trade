@@ -2317,7 +2317,7 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
     def test_agent_cross_run_quality_endpoint_returns_current_gate_state(self) -> None:
         service = MagicMock()
         service.get_cross_run_quality_status.return_value = {
-            "schema_version": 1,
+            "schema_version": 3,
             "generated_at": datetime(2026, 7, 14, 10, 0),
             "state": "insufficient_evidence",
             "reason": "mature_sample_count_below_threshold",
@@ -2328,6 +2328,15 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
             "market": "cn",
             "selection_quality_state": "insufficient_evidence",
             "selection_quality_reason": "mature_sample_count_below_threshold",
+            "return_risk_objective_state": "insufficient_evidence",
+            "return_risk_objective_reason": (
+                "return_risk_mature_sample_count_below_threshold"
+            ),
+            "return_risk_objective_applied": False,
+            "return_risk_objective": {
+                "version": "candidate-return-risk-v1",
+                "state": "insufficient_evidence",
+            },
             "review_quality_state": "insufficient_evidence",
             "review_quality_reason": "review_mature_sample_count_below_threshold",
             "review_quality_applied": False,
@@ -2346,6 +2355,12 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
             "average_return_pct": None,
             "median_return_pct": None,
             "average_max_adverse_excursion_pct": None,
+            "average_daily_return_pct": None,
+            "daily_return_coverage_pct": None,
+            "daily_return_volatility_pct": None,
+            "downside_deviation_pct": None,
+            "daily_expected_shortfall_20_pct": None,
+            "return_risk_utility_pct": None,
             "unable_reason_counts": {"insufficient_forward_bars": 3},
             "lookahead_protection": True,
             "source": "persisted_agent_decisions_and_stock_daily",
@@ -2364,6 +2379,10 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
         self.assertEqual(response.json()["state"], "insufficient_evidence")
         self.assertFalse(response.json()["gate_blocked"])
         self.assertEqual(response.json()["review_quality_state"], "insufficient_evidence")
+        self.assertEqual(
+            response.json()["return_risk_objective"]["version"],
+            "candidate-return-risk-v1",
+        )
         service.get_cross_run_quality_status.assert_called_once_with()
 
 

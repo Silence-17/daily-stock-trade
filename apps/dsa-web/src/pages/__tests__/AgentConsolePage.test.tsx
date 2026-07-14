@@ -470,7 +470,7 @@ describe('AgentConsolePage', () => {
     getAgentDailySummary.mockResolvedValue(dailySummary);
     getAgentDataQualityTrends.mockResolvedValue(dataQualityTrends);
     getAgentCrossRunQuality.mockResolvedValue({
-      schemaVersion: 1,
+      schemaVersion: 3,
       generatedAt: '2026-07-14T10:00:00',
       state: 'insufficient_evidence',
       reason: 'mature_sample_count_below_threshold',
@@ -481,6 +481,15 @@ describe('AgentConsolePage', () => {
       market: 'cn',
       selectionQualityState: 'insufficient_evidence',
       selectionQualityReason: 'mature_sample_count_below_threshold',
+      returnRiskObjectiveState: 'insufficient_evidence',
+      returnRiskObjectiveReason: 'return_risk_mature_sample_count_below_threshold',
+      returnRiskObjectiveApplied: false,
+      returnRiskObjective: {
+        version: 'candidate-return-risk-v1',
+        metrics: {
+          returnRiskUtilityPct: null,
+        },
+      },
       reviewQualityState: 'insufficient_evidence',
       reviewQualityReason: 'review_mature_sample_count_below_threshold',
       reviewQualityApplied: false,
@@ -504,6 +513,12 @@ describe('AgentConsolePage', () => {
       averageReturnPct: null,
       medianReturnPct: null,
       averageMaxAdverseExcursionPct: null,
+      averageDailyReturnPct: null,
+      dailyReturnCoveragePct: 0,
+      dailyReturnVolatilityPct: null,
+      downsideDeviationPct: null,
+      dailyExpectedShortfall20Pct: null,
+      returnRiskUtilityPct: null,
       unableReasonCounts: { insufficient_forward_bars: 3 },
       lookaheadProtection: true,
       source: 'persisted_agent_decisions_and_stock_daily',
@@ -540,6 +555,16 @@ describe('AgentConsolePage', () => {
           medianReturnPct: 3.5,
           averageMaxFavorableExcursionPct: 5,
           averageMaxAdverseExcursionPct: -1.2,
+          dailyObservationCount: 1,
+          expectedDailyObservationCount: 1,
+          dailyReturnCoveragePct: 100,
+          averageDailyReturnPct: 3.5,
+          dailyReturnVolatilityPct: 0,
+          downsideDeviationPct: 0,
+          horizonDownsideDeviationPct: 0,
+          dailyExpectedShortfall20Pct: 3.5,
+          returnRiskUtilityPct: 3.2,
+          returnRiskObjectiveVersion: 'candidate-return-risk-v1',
           neutralBandPct: 2,
           unableReasonCounts: { insufficientForwardBars: 1 },
         },
@@ -771,6 +796,13 @@ describe('AgentConsolePage', () => {
     expect(screen.getByTestId('agent-current-cross-run-quality')).toHaveTextContent('仅审计');
     expect(screen.getByTestId('agent-review-quality-gate-state')).toHaveTextContent('最终复核质量 insufficient_evidence');
     expect(screen.getByTestId('agent-review-quality-gate-metrics')).toHaveTextContent('复核通过精度');
+    expect(screen.getByTestId('agent-return-risk-objective-state')).toHaveTextContent(
+      '收益风险目标 insufficient_evidence',
+    );
+    expect(screen.getByTestId('agent-return-risk-objective-state')).toHaveTextContent(
+      'candidate-return-risk-v1',
+    );
+    expect(screen.getByTestId('agent-return-risk-objective-metrics')).toHaveTextContent('收益风险效用');
     expect(screen.getByText('2026-07-01 · 2/2 runs scanned')).toBeInTheDocument();
     expect(screen.getByTestId('agent-data-quality-trends')).toHaveTextContent('跨 run 数据质量趋势');
     expect(screen.getByTestId('agent-data-quality-trends')).toHaveTextContent('33.33%');
@@ -926,6 +958,8 @@ describe('AgentConsolePage', () => {
       refreshMissing: false,
     }));
     expect(await screen.findByTestId('agent-backtest-matrix')).toHaveTextContent('3.5%');
+    expect(screen.getByTestId('agent-backtest-matrix')).toHaveTextContent('风险效用 3.2%');
+    expect(screen.getByTestId('agent-backtest-matrix')).toHaveTextContent('尾部收益 3.5%');
     expect(screen.getByTestId('agent-backtest-panel')).toHaveTextContent('前视保护 已启用');
     expect(screen.getByTestId('agent-review-quality-matrix')).toHaveTextContent('openai/model-a');
     expect(screen.getByTestId('agent-review-quality-matrix')).toHaveTextContent('prompt-v2/eval-v1');

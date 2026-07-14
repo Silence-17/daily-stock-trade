@@ -787,6 +787,8 @@ python main.py --schedule --no-run-immediately
 
 > 自动选股还会基于同策略、同市场的持久化候选生成跨运行前瞻状态。默认只审计；开启 `auto_cross_run_quality_gate_enabled` 后，成熟样本胜率低于阈值或评价不可用会阻断新增买入，证据不足不会阻断，自动卖出风控仍会继续执行。评价只读取严格晚于决策日的本地日线，不联网补数或重跑历史策略。
 
+> 跨运行评价同时使用版本化 `candidate-return-risk-v1` 目标函数。系统从每个候选的后续日线计算逐日收益、日波动率、下行偏差和最差 20% 日度收益均值，并以“平均前瞻收益 - 0.5 × 期限下行偏差 - 0.25 × 平均最大不利波动绝对值”生成风险效用。逐日收盘价必须完整，系统不会把跨日涨跌伪装成单日收益。成熟样本效用为负会收紧候选数量和单票预算；平均收益也为负时进入 `blocked`，在启用跨运行门禁后阻断新增买入。Agent 控制台会展示目标版本、状态、原因、逐日覆盖率和指标。
+
 > 组合分配可选择“评分 / 波动率 + 相关性上限”。该方法先使用同一决策时点的 20 日波动率，再读取运行日及之前的本地 trailing returns，按候选排名排除超过两两相关性阈值的低排名标的。历史或重叠样本不足会逐票失败关闭，不会退化为普通评分分配。
 > 模拟交易的每票金额、每日预算、最低现金和金额型仓位上限均按账户基准币种计价。非 A 股订单会使用 Portfolio 汇率表换算交易币种金额，缺失或过期汇率以 `fx_rate_unavailable` 阻止新增买入但不阻止卖出；Agent 审计会保留基准金额、交易币种金额和汇率来源。可在持仓页面或 `POST /api/v1/portfolio/fx/refresh` 刷新汇率。
 > Agent 控制台会读取 `GET /api/v1/vnpy-paper/agent-runs/daily-summary` 展示“今日 Agent 总结”，按日期聚合 run 数、候选/计划/成交/跳过计数、状态分布、执行模式、数据质量、Agent 复核状态、LLM 复核状态、复核质量状态/风险标记/平均分、工作流状态/阶段、主要跳过原因和热门标的；候选决策详情会展示 `order_result.agent_review` 的规则 Agent 买入前复核状态和摘要，Agent 计划卡片会展示规则派生的计划档位、风控档位、同策略/市场最近 5 次运行上下文和可选 `llm_dynamic_plan` 状态。运行详情会派生 `diagnostics.agent_workflow`，按计划、数据质量、候选复核、交易计划和执行阶段展示当前阶段、整体状态和下一步，并通过 `diagnostics.agent_summary.review_quality` 展示本轮复核质量、覆盖率、风险标记和是否建议人工确认。运行详情还可手动触发 `POST /api/v1/vnpy-paper/agent-runs/{run_uid}/llm-recap` 生成可选 LLM 复盘并写入 `diagnostics.llm_recap`；该入口只做审计复盘，不提交订单，也不会改变交易计划状态。模拟交易设置中的 `auto_llm_plan_enabled` 默认关闭；开启后会在 AlphaSift 选股前调用 LLM 生成本轮动态计划，只允许在已知策略白名单内选择策略并在保存配置上限内收紧候选数、每票预算和最低分。动态计划 v2 复用规则 Agent 审计中的 `recent_run_context`。`auto_llm_review_enabled` 同样默认关闭；开启后会在规则风控通过后调用 LLM 生成 `order_result.llm_review`，`blocked` 或调用失败会跳过候选。`llm_dynamic_plan` 与 `llm_review` 都会记录 `prompt_version` 和 `evaluator_version`，Agent 控制台会在对应位置展示这些审计版本。

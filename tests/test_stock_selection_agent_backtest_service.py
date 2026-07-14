@@ -109,6 +109,17 @@ class StockSelectionAgentBacktestServiceTestCase(unittest.TestCase):
         self.assertEqual(result["matrix"]["1"]["win_count"], 1)
         self.assertEqual(result["matrix"]["2"]["loss_count"], 1)
         self.assertEqual(result["strategy_matrix"]["dual_low"]["1"]["coverage_pct"], 100.0)
+        self.assertEqual(item["horizons"]["2"]["daily_returns_pct"], [3.0, -7.76699])
+        self.assertEqual(result["matrix"]["2"]["daily_observation_count"], 2)
+        self.assertEqual(result["matrix"]["2"]["daily_return_coverage_pct"], 100.0)
+        self.assertAlmostEqual(result["matrix"]["2"]["average_daily_return_pct"], -2.383495)
+        self.assertAlmostEqual(result["matrix"]["2"]["daily_return_volatility_pct"], 5.383495)
+        self.assertAlmostEqual(result["matrix"]["2"]["daily_expected_shortfall_20_pct"], -7.76699)
+        self.assertAlmostEqual(result["matrix"]["2"]["return_risk_utility_pct"], -10.383495)
+        self.assertEqual(
+            result["matrix"]["2"]["return_risk_objective_version"],
+            "candidate-return-risk-v1",
+        )
 
     def test_review_quality_matrix_separates_rule_and_llm_versions_across_horizons(self) -> None:
         rule_passed = {
@@ -286,6 +297,7 @@ class StockSelectionAgentBacktestServiceTestCase(unittest.TestCase):
                     "average_return_pct": 1.0,
                     "median_return_pct": 0.5,
                     "average_max_adverse_excursion_pct": -2.0,
+                    "return_risk_utility_pct": 0.25,
                     "unable_reason_counts": {"insufficient_forward_bars": 8},
                 }
             },
@@ -314,7 +326,11 @@ class StockSelectionAgentBacktestServiceTestCase(unittest.TestCase):
         self.assertEqual(blocked["state"], "blocked")
         self.assertEqual(blocked["transition"], "healthy->blocked")
 
-        base_result["matrix"]["5"].update(win_rate_pct=50.0, average_return_pct=-0.2)
+        base_result["matrix"]["5"].update(
+            win_rate_pct=50.0,
+            average_return_pct=-0.2,
+            return_risk_utility_pct=0.1,
+        )
         with patch.object(self.service, "evaluate", return_value=base_result):
             guarded = self.service.build_quality_snapshot(
                 strategy="dual_low",
@@ -323,7 +339,10 @@ class StockSelectionAgentBacktestServiceTestCase(unittest.TestCase):
             )
         self.assertEqual(guarded["state"], "guarded")
 
-        base_result["matrix"]["5"].update(average_return_pct=0.8)
+        base_result["matrix"]["5"].update(
+            average_return_pct=0.8,
+            return_risk_utility_pct=0.2,
+        )
         with patch.object(self.service, "evaluate", return_value=base_result):
             healthy = self.service.build_quality_snapshot(
                 strategy="dual_low",
@@ -346,6 +365,7 @@ class StockSelectionAgentBacktestServiceTestCase(unittest.TestCase):
                     "average_return_pct": 1.0,
                     "median_return_pct": 0.5,
                     "average_max_adverse_excursion_pct": -2.0,
+                    "return_risk_utility_pct": 0.25,
                     "unable_reason_counts": {},
                 }
             },
@@ -378,7 +398,7 @@ class StockSelectionAgentBacktestServiceTestCase(unittest.TestCase):
                 previous_state="healthy",
             )
 
-        self.assertEqual(snapshot["schema_version"], 2)
+        self.assertEqual(snapshot["schema_version"], 3)
         self.assertEqual(snapshot["selection_quality_state"], "healthy")
         self.assertEqual(snapshot["review_quality_state"], "blocked")
         self.assertEqual(snapshot["state"], "blocked")
@@ -397,6 +417,79 @@ class StockSelectionAgentBacktestServiceTestCase(unittest.TestCase):
             min_accuracy_pct=45,
         )
         self.assertEqual(blocked_state, ("blocked", "review_blocked_avoidance_below_threshold"))
+
+    def test_return_risk_objective_tightens_mature_high_risk_samples(self) -> None:
+        guarded = self.service._return_risk_objective_state(
+            {
+                "completed_count": 12,
+                "average_return_pct": 1.0,
+                "return_risk_utility_pct": -0.25,
+                "daily_observation_count": 60,
+                "daily_return_volatility_pct": 2.5,
+                "downside_deviation_pct": 1.8,
+                "daily_expected_shortfall_20_pct": -3.2,
+                "average_max_adverse_excursion_pct": -6.0,
+            },
+            min_mature_samples=10,
+        )
+        blocked = self.service._return_risk_objective_state(
+            {
+                "completed_count": 12,
+                "average_return_pct": -0.1,
+                "return_risk_utility_pct": -1.0,
+            },
+            min_mature_samples=10,
+        )
+
+        self.assertEqual(guarded["state"], "guarded")
+        self.assertEqual(guarded["version"], "candidate-return-risk-v1")
+        self.assertEqual(guarded["metrics"]["daily_observation_count"], 60)
+        self.assertEqual(blocked["state"], "blocked")
+        self.assertEqual(blocked["reason"], "return_risk_negative_return_and_utility")
+
+    def test_return_risk_utility_fails_closed_when_an_intermediate_close_is_missing(self) -> None:
+        self._record_decision(
+            run_uid="agent-missing-daily-close",
+            strategy="dual_low",
+            symbol="600519",
+            status="filled",
+            price=100.0,
+            created_at=datetime(2024, 1, 1, 10, 0),
+        )
+        with self.db.get_session() as session:
+            session.add_all(
+                [
+                    StockDaily(
+                        code="600519",
+                        date=date(2024, 1, 2),
+                        high=102,
+                        low=98,
+                        close=None,
+                    ),
+                    StockDaily(
+                        code="600519",
+                        date=date(2024, 1, 3),
+                        high=104,
+                        low=99,
+                        close=103,
+                    ),
+                ]
+            )
+            session.commit()
+
+        result = self.service.evaluate(eval_windows=[2])
+        metrics = result["matrix"]["2"]
+
+        self.assertEqual(metrics["completed_count"], 1)
+        self.assertEqual(metrics["daily_observation_count"], 0)
+        self.assertEqual(metrics["daily_return_coverage_pct"], 0.0)
+        self.assertIsNone(metrics["return_risk_utility_pct"])
+        objective = self.service._return_risk_objective_state(
+            metrics,
+            min_mature_samples=1,
+        )
+        self.assertEqual(objective["state"], "unavailable")
+        self.assertEqual(objective["reason"], "return_risk_utility_unavailable")
 
 
 if __name__ == "__main__":

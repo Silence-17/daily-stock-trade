@@ -681,7 +681,7 @@ class VnpyPaperAgentBacktestResponse(BaseModel):
 
 
 class VnpyPaperAgentCrossRunQualityResponse(BaseModel):
-    schema_version: int = 1
+    schema_version: int = 3
     generated_at: Optional[Any] = None
     state: str
     reason: str
@@ -692,6 +692,10 @@ class VnpyPaperAgentCrossRunQualityResponse(BaseModel):
     market: str
     selection_quality_state: Optional[str] = None
     selection_quality_reason: Optional[str] = None
+    return_risk_objective_state: Optional[str] = None
+    return_risk_objective_reason: Optional[str] = None
+    return_risk_objective_applied: bool = False
+    return_risk_objective: Dict[str, Any] = Field(default_factory=dict)
     review_quality_state: Optional[str] = None
     review_quality_reason: Optional[str] = None
     review_quality_applied: bool = False
@@ -707,6 +711,12 @@ class VnpyPaperAgentCrossRunQualityResponse(BaseModel):
     average_return_pct: Optional[float] = None
     median_return_pct: Optional[float] = None
     average_max_adverse_excursion_pct: Optional[float] = None
+    average_daily_return_pct: Optional[float] = None
+    daily_return_coverage_pct: Optional[float] = None
+    daily_return_volatility_pct: Optional[float] = None
+    downside_deviation_pct: Optional[float] = None
+    daily_expected_shortfall_20_pct: Optional[float] = None
+    return_risk_utility_pct: Optional[float] = None
     unable_reason_counts: Dict[str, int] = Field(default_factory=dict)
     lookahead_protection: bool = True
     source: str
