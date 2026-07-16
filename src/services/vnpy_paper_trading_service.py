@@ -27,7 +27,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
 from data_provider.base import DataFetcherManager
-from src.config import get_config
+from src.config import get_config, parse_env_bool
 from src.core import trading_calendar
 from src.repositories.stock_selection_agent_repo import StockSelectionAgentRepository
 from src.repositories.stock_repo import StockRepository
@@ -91,6 +91,10 @@ ALPHASIFT_FALLBACK_STRATEGIES = (
 )
 DEFAULT_AUTO_ALPHASIFT_LLM_TIMEOUT_SECONDS = 45
 DEFAULT_AUTO_ALPHASIFT_LLM_MAX_RETRIES = 0
+DEFAULT_AUTO_ALPHASIFT_LLM_FAILURE_THRESHOLD = 1
+DEFAULT_AUTO_ALPHASIFT_LLM_COOLDOWN_MINUTES = 60
+DEFAULT_AUTO_ALPHASIFT_LLM_PROBE_TIMEOUT_SECONDS = 10
+DEFAULT_AUTO_ALPHASIFT_LLM_PROBE_LEASE_SECONDS = 300
 ALLOWED_AUTO_MARKETS = {"cn", "hk", "us", "jp", "kr", "tw"}
 LLM_DYNAMIC_AGENT_PLAN_PROMPT_VERSION = "vnpy_paper_dynamic_agent_plan_v2"
 LLM_DYNAMIC_AGENT_PLAN_EVALUATOR_VERSION = "dynamic_plan_guardrails_v1"
@@ -217,18 +221,63 @@ def _safe_int(value: Any) -> Optional[int]:
 def _resolve_auto_alphasift_llm_policy() -> Dict[str, Any]:
     timeout = _safe_int(os.getenv("VNPY_AUTO_ALPHASIFT_LLM_TIMEOUT_SEC"))
     max_retries = _safe_int(os.getenv("VNPY_AUTO_ALPHASIFT_LLM_MAX_RETRIES"))
+    failure_threshold = _safe_int(
+        os.getenv("VNPY_AUTO_ALPHASIFT_LLM_FAILURE_THRESHOLD")
+    )
+    cooldown_minutes = _safe_int(
+        os.getenv("VNPY_AUTO_ALPHASIFT_LLM_COOLDOWN_MINUTES")
+    )
+    probe_timeout = _safe_int(
+        os.getenv("VNPY_AUTO_ALPHASIFT_LLM_PROBE_TIMEOUT_SEC")
+    )
+    timeout_seconds = (
+        max(1, timeout)
+        if timeout is not None
+        else DEFAULT_AUTO_ALPHASIFT_LLM_TIMEOUT_SECONDS
+    )
     return {
-        "timeout_seconds": (
-            max(1, timeout)
-            if timeout is not None
-            else DEFAULT_AUTO_ALPHASIFT_LLM_TIMEOUT_SECONDS
-        ),
+        "schema_version": 1,
+        "timeout_seconds": timeout_seconds,
+        "normal_timeout_seconds": timeout_seconds,
         "max_retries": (
             max(0, max_retries)
             if max_retries is not None
             else DEFAULT_AUTO_ALPHASIFT_LLM_MAX_RETRIES
         ),
         "fallback": "screen_score",
+        "circuit_breaker_enabled": parse_env_bool(
+            os.getenv("VNPY_AUTO_ALPHASIFT_LLM_CIRCUIT_BREAKER_ENABLED"),
+            default=True,
+        ),
+        "failure_threshold": max(
+            1,
+            failure_threshold
+            if failure_threshold is not None
+            else DEFAULT_AUTO_ALPHASIFT_LLM_FAILURE_THRESHOLD,
+        ),
+        "cooldown_minutes": max(
+            1,
+            cooldown_minutes
+            if cooldown_minutes is not None
+            else DEFAULT_AUTO_ALPHASIFT_LLM_COOLDOWN_MINUTES,
+        ),
+        "probe_timeout_seconds": min(
+            timeout_seconds,
+            max(
+                1,
+                probe_timeout
+                if probe_timeout is not None
+                else DEFAULT_AUTO_ALPHASIFT_LLM_PROBE_TIMEOUT_SECONDS,
+            ),
+        ),
+        "probe_lease_seconds": DEFAULT_AUTO_ALPHASIFT_LLM_PROBE_LEASE_SECONDS,
+        "state": "closed",
+        "decision": "normal",
+        "use_llm": True,
+        "consecutive_failures": 0,
+        "last_attempt_run_uid": None,
+        "last_attempt_at": None,
+        "retry_at": None,
     }
 
 
@@ -2231,39 +2280,40 @@ class VnpyPaperTradingService:
             recent_run_context=recent_run_context,
         )
         settings = self._apply_llm_dynamic_agent_plan(settings, llm_dynamic_plan)
-        alphasift_llm_policy = _resolve_auto_alphasift_llm_policy()
-        run_diagnostics = {
-            "engine": "vnpy_local_paper_ledger",
-            "execution_mode": settings.auto_execution_mode,
-            "execution_mode_override": override_mode or None,
-            "ignore_auto_trade_enabled": bool(ignore_auto_trade_enabled),
-            "agent_plan": self._build_agent_plan(
-                settings,
-                execution_mode_override=override_mode or None,
-                ignore_auto_trade_enabled=bool(ignore_auto_trade_enabled),
-                llm_dynamic_plan=llm_dynamic_plan,
-                recent_run_context=recent_run_context,
-                market_objective=market_objective,
-            ),
-            "llm_dynamic_plan": llm_dynamic_plan,
-            "market_objective": market_objective,
-            "cross_run_quality": cross_run_quality,
-            "alphasift_llm_policy": alphasift_llm_policy,
-            "stage_timings": stage_timings,
-        }
-        finish_timing_stage("planning")
-        run = self.agent_repo.create_run(
-            run_uid=run_uid,
-            trigger_source="vnpy_paper_auto",
-            strategy=settings.auto_strategy,
-            market=settings.auto_market,
-            max_results=settings.auto_max_results,
-            cash_per_order=settings.auto_cash_per_order,
-            min_score=settings.auto_min_score,
-            skip_existing_positions=settings.auto_skip_existing_positions,
-            settings=asdict(settings),
-            diagnostics=run_diagnostics,
-        )
+        with self._lock:
+            alphasift_llm_policy = self._auto_alphasift_llm_policy(settings)
+            run_diagnostics = {
+                "engine": "vnpy_local_paper_ledger",
+                "execution_mode": settings.auto_execution_mode,
+                "execution_mode_override": override_mode or None,
+                "ignore_auto_trade_enabled": bool(ignore_auto_trade_enabled),
+                "agent_plan": self._build_agent_plan(
+                    settings,
+                    execution_mode_override=override_mode or None,
+                    ignore_auto_trade_enabled=bool(ignore_auto_trade_enabled),
+                    llm_dynamic_plan=llm_dynamic_plan,
+                    recent_run_context=recent_run_context,
+                    market_objective=market_objective,
+                ),
+                "llm_dynamic_plan": llm_dynamic_plan,
+                "market_objective": market_objective,
+                "cross_run_quality": cross_run_quality,
+                "alphasift_llm_policy": alphasift_llm_policy,
+                "stage_timings": stage_timings,
+            }
+            finish_timing_stage("planning")
+            run = self.agent_repo.create_run(
+                run_uid=run_uid,
+                trigger_source="vnpy_paper_auto",
+                strategy=settings.auto_strategy,
+                market=settings.auto_market,
+                max_results=settings.auto_max_results,
+                cash_per_order=settings.auto_cash_per_order,
+                min_score=settings.auto_min_score,
+                skip_existing_positions=settings.auto_skip_existing_positions,
+                settings=asdict(settings),
+                diagnostics=run_diagnostics,
+            )
         run_id = int(run["id"])
         if not settings.auto_trade_enabled:
             finish_timing_stage("preflight")
@@ -2473,6 +2523,7 @@ class VnpyPaperTradingService:
                 market=settings.auto_market,
                 max_results=settings.auto_max_results,
                 source_health_trends=source_health_trends,
+                use_llm=bool(alphasift_llm_policy["use_llm"]),
                 llm_timeout_seconds=int(alphasift_llm_policy["timeout_seconds"]),
                 llm_max_retries=int(alphasift_llm_policy["max_retries"]),
             )
@@ -2509,6 +2560,12 @@ class VnpyPaperTradingService:
             )
             raise
         finish_timing_stage("alphasift_screen")
+        alphasift_llm_result = self._build_alphasift_llm_result(
+            screen,
+            alphasift_llm_policy,
+        )
+        run_diagnostics["alphasift_llm_result"] = alphasift_llm_result
+        run_diagnostics["llm_parse_errors"] = list(screen.get("llm_parse_errors") or [])
         candidates = list(screen.get("candidates") or [])
         data_quality = self._screen_data_quality(screen, candidates)
         data_quality.update(self._screen_data_quality_score(screen, candidates, data_quality))
@@ -5507,6 +5564,214 @@ class VnpyPaperTradingService:
                 None,
             ),
             "runs": compact_runs,
+        }
+
+    def _auto_alphasift_llm_policy(
+        self,
+        settings: VnpyPaperSettings,
+    ) -> Dict[str, Any]:
+        policy = _resolve_auto_alphasift_llm_policy()
+        if not policy["circuit_breaker_enabled"]:
+            policy["state"] = "disabled"
+            policy["decision"] = "normal"
+            return policy
+
+        recent = self.agent_repo.list_recent_runs(
+            trigger_source="vnpy_paper_auto",
+            strategy=settings.auto_strategy,
+            market=settings.auto_market,
+            limit=20,
+        )
+        consecutive_failures = 0
+        last_attempt_run_uid: Optional[str] = None
+        last_attempt_at: Optional[datetime] = None
+        history_run_uids: List[str] = []
+        for item in recent:
+            outcome = self._historical_alphasift_llm_result(item)
+            status = str(outcome.get("status") or "unknown").strip().lower()
+            if status == "skipped":
+                continue
+            if status == "probe_in_progress":
+                probe_started_at = self._parse_db_datetime(
+                    item.get("updated_at") or item.get("created_at")
+                )
+                probe_status = str(item.get("status") or "").strip().lower()
+                probe_lease_expires_at = (
+                    probe_started_at
+                    + timedelta(seconds=int(policy["probe_lease_seconds"]))
+                    if probe_started_at is not None
+                    else None
+                )
+                probe_is_active = (
+                    probe_status in {"running", "started"}
+                    and (
+                        probe_lease_expires_at is None
+                        or self._now_utc() < probe_lease_expires_at
+                    )
+                )
+                if probe_is_active:
+                    policy.update(
+                        {
+                            "state": "open",
+                            "decision": "probe_in_progress",
+                            "use_llm": False,
+                            "last_attempt_run_uid": str(item.get("run_uid") or "").strip() or None,
+                            "last_attempt_at": (
+                                self._format_utc_datetime(probe_started_at)
+                                if probe_started_at is not None
+                                else None
+                            ),
+                            "probe_lease_expires_at": (
+                                self._format_utc_datetime(probe_lease_expires_at)
+                                if probe_lease_expires_at is not None
+                                else None
+                            ),
+                        }
+                    )
+                    return policy
+                status = "failure"
+            if status not in {"success", "failure"}:
+                break
+            if last_attempt_run_uid is None:
+                last_attempt_run_uid = str(item.get("run_uid") or "").strip() or None
+                last_attempt_at = self._parse_db_datetime(
+                    item.get("completed_at") or item.get("updated_at") or item.get("created_at")
+                )
+            if status == "success":
+                break
+            consecutive_failures += 1
+            run_uid = str(item.get("run_uid") or "").strip()
+            if run_uid:
+                history_run_uids.append(run_uid)
+
+        policy.update(
+            {
+                "consecutive_failures": consecutive_failures,
+                "last_attempt_run_uid": last_attempt_run_uid,
+                "last_attempt_at": (
+                    self._format_utc_datetime(last_attempt_at)
+                    if last_attempt_at is not None
+                    else None
+                ),
+                "history_run_uids": history_run_uids,
+            }
+        )
+        if consecutive_failures < int(policy["failure_threshold"]):
+            return policy
+
+        retry_at = (
+            last_attempt_at + timedelta(minutes=int(policy["cooldown_minutes"]))
+            if last_attempt_at is not None
+            else None
+        )
+        policy["retry_at"] = (
+            self._format_utc_datetime(retry_at) if retry_at is not None else None
+        )
+        if retry_at is not None and self._now_utc() >= retry_at:
+            policy.update(
+                {
+                    "state": "half_open",
+                    "decision": "recovery_probe",
+                    "use_llm": True,
+                    "timeout_seconds": int(policy["probe_timeout_seconds"]),
+                }
+            )
+            return policy
+
+        policy.update(
+            {
+                "state": "open",
+                "decision": "circuit_open",
+                "use_llm": False,
+            }
+        )
+        return policy
+
+    @staticmethod
+    def _historical_alphasift_llm_result(run: Dict[str, Any]) -> Dict[str, Any]:
+        diagnostics = run.get("diagnostics") if isinstance(run.get("diagnostics"), dict) else {}
+        result = diagnostics.get("alphasift_llm_result")
+        if isinstance(result, dict) and result.get("status"):
+            return result
+        policy = diagnostics.get("alphasift_llm_policy")
+        if (
+            isinstance(policy, dict)
+            and str(policy.get("decision") or "").strip().lower() == "recovery_probe"
+        ):
+            return {"status": "probe_in_progress"}
+        warnings = [str(item) for item in list(diagnostics.get("warnings") or [])]
+        parse_errors = [str(item) for item in list(diagnostics.get("llm_parse_errors") or [])]
+        failure_text = " ".join(warnings + parse_errors).lower()
+        if "llm ranking failed" in failure_text or parse_errors:
+            return {
+                "status": "failure",
+                "reason": (
+                    "timeout"
+                    if "timeout" in failure_text or "timed out" in failure_text
+                    else "llm_ranking_failed"
+                ),
+                "legacy_inferred": True,
+            }
+        return {"status": "unknown"}
+
+    @staticmethod
+    def _build_alphasift_llm_result(
+        screen: Dict[str, Any],
+        policy: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        attempted = bool(policy.get("use_llm"))
+        warnings = [str(item) for item in list(screen.get("warnings") or [])]
+        parse_errors = [str(item) for item in list(screen.get("llm_parse_errors") or [])]
+        failure_text = " ".join(warnings + parse_errors).lower()
+        llm_ranked = screen.get("llm_ranked")
+        if not attempted:
+            status = "skipped"
+            reason = str(policy.get("decision") or "circuit_open")
+        elif llm_ranked is True:
+            status = "success"
+            reason = None
+        elif (
+            llm_ranked is False
+            or parse_errors
+            or "llm ranking failed" in failure_text
+        ):
+            status = "failure"
+            if "timeout" in failure_text or "timed out" in failure_text:
+                reason = "timeout"
+            elif parse_errors:
+                reason = "invalid_structured_output"
+            else:
+                reason = "llm_ranking_failed"
+        else:
+            status = "unknown"
+            reason = "llm_result_not_reported"
+
+        previous_failures = int(policy.get("consecutive_failures") or 0)
+        failure_threshold = int(policy.get("failure_threshold") or 1)
+        if not policy.get("circuit_breaker_enabled"):
+            state_after = "disabled"
+        elif status == "success":
+            state_after = "closed"
+        elif status == "failure" and previous_failures + 1 >= failure_threshold:
+            state_after = "open"
+        else:
+            state_after = str(policy.get("state") or "closed")
+        return {
+            "schema_version": 1,
+            "status": status,
+            "reason": reason,
+            "attempted": attempted,
+            "llm_ranked": llm_ranked,
+            "state_before": policy.get("state"),
+            "state_after": state_after,
+            "decision": policy.get("decision"),
+            "timeout_seconds": policy.get("timeout_seconds"),
+            "consecutive_failures_before_attempt": previous_failures,
+            "consecutive_failures_after_attempt": (
+                0 if status == "success" else previous_failures + (1 if status == "failure" else 0)
+            ),
+            "parse_errors": parse_errors,
+            "observed_at": _utc_now_iso(),
         }
 
     def _cross_run_quality_snapshot(

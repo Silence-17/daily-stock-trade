@@ -339,6 +339,12 @@ const runDetail = {
     updatedAt: '2026-07-01T09:30:01Z',
   }],
   timeline: [{
+    stage: 'llm_ranking_health',
+    status: 'skipped',
+    message: 'AlphaSift LLM ranking: decision=circuit_open, result=skipped, state=open',
+    timestamp: '2026-07-01T09:30:00Z',
+    details: {},
+  }, {
     stage: 'candidate_decisions',
     status: 'completed',
     message: '2 candidate decisions: buy=1, skip=1',
@@ -823,6 +829,8 @@ describe('AgentConsolePage', () => {
     expect(screen.getByText('execution 1')).toBeInTheDocument();
     expect(screen.getAllByText('ss-agent-test').length).toBeGreaterThan(0);
     expect(screen.getByText('2 candidate decisions: buy=1, skip=1')).toBeInTheDocument();
+    expect(screen.getByText('llm_ranking_health · skipped')).toBeInTheDocument();
+    expect(screen.getByText(/decision=circuit_open, result=skipped, state=open/)).toBeInTheDocument();
     expect(screen.getByTestId('agent-workflow')).toHaveTextContent('execution');
     expect(screen.getByTestId('agent-workflow')).toHaveTextContent('monitor_positions_and_events');
     expect(screen.getByText('Candidate review warning')).toBeInTheDocument();

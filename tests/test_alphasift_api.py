@@ -3312,6 +3312,28 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
         self.assertEqual(context["llm"]["max_retries"], 0)
         self.assertEqual(payload["candidate_count"], 0)
 
+    def test_service_screen_can_disable_llm_for_request_without_changing_manual_default(self) -> None:
+        config = self._config(enabled=True)
+        fake_module = _make_adapter_module(
+            screen=MagicMock(return_value={"candidates": [], "llm_ranked": False})
+        )
+
+        with patch("src.services.alphasift_service._import_alphasift", return_value=fake_module):
+            alphasift_service.AlphaSiftService(config=config).screen(
+                strategy="dual_low",
+                market="cn",
+                max_results=3,
+                use_llm=False,
+            )
+            alphasift_service.AlphaSiftService(config=config).screen(
+                strategy="dual_low",
+                market="cn",
+                max_results=3,
+            )
+
+        self.assertFalse(fake_module.screen.call_args_list[0].kwargs["use_llm"])
+        self.assertTrue(fake_module.screen.call_args_list[1].kwargs["use_llm"])
+
     def test_screen_preserves_explicit_candidate_context_provider_override(self) -> None:
         config = self._config(enabled=True)
         captured: dict[str, object] = {}

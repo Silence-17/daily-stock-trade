@@ -1244,6 +1244,7 @@ class AlphaSiftService:
         market: str,
         max_results: int,
         source_health_trends: Optional[List[Dict[str, Any]]] = None,
+        use_llm: bool = True,
         llm_timeout_seconds: Optional[int] = None,
         llm_max_retries: Optional[int] = None,
     ) -> Dict[str, Any]:
@@ -1268,6 +1269,7 @@ class AlphaSiftService:
                 max_results,
                 self.config,
                 snapshot_source_priority=str(source_routing["effective_priority"]),
+                use_llm=bool(use_llm),
                 llm_timeout_seconds=llm_timeout_seconds,
                 llm_max_retries=llm_max_retries,
             )
@@ -1998,6 +2000,7 @@ def _call_alphasift_screen(
     config: Config,
     *,
     snapshot_source_priority: Optional[str] = None,
+    use_llm: bool = True,
     llm_timeout_seconds: Optional[int] = None,
     llm_max_retries: Optional[int] = None,
 ) -> Any:
@@ -2025,7 +2028,7 @@ def _call_alphasift_screen(
         kwargs["max_results"] = max_results
 
     if supports_use_llm:
-        kwargs["use_llm"] = True
+        kwargs["use_llm"] = bool(use_llm)
     if supports_context:
         kwargs["context"] = _build_alphasift_context(
             config,
