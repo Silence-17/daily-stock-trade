@@ -65,6 +65,7 @@ export type VnpyPaperSettings = {
   autoHotspotRetreatGateEnabled: boolean;
   autoHotspotRetreatMinDrop: number;
   autoIntradayMarketGateEnabled: boolean;
+  autoIntradayRequireProviderTimestamp: boolean;
   autoIntradayIndexMinChangePct: number;
   autoIntradayBreadthMinScore: number;
   autoCrossMarketGateEnabled: boolean;
@@ -1237,6 +1238,9 @@ function buildSettingsPayload(payload: VnpyPaperSettingsUpdate): Record<string, 
   }
   if (hasOwn(payload, 'autoIntradayMarketGateEnabled')) {
     body.auto_intraday_market_gate_enabled = payload.autoIntradayMarketGateEnabled;
+  }
+  if (hasOwn(payload, 'autoIntradayRequireProviderTimestamp')) {
+    body.auto_intraday_require_provider_timestamp = payload.autoIntradayRequireProviderTimestamp;
   }
   if (hasOwn(payload, 'autoIntradayIndexMinChangePct')) {
     body.auto_intraday_index_min_change_pct = payload.autoIntradayIndexMinChangePct;

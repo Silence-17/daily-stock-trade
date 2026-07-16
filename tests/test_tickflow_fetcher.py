@@ -357,6 +357,33 @@ class TestTickFlowFetcher(unittest.TestCase):
         self.assertIsNone(fetcher.get_market_stats())
         self.assertEqual(len(fetcher._client.quotes.calls), 1)
 
+    def test_get_market_stats_reports_complete_provider_timestamp_coverage(self):
+        fetcher = TickFlowFetcher(api_key="sk-test")
+        fetcher._client = _FakeClient(
+            universe_data=[_quote("600519.SH"), _quote("000001.SZ")]
+        )
+
+        stats = fetcher.get_market_stats()
+
+        self.assertIsNotNone(stats)
+        self.assertEqual(stats["provider_timestamp"], "2024-01-02T00:00:00+00:00")
+        self.assertEqual(stats["provider_timestamp_coverage_pct"], 100.0)
+        self.assertEqual(stats["data_granularity"], "realtime")
+
+    def test_get_market_stats_withholds_partial_provider_timestamp(self):
+        missing_timestamp = _quote("000001.SZ")
+        missing_timestamp.pop("timestamp")
+        fetcher = TickFlowFetcher(api_key="sk-test")
+        fetcher._client = _FakeClient(
+            universe_data=[_quote("600519.SH"), missing_timestamp]
+        )
+
+        stats = fetcher.get_market_stats()
+
+        self.assertIsNotNone(stats)
+        self.assertIsNone(stats["provider_timestamp"])
+        self.assertEqual(stats["provider_timestamp_coverage_pct"], 50.0)
+
     def test_capability_negative_cache_retries_after_ttl(self):
         fetcher = TickFlowFetcher(api_key="sk-test")
         fetcher._client = _FakeClient(universe_data=_PermissionLikeError("universe forbidden"))

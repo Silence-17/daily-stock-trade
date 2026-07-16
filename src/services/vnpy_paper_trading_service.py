@@ -191,6 +191,7 @@ class VnpyPaperSettings:
     auto_hotspot_retreat_gate_enabled: bool = False
     auto_hotspot_retreat_min_drop: int = 25
     auto_intraday_market_gate_enabled: bool = False
+    auto_intraday_require_provider_timestamp: bool = True
     auto_intraday_index_min_change_pct: float = -2.0
     auto_intraday_breadth_min_score: int = 35
     auto_cross_market_gate_enabled: bool = False
@@ -4999,6 +5000,12 @@ class VnpyPaperTradingService:
                     defaults.auto_intraday_market_gate_enabled,
                 )
             ),
+            auto_intraday_require_provider_timestamp=bool(
+                raw.get(
+                    "auto_intraday_require_provider_timestamp",
+                    defaults.auto_intraday_require_provider_timestamp,
+                )
+            ),
             auto_intraday_index_min_change_pct=max(
                 -20.0,
                 min(
@@ -5528,6 +5535,7 @@ class VnpyPaperTradingService:
                 "hotspot_retreat_gate_enabled": settings.auto_hotspot_retreat_gate_enabled,
                 "hotspot_retreat_min_drop": settings.auto_hotspot_retreat_min_drop,
                 "intraday_market_gate_enabled": settings.auto_intraday_market_gate_enabled,
+                "intraday_require_provider_timestamp": settings.auto_intraday_require_provider_timestamp,
                 "intraday_index_min_change_pct": settings.auto_intraday_index_min_change_pct,
                 "intraday_breadth_min_score": settings.auto_intraday_breadth_min_score,
                 "cross_market_gate_enabled": settings.auto_cross_market_gate_enabled,
@@ -6307,6 +6315,7 @@ class VnpyPaperTradingService:
                     {
                         "reason": "intraday_market_index_unavailable",
                         "action": "skip_buy",
+                        "require_provider_timestamp": settings.auto_intraday_require_provider_timestamp,
                         "alert": False,
                     },
                     {
@@ -6319,6 +6328,7 @@ class VnpyPaperTradingService:
                         "reason": "intraday_market_breadth_unavailable",
                         "action": "skip_buy",
                         "scope": "cn_only",
+                        "require_provider_timestamp": settings.auto_intraday_require_provider_timestamp,
                         "alert": False,
                     },
                     {
@@ -9968,6 +9978,7 @@ class VnpyPaperTradingService:
         market: str,
         *,
         require_intraday: bool = False,
+        require_provider_timestamp: bool = False,
     ) -> Dict[str, Any]:
         raw_indices, error, duration_ms = self._run_market_evidence_call(
             lambda: self.data_fetcher_manager.get_main_indices(region=market),
@@ -10038,6 +10049,8 @@ class VnpyPaperTradingService:
                     provider_timestamp_status = "invalid"
                     if require_intraday:
                         rejection_reason = rejection_reason or "provider_timestamp_invalid"
+            elif require_intraday and require_provider_timestamp:
+                rejection_reason = rejection_reason or "provider_timestamp_required"
 
             normalized_item = {
                 "code": code or None,
@@ -10068,6 +10081,7 @@ class VnpyPaperTradingService:
                 "indices": [],
                 "rejected_indices": rejected_indices,
                 "require_intraday": require_intraday,
+                "require_provider_timestamp": require_provider_timestamp,
                 "expected_data_date": expected_data_date,
                 "evidence_reason": (
                     "index_evidence_not_intraday"
@@ -10086,13 +10100,18 @@ class VnpyPaperTradingService:
             "indices": indices,
             "rejected_indices": rejected_indices,
             "require_intraday": require_intraday,
+            "require_provider_timestamp": require_provider_timestamp,
             "expected_data_date": expected_data_date,
             "providers": sorted(
                 {str(item["provider"]) for item in indices if item.get("provider")}
             ),
         }
 
-    def _live_cn_breadth_evidence(self) -> Dict[str, Any]:
+    def _live_cn_breadth_evidence(
+        self,
+        *,
+        require_provider_timestamp: bool = False,
+    ) -> Dict[str, Any]:
         stats, error, duration_ms = self._run_market_evidence_call(
             lambda: self.data_fetcher_manager.get_market_stats(
                 purpose="vnpy_paper_intraday_risk"
@@ -10113,6 +10132,52 @@ class VnpyPaperTradingService:
                 ),
             }
         stats = stats if isinstance(stats, dict) else {}
+        provider_timestamp = str(stats.get("provider_timestamp") or "").strip() or None
+        provider_timestamp_coverage_pct = _safe_float(
+            stats.get("provider_timestamp_coverage_pct")
+        )
+        provider_age_seconds = None
+        provider_timestamp_status = "unavailable"
+        if provider_timestamp:
+            try:
+                normalized = (
+                    provider_timestamp[:-1] + "+00:00"
+                    if provider_timestamp.endswith("Z")
+                    else provider_timestamp
+                )
+                provider_dt = datetime.fromisoformat(normalized)
+                if provider_dt.tzinfo is None:
+                    raise ValueError("provider timestamp has no timezone")
+                provider_age_seconds = int(
+                    (datetime.now(timezone.utc) - provider_dt.astimezone(timezone.utc)).total_seconds()
+                )
+                if provider_age_seconds < -60:
+                    provider_timestamp_status = "future"
+                elif provider_age_seconds > AUTO_MARKET_PROVIDER_TIMESTAMP_MAX_AGE_SECONDS:
+                    provider_timestamp_status = "stale"
+                else:
+                    provider_timestamp_status = "fresh"
+            except (TypeError, ValueError):
+                provider_timestamp_status = "invalid"
+        timestamp_coverage_incomplete = (
+            provider_timestamp_coverage_pct is not None
+            and provider_timestamp_coverage_pct < 100.0
+        )
+        if require_provider_timestamp and (
+            provider_timestamp_status != "fresh" or timestamp_coverage_incomplete
+        ):
+            return {
+                "available": False,
+                "duration_ms": duration_ms,
+                "provider": str(stats.get("provider") or "").strip() or None,
+                "fetched_at": str(stats.get("fetched_at") or "").strip() or None,
+                "provider_timestamp": provider_timestamp,
+                "provider_timestamp_status": provider_timestamp_status,
+                "provider_age_seconds": provider_age_seconds,
+                "provider_timestamp_coverage_pct": provider_timestamp_coverage_pct,
+                "require_provider_timestamp": require_provider_timestamp,
+                "evidence_reason": "breadth_provider_timestamp_required",
+            }
         up_count = _safe_int(stats.get("up_count"))
         down_count = _safe_int(stats.get("down_count"))
         flat_count = _safe_int(stats.get("flat_count"))
@@ -10143,6 +10208,11 @@ class VnpyPaperTradingService:
             "calculation": "up_count / (up_count + down_count + flat_count) * 100",
             "provider": str(stats.get("provider") or "").strip() or None,
             "fetched_at": str(stats.get("fetched_at") or "").strip() or None,
+            "provider_timestamp": provider_timestamp,
+            "provider_timestamp_status": provider_timestamp_status,
+            "provider_age_seconds": provider_age_seconds,
+            "provider_timestamp_coverage_pct": provider_timestamp_coverage_pct,
+            "require_provider_timestamp": require_provider_timestamp,
         }
 
     def _market_context_pre_trade_risk(
@@ -10187,6 +10257,7 @@ class VnpyPaperTradingService:
                 "index_min_change_pct": settings.auto_intraday_index_min_change_pct,
                 "breadth_min_score": settings.auto_intraday_breadth_min_score,
                 "breadth_scope": "cn_only",
+                "require_provider_timestamp": settings.auto_intraday_require_provider_timestamp,
             },
             "cross_market": {
                 "enabled": settings.auto_cross_market_gate_enabled,
@@ -10240,6 +10311,7 @@ class VnpyPaperTradingService:
             index_evidence = self._live_market_index_evidence(
                 market,
                 require_intraday=True,
+                require_provider_timestamp=settings.auto_intraday_require_provider_timestamp,
             )
             diagnostics["intraday_market"]["index"] = index_evidence
             if not index_evidence.get("available"):
@@ -10253,7 +10325,9 @@ class VnpyPaperTradingService:
                 diagnostics.update({"status": "blocked", "reason": reason})
                 return reason, diagnostics
             if market == "cn":
-                breadth_evidence = self._live_cn_breadth_evidence()
+                breadth_evidence = self._live_cn_breadth_evidence(
+                    require_provider_timestamp=settings.auto_intraday_require_provider_timestamp,
+                )
                 diagnostics["intraday_market"]["breadth"] = breadth_evidence
                 if not breadth_evidence.get("available"):
                     reason = "intraday_market_breadth_unavailable"
