@@ -261,6 +261,8 @@ class VnpyPaperSchedulerTaskStatus(BaseModel):
     interval_seconds: Optional[int] = None
     initial_delay_seconds: Optional[int] = None
     running: bool = False
+    overlap_guarded: bool = False
+    previous_generation_running: bool = False
     last_run: Optional[Any] = None
     next_run_at: Optional[Any] = None
 

@@ -210,7 +210,9 @@ const statusResponse = {
     }, {
       name: 'vnpy_paper_auto_retry',
       intervalSeconds: 300,
-      running: false,
+      running: true,
+      overlapGuarded: true,
+      previousGenerationRunning: true,
       lastRun: null,
       nextRunAt: '2026-07-02T09:36:00',
     }],
@@ -1515,7 +1517,10 @@ describe('VnpyPaperTradingPage', () => {
     expect(screen.getByTestId('paper-account-history')).toHaveTextContent('已归档');
     expect(screen.getByText('调度已启动')).toBeInTheDocument();
     expect(screen.getByText('自动任务已注册')).toBeInTheDocument();
-    expect(screen.getByText('重试任务已注册')).toBeInTheDocument();
+    expect(screen.getByText('重试任务运行中')).toBeInTheDocument();
+    expect(screen.getByTestId('auto-retry-previous-generation-running')).toHaveTextContent(
+      '配置重载前任务仍在收尾',
+    );
     expect(screen.getAllByText(/09:35/).length).toBeGreaterThan(0);
     expect(screen.getByText('可交易窗口')).toBeInTheDocument();
     expect(screen.getAllByText(/09:30/).length).toBeGreaterThan(0);

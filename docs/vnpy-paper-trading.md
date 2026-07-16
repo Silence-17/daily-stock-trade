@@ -66,6 +66,7 @@
 - 自动交易写入的同日同策略同股票订单带有 `dedup_hash`，避免定时任务重复买入同一个候选；`vnpy_paper` 模式还会检查同股票同方向是否已有 `submitted` / `part_filled` / `cancel_requested` 活跃计划，命中时以 `active_vnpy_order_exists` 跳过，避免在真实成交回报到达前重复提交买入或卖出委托。
 - 定时任务注册在 API/Web/Desktop 进程内的 `RuntimeSchedulerService` 后台任务中；即使每日分析定时任务未开启，只要自动模拟交易开启，后台 scheduler loop 也会运行该任务。
 - `python main.py --serve-only` / `--webui-only` 只禁用每日分析 daily job，不会禁用自动模拟交易等 runtime scheduler 后台任务；页面保存“定时自动买入”后会触发 reconcile。
+- scheduler reconcile 会复用按任务名保存的进程内互斥锁；若重载前一代的同名任务尚未结束，新一代不会并发执行，而是写入 `status=skipped`、`reason=task_already_running` 的持久化事件。状态中的任务级 `overlap_guarded` 表示该保护已启用，`previous_generation_running` 表示当前看到的是重载前任务仍在收尾；异常退出也会释放互斥锁，不影响下一轮调度。
 - 状态接口会返回 `scheduler` 状态，包含后台任务名、是否运行、任务级 `next_run_at`、最近错误、最近跳过原因和最近 `task_events`；Web 页面用这些字段展示自动交易后台任务是否已注册、下次触发时间以及“后台任务日志”。
 - Web 模拟交易页新增“任务健康检查”，基于 `GET /api/v1/vnpy-paper/task-health` 汇总 `vnpy_paper_auto_trade` 和 `vnpy_paper_auto_retry` 是否注册、是否运行、是否被配置停用、最近事件是否失败/跳过以及下次运行时间；任务健康摘要会优先使用持久化最近事件，便于 API 进程重启后继续判断自动选股和恢复扫描为什么未执行。
 - Web 模拟交易页的“后台任务日志”会读取 `GET /api/v1/vnpy-paper/task-events`，支持按任务名和 started/completed/skipped/failed 状态筛选数据库持久化的最近任务事件；API 进程重启后仍可用于定位自动买入、自动恢复扫描或事件监控到底在哪一步被跳过或失败。
