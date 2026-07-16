@@ -5559,7 +5559,11 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
             self.service.portfolio,
             "list_trade_events",
             side_effect=list_events,
-        ) as list_trade_events:
+        ) as list_trade_events, patch.object(
+            self.service.portfolio,
+            "list_corporate_action_events",
+            return_value={"items": [], "total": 0},
+        ):
             holding_days = self.service._position_holding_days(account_id=1, symbol="600519")
 
         self.assertEqual(holding_days, 120)
@@ -5599,10 +5603,129 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
             self.service.portfolio,
             "list_trade_events",
             return_value=payload,
+        ), patch.object(
+            self.service.portfolio,
+            "list_corporate_action_events",
+            return_value={"items": [], "total": 0},
         ):
             holding_days = self.service._position_holding_days(account_id=1, symbol="600519")
 
         self.assertEqual(holding_days, 4)
+
+    def test_position_holding_days_replays_split_before_partial_exit(self) -> None:
+        today = date.today()
+        trades = {
+            "items": [
+                {
+                    "id": 2,
+                    "trade_date": (today - timedelta(days=10)).isoformat(),
+                    "side": "sell",
+                    "quantity": 100,
+                },
+                {
+                    "id": 1,
+                    "trade_date": (today - timedelta(days=40)).isoformat(),
+                    "side": "buy",
+                    "quantity": 100,
+                },
+            ],
+            "total": 2,
+        }
+        actions = {
+            "items": [
+                {
+                    "id": 1,
+                    "effective_date": (today - timedelta(days=10)).isoformat(),
+                    "action_type": "split_adjustment",
+                    "split_ratio": 2.0,
+                }
+            ],
+            "total": 1,
+        }
+
+        with patch.object(
+            self.service.portfolio,
+            "list_trade_events",
+            return_value=trades,
+        ), patch.object(
+            self.service.portfolio,
+            "list_corporate_action_events",
+            return_value=actions,
+        ) as list_actions:
+            holding_days = self.service._position_holding_days(account_id=1, symbol="600519")
+
+        self.assertEqual(holding_days, 40)
+        self.assertEqual(list_actions.call_args.kwargs["action_type"], "split_adjustment")
+        self.assertEqual(list_actions.call_args.kwargs["page_size"], 100)
+        self.assertEqual(list_actions.call_args.kwargs["date_to"], today)
+
+    def test_position_holding_days_replays_persisted_split_ledger(self) -> None:
+        today = date.today()
+        account = self.service.ensure_account()
+        account_id = int(account["id"])
+        self.service.portfolio.record_trade(
+            account_id=account_id,
+            symbol="600519",
+            trade_date=today - timedelta(days=40),
+            side="buy",
+            quantity=100,
+            price=10,
+            market="cn",
+            currency="CNY",
+        )
+        self.service.portfolio.record_corporate_action(
+            account_id=account_id,
+            symbol="600519",
+            effective_date=today - timedelta(days=10),
+            action_type="split_adjustment",
+            split_ratio=2.0,
+            market="cn",
+            currency="CNY",
+        )
+        self.service.portfolio.record_trade(
+            account_id=account_id,
+            symbol="600519",
+            trade_date=today - timedelta(days=10),
+            side="sell",
+            quantity=100,
+            price=6,
+            market="cn",
+            currency="CNY",
+        )
+
+        holding_days = self.service._position_holding_days(
+            account_id=account_id,
+            symbol="600519",
+        )
+
+        self.assertEqual(holding_days, 40)
+
+    def test_position_holding_days_fails_closed_when_split_history_is_unavailable(self) -> None:
+        today = date.today()
+        trades = {
+            "items": [
+                {
+                    "id": 1,
+                    "trade_date": (today - timedelta(days=40)).isoformat(),
+                    "side": "buy",
+                    "quantity": 100,
+                }
+            ],
+            "total": 1,
+        }
+
+        with patch.object(
+            self.service.portfolio,
+            "list_trade_events",
+            return_value=trades,
+        ), patch.object(
+            self.service.portfolio,
+            "list_corporate_action_events",
+            side_effect=RuntimeError("split history unavailable"),
+        ):
+            holding_days = self.service._position_holding_days(account_id=1, symbol="600519")
+
+        self.assertIsNone(holding_days)
 
     def test_auto_trade_rebalance_sells_single_position_excess_when_enabled(self) -> None:
         self.service.submit_order(
