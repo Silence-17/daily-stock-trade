@@ -3213,6 +3213,40 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
         self.assertEqual(context["llm"]["max_tokens"], 768)
         self.assertEqual(payload["candidate_count"], 0)
 
+    def test_service_screen_applies_request_scoped_llm_budget_and_restores_env(self) -> None:
+        config = self._config(enabled=True)
+        captured: dict[str, object] = {}
+
+        def screen_impl(_strategy: str, **kwargs):
+            captured["timeout"] = alphasift_service.os.environ.get("LLM_TIMEOUT_SEC")
+            captured["max_retries"] = alphasift_service.os.environ.get("LLM_MAX_RETRIES")
+            captured["context"] = kwargs.get("context")
+            return {"candidates": []}
+
+        fake_module = _make_adapter_module(screen=MagicMock(side_effect=screen_impl))
+        baseline = {"LLM_TIMEOUT_SEC": "240", "LLM_MAX_RETRIES": "2"}
+        with (
+            patch.dict(alphasift_service.os.environ, baseline, clear=False),
+            patch("src.services.alphasift_service._import_alphasift", return_value=fake_module),
+        ):
+            payload = alphasift_service.AlphaSiftService(config=config).screen(
+                strategy="dual_low",
+                market="cn",
+                max_results=5,
+                llm_timeout_seconds=45,
+                llm_max_retries=0,
+            )
+            self.assertEqual(alphasift_service.os.environ.get("LLM_TIMEOUT_SEC"), "240")
+            self.assertEqual(alphasift_service.os.environ.get("LLM_MAX_RETRIES"), "2")
+
+        self.assertEqual(captured["timeout"], "45")
+        self.assertEqual(captured["max_retries"], "0")
+        context = captured["context"]
+        self.assertIsInstance(context, dict)
+        self.assertEqual(context["llm"]["timeout_sec"], 45)
+        self.assertEqual(context["llm"]["max_retries"], 0)
+        self.assertEqual(payload["candidate_count"], 0)
+
     def test_screen_preserves_explicit_candidate_context_provider_override(self) -> None:
         config = self._config(enabled=True)
         captured: dict[str, object] = {}

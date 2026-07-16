@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [改进] 自动模拟交易调用 AlphaSift LLM 重排时默认使用独立的 45 秒单次预算并关闭结构化结果重试，支持环境变量覆盖，失败后直接按 `screen_score` 降级；手工选股继续沿用原有 LLM 超时配置，每轮 Agent 诊断记录实际超时、重试和降级策略
 - [修复] 自动选股最低数据质量分默认改为 60，旧配置缺失或 `null` 也归一为 60，使 `poor/critical` 轮次默认以 `data_quality_score_below_threshold` 阻止新增买入；显式设为 0 可保留仅审计模式
 - [修复] 自动买入在候选明确缺少交易状态且启用 ST/停牌/涨跌停过滤时以 `candidate_trading_status_unavailable` 跳过，配置最低成交额但成交额不可得时以 `liquidity_data_unavailable` 跳过，避免把未知状态误判为通过
 - [改进] AlphaSift 候选上下文新增行情、资金流和新闻独立来源健康遥测，统一接入自动交易数据质量评分与 Agent 跨运行来源趋势，来源不可用时保留候选审计并支持最低质量分门禁阻止下单

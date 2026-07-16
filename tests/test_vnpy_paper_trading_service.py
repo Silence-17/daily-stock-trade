@@ -29,6 +29,7 @@ from src.services.vnpy_paper_trading_service import (
     LLM_PRE_TRADE_REVIEW_EVALUATOR_VERSION,
     LLM_PRE_TRADE_REVIEW_PROMPT_VERSION,
     VnpyPaperTradingService,
+    _resolve_auto_alphasift_llm_policy,
     build_vnpy_paper_trading_background_tasks,
 )
 from src.storage import DatabaseManager, StockDaily, StockSelectionAgentTradePlan
@@ -81,6 +82,22 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         os.environ.pop("ENV_FILE", None)
         os.environ.pop("DATABASE_PATH", None)
         self.temp_dir.cleanup()
+
+    def test_auto_alphasift_llm_policy_allows_bounded_environment_override(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "VNPY_AUTO_ALPHASIFT_LLM_TIMEOUT_SEC": "12",
+                "VNPY_AUTO_ALPHASIFT_LLM_MAX_RETRIES": "3",
+            },
+            clear=False,
+        ):
+            policy = _resolve_auto_alphasift_llm_policy()
+
+        self.assertEqual(
+            policy,
+            {"timeout_seconds": 12, "max_retries": 3, "fallback": "screen_score"},
+        )
 
     @staticmethod
     def _age_trade_plan(plan_id: int, *, minutes: int = 45) -> None:
@@ -572,6 +589,8 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
             market="hk",
             max_results=2,
             source_health_trends=[],
+            llm_timeout_seconds=45,
+            llm_max_retries=0,
         )
         audit = self.service.agent_repo.get_run_detail(result["agent_run_uid"])
         assert audit is not None
@@ -660,6 +679,8 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
             market="cn",
             max_results=1,
             source_health_trends=trend_items,
+            llm_timeout_seconds=45,
+            llm_max_retries=0,
         )
         self.assertTrue(result["accepted"])
         self.assertEqual(result["strategy"], "capital_heat")
@@ -679,6 +700,10 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         )
         self.assertTrue(plan["gates"]["llm_dynamic_plan_enabled"])
         self.assertTrue(plan["gates"]["llm_dynamic_plan_applied"])
+        self.assertEqual(
+            audit["diagnostics"]["alphasift_llm_policy"],
+            {"timeout_seconds": 45, "max_retries": 0, "fallback": "screen_score"},
+        )
         self.assertEqual(dynamic_plan["status"], "accepted")
         self.assertEqual(dynamic_plan["model"], "openai/test")
         self.assertEqual(dynamic_plan["prompt_version"], LLM_DYNAMIC_AGENT_PLAN_PROMPT_VERSION)

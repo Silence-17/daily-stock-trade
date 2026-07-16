@@ -77,6 +77,7 @@
 - Web 选股页可启动筛选任务。
 - DSA 已有 Agent 策略 YAML，用于分析视角和风险判断。
 - AlphaSift 调用期可接入 LLM 重排。
+- 自动 Agent 的 AlphaSift LLM 重排已和手工选股拆分运行预算：自动运行默认单次最多等待 45 秒、不重试无效结构化结果，可通过专用环境变量覆盖；失败立即回退 `screen_score`，并把最终策略写入 `diagnostics.alphasift_llm_policy`。真实 gateway 长跑仍需继续验证端到端耗时分布。
 - 自动模拟交易会写入 `stock_selection_agent_runs`，记录 run id、触发来源、策略、市场、参数、候选数、成交数、跳过数和诊断。
 - 自动模拟交易 run 诊断新增 `agent_plan`，记录策略、市场、候选数量、每票预算、执行模式、规则派生 `plan_profile`、`execution_policy`、`sizing_plan`、`adaptive_controls`、仓位计划模板、风控预算、候选过滤器、gate 和预期产物。
 - 自动模拟交易设置新增默认关闭的 `auto_llm_plan_enabled`：开启后会在调用 AlphaSift 前生成本轮 `llm_dynamic_plan`，允许 LLM 在已知策略白名单内选择策略，并只在已保存上限内收紧候选数、每票预算和最低分；失败时回退保存配置并落审计。
