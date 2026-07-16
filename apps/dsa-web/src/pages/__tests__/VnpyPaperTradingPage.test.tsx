@@ -1508,9 +1508,11 @@ describe('VnpyPaperTradingPage', () => {
 
     const reconnectButton = await screen.findByRole('button', { name: '重连网关' });
     expect(reconnectButton).toBeEnabled();
+    await waitFor(() => expect(listAlertTriggers).toHaveBeenCalledTimes(1));
     fireEvent.click(reconnectButton);
 
     await waitFor(() => expect(reconnectGateway).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(listAlertTriggers).toHaveBeenCalledTimes(2));
     expect(await screen.findByText('vn.py gateway 已重新连接')).toBeInTheDocument();
   });
 
