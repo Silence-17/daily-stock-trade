@@ -96,6 +96,15 @@ DEFAULT_AUTO_ALPHASIFT_LLM_COOLDOWN_MINUTES = 60
 DEFAULT_AUTO_ALPHASIFT_LLM_PROBE_TIMEOUT_SECONDS = 10
 DEFAULT_AUTO_ALPHASIFT_LLM_PROBE_LEASE_SECONDS = 300
 ALLOWED_AUTO_MARKETS = {"cn", "hk", "us", "jp", "kr", "tw"}
+AUTO_CROSS_MARKET_LINKS = {
+    "cn": ("hk", "us"),
+    "hk": ("cn", "us"),
+    "us": ("hk",),
+    "jp": ("us",),
+    "kr": ("us",),
+    "tw": ("us",),
+}
+NON_DIRECTIONAL_MARKET_INDEX_CODES = {"VIX"}
 LLM_DYNAMIC_AGENT_PLAN_PROMPT_VERSION = "vnpy_paper_dynamic_agent_plan_v2"
 LLM_DYNAMIC_AGENT_PLAN_EVALUATOR_VERSION = "dynamic_plan_guardrails_v1"
 LLM_PRE_TRADE_REVIEW_PROMPT_VERSION = "vnpy_paper_pre_trade_review_v1"
@@ -178,6 +187,11 @@ class VnpyPaperSettings:
     auto_market_breadth_min_score: int = 35
     auto_hotspot_retreat_gate_enabled: bool = False
     auto_hotspot_retreat_min_drop: int = 25
+    auto_intraday_market_gate_enabled: bool = False
+    auto_intraday_index_min_change_pct: float = -2.0
+    auto_intraday_breadth_min_score: int = 35
+    auto_cross_market_gate_enabled: bool = False
+    auto_cross_market_min_change_pct: float = -2.0
     auto_failure_fuse_enabled: bool = False
     auto_failure_fuse_threshold: int = 3
     auto_failure_fuse_auto_recovery_enabled: bool = False
@@ -4699,6 +4713,15 @@ class VnpyPaperTradingService:
         auto_hotspot_retreat_min_drop = _safe_int(
             raw.get("auto_hotspot_retreat_min_drop")
         )
+        auto_intraday_index_min_change_pct = _safe_float(
+            raw.get("auto_intraday_index_min_change_pct")
+        )
+        auto_intraday_breadth_min_score = _safe_int(
+            raw.get("auto_intraday_breadth_min_score")
+        )
+        auto_cross_market_min_change_pct = _safe_float(
+            raw.get("auto_cross_market_min_change_pct")
+        )
         auto_failure_fuse_threshold = _safe_int(raw.get("auto_failure_fuse_threshold"))
         auto_failure_fuse_cooldown_minutes = _safe_int(
             raw.get("auto_failure_fuse_cooldown_minutes")
@@ -4962,6 +4985,45 @@ class VnpyPaperTradingService:
                     auto_hotspot_retreat_min_drop
                     if auto_hotspot_retreat_min_drop is not None
                     else defaults.auto_hotspot_retreat_min_drop,
+                ),
+            ),
+            auto_intraday_market_gate_enabled=bool(
+                raw.get(
+                    "auto_intraday_market_gate_enabled",
+                    defaults.auto_intraday_market_gate_enabled,
+                )
+            ),
+            auto_intraday_index_min_change_pct=max(
+                -20.0,
+                min(
+                    20.0,
+                    auto_intraday_index_min_change_pct
+                    if auto_intraday_index_min_change_pct is not None
+                    else defaults.auto_intraday_index_min_change_pct,
+                ),
+            ),
+            auto_intraday_breadth_min_score=max(
+                0,
+                min(
+                    100,
+                    auto_intraday_breadth_min_score
+                    if auto_intraday_breadth_min_score is not None
+                    else defaults.auto_intraday_breadth_min_score,
+                ),
+            ),
+            auto_cross_market_gate_enabled=bool(
+                raw.get(
+                    "auto_cross_market_gate_enabled",
+                    defaults.auto_cross_market_gate_enabled,
+                )
+            ),
+            auto_cross_market_min_change_pct=max(
+                -20.0,
+                min(
+                    20.0,
+                    auto_cross_market_min_change_pct
+                    if auto_cross_market_min_change_pct is not None
+                    else defaults.auto_cross_market_min_change_pct,
                 ),
             ),
             auto_failure_fuse_enabled=bool(
@@ -5459,6 +5521,11 @@ class VnpyPaperTradingService:
                 "market_breadth_min_score": settings.auto_market_breadth_min_score,
                 "hotspot_retreat_gate_enabled": settings.auto_hotspot_retreat_gate_enabled,
                 "hotspot_retreat_min_drop": settings.auto_hotspot_retreat_min_drop,
+                "intraday_market_gate_enabled": settings.auto_intraday_market_gate_enabled,
+                "intraday_index_min_change_pct": settings.auto_intraday_index_min_change_pct,
+                "intraday_breadth_min_score": settings.auto_intraday_breadth_min_score,
+                "cross_market_gate_enabled": settings.auto_cross_market_gate_enabled,
+                "cross_market_min_change_pct": settings.auto_cross_market_min_change_pct,
                 "failure_fuse_enabled": settings.auto_failure_fuse_enabled,
                 "failure_fuse_threshold": settings.auto_failure_fuse_threshold,
                 "llm_dynamic_plan_enabled": settings.auto_llm_plan_enabled,
@@ -6108,6 +6175,10 @@ class VnpyPaperTradingService:
             layers.append("market_breadth")
         if settings.auto_hotspot_retreat_gate_enabled:
             layers.append("hotspot_retreat")
+        if settings.auto_intraday_market_gate_enabled:
+            layers.append("intraday_market")
+        if settings.auto_cross_market_gate_enabled:
+            layers.append("cross_market_linkage")
         if (
             settings.auto_market_light_gate_enabled
             or settings.auto_market_breadth_gate_enabled
@@ -6223,6 +6294,51 @@ class VnpyPaperTradingService:
                     "min_drop": settings.auto_hotspot_retreat_min_drop,
                     "alert": False,
                 }
+            )
+        if settings.auto_intraday_market_gate_enabled:
+            actions.extend(
+                [
+                    {
+                        "reason": "intraday_market_index_unavailable",
+                        "action": "skip_buy",
+                        "alert": False,
+                    },
+                    {
+                        "reason": "intraday_market_index_below_threshold",
+                        "action": "skip_buy",
+                        "index_min_change_pct": settings.auto_intraday_index_min_change_pct,
+                        "alert": False,
+                    },
+                    {
+                        "reason": "intraday_market_breadth_unavailable",
+                        "action": "skip_buy",
+                        "scope": "cn_only",
+                        "alert": False,
+                    },
+                    {
+                        "reason": "intraday_market_breadth_below_threshold",
+                        "action": "skip_buy",
+                        "breadth_min_score": settings.auto_intraday_breadth_min_score,
+                        "scope": "cn_only",
+                        "alert": False,
+                    },
+                ]
+            )
+        if settings.auto_cross_market_gate_enabled:
+            actions.extend(
+                [
+                    {
+                        "reason": "cross_market_context_unavailable",
+                        "action": "skip_buy",
+                        "alert": False,
+                    },
+                    {
+                        "reason": "cross_market_index_below_threshold",
+                        "action": "skip_buy",
+                        "min_change_pct": settings.auto_cross_market_min_change_pct,
+                        "alert": False,
+                    },
+                ]
             )
         if settings.auto_failure_fuse_enabled:
             actions.append({"reason": "failure_fuse_open", "action": "skip_run_and_alert", "alert": True})
@@ -9801,17 +9917,109 @@ class VnpyPaperTradingService:
                 self._write_config_payload(payload)
             return peak
 
-    @staticmethod
+    def _live_market_index_evidence(self, market: str) -> Dict[str, Any]:
+        try:
+            raw_indices = self.data_fetcher_manager.get_main_indices(region=market)
+        except Exception as exc:  # noqa: BLE001 - configured gate fails closed with audited evidence.
+            logger.warning("Failed to fetch live index evidence for %s: %s", market, exc)
+            return {
+                "available": False,
+                "market": market,
+                "error": str(exc)[:300],
+                "evidence_reason": "index_fetch_failed",
+            }
+
+        indices: List[Dict[str, Any]] = []
+        for item in raw_indices if isinstance(raw_indices, list) else []:
+            if not isinstance(item, dict):
+                continue
+            code = str(item.get("code") or "").strip().upper()
+            if code in NON_DIRECTIONAL_MARKET_INDEX_CODES:
+                continue
+            change_pct = _safe_float(item.get("change_pct"))
+            if change_pct is None:
+                continue
+            indices.append(
+                {
+                    "code": code or None,
+                    "name": str(item.get("name") or "").strip() or None,
+                    "change_pct": round(change_pct, 6),
+                }
+            )
+        if not indices:
+            return {
+                "available": False,
+                "market": market,
+                "index_count": 0,
+                "indices": [],
+                "evidence_reason": "index_quotes_empty",
+            }
+        aggregate = sum(float(item["change_pct"]) for item in indices) / len(indices)
+        return {
+            "available": True,
+            "market": market,
+            "index_count": len(indices),
+            "aggregate_change_pct": round(aggregate, 6),
+            "aggregation": "equal_weight_mean",
+            "indices": indices,
+        }
+
+    def _live_cn_breadth_evidence(self) -> Dict[str, Any]:
+        try:
+            stats = self.data_fetcher_manager.get_market_stats(
+                purpose="vnpy_paper_intraday_risk"
+            )
+        except Exception as exc:  # noqa: BLE001 - configured gate fails closed with audited evidence.
+            logger.warning("Failed to fetch live A-share breadth evidence: %s", exc)
+            return {
+                "available": False,
+                "error": str(exc)[:300],
+                "evidence_reason": "breadth_fetch_failed",
+            }
+        stats = stats if isinstance(stats, dict) else {}
+        up_count = _safe_int(stats.get("up_count"))
+        down_count = _safe_int(stats.get("down_count"))
+        flat_count = _safe_int(stats.get("flat_count"))
+        if up_count is None or down_count is None or flat_count is None:
+            return {
+                "available": False,
+                "evidence_reason": "breadth_counts_missing",
+            }
+        participants = up_count + down_count + flat_count
+        if min(up_count, down_count, flat_count) < 0 or participants <= 0:
+            return {
+                "available": False,
+                "up_count": up_count,
+                "down_count": down_count,
+                "flat_count": flat_count,
+                "evidence_reason": "breadth_counts_invalid",
+            }
+        return {
+            "available": True,
+            "up_count": up_count,
+            "down_count": down_count,
+            "flat_count": flat_count,
+            "participants": participants,
+            "score": round(up_count / participants * 100, 6),
+            "calculation": "up_count / (up_count + down_count + flat_count) * 100",
+        }
+
     def _market_context_pre_trade_risk(
+        self,
         settings: VnpyPaperSettings,
     ) -> Tuple[Optional[str], Dict[str, Any]]:
-        enabled = bool(
+        persisted_enabled = bool(
             settings.auto_market_light_gate_enabled
             or settings.auto_market_breadth_gate_enabled
             or settings.auto_hotspot_retreat_gate_enabled
         )
+        enabled = bool(
+            persisted_enabled
+            or settings.auto_intraday_market_gate_enabled
+            or settings.auto_cross_market_gate_enabled
+        )
         diagnostics: Dict[str, Any] = {
-            "schema_version": 1,
+            "schema_version": 2,
             "enabled": enabled,
             "market": str(settings.auto_market or "").strip().lower(),
             "freshness": {
@@ -9832,6 +10040,22 @@ class VnpyPaperTradingService:
                 "enabled": settings.auto_hotspot_retreat_gate_enabled,
                 "min_drop": settings.auto_hotspot_retreat_min_drop,
                 "proxy": "market_light_limit_dimension",
+            },
+            "intraday_market": {
+                "enabled": settings.auto_intraday_market_gate_enabled,
+                "index_min_change_pct": settings.auto_intraday_index_min_change_pct,
+                "breadth_min_score": settings.auto_intraday_breadth_min_score,
+                "breadth_scope": "cn_only",
+            },
+            "cross_market": {
+                "enabled": settings.auto_cross_market_gate_enabled,
+                "min_change_pct": settings.auto_cross_market_min_change_pct,
+                "mapping_version": 1,
+                "linked_markets": list(
+                    AUTO_CROSS_MARKET_LINKS.get(
+                        str(settings.auto_market or "").strip().lower(), ()
+                    )
+                ),
             },
             "status": "disabled" if not enabled else "checking",
             "reason": None,
@@ -9854,6 +10078,78 @@ class VnpyPaperTradingService:
         if not enabled:
             return None, diagnostics
         market = str(settings.auto_market or "").strip().lower()
+        if market not in ALLOWED_AUTO_MARKETS:
+            reason = (
+                "intraday_market_context_unavailable"
+                if settings.auto_intraday_market_gate_enabled
+                else "cross_market_context_unavailable"
+                if settings.auto_cross_market_gate_enabled
+                else unavailable_reason()
+            )
+            diagnostics.update(
+                {
+                    "status": "unavailable",
+                    "reason": reason,
+                    "evidence_reason": "market_context_unsupported",
+                }
+            )
+            return reason, diagnostics
+
+        if settings.auto_intraday_market_gate_enabled:
+            index_evidence = self._live_market_index_evidence(market)
+            diagnostics["intraday_market"]["index"] = index_evidence
+            if not index_evidence.get("available"):
+                reason = "intraday_market_index_unavailable"
+                diagnostics.update({"status": "unavailable", "reason": reason})
+                return reason, diagnostics
+            if float(index_evidence["aggregate_change_pct"]) < float(
+                settings.auto_intraday_index_min_change_pct
+            ):
+                reason = "intraday_market_index_below_threshold"
+                diagnostics.update({"status": "blocked", "reason": reason})
+                return reason, diagnostics
+            if market == "cn":
+                breadth_evidence = self._live_cn_breadth_evidence()
+                diagnostics["intraday_market"]["breadth"] = breadth_evidence
+                if not breadth_evidence.get("available"):
+                    reason = "intraday_market_breadth_unavailable"
+                    diagnostics.update({"status": "unavailable", "reason": reason})
+                    return reason, diagnostics
+                if float(breadth_evidence["score"]) < float(
+                    settings.auto_intraday_breadth_min_score
+                ):
+                    reason = "intraday_market_breadth_below_threshold"
+                    diagnostics.update({"status": "blocked", "reason": reason})
+                    return reason, diagnostics
+
+        if settings.auto_cross_market_gate_enabled:
+            linked_markets = AUTO_CROSS_MARKET_LINKS.get(market, ())
+            linked_evidence = [
+                self._live_market_index_evidence(linked_market)
+                for linked_market in linked_markets
+            ]
+            diagnostics["cross_market"]["evidence"] = linked_evidence
+            if not linked_markets or any(
+                not item.get("available") for item in linked_evidence
+            ):
+                reason = "cross_market_context_unavailable"
+                diagnostics.update({"status": "unavailable", "reason": reason})
+                return reason, diagnostics
+            blocked_markets = [
+                str(item.get("market") or "")
+                for item in linked_evidence
+                if float(item["aggregate_change_pct"])
+                < float(settings.auto_cross_market_min_change_pct)
+            ]
+            diagnostics["cross_market"]["blocked_markets"] = blocked_markets
+            if blocked_markets:
+                reason = "cross_market_index_below_threshold"
+                diagnostics.update({"status": "blocked", "reason": reason})
+                return reason, diagnostics
+
+        if not persisted_enabled:
+            diagnostics.update({"status": "passed", "reason": None})
+            return None, diagnostics
         if market not in {"cn", "hk", "us", "jp", "kr"}:
             reason = unavailable_reason()
             diagnostics.update(

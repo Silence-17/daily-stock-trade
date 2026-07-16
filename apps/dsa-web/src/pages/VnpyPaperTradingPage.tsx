@@ -124,6 +124,11 @@ type SettingsForm = {
   autoMarketBreadthMinScore: string;
   autoHotspotRetreatGateEnabled: boolean;
   autoHotspotRetreatMinDrop: string;
+  autoIntradayMarketGateEnabled: boolean;
+  autoIntradayIndexMinChangePct: string;
+  autoIntradayBreadthMinScore: string;
+  autoCrossMarketGateEnabled: boolean;
+  autoCrossMarketMinChangePct: string;
   autoFailureFuseEnabled: boolean;
   autoFailureFuseThreshold: string;
   autoFailureFuseAutoRecoveryEnabled: boolean;
@@ -230,6 +235,11 @@ const defaultSettingsForm: SettingsForm = {
   autoMarketBreadthMinScore: '35',
   autoHotspotRetreatGateEnabled: false,
   autoHotspotRetreatMinDrop: '25',
+  autoIntradayMarketGateEnabled: false,
+  autoIntradayIndexMinChangePct: '-2',
+  autoIntradayBreadthMinScore: '35',
+  autoCrossMarketGateEnabled: false,
+  autoCrossMarketMinChangePct: '-2',
   autoFailureFuseEnabled: false,
   autoFailureFuseThreshold: '3',
   autoFailureFuseAutoRecoveryEnabled: false,
@@ -579,6 +589,11 @@ function settingsToForm(status: VnpyPaperStatusResponse): SettingsForm {
     autoMarketBreadthMinScore: String(settings.autoMarketBreadthMinScore ?? 35),
     autoHotspotRetreatGateEnabled: Boolean(settings.autoHotspotRetreatGateEnabled),
     autoHotspotRetreatMinDrop: String(settings.autoHotspotRetreatMinDrop ?? 25),
+    autoIntradayMarketGateEnabled: Boolean(settings.autoIntradayMarketGateEnabled),
+    autoIntradayIndexMinChangePct: String(settings.autoIntradayIndexMinChangePct ?? -2),
+    autoIntradayBreadthMinScore: String(settings.autoIntradayBreadthMinScore ?? 35),
+    autoCrossMarketGateEnabled: Boolean(settings.autoCrossMarketGateEnabled),
+    autoCrossMarketMinChangePct: String(settings.autoCrossMarketMinChangePct ?? -2),
     autoFailureFuseEnabled: Boolean(settings.autoFailureFuseEnabled),
     autoFailureFuseThreshold: String(settings.autoFailureFuseThreshold ?? 3),
     autoFailureFuseAutoRecoveryEnabled: Boolean(settings.autoFailureFuseAutoRecoveryEnabled),
@@ -686,6 +701,11 @@ function buildSettingsUpdate(settingsForm: SettingsForm): VnpyPaperSettingsUpdat
     autoMarketBreadthMinScore: parseNumber(settingsForm.autoMarketBreadthMinScore) ?? 35,
     autoHotspotRetreatGateEnabled: settingsForm.autoHotspotRetreatGateEnabled,
     autoHotspotRetreatMinDrop: parseNumber(settingsForm.autoHotspotRetreatMinDrop) ?? 25,
+    autoIntradayMarketGateEnabled: settingsForm.autoIntradayMarketGateEnabled,
+    autoIntradayIndexMinChangePct: parseNumber(settingsForm.autoIntradayIndexMinChangePct) ?? -2,
+    autoIntradayBreadthMinScore: parseNumber(settingsForm.autoIntradayBreadthMinScore) ?? 35,
+    autoCrossMarketGateEnabled: settingsForm.autoCrossMarketGateEnabled,
+    autoCrossMarketMinChangePct: parseNumber(settingsForm.autoCrossMarketMinChangePct) ?? -2,
     autoFailureFuseEnabled: settingsForm.autoFailureFuseEnabled,
     autoFailureFuseThreshold: parseNumber(settingsForm.autoFailureFuseThreshold) ?? 3,
     autoFailureFuseAutoRecoveryEnabled: settingsForm.autoFailureFuseAutoRecoveryEnabled,
@@ -3693,6 +3713,30 @@ const VnpyPaperTradingPage: React.FC = () => {
               <input
                 type="checkbox"
                 className={CHECKBOX_CLASS}
+                checked={settingsForm.autoIntradayMarketGateEnabled}
+                onChange={(event) => setSettingsForm((prev) => ({
+                  ...prev,
+                  autoIntradayMarketGateEnabled: event.target.checked,
+                }))}
+              />
+              盘中指数与实时宽度风控
+            </label>
+            <label className="flex items-center gap-2 text-sm text-foreground">
+              <input
+                type="checkbox"
+                className={CHECKBOX_CLASS}
+                checked={settingsForm.autoCrossMarketGateEnabled}
+                onChange={(event) => setSettingsForm((prev) => ({
+                  ...prev,
+                  autoCrossMarketGateEnabled: event.target.checked,
+                }))}
+              />
+              跨市场联动风控
+            </label>
+            <label className="flex items-center gap-2 text-sm text-foreground">
+              <input
+                type="checkbox"
+                className={CHECKBOX_CLASS}
                 checked={settingsForm.autoFailureFuseEnabled}
                 onChange={(event) => setSettingsForm((prev) => ({
                   ...prev,
@@ -4293,6 +4337,53 @@ const VnpyPaperTradingPage: React.FC = () => {
                 onChange={(event) => setSettingsForm((prev) => ({
                   ...prev,
                   autoHotspotRetreatMinDrop: event.target.value,
+                }))}
+              />
+            </label>
+            <label className="space-y-1 text-xs text-secondary-text">
+              盘中指数最低涨跌幅（%）
+              <input
+                className={INPUT_CLASS}
+                type="number"
+                min={-20}
+                max={20}
+                step="0.1"
+                disabled={!settingsForm.autoIntradayMarketGateEnabled}
+                value={settingsForm.autoIntradayIndexMinChangePct}
+                onChange={(event) => setSettingsForm((prev) => ({
+                  ...prev,
+                  autoIntradayIndexMinChangePct: event.target.value,
+                }))}
+              />
+            </label>
+            <label className="space-y-1 text-xs text-secondary-text">
+              A 股盘中最低宽度分
+              <input
+                className={INPUT_CLASS}
+                type="number"
+                min={0}
+                max={100}
+                disabled={!settingsForm.autoIntradayMarketGateEnabled}
+                value={settingsForm.autoIntradayBreadthMinScore}
+                onChange={(event) => setSettingsForm((prev) => ({
+                  ...prev,
+                  autoIntradayBreadthMinScore: event.target.value,
+                }))}
+              />
+            </label>
+            <label className="space-y-1 text-xs text-secondary-text">
+              关联市场最低涨跌幅（%）
+              <input
+                className={INPUT_CLASS}
+                type="number"
+                min={-20}
+                max={20}
+                step="0.1"
+                disabled={!settingsForm.autoCrossMarketGateEnabled}
+                value={settingsForm.autoCrossMarketMinChangePct}
+                onChange={(event) => setSettingsForm((prev) => ({
+                  ...prev,
+                  autoCrossMarketMinChangePct: event.target.value,
                 }))}
               />
             </label>

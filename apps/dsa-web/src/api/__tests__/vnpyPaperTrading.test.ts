@@ -79,6 +79,11 @@ describe('vnpyPaperTradingApi', () => {
           auto_market_breadth_min_score: 42,
           auto_hotspot_retreat_gate_enabled: true,
           auto_hotspot_retreat_min_drop: 30,
+          auto_intraday_market_gate_enabled: true,
+          auto_intraday_index_min_change_pct: -1.5,
+          auto_intraday_breadth_min_score: 45,
+          auto_cross_market_gate_enabled: true,
+          auto_cross_market_min_change_pct: -2.5,
           auto_failure_fuse_enabled: true,
           auto_failure_fuse_threshold: 2,
           auto_failure_fuse_auto_recovery_enabled: true,
@@ -174,6 +179,11 @@ describe('vnpyPaperTradingApi', () => {
     expect(result.settings.autoMarketBreadthMinScore).toBe(42);
     expect(result.settings.autoHotspotRetreatGateEnabled).toBe(true);
     expect(result.settings.autoHotspotRetreatMinDrop).toBe(30);
+    expect(result.settings.autoIntradayMarketGateEnabled).toBe(true);
+    expect(result.settings.autoIntradayIndexMinChangePct).toBe(-1.5);
+    expect(result.settings.autoIntradayBreadthMinScore).toBe(45);
+    expect(result.settings.autoCrossMarketGateEnabled).toBe(true);
+    expect(result.settings.autoCrossMarketMinChangePct).toBe(-2.5);
     expect(result.settings.autoFailureFuseEnabled).toBe(true);
     expect(result.settings.autoFailureFuseThreshold).toBe(2);
     expect(result.settings.autoFailureFuseAutoRecoveryEnabled).toBe(true);
@@ -1182,6 +1192,11 @@ describe('vnpyPaperTradingApi', () => {
       autoMarketBreadthMinScore: 42,
       autoHotspotRetreatGateEnabled: true,
       autoHotspotRetreatMinDrop: 30,
+      autoIntradayMarketGateEnabled: true,
+      autoIntradayIndexMinChangePct: -1.5,
+      autoIntradayBreadthMinScore: 45,
+      autoCrossMarketGateEnabled: true,
+      autoCrossMarketMinChangePct: -2.5,
       autoFailureFuseEnabled: true,
       autoFailureFuseThreshold: 2,
       autoFailureFuseAutoRecoveryEnabled: true,
@@ -1251,6 +1266,11 @@ describe('vnpyPaperTradingApi', () => {
       auto_market_breadth_min_score: 42,
       auto_hotspot_retreat_gate_enabled: true,
       auto_hotspot_retreat_min_drop: 30,
+      auto_intraday_market_gate_enabled: true,
+      auto_intraday_index_min_change_pct: -1.5,
+      auto_intraday_breadth_min_score: 45,
+      auto_cross_market_gate_enabled: true,
+      auto_cross_market_min_change_pct: -2.5,
       auto_failure_fuse_enabled: true,
       auto_failure_fuse_threshold: 2,
       auto_failure_fuse_auto_recovery_enabled: true,

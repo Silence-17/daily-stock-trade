@@ -131,6 +131,11 @@ const statusResponse = {
     autoMarketBreadthMinScore: 35,
     autoHotspotRetreatGateEnabled: false,
     autoHotspotRetreatMinDrop: 25,
+    autoIntradayMarketGateEnabled: false,
+    autoIntradayIndexMinChangePct: -2,
+    autoIntradayBreadthMinScore: 35,
+    autoCrossMarketGateEnabled: false,
+    autoCrossMarketMinChangePct: -2,
     autoFailureFuseEnabled: false,
     autoFailureFuseThreshold: 3,
     autoFailureFuseAutoRecoveryEnabled: false,
@@ -2076,6 +2081,11 @@ describe('VnpyPaperTradingPage', () => {
     fireEvent.change(screen.getByLabelText('最低市场宽度分'), { target: { value: '42' } });
     fireEvent.click(screen.getByLabelText('热点退潮风控'));
     fireEvent.change(screen.getByLabelText('热点强度最小回落分'), { target: { value: '30' } });
+    fireEvent.click(screen.getByLabelText('盘中指数与实时宽度风控'));
+    fireEvent.change(screen.getByLabelText('盘中指数最低涨跌幅（%）'), { target: { value: '-1.5' } });
+    fireEvent.change(screen.getByLabelText('A 股盘中最低宽度分'), { target: { value: '45' } });
+    fireEvent.click(screen.getByLabelText('跨市场联动风控'));
+    fireEvent.change(screen.getByLabelText('关联市场最低涨跌幅（%）'), { target: { value: '-2.5' } });
     fireEvent.click(screen.getByLabelText('连续失败熔断'));
     fireEvent.change(screen.getByLabelText('熔断阈值'), { target: { value: '2' } });
     fireEvent.click(screen.getByLabelText('熔断冷却后自动恢复'));
@@ -2145,6 +2155,11 @@ describe('VnpyPaperTradingPage', () => {
         autoMarketBreadthMinScore: 42,
         autoHotspotRetreatGateEnabled: true,
         autoHotspotRetreatMinDrop: 30,
+        autoIntradayMarketGateEnabled: true,
+        autoIntradayIndexMinChangePct: -1.5,
+        autoIntradayBreadthMinScore: 45,
+        autoCrossMarketGateEnabled: true,
+        autoCrossMarketMinChangePct: -2.5,
         autoFailureFuseEnabled: true,
         autoFailureFuseThreshold: 2,
         autoFailureFuseAutoRecoveryEnabled: true,

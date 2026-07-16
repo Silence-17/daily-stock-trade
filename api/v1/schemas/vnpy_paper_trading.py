@@ -62,6 +62,11 @@ class VnpyPaperSettings(BaseModel):
     auto_market_breadth_min_score: int = Field(35, ge=0, le=100)
     auto_hotspot_retreat_gate_enabled: bool = False
     auto_hotspot_retreat_min_drop: int = Field(25, ge=1, le=100)
+    auto_intraday_market_gate_enabled: bool = False
+    auto_intraday_index_min_change_pct: float = Field(-2.0, ge=-20, le=20)
+    auto_intraday_breadth_min_score: int = Field(35, ge=0, le=100)
+    auto_cross_market_gate_enabled: bool = False
+    auto_cross_market_min_change_pct: float = Field(-2.0, ge=-20, le=20)
     auto_failure_fuse_enabled: bool = False
     auto_failure_fuse_threshold: int = Field(3, ge=2, le=20)
     auto_failure_fuse_auto_recovery_enabled: bool = False
@@ -136,6 +141,11 @@ class VnpyPaperSettingsUpdate(BaseModel):
     auto_market_breadth_min_score: Optional[int] = Field(None, ge=0, le=100)
     auto_hotspot_retreat_gate_enabled: Optional[bool] = None
     auto_hotspot_retreat_min_drop: Optional[int] = Field(None, ge=1, le=100)
+    auto_intraday_market_gate_enabled: Optional[bool] = None
+    auto_intraday_index_min_change_pct: Optional[float] = Field(None, ge=-20, le=20)
+    auto_intraday_breadth_min_score: Optional[int] = Field(None, ge=0, le=100)
+    auto_cross_market_gate_enabled: Optional[bool] = None
+    auto_cross_market_min_change_pct: Optional[float] = Field(None, ge=-20, le=20)
     auto_failure_fuse_enabled: Optional[bool] = None
     auto_failure_fuse_threshold: Optional[int] = Field(None, ge=2, le=20)
     auto_failure_fuse_auto_recovery_enabled: Optional[bool] = None
