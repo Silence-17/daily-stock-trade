@@ -895,35 +895,54 @@ class DataFetcherManager:
             cls._persist_realtime_source_health()
 
     @classmethod
-    def configure_realtime_source_health_persistence(cls, database_path: str) -> Dict[str, Any]:
-        """Bind restart recovery to a state file beside the configured database."""
+    def configure_provider_source_health_persistence(cls, database_path: str) -> Dict[str, Any]:
+        """Bind provider recovery to a state file beside the configured database."""
         db_path = Path(str(database_path or "./data/stock_analysis.db")).expanduser()
-        state_path = db_path.parent / "realtime_source_health.json"
+        state_path = db_path.parent / "provider_source_health.json"
+        legacy_path = db_path.parent / "realtime_source_health.json"
         with cls._realtime_source_health_state_lock:
             cls._realtime_source_health_state_path = state_path
             cls._realtime_source_health_restored_sources = 0
             cls._realtime_source_health.reset()
-            if not state_path.is_file():
+            load_path = state_path if state_path.is_file() else legacy_path
+            if not load_path.is_file():
                 return {"enabled": True, "restored_sources": 0}
             try:
-                payload = json.loads(state_path.read_text(encoding="utf-8"))
+                payload = json.loads(load_path.read_text(encoding="utf-8"))
                 restored = cls._realtime_source_health.restore_state(
                     payload,
                     max_age_seconds=cls._REALTIME_SOURCE_HEALTH_STATE_MAX_AGE_SECONDS,
                 )
             except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
-                logger.warning("[source-health] ignored invalid persisted realtime state: %s", exc)
+                logger.warning("[source-health] ignored invalid persisted provider state: %s", exc)
                 return {"enabled": True, "restored_sources": 0, "ignored_invalid_state": True}
             cls._realtime_source_health_restored_sources = restored
-            logger.info("[source-health] restored %s realtime provider states", restored)
-            return {"enabled": True, "restored_sources": restored}
+            migrated = load_path == legacy_path
+            if migrated:
+                cls._persist_realtime_source_health()
+            logger.info("[source-health] restored %s provider states", restored)
+            return {
+                "enabled": True,
+                "restored_sources": restored,
+                "migrated_legacy_state": migrated,
+            }
 
     @classmethod
-    def disable_realtime_source_health_persistence(cls) -> None:
+    def configure_realtime_source_health_persistence(cls, database_path: str) -> Dict[str, Any]:
+        """Backward-compatible alias for provider health persistence."""
+        return cls.configure_provider_source_health_persistence(database_path)
+
+    @classmethod
+    def disable_provider_source_health_persistence(cls) -> None:
         """Detach disk persistence without changing current in-memory health."""
         with cls._realtime_source_health_state_lock:
             cls._realtime_source_health_state_path = None
             cls._realtime_source_health_restored_sources = 0
+
+    @classmethod
+    def disable_realtime_source_health_persistence(cls) -> None:
+        """Backward-compatible alias for provider health persistence."""
+        cls.disable_provider_source_health_persistence()
 
     @classmethod
     def _persist_realtime_source_health(cls) -> None:
@@ -985,7 +1004,102 @@ class DataFetcherManager:
     @classmethod
     def reset_realtime_source_health(cls) -> None:
         """Reset manager-level realtime provider health for tests/admin diagnostics."""
-        cls._realtime_source_health.reset()
+        prefix = "realtime_quote:"
+        for key in list(cls._realtime_source_health.get_status()):
+            if key.startswith(prefix):
+                cls._realtime_source_health.reset(key)
+        cls._persist_realtime_source_health()
+
+    @classmethod
+    def _capital_flow_health_key(cls, source: str, market: str = "cn") -> str:
+        return f"capital_flow:{str(market or 'unknown').lower()}:{str(source or 'unknown').lower()}"
+
+    @classmethod
+    def _is_capital_flow_source_available(cls, source: str, market: str = "cn") -> bool:
+        key = cls._capital_flow_health_key(source, market)
+        before = cls._realtime_source_health.export_state().get("states", {}).get(key)
+        available = cls._realtime_source_health.is_available(key)
+        after = cls._realtime_source_health.export_state().get("states", {}).get(key)
+        if before != after:
+            cls._persist_realtime_source_health()
+        if not available:
+            logger.info(
+                "[数据源健康度] %s 资金流跳过短期熔断的数据源: %s",
+                market,
+                source,
+            )
+        return available
+
+    @classmethod
+    def _record_capital_flow_source_success(cls, source: str, market: str = "cn") -> None:
+        key = cls._capital_flow_health_key(source, market)
+        before = cls._realtime_source_health.export_state().get("states", {}).get(key)
+        cls._realtime_source_health.record_success(key)
+        after = cls._realtime_source_health.export_state().get("states", {}).get(key)
+        if before != after:
+            cls._persist_realtime_source_health()
+
+    @classmethod
+    def _record_capital_flow_source_failure(
+        cls,
+        source: str,
+        error: str,
+        market: str = "cn",
+    ) -> None:
+        cls._realtime_source_health.record_failure(
+            cls._capital_flow_health_key(source, market),
+            error=error,
+        )
+        cls._persist_realtime_source_health()
+
+    @classmethod
+    def _record_capital_flow_source_inconclusive(
+        cls,
+        source: str,
+        market: str = "cn",
+    ) -> None:
+        key = cls._capital_flow_health_key(source, market)
+        before = cls._realtime_source_health.export_state().get("states", {}).get(key)
+        cls._realtime_source_health.record_inconclusive(key)
+        after = cls._realtime_source_health.export_state().get("states", {}).get(key)
+        if before != after:
+            cls._persist_realtime_source_health()
+
+    @classmethod
+    def capital_flow_source_health_snapshot(cls) -> Dict[str, Dict[str, Any]]:
+        """Return capital-flow provider health without consuming probe slots."""
+        prefix = "capital_flow:"
+        result: Dict[str, Dict[str, Any]] = {}
+        for key, value in cls._realtime_source_health.get_snapshot().items():
+            if not key.startswith(prefix):
+                continue
+            state = dict(value)
+            state["last_error"] = sanitize_diagnostic_text(
+                state.get("last_error"),
+                max_length=200,
+            ) or None
+            result[key[len(prefix):].replace(":", "/", 1)] = state
+        return result
+
+    @classmethod
+    def capital_flow_source_health_policy(cls) -> Dict[str, Any]:
+        return {
+            "mode": "circuit_breaker_failover",
+            "priority": ["tushare_ths", "akshare"],
+            "failure_threshold": int(cls._realtime_source_health.failure_threshold),
+            "cooldown_seconds": float(cls._realtime_source_health.cooldown_seconds),
+            "half_open_max_calls": int(cls._realtime_source_health.half_open_max_calls),
+            "cross_process_persistence": cls._realtime_source_health_state_path is not None,
+            "restored_sources": int(cls._realtime_source_health_restored_sources),
+        }
+
+    @classmethod
+    def reset_capital_flow_source_health(cls) -> None:
+        """Reset manager-level capital-flow health for tests/admin diagnostics."""
+        prefix = "capital_flow:"
+        for key in list(cls._realtime_source_health.get_status()):
+            if key.startswith(prefix):
+                cls._realtime_source_health.reset(key)
         cls._persist_realtime_source_health()
 
     def _get_cached_stock_name(self, stock_code: str) -> Optional[str]:
@@ -3782,7 +3896,7 @@ class DataFetcherManager:
         return result_ctx
 
     def get_capital_flow_context(self, stock_code: str, budget_seconds: Optional[float] = None) -> Dict[str, Any]:
-        """资金流向块（fail-open）。"""
+        """资金流向块（Tushare/THS 优先，AkShare 独立兜底）。"""
         from src.config import get_config
 
         config = get_config()
@@ -3803,46 +3917,120 @@ class DataFetcherManager:
                 [{"provider": "fundamental_pipeline", "result": "failed", "duration_ms": 0}],
                 ["fundamental stage timeout"],
             )
-        payload, err, cost_ms = self._run_with_retry(
-            lambda: self._fundamental_adapter.get_capital_flow(stock_code),
-            timeout,
-            "capital_flow",
-        )
-        if not isinstance(payload, dict):
-            return self._build_fundamental_block(
-                "failed",
-                {},
-                [{"provider": "fundamental_pipeline", "result": "failed", "duration_ms": cost_ms}],
-                [err or "capital_flow failed"],
+        routes: List[Tuple[str, Callable[[], Any]]] = []
+        tushare = self._get_fetcher_by_name("TushareFetcher", capability="capital_flow")
+        if tushare is not None and callable(getattr(tushare, "get_capital_flow", None)):
+            routes.append(
+                (
+                    "tushare_ths",
+                    lambda: self._call_fetcher_method(
+                        tushare,
+                        "get_capital_flow",
+                        stock_code,
+                    ),
+                )
             )
+        routes.append(("akshare", lambda: self._fundamental_adapter.get_capital_flow(stock_code)))
 
-        stock_flow = payload.get("stock_flow") or {}
-        sector_rankings = payload.get("sector_rankings") or {}
-        has_stock_flow = False
-        if isinstance(stock_flow, dict):
-            has_stock_flow = any(v is not None for v in stock_flow.values())
-        has_sector_rankings = bool(sector_rankings.get("top")) or bool(sector_rankings.get("bottom"))
-        adapter_status = str(payload.get("status", "not_supported"))
-        if has_stock_flow or has_sector_rankings:
-            capital_flow_status = "ok"
-        elif adapter_status == "not_supported":
-            capital_flow_status = "not_supported"
-        else:
-            capital_flow_status = "partial"
+        started_at = time.time()
+        source_chain: List[Dict[str, Any]] = []
+        errors: List[str] = []
+        observed_not_supported = False
+        observed_failure = False
 
+        for index, (source, task) in enumerate(routes):
+            if not self._is_capital_flow_source_available(source):
+                source_chain.append(
+                    {"provider": source, "result": "circuit_open", "duration_ms": 0}
+                )
+                errors.append(f"{source} circuit open")
+                observed_failure = True
+                continue
+
+            elapsed = max(0.0, time.time() - started_at)
+            remaining = max(0.0, timeout - elapsed)
+            if remaining <= 0:
+                errors.append("capital_flow timeout")
+                observed_failure = True
+                break
+            remaining_routes = max(1, len(routes) - index)
+            attempt_budget = remaining if remaining_routes == 1 else remaining / remaining_routes
+            payload, err, cost_ms = self._run_with_retry(
+                task,
+                attempt_budget,
+                f"capital_flow:{source}",
+            )
+            if not isinstance(payload, dict):
+                error_text = err or f"{source} capital_flow failed"
+                source_chain.append(
+                    {"provider": source, "result": "failed", "duration_ms": cost_ms}
+                )
+                errors.append(error_text)
+                observed_failure = True
+                self._record_capital_flow_source_failure(source, error_text)
+                continue
+
+            stock_flow = payload.get("stock_flow") or {}
+            sector_rankings = payload.get("sector_rankings") or {}
+            has_stock_flow = isinstance(stock_flow, dict) and any(
+                value is not None
+                for key, value in stock_flow.items()
+                if key not in {"amount_unit", "source", "as_of"}
+            )
+            has_sector_rankings = isinstance(sector_rankings, dict) and (
+                bool(sector_rankings.get("top")) or bool(sector_rankings.get("bottom"))
+            )
+            payload_errors = [str(item) for item in payload.get("errors", []) if item]
+            adapter_status = str(payload.get("status", "not_supported")).strip().lower()
+
+            if has_stock_flow or has_sector_rankings:
+                self._record_capital_flow_source_success(source)
+                source_chain.append(
+                    {"provider": source, "result": "ok", "duration_ms": cost_ms}
+                )
+                source_chain.extend(
+                    self._normalize_source_chain(
+                        payload.get("source_chain", []),
+                        source,
+                        "ok",
+                        cost_ms,
+                    )
+                )
+                return self._build_fundamental_block(
+                    "ok",
+                    {
+                        "stock_flow": stock_flow,
+                        "sector_rankings": sector_rankings,
+                        "provider": source,
+                        "as_of": payload.get("as_of"),
+                        "fallback_from": source_chain[0]["provider"] if index > 0 else None,
+                    },
+                    source_chain,
+                    errors + payload_errors + ([err] if err else []),
+                )
+
+            source_chain.append(
+                {
+                    "provider": source,
+                    "result": adapter_status if adapter_status else "empty",
+                    "duration_ms": cost_ms,
+                }
+            )
+            errors.extend(payload_errors)
+            if adapter_status == "not_supported" and not payload_errors and err is None:
+                observed_not_supported = True
+                self._record_capital_flow_source_inconclusive(source)
+            else:
+                error_text = err or (payload_errors[0] if payload_errors else f"{source} empty result")
+                observed_failure = True
+                self._record_capital_flow_source_failure(source, error_text)
+
+        final_status = "failed" if observed_failure else "not_supported" if observed_not_supported else "partial"
         return self._build_fundamental_block(
-            capital_flow_status,
-            {
-                "stock_flow": payload.get("stock_flow", {}),
-                "sector_rankings": payload.get("sector_rankings", {}),
-            },
-            self._normalize_source_chain(
-                payload.get("source_chain", []),
-                "capital_flow",
-                capital_flow_status,
-                cost_ms,
-            ),
-            list(payload.get("errors", [])) + ([err] if err else []),
+            final_status,
+            {},
+            source_chain,
+            errors or (["capital_flow unavailable"] if final_status != "not_supported" else []),
         )
 
     def get_dragon_tiger_context(self, stock_code: str, budget_seconds: Optional[float] = None) -> Dict[str, Any]:

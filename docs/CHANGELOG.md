@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [改进] 候选资金流新增独立 `tushare_ths -> akshare` provider 路由，Tushare THS 万元字段统一换算为 CNY，异常连续 3 次后冷却 5 分钟并在单半开探测成功后恢复；行情/资金流状态共同持久化到 `provider_source_health.json`，自动迁移旧行情状态，并在 AlphaSift 状态、Agent 审计和 Web 动态路由中展示
 - [改进] 实时行情 provider 熔断状态新增 API 重启恢复，失败/冷却状态原子保存到数据库同目录，24 小时内恢复且不延续旧半开探测名额，损坏或过期状态不阻断启动；AlphaSift 状态接口同步暴露候选行情恢复 policy 与当前状态
 - [改进] 候选实时行情路由新增 provider 级连续异常熔断、5 分钟冷却和单半开恢复探测，坏源不会在每只候选上重复超时；空股票结果不误伤整源，实际状态、失败数、冷却时间和脱敏错误写入 Agent 来源路由并在控制台展示
 - [修复] 自动模拟交易的市场上下文门禁新增默认 7 个自然日的快照新鲜度上限；任一相关门禁启用后，缺失、读取失败、非法日期、未来日期或超期快照均 fail-closed，并在 Agent 计划、诊断和时间线保留阈值与快照年龄

@@ -535,6 +535,17 @@ const AgentConsolePage: React.FC = () => {
   const selectedQuoteRoutingItems = Object.entries(selectedQuoteRoutingSources || {})
     .map(([source, raw]) => ({ source, state: asRecord(raw) }))
     .filter((item) => item.state);
+  const selectedFundFlowRouting = (
+    asRecord(selectedCandidateContextRouting?.fundFlow)
+    ?? asRecord(selectedCandidateContextRouting?.fund_flow)
+  );
+  const selectedFundFlowRoutingSources = asRecord(selectedFundFlowRouting?.sources);
+  const selectedFundFlowPriority = Array.isArray(selectedFundFlowRouting?.priority)
+    ? selectedFundFlowRouting.priority.map((item) => String(item || '')).filter(Boolean)
+    : [];
+  const selectedFundFlowRoutingItems = Object.entries(selectedFundFlowRoutingSources || {})
+    .map(([source, raw]) => ({ source, state: asRecord(raw) }))
+    .filter((item) => item.state);
   const selectedPortfolioOptimizer = asRecord(selectedPortfolioAllocation?.optimizer);
   const selectedPlanProfile = asRecord(selectedPlan?.planProfile) ?? asRecord(selectedPlan?.plan_profile);
   const selectedAdaptiveControls = (
@@ -2376,6 +2387,23 @@ const AgentConsolePage: React.FC = () => {
                                     return `${source} ${String(state?.state || '-')}`
                                       + `（失败 ${failures}${cooldown > 0 ? `，冷却 ${cooldown}s` : ''}）`;
                                   }).join(' / ')}
+                                </div>
+                              ) : null}
+                              {selectedFundFlowRouting ? (
+                                <div className="text-xs font-normal text-secondary-text">
+                                  资金流：
+                                  {selectedFundFlowRoutingItems.length > 0
+                                    ? selectedFundFlowRoutingItems.map(({ source, state }) => {
+                                      const failures = Number(state?.failures || 0);
+                                      const cooldown = Number(
+                                        state?.cooldownRemainingSeconds
+                                        ?? state?.cooldown_remaining_seconds
+                                        ?? 0,
+                                      );
+                                      return `${source} ${String(state?.state || '-')}`
+                                        + `（失败 ${failures}${cooldown > 0 ? `，冷却 ${cooldown}s` : ''}）`;
+                                    }).join(' / ')
+                                    : selectedFundFlowPriority.join(' → ') || 'tushare_ths → akshare'}
                                 </div>
                               ) : null}
                             </dd>

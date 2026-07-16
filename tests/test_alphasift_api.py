@@ -193,13 +193,20 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
 
         self.assertEqual(payload["source_health"]["snapshot"]["sina"]["failures"], 2)
 
-    def test_status_includes_candidate_quote_recovery_policy(self) -> None:
+    def test_status_includes_candidate_provider_recovery_policies(self) -> None:
         config = self._config(enabled=True)
         quote_routing = {
             "mode": "circuit_breaker_failover",
             "cross_process_persistence": True,
             "restored_sources": 1,
             "sources": {"cn/efinance": {"state": "open"}},
+        }
+        flow_routing = {
+            "mode": "circuit_breaker_failover",
+            "priority": ["tushare_ths", "akshare"],
+            "cross_process_persistence": True,
+            "restored_sources": 1,
+            "sources": {"cn/tushare_ths": {"state": "open"}},
         }
 
         with (
@@ -211,12 +218,20 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
                 "src.services.alphasift_service._get_dsa_realtime_source_routing",
                 return_value=quote_routing,
             ),
+            patch(
+                "src.services.alphasift_service._get_dsa_capital_flow_source_routing",
+                return_value=flow_routing,
+            ),
         ):
             payload = alphasift_endpoint.alphasift_status(config=config)
 
         self.assertEqual(
             payload["source_routing"]["candidate_context"]["quote"],
             quote_routing,
+        )
+        self.assertEqual(
+            payload["source_routing"]["candidate_context"]["fund_flow"],
+            flow_routing,
         )
 
     def test_snapshot_source_routing_demotes_persistently_degraded_source(self) -> None:
@@ -2283,6 +2298,24 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
                     },
                 }
             ),
+            capital_flow_source_health_snapshot=MagicMock(
+                return_value={
+                    "cn/tushare_ths": {
+                        "state": "open",
+                        "failures": 3,
+                        "disabled": True,
+                        "cooldown_remaining_seconds": 180,
+                        "last_error": "permission denied",
+                    },
+                    "cn/akshare": {
+                        "state": "closed",
+                        "failures": 0,
+                        "disabled": False,
+                        "cooldown_remaining_seconds": 0,
+                        "last_error": None,
+                    },
+                }
+            ),
         )
         fake_module = _make_adapter_module(
             screen=MagicMock(
@@ -2353,9 +2386,22 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
         self.assertEqual(quote_routing["mode"], "circuit_breaker_failover")
         self.assertEqual(quote_routing["sources"]["cn/efinance"]["state"], "open")
         self.assertTrue(quote_routing["sources"]["cn/efinance"]["disabled"])
+        fund_flow_routing = payload["source_routing"]["candidate_context"]["fund_flow"]
+        self.assertEqual(fund_flow_routing["priority"], ["tushare_ths", "akshare"])
+        self.assertEqual(
+            fund_flow_routing["sources"]["cn/tushare_ths"]["state"],
+            "open",
+        )
+        self.assertTrue(fund_flow_routing["sources"]["cn/tushare_ths"]["disabled"])
         self.assertEqual(
             payload["dsa_enrichment"]["source_routing"]["quote"]["sources"][
                 "cn/akshare_em"
+            ]["state"],
+            "closed",
+        )
+        self.assertEqual(
+            payload["dsa_enrichment"]["source_routing"]["fund_flow"]["sources"][
+                "cn/akshare"
             ]["state"],
             "closed",
         )
