@@ -1404,7 +1404,11 @@ describe('VnpyPaperTradingPage', () => {
                     {
                       windowDays: 7,
                       observationCount: 4,
+                      healthObservationCount: 3,
+                      emptyPositionObservationCount: 1,
                       degradedPct: 25,
+                      positionWeightedCoveragePct: 90,
+                      positionWeightedFreshCoveragePct: 85,
                       averageCoveragePct: 91.25,
                       averageFreshCoveragePct: 87.5,
                       minimumCoveragePct: 75,
@@ -1414,6 +1418,7 @@ describe('VnpyPaperTradingPage', () => {
                         provider: 'tencent',
                         positionObservationCount: 12,
                         observationCount: 4,
+                        sharePct: 60,
                       }],
                     },
                     {
@@ -1452,11 +1457,13 @@ describe('VnpyPaperTradingPage', () => {
     const trends = screen.getByTestId('valuation-health-trends');
     expect(trends).toHaveTextContent('估值价格源趋势');
     expect(trends).toHaveTextContent('7 天');
-    expect(trends).toHaveTextContent('4 次观测');
-    expect(trends).toHaveTextContent('平均覆盖 91.25%');
+    expect(trends).toHaveTextContent('3 有效 / 4 总计');
+    expect(trends).toHaveTextContent('持仓加权覆盖 90.00%');
+    expect(trends).toHaveTextContent('时间均值覆盖 91.25%');
     expect(trends).toHaveTextContent('最低覆盖 75.00%');
     expect(trends).toHaveTextContent('降级占比 25.00%');
-    expect(trends).toHaveTextContent('Provider tencent 12');
+    expect(trends).toHaveTextContent('空仓 1');
+    expect(trends).toHaveTextContent('Provider tencent 60.00%');
   });
 
   it('shows the persisted last auto-run skip reason in availability diagnostics', async () => {

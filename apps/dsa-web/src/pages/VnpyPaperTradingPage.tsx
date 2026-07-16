@@ -2203,23 +2203,36 @@ const VnpyPaperTradingPage: React.FC = () => {
             {valuationTrendWindows.map((item) => {
               const days = Number(item.windowDays || 0);
               const observations = Number(item.observationCount || 0);
+              const healthObservations = finiteNumberOrNull(item.healthObservationCount) ?? observations;
+              const emptyObservations = Number(item.emptyPositionObservationCount || 0);
               const degradedPct = finiteNumberOrNull(item.degradedPct);
               const averageCoverage = finiteNumberOrNull(item.averageCoveragePct);
               const averageFreshCoverage = finiteNumberOrNull(item.averageFreshCoveragePct);
+              const weightedCoverage = finiteNumberOrNull(item.positionWeightedCoveragePct) ?? averageCoverage;
+              const weightedFreshCoverage = finiteNumberOrNull(item.positionWeightedFreshCoveragePct) ?? averageFreshCoverage;
               const minimumCoverage = finiteNumberOrNull(item.minimumCoveragePct);
               const minimumFreshCoverage = finiteNumberOrNull(item.minimumFreshCoveragePct);
               const providerUsage = asRecordList(item.providerUsage)
                 .slice(0, 3)
-                .map((provider) => `${String(provider.provider || 'unknown')} ${formatNumber(provider.positionObservationCount, 0)}`)
+                .map((provider) => {
+                  const share = finiteNumberOrNull(provider.sharePct);
+                  return `${String(provider.provider || 'unknown')} ${share === null ? '-' : `${formatNumber(share, 2)}%`}`;
+                })
                 .join(' · ');
               return (
                 <div key={days} className="min-w-0 border-l-2 border-cyan/50 pl-3">
                   <div className="flex items-center justify-between gap-2">
                     <span className="text-sm font-semibold text-foreground">{days} 天</span>
-                    <span className="text-xs text-secondary-text">{formatNumber(observations, 0)} 次观测</span>
+                    <span className="text-xs text-secondary-text">
+                      {formatNumber(healthObservations, 0)} 有效 / {formatNumber(observations, 0)} 总计
+                    </span>
                   </div>
                   <p className="mt-2 text-xs text-secondary-text">
-                    平均覆盖 {averageCoverage === null ? '-' : `${formatNumber(averageCoverage, 2)}%`}
+                    持仓加权覆盖 {weightedCoverage === null ? '-' : `${formatNumber(weightedCoverage, 2)}%`}
+                    {' · '}新鲜 {weightedFreshCoverage === null ? '-' : `${formatNumber(weightedFreshCoverage, 2)}%`}
+                  </p>
+                  <p className="mt-1 text-xs text-secondary-text">
+                    时间均值覆盖 {averageCoverage === null ? '-' : `${formatNumber(averageCoverage, 2)}%`}
                     {' · '}新鲜 {averageFreshCoverage === null ? '-' : `${formatNumber(averageFreshCoverage, 2)}%`}
                   </p>
                   <p className="mt-1 text-xs text-secondary-text">
@@ -2228,6 +2241,7 @@ const VnpyPaperTradingPage: React.FC = () => {
                   </p>
                   <p className={`mt-1 text-xs ${degradedPct && degradedPct > 0 ? 'text-warning' : 'text-secondary-text'}`}>
                     降级占比 {degradedPct === null ? '-' : `${formatNumber(degradedPct, 2)}%`}
+                    {emptyObservations > 0 ? ` · 空仓 ${formatNumber(emptyObservations, 0)}` : ''}
                   </p>
                   <p className="mt-1 truncate text-xs text-secondary-text" title={providerUsage || '无 provider 观测'}>
                     Provider {providerUsage || '-'}

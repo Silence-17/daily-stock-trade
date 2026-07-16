@@ -242,33 +242,79 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
         ready = {
             **degraded,
             "status": "ready",
-            "available_count": 4,
-            "fresh_count": 4,
+            "position_count": 8,
+            "available_count": 8,
+            "fresh_count": 8,
             "missing_count": 0,
             "stale_count": 0,
-            "coverage_pct": 100.0,
-            "fresh_coverage_pct": 100.0,
-            "provider_counts": {"tencent": 4},
+            # Aggregation must derive percentages from counts, not trust stale denormalized values.
+            "coverage_pct": 1.0,
+            "fresh_coverage_pct": 1.0,
+            "provider_counts": {"tencent": 8},
         }
 
         first = repo.record_observation(degraded, observed_at=first_at)
         duplicate = repo.record_observation(ready, observed_at=first_at + timedelta(minutes=5))
         repo.record_observation(ready, observed_at=datetime(2026, 7, 16, 8, 1))
+        repo.record_observation(
+            {
+                **ready,
+                "position_count": 0,
+                "account_count": 1,
+                "available_count": 0,
+                "fresh_count": 0,
+                "coverage_pct": 100.0,
+                "fresh_coverage_pct": 100.0,
+                "provider_counts": {},
+            },
+            observed_at=datetime(2026, 7, 16, 9, 1),
+        )
         trends = repo.trends(now=datetime(2026, 7, 17, 8, 1))
 
         self.assertTrue(first["inserted"])
         self.assertFalse(duplicate["inserted"])
         windows = {item["window_days"]: item for item in trends["windows"]}
-        self.assertEqual(windows[7]["observation_count"], 2)
+        self.assertEqual(windows[7]["observation_count"], 3)
+        self.assertEqual(windows[7]["health_observation_count"], 2)
+        self.assertEqual(windows[7]["empty_position_observation_count"], 1)
         self.assertEqual(windows[7]["degraded_count"], 1)
+        self.assertEqual(windows[7]["degraded_pct"], 50.0)
         self.assertEqual(windows[7]["average_coverage_pct"], 87.5)
         self.assertEqual(windows[7]["minimum_fresh_coverage_pct"], 50.0)
+        self.assertEqual(windows[7]["position_observation_count"], 12)
+        self.assertEqual(windows[7]["position_weighted_coverage_pct"], 91.67)
+        self.assertEqual(windows[7]["position_weighted_fresh_coverage_pct"], 83.33)
+        self.assertEqual(windows[7]["provider_attribution_coverage_pct"], 100.0)
         providers = {
             item["provider"]: item for item in windows[7]["provider_usage"]
         }
         self.assertEqual(windows[7]["provider_usage"][0]["provider"], "tencent")
-        self.assertEqual(providers["tencent"]["position_observation_count"], 5)
+        self.assertEqual(providers["tencent"]["position_observation_count"], 9)
         self.assertEqual(providers["tencent"]["observation_count"], 2)
+        self.assertEqual(providers["tencent"]["share_pct"], 75.0)
+
+        repo.record_observation(
+            {
+                **ready,
+                "position_count": 0,
+                "available_count": 0,
+                "fresh_count": 0,
+                "provider_counts": {},
+            },
+            observed_at=datetime(2026, 7, 16, 10, 1),
+            scope="empty_accounts",
+        )
+        empty_window = repo.trends(
+            now=datetime(2026, 7, 17, 8, 1),
+            scope="empty_accounts",
+        )["windows"][0]
+        self.assertEqual(empty_window["observation_count"], 1)
+        self.assertEqual(empty_window["health_observation_count"], 0)
+        self.assertEqual(empty_window["empty_position_observation_count"], 1)
+        self.assertIsNone(empty_window["average_coverage_pct"])
+        self.assertIsNone(empty_window["position_weighted_coverage_pct"])
+        self.assertIsNone(empty_window["degraded_pct"])
+        self.assertIsNone(empty_window["latest_observed_at"])
 
     def test_valuation_health_history_failure_is_sanitized_and_non_blocking(self) -> None:
         payload = {
