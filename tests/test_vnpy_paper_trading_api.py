@@ -22,7 +22,10 @@ except ModuleNotFoundError:
 
 import src.auth as auth
 from api.app import create_app
-from api.v1.endpoints.vnpy_paper_trading import _system_health_payload
+from api.v1.endpoints.vnpy_paper_trading import (
+    _system_health_payload,
+    _with_valuation_health_history,
+)
 from src.config import Config
 from src.repositories.portfolio_valuation_health_repo import (
     PortfolioValuationHealthRepository,
@@ -266,6 +269,47 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
         self.assertEqual(windows[7]["provider_usage"][0]["provider"], "tencent")
         self.assertEqual(providers["tencent"]["position_observation_count"], 5)
         self.assertEqual(providers["tencent"]["observation_count"], 2)
+
+    def test_valuation_health_history_failure_is_sanitized_and_non_blocking(self) -> None:
+        payload = {
+            "diagnostics": {"snapshot_requested": True},
+            "snapshot": {"accounts": []},
+        }
+        with patch(
+            "api.v1.endpoints.vnpy_paper_trading.PortfolioValuationHealthRepository",
+            side_effect=RuntimeError("database unavailable at C:/secret/portfolio.db"),
+        ):
+            decorated = _with_valuation_health_history(payload)
+
+        trends = decorated["diagnostics"]["valuation_health_trends"]
+        self.assertFalse(trends["available"])
+        self.assertEqual(trends["reason"], "valuation_health_history_unavailable")
+        self.assertNotIn("error", trends)
+        health = _system_health_payload(decorated)
+        valuation = {item["key"]: item for item in health["components"]}["valuation"]
+        self.assertEqual(valuation["status"], "ready")
+        self.assertEqual(valuation["trends"], trends)
+
+    def test_lightweight_status_reads_trends_without_recording_observation(self) -> None:
+        repository = MagicMock()
+        repository.trends.return_value = {
+            "schema_version": 1,
+            "windows": [{"window_days": 7, "observation_count": 3}],
+        }
+        with patch(
+            "api.v1.endpoints.vnpy_paper_trading.PortfolioValuationHealthRepository",
+            return_value=repository,
+        ):
+            decorated = _with_valuation_health_history({
+                "diagnostics": {"snapshot_requested": False},
+            })
+
+        repository.record_observation.assert_not_called()
+        repository.trends.assert_called_once_with()
+        self.assertEqual(
+            decorated["diagnostics"]["valuation_health_trends"]["windows"][0]["observation_count"],
+            3,
+        )
 
     def test_system_health_blocks_latched_drawdown_until_recovery_threshold(self) -> None:
         health = _system_health_payload({
