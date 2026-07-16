@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [新功能] 新增 `POST /api/v1/vnpy-paper/gateway/reconnect` 与 Web“重连网关”入口，可在后台自动重连关闭时安全执行一次参数重读和连接尝试；已连接、状态确认中或异步确认宽限期内不会重复登录，响应保留是否尝试、连接结果和 runtime 审计且不触发选股、计划或订单
 - [改进] vn.py 自动重连在连续失败后按基础间隔指数退避并由可配置最大间隔封顶，连接确认或恢复成功后自动复位；runtime 与系统健康新增当前/最大间隔、连续失败数和退避复位时间审计，避免真实 gateway 长时间故障时持续高频登录
 - [新功能] vn.py runtime 新增默认关闭的后台自动重连监控，可配置 5 至 3600 秒检查间隔和 5 至 600 秒异步连接确认宽限期；仅对明确 `failed` / `disconnected` 状态重新读取外部连接文件并调用 `MainEngine.connect`，不对仍在确认宽限期内的异步连接误重连，状态与系统健康审计运行状态、尝试/成功/失败次数、最近结果和下次检查时间
 - [修复] vn.py runtime 不再把 `MainEngine.connect()` 未抛异常等同于网关已连接；连接异常降级为 `connect_failed` 而不拖垮 API 启动，状态按网关钩子动态区分已确认、未确认和断开，系统健康展示对应 ready/warning/blocked，明确断开的网关会以 `vnpy_gateway_disconnected` 阻止新增委托

@@ -890,6 +890,7 @@ const VnpyPaperTradingPage: React.FC = () => {
   const [restoringAccountId, setRestoringAccountId] = useState<number | null>(null);
   const [cleaningArchivedAccounts, setCleaningArchivedAccounts] = useState(false);
   const [resettingFailureFuse, setResettingFailureFuse] = useState(false);
+  const [reconnectingGateway, setReconnectingGateway] = useState(false);
   const [snapshotLoading, setSnapshotLoading] = useState(false);
   const [snapshotError, setSnapshotError] = useState('');
   const [error, setError] = useState('');
@@ -1421,6 +1422,7 @@ const VnpyPaperTradingPage: React.FC = () => {
   const vnpyAdapter = asRecord(status?.diagnostics?.vnpyAdapter);
   const vnpyBridge = asRecord(status?.diagnostics?.vnpyBridge);
   const vnpyRuntime = asRecord(status?.diagnostics?.vnpyRuntime);
+  const vnpyRuntimeConnect = asRecord(vnpyRuntime?.connect);
   const tradingWindow = asRecord(status?.diagnostics?.tradingWindow);
   const failureFuse = asRecord(status?.diagnostics?.failureFuse);
   const systemHealth = asRecord(status?.diagnostics?.systemHealth);
@@ -1443,6 +1445,14 @@ const VnpyPaperTradingPage: React.FC = () => {
   const vnpyRuntimeLabel = vnpyRuntimeReason && vnpyRuntimeReason !== vnpyRuntimeMode
     ? `${vnpyRuntimeMode}: ${vnpyRuntimeReason}`
     : vnpyRuntimeMode;
+  const vnpyGatewayConnectionStatus = String(vnpyRuntimeConnect?.status || 'unavailable');
+  const vnpyGatewayConnected = vnpyRuntimeConnect?.connected === true;
+  const canReconnectGateway = Boolean(
+    vnpyRuntime?.available
+    && vnpyRuntime?.gatewayName
+    && !vnpyGatewayConnected
+    && !['connect_requested', 'connection_unconfirmed'].includes(vnpyGatewayConnectionStatus),
+  );
   const vnpyAdapterMode = String(vnpyAdapter?.mode || (status?.vnpyAvailable ? 'vnpy_order_request' : 'local_paper_fallback'));
   const vnpyOrderRequestSupported = Boolean(vnpyAdapter?.orderRequestSupported);
   const vnpyCancelRequestSupported = Boolean(vnpyAdapter?.cancelRequestSupported);
@@ -1636,6 +1646,27 @@ const VnpyPaperTradingPage: React.FC = () => {
       setError(toApiErrorMessage(err, '模拟账户初始化失败'));
     } finally {
       setEnsuring(false);
+    }
+  };
+
+  const handleReconnectGateway = async () => {
+    setReconnectingGateway(true);
+    setError('');
+    setSuccess('');
+    try {
+      const result = await vnpyPaperTradingApi.reconnectGateway();
+      if (result.connected) {
+        setSuccess('vn.py gateway 已重新连接');
+      } else if (result.attempted) {
+        setError(`vn.py gateway 重连后仍未就绪：${result.reason || result.status}`);
+      } else {
+        setSuccess(`未执行重复重连：${result.reason || result.result}`);
+      }
+      await loadStatus();
+    } catch (err) {
+      setError(toApiErrorMessage(err, 'vn.py gateway 重连失败'));
+    } finally {
+      setReconnectingGateway(false);
     }
   };
 
@@ -2063,6 +2094,17 @@ const VnpyPaperTradingPage: React.FC = () => {
           <Button variant="secondary" isLoading={loading} loadingText="刷新中..." onClick={() => void loadStatus()}>
             <RefreshCw className="h-4 w-4" />
             刷新
+          </Button>
+          <Button
+            variant="outline"
+            isLoading={reconnectingGateway}
+            loadingText="重连中..."
+            disabled={!canReconnectGateway}
+            onClick={() => void handleReconnectGateway()}
+            title={canReconnectGateway ? '重新读取连接参数并尝试连接 gateway' : `当前连接状态：${vnpyGatewayConnectionStatus}`}
+          >
+            <RefreshCw className="h-4 w-4" />
+            重连网关
           </Button>
           <Button variant="outline" isLoading={ensuring} loadingText="初始化中..." onClick={() => void handleEnsureAccount()}>
             <WalletCards className="h-4 w-4" />

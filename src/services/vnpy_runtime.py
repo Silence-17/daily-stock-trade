@@ -86,6 +86,14 @@ class VnpyRuntimeHandle:
                     "running": False,
                 }
             )
+            state.setdefault("attempt_count", 0)
+            state.setdefault("success_count", 0)
+            state.setdefault("failure_count", 0)
+            state.setdefault("consecutive_failure_count", 0)
+            state.setdefault(
+                "current_interval_seconds",
+                self.settings.auto_reconnect_interval_seconds,
+            )
             if not self.settings.auto_reconnect_enabled:
                 state["reason"] = "disabled"
                 return
@@ -102,14 +110,6 @@ class VnpyRuntimeHandle:
                 state["reason"] = None
                 return
             self._auto_reconnect_stop.clear()
-            state.setdefault("attempt_count", 0)
-            state.setdefault("success_count", 0)
-            state.setdefault("failure_count", 0)
-            state.setdefault("consecutive_failure_count", 0)
-            state.setdefault(
-                "current_interval_seconds",
-                self.settings.auto_reconnect_interval_seconds,
-            )
             state["reason"] = None
             state["running"] = True
             state["next_check_at"] = _future_iso(
@@ -126,12 +126,42 @@ class VnpyRuntimeHandle:
     def run_auto_reconnect_check(self) -> Dict[str, Any]:
         """Run one deterministic reconnect check for the monitor and tests."""
 
+        return self._run_reconnect_check(
+            require_auto_enabled=True,
+            trigger="monitor",
+        )
+
+    def run_manual_reconnect(self) -> Dict[str, Any]:
+        """Attempt one operator-requested reconnect when it is safe to do so."""
+
+        return self._run_reconnect_check(
+            require_auto_enabled=False,
+            trigger="manual",
+        )
+
+    def _run_reconnect_check(
+        self,
+        *,
+        require_auto_enabled: bool,
+        trigger: str,
+    ) -> Dict[str, Any]:
+        """Run one serialized reconnect check for the monitor or an operator."""
+
         with self._diagnostics_lock:
             state = self.diagnostics.setdefault("auto_reconnect", {})
             state["last_check_at"] = _utc_iso()
-            if not self.settings.auto_reconnect_enabled:
+            state["last_trigger"] = trigger
+            if require_auto_enabled and not self.settings.auto_reconnect_enabled:
                 state["last_result"] = "disabled"
                 state["last_reason"] = "disabled"
+                return state
+            if (
+                not self.settings.enabled
+                or self.main_engine is None
+                or not self.settings.gateway_name
+            ):
+                state["last_check_result"] = "unavailable"
+                state["last_check_reason"] = "runtime_connect_not_configured"
                 return state
             _refresh_gateway_connection(
                 main_engine=self.main_engine,
@@ -140,7 +170,10 @@ class VnpyRuntimeHandle:
             )
             connect = self.diagnostics.get("connect")
             status = connect.get("status") if isinstance(connect, dict) else None
-            if status not in {"failed", "disconnected"}:
+            reconnectable_statuses = {"failed", "disconnected"}
+            if trigger == "manual" and status is None:
+                reconnectable_statuses.add(None)
+            if status not in reconnectable_statuses:
                 state["last_check_result"] = "not_required"
                 state["last_check_reason"] = status or "connect_status_unavailable"
                 if status == "connected":

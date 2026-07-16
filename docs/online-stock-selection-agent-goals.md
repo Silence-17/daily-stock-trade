@@ -276,6 +276,7 @@
 - 内置 `DsaSimulatedGateway` 已支持默认保留状态的断线重连：资金、持仓、订单和计数器保持连续，在途延迟订单会恢复并恰好成交一次；`check_vnpy_adapter.py --require-vnpy --reconnect-cycles 3` 已验证三轮缓存保留、成交去重和编号唯一性，安装脚本默认执行该验收。
 - vn.py runtime 已区分 `MainEngine.connect()` 请求受理与网关确认连接，连接异常不会拖垮 API 启动；支持状态钩子的网关会动态刷新连接状态，无法确认时健康状态 warning，明确断开时 blocked 且新增委托 fail-closed。
 - vn.py runtime 已新增默认关闭的冷却自动重连监控：只恢复明确失败/断开的连接，每次重读外部参数文件，在已受理异步连接的可配置确认宽限期内避免误重连，并对连续失败执行有上限指数退避、恢复后复位；状态和统一系统健康保留线程、宽限期、基础/当前/最大间隔、连续失败、次数、时间、结果与下次检查审计。
+- vn.py runtime 已新增一次性安全手动重连 API 和 Web 入口：后台自动重连关闭时也可使用，已连接、确认中或宽限期内不会重复登录；操作只恢复连接并返回审计，不触发 Agent run、交易计划或订单。
 - 新增 `POST /api/v1/vnpy-paper/trade-plans/{plan_uid}/cancel` 和 Web “撤单”入口：`vnpy_paper` 的 `submitted` / `part_filled` 计划可映射为 vn.py `CancelRequest` 并调用 `MainEngine.cancel_order`，计划进入 `cancel_requested`，终态仍以 vn.py 订单回报为准。
 
 未完成：

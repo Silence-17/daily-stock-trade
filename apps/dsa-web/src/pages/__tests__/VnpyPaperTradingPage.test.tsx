@@ -5,6 +5,7 @@ import { UiLanguageProvider } from '../../contexts/UiLanguageContext';
 import VnpyPaperTradingPage from '../VnpyPaperTradingPage';
 
 const getStatus = vi.hoisted(() => vi.fn());
+const reconnectGateway = vi.hoisted(() => vi.fn());
 const getTaskHealth = vi.hoisted(() => vi.fn());
 const getTaskEvents = vi.hoisted(() => vi.fn());
 const getTaskEventSummary = vi.hoisted(() => vi.fn());
@@ -33,6 +34,7 @@ const listAlertTriggers = vi.hoisted(() => vi.fn());
 vi.mock('../../api/vnpyPaperTrading', () => ({
   vnpyPaperTradingApi: {
     getStatus,
+    reconnectGateway,
     getTaskHealth,
     getTaskEvents,
     getTaskEventSummary,
@@ -948,6 +950,7 @@ const returnRiskCalibrationTrendsResponse = {
 describe('VnpyPaperTradingPage', () => {
   beforeEach(() => {
     getStatus.mockReset();
+    reconnectGateway.mockReset();
     getTaskHealth.mockReset();
     getTaskEvents.mockReset();
     getTaskEventSummary.mockReset();
@@ -973,6 +976,15 @@ describe('VnpyPaperTradingPage', () => {
     cancelTradePlan.mockReset();
     listAlertTriggers.mockReset();
     getStatus.mockResolvedValue(statusResponse);
+    reconnectGateway.mockResolvedValue({
+      attempted: true,
+      connected: true,
+      status: 'connected',
+      result: 'reconnected',
+      reason: null,
+      connect: { connected: true, status: 'connected' },
+      reconnect: { lastTrigger: 'manual', lastResult: 'reconnected' },
+    });
     getTaskHealth.mockResolvedValue(taskHealthResponse);
     getTaskEvents.mockResolvedValue(taskEventListResponse);
     getTaskEventSummary.mockResolvedValue(taskEventSummaryResponse);
@@ -1465,6 +1477,41 @@ describe('VnpyPaperTradingPage', () => {
     expect(availabilityDiagnostics).toHaveTextContent('后端版本');
     expect(availabilityDiagnostics).toHaveTextContent('需更新');
     expect(availabilityDiagnostics).toHaveTextContent('未报告版本，可能仍是旧后端进程');
+  });
+
+  it('allows an operator to reconnect an explicitly disconnected gateway', async () => {
+    const disconnectedStatus = {
+      ...statusResponse,
+      vnpyAvailable: true,
+      diagnostics: {
+        ...statusResponse.diagnostics,
+        vnpyRuntime: {
+          enabled: true,
+          available: true,
+          mode: 'vnpy_runtime',
+          gatewayName: 'DSA_SIM',
+          connect: {
+            connected: false,
+            status: 'disconnected',
+            reason: 'gateway_reported_disconnected',
+          },
+        },
+      },
+    };
+    getStatus.mockResolvedValue(disconnectedStatus);
+
+    render(
+      <UiLanguageProvider>
+        <VnpyPaperTradingPage />
+      </UiLanguageProvider>,
+    );
+
+    const reconnectButton = await screen.findByRole('button', { name: '重连网关' });
+    expect(reconnectButton).toBeEnabled();
+    fireEvent.click(reconnectButton);
+
+    await waitFor(() => expect(reconnectGateway).toHaveBeenCalledTimes(1));
+    expect(await screen.findByText('vn.py gateway 已重新连接')).toBeInTheDocument();
   });
 
   it('renders paper account status, positions, and trades', async () => {

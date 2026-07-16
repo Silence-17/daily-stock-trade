@@ -976,6 +976,28 @@ describe('vnpyPaperTradingApi', () => {
     });
   });
 
+  it('requests one gateway reconnect and camelCases diagnostics', async () => {
+    post.mockResolvedValueOnce({
+      data: {
+        attempted: true,
+        connected: true,
+        status: 'connected',
+        result: 'reconnected',
+        reason: null,
+        connect: { confirmation_source: 'get_state_snapshot' },
+        reconnect: { last_trigger: 'manual', attempt_count: 1 },
+      },
+    });
+
+    const result = await vnpyPaperTradingApi.reconnectGateway();
+
+    expect(post).toHaveBeenCalledWith('/api/v1/vnpy-paper/gateway/reconnect');
+    expect(result.connected).toBe(true);
+    expect(result.connect.confirmationSource).toBe('get_state_snapshot');
+    expect(result.reconnect.lastTrigger).toBe('manual');
+    expect(result.reconnect.attemptCount).toBe(1);
+  });
+
   it('loads Agent return-risk calibration trends with filters', async () => {
     get.mockResolvedValueOnce({
       data: {
