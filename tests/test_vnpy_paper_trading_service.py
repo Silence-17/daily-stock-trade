@@ -115,6 +115,23 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertEqual(account_snapshot["total_cash"], 99000.0)
         self.assertEqual(account_snapshot["positions"][0]["symbol"], "600519")
 
+    def test_data_quality_gate_defaults_to_guarded_floor_and_zero_disables(self) -> None:
+        self.assertEqual(self.service.get_settings().auto_min_data_quality_score, 60.0)
+
+        normalized = self.service.update_settings(
+            {"auto_min_data_quality_score": None},
+            include_snapshot=False,
+            include_recent_trades=False,
+        )
+        self.assertEqual(normalized["settings"]["auto_min_data_quality_score"], 60.0)
+
+        audit_only = self.service.update_settings(
+            {"auto_min_data_quality_score": 0},
+            include_snapshot=False,
+            include_recent_trades=False,
+        )
+        self.assertEqual(audit_only["settings"]["auto_min_data_quality_score"], 0.0)
+
     def test_cross_run_quality_gate_blocks_buys_but_preserves_sell_checks(self) -> None:
         self.service.update_settings(
             {
@@ -4762,6 +4779,108 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         }
         self.assertEqual(provider_scores["candidate_context.news"], 0.0)
         self.assertEqual(provider_scores["candidate_context.fund_flow"], 100.0)
+
+    def test_default_data_quality_gate_blocks_poor_run(self) -> None:
+        self.service.update_settings(
+            {
+                "auto_trade_enabled": True,
+                "auto_trade_time_gate_enabled": False,
+                "auto_execution_mode": "dry_run",
+                "auto_max_results": 1,
+                "auto_cash_per_order": 10000,
+            }
+        )
+        fake_alphasift = MagicMock()
+        fake_alphasift.screen.return_value = {
+            "quality_status": "partial",
+            "candidates": [{
+                "code": "600519",
+                "score": 80,
+                "price": 10.0,
+                "data_quality": "partial",
+                "missing_fields": ["industry"],
+                "data_sources": ["snapshot"],
+            }],
+            "source_health": {
+                "snapshot": {
+                    "sina": {"status": "unavailable", "failures": 1},
+                },
+                "candidate_context": {
+                    "quote": {"status": "ok", "successes": 1},
+                    "fund_flow": {"status": "unavailable", "failures": 1},
+                    "news": {"status": "ok", "successes": 1},
+                },
+            },
+            "warnings": ["snapshot_fallback", "fund_flow_unavailable"],
+            "source_errors": ["sina_timeout", "capital_flow_unavailable"],
+        }
+
+        with patch(
+            "src.services.vnpy_paper_trading_service.AlphaSiftService",
+            return_value=fake_alphasift,
+        ):
+            result = self.service.run_auto_trade_once()
+
+        self.assertEqual(result["reason"], "data_quality_score_below_threshold")
+        self.assertEqual(result["submitted_count"], 0)
+        self.assertEqual(result["skipped_count"], 1)
+        audit = self.service.agent_repo.get_run_detail(result["agent_run_uid"])
+        self.assertIsNotNone(audit)
+        assert audit is not None
+        self.assertLess(audit["diagnostics"]["data_quality"]["score"], 60.0)
+        self.assertEqual(
+            audit["diagnostics"]["agent_plan"]["gates"]["min_data_quality_score"],
+            60.0,
+        )
+
+    def test_zero_data_quality_threshold_keeps_audit_only_mode(self) -> None:
+        self.service.update_settings(
+            {
+                "auto_trade_enabled": True,
+                "auto_trade_time_gate_enabled": False,
+                "auto_execution_mode": "dry_run",
+                "auto_min_data_quality_score": 0,
+                "auto_max_results": 1,
+                "auto_cash_per_order": 10000,
+            }
+        )
+        fake_alphasift = MagicMock()
+        fake_alphasift.screen.return_value = {
+            "quality_status": "partial",
+            "candidates": [{
+                "code": "600519",
+                "score": 80,
+                "price": 10.0,
+                "data_quality": "partial",
+                "missing_fields": ["industry"],
+                "data_sources": ["snapshot"],
+            }],
+            "source_health": {
+                "snapshot": {
+                    "sina": {"status": "unavailable", "failures": 1},
+                },
+            },
+            "warnings": ["snapshot_fallback"],
+            "source_errors": ["sina_timeout"],
+        }
+
+        with patch(
+            "src.services.vnpy_paper_trading_service.AlphaSiftService",
+            return_value=fake_alphasift,
+        ):
+            result = self.service.run_auto_trade_once()
+
+        self.assertEqual(result["planned_count"], 1)
+        self.assertEqual(result["submitted_count"], 0)
+        self.assertEqual(result["skipped_count"], 0)
+        audit = self.service.agent_repo.get_run_detail(result["agent_run_uid"])
+        self.assertIsNotNone(audit)
+        assert audit is not None
+        self.assertLess(audit["diagnostics"]["data_quality"]["score"], 60.0)
+        self.assertEqual(
+            audit["diagnostics"]["agent_plan"]["gates"]["min_data_quality_score"],
+            0.0,
+        )
 
     def test_auto_trade_data_quality_score_gate_blocks_partial_run_below_threshold(self) -> None:
         self.service.update_settings(
