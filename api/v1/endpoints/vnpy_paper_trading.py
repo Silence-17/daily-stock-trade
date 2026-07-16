@@ -777,32 +777,102 @@ def _system_health_payload(status_payload: Dict[str, Any]) -> Dict[str, Any]:
 
     vnpy_required = execution_mode == "vnpy_paper"
     vnpy_bridge_available = bool(vnpy_bridge.get("available"))
+    runtime_connect = (
+        vnpy_runtime.get("connect")
+        if isinstance(vnpy_runtime.get("connect"), dict)
+        else {}
+    )
+    runtime_connect_required = bool(
+        vnpy_required
+        and vnpy_runtime.get("enabled")
+        and vnpy_runtime.get("connect_on_start")
+    )
+    runtime_connect_failed = bool(
+        runtime_connect_required
+        and runtime_connect.get("request_accepted") is False
+    )
+    bridge_connection_failed = bool(
+        vnpy_required and vnpy_bridge.get("connection_confirmed") is False
+    )
+    runtime_connect_confirmed = runtime_connect.get("connected") is True
+    runtime_connection_reported = isinstance(runtime_connect.get("connected"), bool)
+    bridge_connection_reported = isinstance(
+        vnpy_bridge.get("connection_confirmed"),
+        bool,
+    )
+    effective_connection_confirmed = (
+        runtime_connect.get("connected")
+        if runtime_connection_reported
+        else vnpy_bridge.get("connection_confirmed")
+        if bridge_connection_reported
+        else None
+    )
+    effective_connection_status = (
+        runtime_connect.get("status")
+        if runtime_connect
+        else vnpy_bridge.get("connection_status")
+    )
+    effective_confirmation_source = (
+        runtime_connect.get("confirmation_source")
+        or vnpy_bridge.get("connection_confirmation_source")
+    )
+    runtime_connect_unconfirmed = bool(
+        runtime_connect_required
+        and runtime_connect.get("request_accepted") is True
+        and not runtime_connect_confirmed
+    )
+    vnpy_component_status = (
+        "blocked"
+        if vnpy_required
+        and (
+            not vnpy_bridge_available
+            or runtime_connect_failed
+            or bridge_connection_failed
+        )
+        else "warning"
+        if runtime_connect_unconfirmed
+        else "ready"
+    )
+    vnpy_component_reason = (
+        "vnpy_bridge_not_required"
+        if not vnpy_required
+        else str(vnpy_bridge.get("reason") or "vnpy_bridge_unavailable")
+        if not vnpy_bridge_available
+        else "vnpy_gateway_disconnected"
+        if bridge_connection_failed
+        else str(runtime_connect.get("reason") or "vnpy_gateway_connect_failed")
+        if runtime_connect_failed
+        else "vnpy_gateway_connection_unconfirmed"
+        if runtime_connect_unconfirmed
+        else "vnpy_bridge_ready"
+        if vnpy_bridge_available
+        else str(vnpy_bridge.get("reason") or "vnpy_bridge_unavailable")
+    )
     add_component(
         key="vnpy_bridge",
         label="vn.py bridge",
-        status=(
-            "ready"
-            if not vnpy_required or vnpy_bridge_available
-            else "blocked"
-        ),
-        reason=(
-            "vnpy_bridge_not_required"
-            if not vnpy_required
-            else "vnpy_bridge_ready"
-            if vnpy_bridge_available
-            else str(vnpy_bridge.get("reason") or "vnpy_bridge_unavailable")
-        ),
+        status=vnpy_component_status,
+        reason=vnpy_component_reason,
         detail=(
             f"{execution_mode} 模式不要求 vn.py bridge"
             if not vnpy_required
-            else "MainEngine 可提交委托"
-            if vnpy_bridge_available
             else str(vnpy_bridge.get("mode") or "not_configured")
+            if not vnpy_bridge_available
+            else "网关明确报告未连接"
+            if bridge_connection_failed
+            else str(runtime_connect.get("message") or runtime_connect.get("reason"))
+            if runtime_connect_failed
+            else "MainEngine 已发起连接，等待网关确认"
+            if runtime_connect_unconfirmed
+            else "MainEngine 可提交委托"
         ),
         required=vnpy_required,
         extra={
             "runtime_mode": vnpy_runtime.get("mode"),
             "runtime_available": vnpy_runtime.get("available"),
+            "connection_status": effective_connection_status,
+            "connection_confirmed": effective_connection_confirmed,
+            "connection_confirmation_source": effective_confirmation_source,
         },
     )
 
@@ -1578,7 +1648,19 @@ def _task_metrics_payload(
 
 
 def _with_vnpy_runtime_status(payload: Dict[str, Any], request: Request) -> Dict[str, Any]:
-    runtime_diagnostics = getattr(request.app.state, "vnpy_runtime_diagnostics", None)
+    runtime_handle = getattr(request.app.state, "vnpy_runtime_handle", None)
+    refresh = getattr(runtime_handle, "refresh_diagnostics", None)
+    if callable(refresh):
+        try:
+            runtime_diagnostics = refresh()
+        except Exception:  # noqa: BLE001 - status reads must survive optional runtime diagnostics.
+            runtime_diagnostics = getattr(
+                request.app.state,
+                "vnpy_runtime_diagnostics",
+                None,
+            )
+    else:
+        runtime_diagnostics = getattr(request.app.state, "vnpy_runtime_diagnostics", None)
     if isinstance(runtime_diagnostics, dict):
         payload.setdefault("diagnostics", {})["vnpy_runtime"] = runtime_diagnostics
     return payload

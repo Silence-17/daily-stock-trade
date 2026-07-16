@@ -117,6 +117,15 @@ def get_vnpy_bridge_status(
     adapter_status = get_vnpy_adapter_status()
     order_request_supported = bool(adapter_status.get("order_request_supported"))
     available = bool(main_engine is not None and send_order_supported and gateway_configured and order_request_supported)
+    connection_confirmed: Optional[bool] = None
+    connection_confirmation_source = "unavailable"
+    if main_engine is not None and gateway_configured:
+        get_gateway = getattr(main_engine, "get_gateway", None)
+        gateway = get_gateway(str(gateway_name).strip()) if callable(get_gateway) else None
+        if gateway is not None:
+            connection_confirmed, connection_confirmation_source = (
+                _gateway_connection_confirmation(gateway)
+            )
     reason = None
     if not available:
         if main_engine is None:
@@ -144,7 +153,35 @@ def get_vnpy_bridge_status(
         "get_all_trades_supported": get_all_trades_supported,
         "order_reconciliation_supported": get_order_supported or get_all_trades_supported,
         "order_request_supported": order_request_supported,
+        "connection_confirmed": connection_confirmed,
+        "connection_status": (
+            "connected"
+            if connection_confirmed is True
+            else "disconnected"
+            if connection_confirmed is False
+            else "unknown"
+        ),
+        "connection_confirmation_source": connection_confirmation_source,
     }
+
+
+def _gateway_connection_confirmation(gateway: Any) -> Tuple[Optional[bool], str]:
+    for method_name in ("get_connection_status", "get_state_snapshot"):
+        method = getattr(gateway, method_name, None)
+        if not callable(method):
+            continue
+        try:
+            state = method()
+        except Exception:
+            return None, f"{method_name}_failed"
+        if isinstance(state, bool):
+            return state, method_name
+        if isinstance(state, dict) and isinstance(state.get("connected"), bool):
+            return state["connected"], method_name
+    connected = getattr(gateway, "connected", None)
+    if isinstance(connected, bool):
+        return connected, "gateway.connected"
+    return None, "unavailable"
 
 
 def get_vnpy_event_bridge_status(*, event_engine: Optional[Any] = None) -> Dict[str, Any]:

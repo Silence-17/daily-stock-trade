@@ -13,6 +13,7 @@ import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from threading import RLock
 from typing import Any, Dict, Optional, Tuple
 
 from src.services.vnpy_paper_trading_service import VnpyPaperTradingService
@@ -47,6 +48,18 @@ class VnpyRuntimeHandle:
         self.main_engine = main_engine
         self.event_bridge = event_bridge
         self.diagnostics = diagnostics or {}
+        self._diagnostics_lock = RLock()
+
+    def refresh_diagnostics(self) -> Dict[str, Any]:
+        """Refresh gateway state exposed by runtimes with a status hook."""
+
+        with self._diagnostics_lock:
+            _refresh_gateway_connection(
+                main_engine=self.main_engine,
+                gateway_name=self.settings.gateway_name,
+                diagnostics=self.diagnostics,
+            )
+            return self.diagnostics
 
     def close(self) -> None:
         """Release created vn.py resources best-effort."""
@@ -185,7 +198,17 @@ def _add_gateway(
     gateway_name: Optional[str],
     diagnostics: Dict[str, Any],
 ) -> None:
-    gateway_cls = _import_object(gateway_class_path)
+    try:
+        gateway_cls = _import_object(gateway_class_path)
+    except Exception as exc:  # noqa: BLE001 - optional gateway must not block startup.
+        diagnostics["gateway"] = {
+            "added": False,
+            "reason": "gateway_import_failed",
+            "error_type": type(exc).__name__,
+            "message": str(exc),
+        }
+        logger.warning("vn.py gateway import failed: %s", exc)
+        return
     add_gateway = getattr(main_engine, "add_gateway", None)
     if not callable(add_gateway):
         diagnostics["gateway"] = {
@@ -199,7 +222,26 @@ def _add_gateway(
         else:
             add_gateway(gateway_cls)
     except TypeError:
-        add_gateway(gateway_cls)
+        try:
+            add_gateway(gateway_cls)
+        except Exception as exc:  # noqa: BLE001 - optional gateway must not block startup.
+            diagnostics["gateway"] = {
+                "added": False,
+                "reason": "add_gateway_failed",
+                "error_type": type(exc).__name__,
+                "message": str(exc),
+            }
+            logger.warning("vn.py add gateway failed: %s", exc)
+            return
+    except Exception as exc:  # noqa: BLE001 - optional gateway must not block startup.
+        diagnostics["gateway"] = {
+            "added": False,
+            "reason": "add_gateway_failed",
+            "error_type": type(exc).__name__,
+            "message": str(exc),
+        }
+        logger.warning("vn.py add gateway failed: %s", exc)
+        return
     diagnostics["gateway"] = {
         "added": True,
         "class": gateway_class_path,
@@ -218,14 +260,18 @@ def _connect_gateway(
     if not callable(connect):
         diagnostics["connect"] = {
             "attempted": True,
+            "request_accepted": False,
             "connected": False,
+            "status": "failed",
             "reason": "connect_unavailable",
         }
         return
     if not gateway_name:
         diagnostics["connect"] = {
             "attempted": True,
+            "request_accepted": False,
             "connected": False,
+            "status": "failed",
             "reason": "gateway_name_required",
         }
         return
@@ -237,7 +283,9 @@ def _connect_gateway(
         except Exception as exc:  # noqa: BLE001
             diagnostics["connect"] = {
                 "attempted": True,
+                "request_accepted": False,
                 "connected": False,
+                "status": "failed",
                 "reason": "connect_settings_read_failed",
                 "error_type": type(exc).__name__,
                 "message": str(exc),
@@ -249,7 +297,9 @@ def _connect_gateway(
         if not bool(getattr(gateway, "connect_without_settings", False)):
             diagnostics["connect"] = {
                 "attempted": True,
+                "request_accepted": False,
                 "connected": False,
+                "status": "failed",
                 "reason": "connect_settings_path_required",
             }
             return
@@ -257,18 +307,120 @@ def _connect_gateway(
     if not isinstance(payload, dict):
         diagnostics["connect"] = {
             "attempted": True,
+            "request_accepted": False,
             "connected": False,
+            "status": "failed",
             "reason": "connect_settings_must_be_object",
         }
         return
-    connect(payload, gateway_name)
     diagnostics["connect"] = {
         "attempted": True,
-        "connected": True,
+        "request_accepted": False,
+        "connected": False,
+        "status": "connect_requested",
+        "reason": "connection_unconfirmed",
         "settings_path": str(path) if path is not None else None,
         "settings_source": "file" if path is not None else "gateway_defaults",
         "gateway_name": gateway_name,
     }
+    try:
+        connect(payload, gateway_name)
+    except Exception as exc:  # noqa: BLE001 - optional runtime must not block API startup.
+        diagnostics["connect"].update(
+            {
+                "request_accepted": False,
+                "connected": False,
+                "status": "failed",
+                "reason": "connect_failed",
+                "error_type": type(exc).__name__,
+                "message": str(exc),
+            }
+        )
+        logger.warning("vn.py gateway connect failed: %s", exc)
+        return
+    diagnostics["connect"]["request_accepted"] = True
+    _refresh_gateway_connection(
+        main_engine=main_engine,
+        gateway_name=gateway_name,
+        diagnostics=diagnostics,
+    )
+
+
+def _refresh_gateway_connection(
+    *,
+    main_engine: Any,
+    gateway_name: Optional[str],
+    diagnostics: Dict[str, Any],
+) -> None:
+    connect_diagnostics = diagnostics.get("connect")
+    if (
+        not isinstance(connect_diagnostics, dict)
+        or not connect_diagnostics.get("attempted")
+        or not connect_diagnostics.get("request_accepted")
+        or main_engine is None
+        or not gateway_name
+    ):
+        return
+    get_gateway = getattr(main_engine, "get_gateway", None)
+    gateway = get_gateway(gateway_name) if callable(get_gateway) else None
+    if gateway is None:
+        connect_diagnostics.update(
+            {
+                "connected": False,
+                "status": "disconnected",
+                "reason": "gateway_instance_unavailable",
+                "confirmation_source": "main_engine.get_gateway",
+            }
+        )
+        return
+
+    confirmed, source = _gateway_connection_confirmation(gateway)
+    connect_diagnostics["confirmation_source"] = source
+    if confirmed is True:
+        connect_diagnostics.update(
+            {
+                "connected": True,
+                "status": "connected",
+                "reason": None,
+            }
+        )
+    elif confirmed is False:
+        connect_diagnostics.update(
+            {
+                "connected": False,
+                "status": "disconnected",
+                "reason": "gateway_reported_disconnected",
+            }
+        )
+    else:
+        connect_diagnostics.update(
+            {
+                "connected": False,
+                "status": "connect_requested",
+                "reason": "connection_unconfirmed",
+            }
+        )
+
+
+def _gateway_connection_confirmation(gateway: Any) -> Tuple[Optional[bool], str]:
+    for method_name in ("get_connection_status", "get_state_snapshot"):
+        method = getattr(gateway, method_name, None)
+        if not callable(method):
+            continue
+        try:
+            state = method()
+        except Exception as exc:  # noqa: BLE001 - diagnostics must stay read-only and resilient.
+            logger.warning("vn.py gateway status hook %s failed: %s", method_name, exc)
+            return None, f"{method_name}_failed"
+        if isinstance(state, bool):
+            return state, method_name
+        if isinstance(state, dict) and isinstance(state.get("connected"), bool):
+            return state["connected"], method_name
+
+    connected = getattr(gateway, "connected", None)
+    if isinstance(connected, bool):
+        return connected, "gateway.connected"
+    return None, "unavailable"
 
 
 def _import_object(path: str) -> Any:

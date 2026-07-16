@@ -274,6 +274,7 @@
 - runtime 会准备部署工作目录下的 `.vntrader/`，避免受限服务账户尝试写用户主目录导致 MainEngine bootstrap 失败。
 - 新增默认关闭的内置 `DsaSimulatedGateway`：无需账户参数即可通过真实 MainEngine/EventEngine 延迟即时成交，并已验证 Agent 自动交易计划经订单/成交事件回写为 Portfolio 成交。
 - 内置 `DsaSimulatedGateway` 已支持默认保留状态的断线重连：资金、持仓、订单和计数器保持连续，在途延迟订单会恢复并恰好成交一次；`check_vnpy_adapter.py --require-vnpy --reconnect-cycles 3` 已验证三轮缓存保留、成交去重和编号唯一性，安装脚本默认执行该验收。
+- vn.py runtime 已区分 `MainEngine.connect()` 请求受理与网关确认连接，连接异常不会拖垮 API 启动；支持状态钩子的网关会动态刷新连接状态，无法确认时健康状态 warning，明确断开时 blocked 且新增委托 fail-closed。
 - 新增 `POST /api/v1/vnpy-paper/trade-plans/{plan_uid}/cancel` 和 Web “撤单”入口：`vnpy_paper` 的 `submitted` / `part_filled` 计划可映射为 vn.py `CancelRequest` 并调用 `MainEngine.cancel_order`，计划进入 `cancel_requested`，终态仍以 vn.py 订单回报为准。
 
 未完成：
