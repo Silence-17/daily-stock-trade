@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [改进] AlphaSift 预排序上下文在 DSA 请求级回调中强制执行声明的 3 候选上限，并复用已获取的实时行情构建基础面估值，避免第三方默认 5 候选和同票重复行情请求；后排序完整增强对最多 3 个候选使用有界并发并按原排名汇总结果，降低新闻搜索降级时的串行等待
+- [改进] 自动选股 Agent run 新增持久化 `stage_timings` 性能诊断，记录计划、前置门禁、AlphaSift 筛选、候选决策/执行和总耗时；成功、数据质量阻断与筛选异常均保留耗时，Agent 控制台运行时间线新增 `performance` 事件
 - [改进] 自动模拟交易调用 AlphaSift LLM 重排时默认使用独立的 45 秒单次预算并关闭结构化结果重试，支持环境变量覆盖，失败后直接按 `screen_score` 降级；手工选股继续沿用原有 LLM 超时配置，每轮 Agent 诊断记录实际超时、重试和降级策略
 - [修复] 自动选股最低数据质量分默认改为 60，旧配置缺失或 `null` 也归一为 60，使 `poor/critical` 轮次默认以 `data_quality_score_below_threshold` 阻止新增买入；显式设为 0 可保留仅审计模式
 - [修复] 自动买入在候选明确缺少交易状态且启用 ST/停牌/涨跌停过滤时以 `candidate_trading_status_unavailable` 跳过，配置最低成交额但成交额不可得时以 `liquidity_data_unavailable` 跳过，避免把未知状态误判为通过

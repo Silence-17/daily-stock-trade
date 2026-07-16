@@ -2513,6 +2513,40 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
         fundamentals_mock.assert_not_called()
         news_mock.assert_called_once()
 
+    def test_dsa_post_rank_enrichment_runs_candidates_concurrently_in_rank_order(self) -> None:
+        barrier = threading.Barrier(3, timeout=2)
+        candidates = [
+            {"rank": index, "code": code, "name": code}
+            for index, code in enumerate(("600519", "000001", "000651"), start=1)
+        ]
+
+        def build_context(candidate, **_kwargs):
+            barrier.wait()
+            code = candidate["code"]
+            return {
+                "dsa_context": {
+                    "enriched": True,
+                    "quote": {"price": float(candidate["rank"])},
+                    "news": {"success": True, "results": [{"title": code}]},
+                    "warnings": [f"warning-{code}"],
+                },
+                "dsa_news": [{"title": code}],
+            }
+
+        with patch(
+            "src.services.alphasift_service._build_dsa_candidate_context",
+            side_effect=build_context,
+        ) as context_mock:
+            enriched, diagnostics = alphasift_service._enrich_candidates_with_dsa(candidates)
+
+        self.assertEqual(context_mock.call_count, 3)
+        self.assertEqual([item["code"] for item in enriched], ["600519", "000001", "000651"])
+        self.assertEqual(diagnostics["enriched_count"], 3)
+        self.assertEqual(
+            diagnostics["warnings"],
+            ["warning-600519", "warning-000001", "warning-000651"],
+        )
+
     def test_dsa_pre_rank_candidate_context_omits_news(self) -> None:
         fake_manager = SimpleNamespace(get_stock_name=MagicMock(return_value="贵州茅台"))
 
@@ -2536,6 +2570,37 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
         self.assertEqual(context["quote"]["price"], 1688.0)
         self.assertEqual(context["fundamentals"]["coverage"]["valuation"], "available")
         news_mock.assert_not_called()
+
+    def test_dsa_candidate_context_passes_quote_to_fundamental_pipeline(self) -> None:
+        fake_manager = SimpleNamespace(get_stock_name=MagicMock(return_value="Test Stock"))
+        quote = {"price": 10.0, "pe_ratio": 12.3, "amount": 100000000.0}
+
+        with (
+            patch("src.services.alphasift_service._get_dsa_fetcher_manager", return_value=fake_manager),
+            patch("src.services.alphasift_service.get_dsa_realtime_quote", return_value=quote),
+            patch(
+                "src.services.alphasift_service.get_dsa_fundamental_context",
+                return_value={"market": "cn", "coverage": {"valuation": "available"}},
+            ) as fundamentals_mock,
+        ):
+            context = alphasift_service.get_dsa_candidate_context("600519", "Test Stock")
+
+        self.assertEqual(context["quote"], quote)
+        fundamentals_mock.assert_called_once_with("600519", quote=quote)
+
+    def test_alphasift_context_enforces_declared_pre_rank_candidate_limit(self) -> None:
+        config = self._config(enabled=True)
+        with patch(
+            "src.services.alphasift_service.get_dsa_candidate_context",
+            side_effect=lambda code, name="", **_kwargs: {"code": code, "name": name},
+        ) as candidate_context_mock:
+            context = alphasift_service._build_alphasift_context(config, max_results=3)
+            callback = context["dsa"]["get_candidate_context"]
+            results = [callback(str(index), f"Stock {index}") for index in range(5)]
+
+        self.assertEqual(context["dsa"]["max_candidates"], 3)
+        self.assertEqual(candidate_context_mock.call_count, 3)
+        self.assertEqual([item.get("code") for item in results], ["0", "1", "2", None, None])
 
     def test_screen_bridges_dsa_llm_config_into_alphasift_runtime(self) -> None:
         config = Config(
