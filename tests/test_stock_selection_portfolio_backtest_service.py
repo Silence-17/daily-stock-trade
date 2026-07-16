@@ -470,6 +470,82 @@ class StockSelectionPortfolioBacktestServiceTestCase(unittest.TestCase):
         self.assertEqual(historical["final_equity"], 989.55)
         self.assertEqual(historical["methodology"]["sell_tax_mode"], "cn_historical_stamp_duty")
 
+    def test_cash_ledger_applies_bilateral_historical_stamp_duty(self) -> None:
+        with self.db.get_session() as session:
+            session.add_all([
+                StockDaily(code="600001", date=date(2007, 5, 30), open=1, close=1, volume=1000, pct_chg=0),
+                StockDaily(code="600001", date=date(2007, 5, 31), open=1, close=1, volume=1000, pct_chg=0),
+            ])
+            session.commit()
+        self.repository.list_dates.return_value = [date(2007, 5, 29)]
+        self.replay.replay.return_value = {
+            "candidates": [{"symbol": "600001", "name": "bilateral-tax", "screen_score": 90}],
+            "compatibility": {},
+        }
+
+        result = self.service.run(
+            strategy="dual_low",
+            market="cn",
+            date_from=date(2007, 5, 29),
+            date_to=date(2007, 5, 29),
+            final_holding_bars=2,
+            initial_capital=1000,
+            commission_bps=0,
+            sell_tax_mode="cn_historical_stamp_duty",
+            slippage_bps=0,
+            accounting_mode="cash_ledger",
+        )
+
+        buy, sell = result["periods"][0]["trades"]
+        self.assertEqual(buy["side"], "buy")
+        self.assertEqual(buy["quantity"], 900)
+        self.assertEqual(buy["tax_bps"], 30)
+        self.assertEqual(buy["tax"], 2.7)
+        self.assertEqual(buy["tax_source"], "mof_tax_2007_84_bilateral")
+        self.assertEqual(buy["cash_effect"], -902.7)
+        self.assertEqual(sell["tax_bps"], 30)
+        self.assertEqual(sell["tax"], 2.7)
+        self.assertEqual(sell["tax_source"], "mof_tax_2007_84_bilateral")
+        self.assertEqual(result["metrics"]["total_taxes"], 5.4)
+        self.assertEqual(result["final_equity"], 994.6)
+        self.assertEqual(result["methodology"]["historical_tax_coverage_from"], "2005-01-24")
+        self.assertEqual(result["methodology"]["sell_tax_regimes"][1]["buy_tax_bps"], 30)
+
+    def test_historical_stamp_duty_regimes_are_side_aware_and_bounded(self) -> None:
+        cases = [
+            (date(2005, 1, 24), 10, 10, "mof_tax_2005_11_bilateral"),
+            (date(2007, 5, 30), 30, 30, "mof_tax_2007_84_bilateral"),
+            (date(2008, 4, 24), 10, 10, "mof_2008_04_24_bilateral"),
+            (date(2008, 9, 19), 0, 10, "mof_2008_09_19_single_sided"),
+            (date(2023, 8, 28), 0, 5, "mof_sta_announcement_2023_39"),
+        ]
+        for trade_date, expected_buy, expected_sell, expected_source in cases:
+            buy = self.service._resolve_trade_tax(
+                mode="cn_historical_stamp_duty",
+                explicit_sell_bps=0,
+                market="cn",
+                trade_date=trade_date,
+                side="buy",
+            )
+            sell = self.service._resolve_trade_tax(
+                mode="cn_historical_stamp_duty",
+                explicit_sell_bps=0,
+                market="cn",
+                trade_date=trade_date,
+                side="sell",
+            )
+            self.assertEqual(buy, (expected_buy, expected_source))
+            self.assertEqual(sell, (expected_sell, expected_source))
+
+        with self.assertRaisesRegex(ValueError, "before 2005-01-24"):
+            self.service._resolve_trade_tax(
+                mode="cn_historical_stamp_duty",
+                explicit_sell_bps=0,
+                market="cn",
+                trade_date=date(2005, 1, 23),
+                side="sell",
+            )
+
     def test_cash_ledger_applies_dividend_and_split_before_final_exit(self) -> None:
         with self.db.get_session() as session:
             session.add_all([
@@ -729,36 +805,42 @@ class StockSelectionPortfolioBacktestServiceTestCase(unittest.TestCase):
 
     def test_cn_historical_stamp_duty_resolves_official_effective_dates(self) -> None:
         self.assertEqual(
-            self.service._resolve_sell_tax(
+            self.service._resolve_trade_tax(
                 mode="cn_historical_stamp_duty",
-                explicit_bps=999,
+                explicit_sell_bps=999,
                 market="cn",
                 trade_date=date(2023, 8, 27),
+                side="sell",
             ),
             (10.0, "mof_2008_09_19_single_sided"),
         )
         self.assertEqual(
-            self.service._resolve_sell_tax(
+            self.service._resolve_trade_tax(
                 mode="cn_historical_stamp_duty",
-                explicit_bps=999,
+                explicit_sell_bps=999,
                 market="cn",
                 trade_date=date(2023, 8, 28),
+                side="sell",
             ),
             (5.0, "mof_sta_announcement_2023_39"),
         )
-        with self.assertRaisesRegex(ValueError, "before 2008-09-19"):
-            self.service._resolve_sell_tax(
+        self.assertEqual(
+            self.service._resolve_trade_tax(
                 mode="cn_historical_stamp_duty",
-                explicit_bps=0,
+                explicit_sell_bps=0,
                 market="cn",
                 trade_date=date(2008, 9, 18),
-            )
+                side="buy",
+            ),
+            (10.0, "mof_2008_04_24_bilateral"),
+        )
         with self.assertRaisesRegex(ValueError, "only for the cn market"):
-            self.service._resolve_sell_tax(
+            self.service._resolve_trade_tax(
                 mode="cn_historical_stamp_duty",
-                explicit_bps=0,
+                explicit_sell_bps=0,
                 market="us",
                 trade_date=date(2024, 1, 1),
+                side="sell",
             )
 
 

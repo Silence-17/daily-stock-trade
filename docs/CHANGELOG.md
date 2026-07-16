@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [改进] AlphaSift 现金账本组合回测将 A 股历史印花税扩展到 2005-01-24 起的五段官方制度，按成交日和买卖方向计税；2008-09-19 前买方税进入目标整手、现金可买数量、逐笔税源与 Web 税制审计，覆盖范围外继续 fail-closed
 - [改进] Agent 控制台的数据源动态路由新增新闻 provider 顺序、熔断状态、失败/冷却、半开参数、跨重启恢复和下轮建议展示
 - [改进] 新闻搜索 provider 接入统一来源熔断器：连续 3 次 API/传输失败后冷却 5 分钟，冷却后仅放行一个半开探测，成功恢复、失败继续冷却；状态复用 `provider_source_health.json` 跨 API 重启恢复，并进入 AlphaSift 候选路由审计
 - [改进] 自动选股候选新闻支持按最近 30 天同策略/市场 provider 健康趋势生成请求级顺序；新闻缓存按显式路由隔离，provider 异常继续故障转移，并将完整尝试链写入 `news/<provider>` 跨运行健康证据，缓存命中不重复累计旧尝试

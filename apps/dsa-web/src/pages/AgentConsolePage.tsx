@@ -980,6 +980,17 @@ const AgentConsolePage: React.FC = () => {
     return () => window.clearInterval(timer);
   }, [fullMarketJobId, fullMarketJobStatus]);
 
+  const portfolioTaxRegimes = (
+    Array.isArray(portfolioBacktest?.methodology.sellTaxRegimes)
+      ? portfolioBacktest.methodology.sellTaxRegimes
+      : []
+  )
+    .map((item) => asRecord(item))
+    .filter((item): item is Record<string, unknown> => Boolean(item));
+  const portfolioTaxCoverageFrom = String(
+    portfolioBacktest?.methodology.historicalTaxCoverageFrom || '',
+  );
+
   const renderStatusBadge = (status: string, label?: string) => (
     <span className={`inline-flex items-center rounded-full border px-2 py-1 text-xs ${statusTone(status)}`}>
       {label || status || '-'}
@@ -1566,6 +1577,23 @@ const AgentConsolePage: React.FC = () => {
           />
           {portfolioBacktest ? (
             <div className="mt-3 space-y-3" data-testid="agent-portfolio-backtest-results">
+              {portfolioTaxRegimes.length > 0 ? (
+                <div
+                  className="flex flex-wrap items-center gap-2 text-xs text-secondary-text"
+                  data-testid="agent-portfolio-tax-regimes"
+                >
+                  <span>历史税制覆盖：{portfolioTaxCoverageFrom || '未标注'}</span>
+                  {portfolioTaxRegimes.map((regime) => (
+                    <span
+                      key={`${String(regime.effectiveFrom)}-${String(regime.source)}`}
+                      className="border border-border bg-surface px-2 py-1"
+                    >
+                      {String(regime.effectiveFrom)} 买 {formatNumber(regime.buyTaxBps)} bps / 卖{' '}
+                      {formatNumber(regime.sellTaxBps)} bps
+                    </span>
+                  ))}
+                </div>
+              ) : null}
               {Object.keys(
                 asRecord(portfolioBacktest.methodology.configuredTargetWeights)
                 ?? asRecord(portfolioBacktest.methodology.configured_target_weights)
