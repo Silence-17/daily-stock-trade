@@ -1864,16 +1864,30 @@ class VnpyPaperTradingService:
                 note=f"vn.py callback | vt_orderid={order_id}",
             )
         except PortfolioConflictError:
-            return self._failed_order(
-                symbol=symbol_norm,
-                side=side_norm,
-                quantity=trade_quantity,
-                price=trade_price,
-                cash_amount=cash_amount,
-                reason="duplicate_vnpy_trade_callback",
-                message="Duplicate vn.py trade callback was ignored.",
-                raw=callback_raw,
-            )
+            refreshed_plan = self.agent_repo.get_trade_plan(str(plan.get("plan_uid") or ""))
+            return {
+                "accepted": True,
+                "status": (
+                    str(refreshed_plan.get("status") or "submitted")
+                    if isinstance(refreshed_plan, dict)
+                    else "submitted"
+                ),
+                "trade_id": (
+                    _safe_int(refreshed_plan.get("trade_id"))
+                    if isinstance(refreshed_plan, dict)
+                    else None
+                ),
+                "account_id": account_id,
+                "symbol": symbol_norm,
+                "side": side_norm,
+                "quantity": trade_quantity,
+                "price": trade_price,
+                "cash_amount": cash_amount,
+                "source": "vnpy_main_engine",
+                "message": "Duplicate vn.py trade callback was ignored.",
+                "reason": None,
+                "raw": {**callback_raw, "duplicate_callback": True},
+            }
         except PortfolioOversellError as exc:
             return self._failed_order(
                 symbol=symbol_norm,
@@ -3354,6 +3368,9 @@ class VnpyPaperTradingService:
                 "source_routing": screen.get("source_routing") if isinstance(screen, dict) else None,
             },
         )
+        # A synchronous gateway callback can make a persisted plan terminal before
+        # complete_run writes the initial accepted-order counts.
+        self.agent_repo.refresh_run_trade_counts(run_id)
         self._record_last_auto_run(result)
         return result
 

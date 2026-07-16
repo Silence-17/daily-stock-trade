@@ -3419,6 +3419,118 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
             bridge.unregister()
             main_engine.close()
 
+    @unittest.skipUnless(importlib.util.find_spec("vnpy"), "optional vn.py runtime is not installed")
+    def test_builtin_simulated_gateway_isolates_mixed_agent_results(self) -> None:
+        from vnpy.event import EventEngine
+        from vnpy.trader.engine import MainEngine
+
+        from src.services.vnpy_simulated_gateway import DsaSimulatedGateway
+
+        event_engine = EventEngine()
+        main_engine = MainEngine(event_engine)
+        main_engine.add_gateway(DsaSimulatedGateway, "DSA_SIM")
+        main_engine.connect(
+            {
+                "fill_delay_ms": 50,
+                "reject_every_nth_order": 2,
+                "duplicate_trade_event_count": 2,
+            },
+            "DSA_SIM",
+        )
+        service = VnpyPaperTradingService(
+            data_fetcher_manager=_FakeDataFetcherManager(price=10.0),
+            config_path=self.config_path,
+            vnpy_main_engine=main_engine,
+            vnpy_event_engine=event_engine,
+        )
+        bridge = service.attach_vnpy_event_engine(event_engine)
+        service.update_settings(
+            {
+                "auto_trade_enabled": True,
+                "auto_trade_time_gate_enabled": False,
+                "auto_execution_mode": "vnpy_paper",
+                "vnpy_gateway_name": "DSA_SIM",
+                "auto_strategy": "dual_low",
+                "auto_max_results": 3,
+                "auto_cash_per_order": 1200,
+            }
+        )
+        fake_alphasift = MagicMock()
+        fake_alphasift.screen.return_value = {
+            "quality_status": "ok",
+            "candidates": [
+                {
+                    "code": symbol,
+                    "name": f"candidate-{index}",
+                    "score": 90 - index,
+                    "price": 10.0,
+                    "amount": 200000000,
+                }
+                for index, symbol in enumerate(("600519", "000001", "300750"), start=1)
+            ],
+            "warnings": [],
+            "source_errors": [],
+        }
+
+        try:
+            with patch(
+                "src.services.vnpy_paper_trading_service.AlphaSiftService",
+                return_value=fake_alphasift,
+            ):
+                result = service.run_auto_trade_once()
+
+            self.assertEqual(len(result["orders"]), 3)
+            deadline = time.monotonic() + 5.0
+            detail = None
+            expected_statuses = ["filled", "failed", "filled"]
+            while time.monotonic() < deadline:
+                detail = service.agent_repo.get_run_detail(result["agent_run_uid"])
+                if (
+                    detail
+                    and [item["status"] for item in detail["trade_plans"]]
+                    == expected_statuses
+                    and [item["status"] for item in detail["decisions"]]
+                    == expected_statuses
+                ):
+                    break
+                time.sleep(0.05)
+
+            self.assertIsNotNone(detail)
+            assert detail is not None
+            plans = detail["trade_plans"]
+            decisions = detail["decisions"]
+            self.assertEqual([item["status"] for item in plans], expected_statuses)
+            self.assertEqual([item["status"] for item in decisions], expected_statuses)
+            self.assertEqual(plans[1]["skip_reason"], "vnpy_order_rejected")
+            self.assertEqual(
+                plans[1]["order_result"]["message"],
+                "simulated_configured_rejection",
+            )
+            self.assertEqual(detail["submitted_count"], 2)
+            self.assertEqual(detail["skipped_count"], 1)
+
+            account_id = int(service.get_settings().account_id)
+            trades = service.portfolio.list_trade_events(account_id=account_id, page=1)
+            self.assertEqual(len(trades["items"]), 2)
+            self.assertEqual(
+                {item["symbol"] for item in trades["items"]},
+                {"600519", "300750"},
+            )
+            self.assertEqual(
+                len({item["trade_uid"] for item in trades["items"]}),
+                2,
+            )
+            gateway = main_engine.get_gateway("DSA_SIM")
+            self.assertIsNotNone(gateway)
+            assert gateway is not None
+            state = gateway.get_state_snapshot()
+            self.assertEqual(state["order_count"], 3)
+            self.assertEqual(state["trade_count"], 2)
+            self.assertEqual(state["active_order_ids"], [])
+        finally:
+            bridge.unregister()
+            main_engine.close()
+
     def test_cancel_submitted_vnpy_paper_trade_plan_requests_gateway_cancel(self) -> None:
         installed = _install_fake_vnpy_modules()
         main_engine = _FakeMainEngine()

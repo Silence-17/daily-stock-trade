@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [修复] 自动选股 Agent 完成运行时从持久化交易计划重算提交/跳过计数，避免同步拒单回报先更新计划后又被初始下单汇总覆盖；并发重复 vn.py 成交回报命中唯一约束时按成功幂等回放处理，不再产生误导性对账失败
+- [测试] 新增真实 vn.py MainEngine/EventEngine 三候选混合结果矩阵，验证两单成交、一单同步拒单、重复成交回报去重、决策/计划终态一致、Portfolio 隔离和网关无残留活动订单
 - [新功能] 新增零下单 `scripts/check_vnpy_gateway_soak.py` 长跑验收器，可按启动宽限期、采样间隔、最低连接率和必需订单/成交/账户/持仓事件验证任意已配置 vn.py gateway，聚合状态切换与自动重连统计且不输出连接文件路径或内容；内置 gateway 支持显式单次断线注入
 - [修复] vn.py 原生中文订单状态现统一映射为 DSA 状态，交易计划落库后立即对账 MainEngine 终态，避免 gateway 在 `send_order()` 返回前同步拒单或成交时因 `vt_orderid` 尚未持久化而永久停留在 `submitted`
 - [测试] 内置 `DsaSimulatedGateway` 新增默认关闭的每 N 单拒绝和重复成交事件故障注入，`check_vnpy_adapter.py --fault-matrix` 通过真实 MainEngine/EventEngine 验证拒单透传、重复回报去重，并与断线重连矩阵共同纳入 vn.py 安装验收
