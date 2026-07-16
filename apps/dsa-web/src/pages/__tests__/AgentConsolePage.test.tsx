@@ -308,6 +308,16 @@ const runDetail = {
     tradeId: 2,
     rationale: 'low valuation and improving momentum',
     riskFlags: [],
+    agentReview: {
+      status: 'passed',
+      summary: 'Top-level Agent review passed',
+    },
+    llmReview: {
+      status: 'passed',
+      promptVersion: 'vnpy_paper_pre_trade_review_v2',
+      evaluatorVersion: 'candidate_audit_columns_v1',
+      summary: 'Top-level LLM review passed',
+    },
     orderResult: {
       strategyEvidence: {
         schemaVersion: 1,
@@ -1028,10 +1038,10 @@ describe('AgentConsolePage', () => {
     expect(screen.getByTestId('strategy-factors-1')).toHaveTextContent('momentum=72.50');
     expect(screen.getByTestId('agent-llm-recap')).toHaveTextContent('LLM recap generated');
     expect(screen.getByTestId('agent-review-1')).toHaveTextContent('Agent 复核 passed');
-    expect(screen.getByText('Pre-trade Agent review passed')).toBeInTheDocument();
+    expect(screen.getByText('Top-level Agent review passed')).toBeInTheDocument();
     expect(screen.getByTestId('llm-review-1')).toHaveTextContent('LLM 复核 passed');
-    expect(screen.getByText('LLM review passed')).toBeInTheDocument();
-    expect(screen.getByText('prompt=vnpy_paper_pre_trade_review_v1 / eval=pre_trade_fail_closed_v1')).toBeInTheDocument();
+    expect(screen.getByText('Top-level LLM review passed')).toBeInTheDocument();
+    expect(screen.getByText('prompt=vnpy_paper_pre_trade_review_v2 / eval=candidate_audit_columns_v1')).toBeInTheDocument();
     expect(screen.getAllByText('600519').length).toBeGreaterThan(0);
     expect(screen.getAllByText('position_exists').length).toBeGreaterThan(0);
   });

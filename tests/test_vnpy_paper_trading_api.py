@@ -2080,6 +2080,13 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
         self.assertEqual(detail["submitted_count"], 1)
         self.assertEqual(detail["decisions"][0]["symbol"], "600519")
         self.assertEqual(detail["decisions"][0]["status"], "filled")
+        self.assertEqual(detail["decisions"][0]["position_plan"]["symbol"], "600519")
+        self.assertEqual(detail["decisions"][0]["risk_review"]["status"], "passed")
+        self.assertEqual(detail["decisions"][0]["agent_review"]["reviewer"], "rule_agent_v1")
+        self.assertEqual(
+            detail["decisions"][0]["order_result"]["strategy_evidence"],
+            detail["decisions"][0]["strategy_evidence"],
+        )
         self.assertEqual(detail["trade_plans"][0]["status"], "filled")
         self.assertEqual(detail["trade_plans"][0]["trade_id"], run_payload["orders"][0]["trade_id"])
         self.assertEqual(detail["portfolio_change"]["status"], "changed")

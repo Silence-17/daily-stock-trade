@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [改进] 候选决策将 `strategy_evidence`、`position_plan`、`risk_review`、`agent_review` 和 `llm_review` 从订单结果内嵌约定升级为独立持久化/API 字段，成交、撤单与恢复回报不再覆盖候选解释；旧数据库自动补列，旧记录继续从 `order_result` 兼容读取
+- [测试] 新增候选审计字段数据库迁移、旧记录回退、成交回报保留、API 序列化和 Web 新旧合同兼容回归
 - [新功能] Agent run 详情新增基于持久化交易计划与 Portfolio trade id 动态派生的本轮持仓变化，按标的汇总实际买入、卖出、净股数和成交额，并区分已入账、仍有待回报、仅计划和无变化；模拟交易页、Agent 控制台、运行时间线和 JSON 导出复用同一契约
 - [测试] 新增持仓变化后端/API/Web 回归，覆盖本地成交、dry-run 计划、未入账部分成交回报及后续真实成交更新，避免把提交态委托误报为账本持仓
 - [修复] 自动卖出持仓天数改为按 100 条合法分页读取完整成交与拆股历史，并按公司行动先于同日成交的 Portfolio 语义 FIFO 重放当前未平仓批次；清仓重建仓会重置时钟，公司行动历史不可用时不使用不完整证据触发期限卖出

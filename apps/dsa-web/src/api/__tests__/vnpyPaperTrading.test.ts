@@ -1557,6 +1557,11 @@ describe('vnpyPaperTradingApi', () => {
             cash_amount: 1000,
             trade_id: 3,
             risk_flags: [],
+            strategy_evidence: { status: 'detailed', strategy: 'dual_low' },
+            position_plan: { symbol: '600519', planned_cash_amount: 1000 },
+            risk_review: { status: 'passed' },
+            agent_review: { status: 'passed', reviewer: 'rule_agent_v1' },
+            llm_review: { status: 'warning', model: 'unit-test' },
           }],
           trade_plans: [{
             id: 3,
@@ -1615,6 +1620,11 @@ describe('vnpyPaperTradingApi', () => {
     expect(list.total).toBe(1);
     expect(detail.decisions[0].cashAmount).toBe(1000);
     expect(detail.decisions[0].tradeId).toBe(3);
+    expect(detail.decisions[0].strategyEvidence).toEqual({ status: 'detailed', strategy: 'dual_low' });
+    expect(detail.decisions[0].positionPlan).toEqual({ symbol: '600519', plannedCashAmount: 1000 });
+    expect(detail.decisions[0].riskReview).toEqual({ status: 'passed' });
+    expect(detail.decisions[0].agentReview).toEqual({ status: 'passed', reviewer: 'rule_agent_v1' });
+    expect(detail.decisions[0].llmReview).toEqual({ status: 'warning', model: 'unit-test' });
     expect(detail.tradePlans[0].plannedCashAmount).toBe(1000);
     expect(detail.tradePlans[0].executionMode).toBe('paper');
     expect(detail.portfolioChange).toBeDefined();

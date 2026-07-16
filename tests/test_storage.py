@@ -148,6 +148,47 @@ class TestStorage(unittest.TestCase):
 
         DatabaseManager.reset_instance()
 
+    def test_database_initialization_adds_agent_decision_audit_columns(self):
+        DatabaseManager.reset_instance()
+        Config.reset_instance()
+        temp_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        db_path = os.path.join(temp_dir.name, "legacy_agent_decisions.db")
+        try:
+            with sqlite3.connect(db_path) as conn:
+                conn.execute(
+                    """
+                    CREATE TABLE stock_selection_agent_decisions (
+                        id INTEGER PRIMARY KEY,
+                        order_result_json TEXT
+                    )
+                    """
+                )
+
+            db = DatabaseManager(db_url=f"sqlite:///{db_path}")
+            db._ensure_stock_selection_agent_schema()
+            db._ensure_stock_selection_agent_schema()
+
+            with sqlite3.connect(db_path) as conn:
+                columns = {
+                    row[1]
+                    for row in conn.execute(
+                        "PRAGMA table_info(stock_selection_agent_decisions)"
+                    ).fetchall()
+                }
+            self.assertTrue(
+                {
+                    "strategy_evidence_json",
+                    "position_plan_json",
+                    "risk_review_json",
+                    "agent_review_json",
+                    "llm_review_json",
+                }.issubset(columns)
+            )
+        finally:
+            DatabaseManager.reset_instance()
+            Config.reset_instance()
+            temp_dir.cleanup()
+
     def test_schema_migration_record_is_idempotent(self):
         DatabaseManager.reset_instance()
         db = DatabaseManager(db_url="sqlite:///:memory:")

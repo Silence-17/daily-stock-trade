@@ -243,21 +243,29 @@ function runLlmRecap(run: VnpyPaperAgentRunDetail | null): Record<string, unknow
 }
 
 function orderAgentReview(decision: VnpyPaperAgentDecision): Record<string, unknown> | null {
+  const direct = asRecord(decision.agentReview);
+  if (direct && Object.keys(direct).length > 0) return direct;
   const orderResult = asRecord(decision.orderResult);
   return asRecord(orderResult?.agentReview) ?? asRecord(orderResult?.agent_review);
 }
 
 function orderLlmReview(decision: VnpyPaperAgentDecision): Record<string, unknown> | null {
+  const direct = asRecord(decision.llmReview);
+  if (direct && Object.keys(direct).length > 0) return direct;
   const orderResult = asRecord(decision.orderResult);
   return asRecord(orderResult?.llmReview) ?? asRecord(orderResult?.llm_review);
 }
 
 function orderPositionPlan(decision: VnpyPaperAgentDecision): Record<string, unknown> | null {
+  const direct = asRecord(decision.positionPlan);
+  if (direct && Object.keys(direct).length > 0) return direct;
   const orderResult = asRecord(decision.orderResult);
   return asRecord(orderResult?.positionPlan) ?? asRecord(orderResult?.position_plan);
 }
 
 function orderStrategyEvidence(decision: VnpyPaperAgentDecision): Record<string, unknown> | null {
+  const direct = asRecord(decision.strategyEvidence);
+  if (direct && Object.keys(direct).length > 0) return direct;
   const orderResult = asRecord(decision.orderResult);
   return asRecord(orderResult?.strategyEvidence) ?? asRecord(orderResult?.strategy_evidence);
 }

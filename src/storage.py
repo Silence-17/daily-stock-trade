@@ -716,6 +716,11 @@ class StockSelectionAgentDecision(Base):
     trade_id = Column(Integer, ForeignKey('portfolio_trades.id'), index=True)
     rationale = Column(Text)
     risk_flags_json = Column(Text)
+    strategy_evidence_json = Column(Text)
+    position_plan_json = Column(Text)
+    risk_review_json = Column(Text)
+    agent_review_json = Column(Text)
+    llm_review_json = Column(Text)
     order_result_json = Column(Text)
     raw_candidate_json = Column(Text)
     created_at = Column(DateTime, default=datetime.now, index=True)
@@ -1514,17 +1519,36 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
     def _ensure_stock_selection_agent_schema(self) -> None:
         """Backfill stock-selection agent audit schema added after the baseline."""
         inspector = inspect(self._engine)
-        table_name = StockSelectionAgentRun.__tablename__
-        if inspector.has_table(table_name):
-            columns = {column["name"] for column in inspector.get_columns(table_name)}
+        run_table_name = StockSelectionAgentRun.__tablename__
+        if inspector.has_table(run_table_name):
+            columns = {column["name"] for column in inspector.get_columns(run_table_name)}
             if "planned_count" not in columns:
                 with self._engine.begin() as connection:
                     connection.execute(
                         text(
-                            f"ALTER TABLE {table_name} "
+                            f"ALTER TABLE {run_table_name} "
                             "ADD COLUMN planned_count INTEGER NOT NULL DEFAULT 0"
                         )
                     )
+        decision_table_name = StockSelectionAgentDecision.__tablename__
+        if inspector.has_table(decision_table_name):
+            columns = {column["name"] for column in inspector.get_columns(decision_table_name)}
+            audit_columns = (
+                "strategy_evidence_json",
+                "position_plan_json",
+                "risk_review_json",
+                "agent_review_json",
+                "llm_review_json",
+            )
+            with self._engine.begin() as connection:
+                for column_name in audit_columns:
+                    if column_name not in columns:
+                        connection.execute(
+                            text(
+                                f"ALTER TABLE {decision_table_name} "
+                                f"ADD COLUMN {column_name} TEXT"
+                            )
+                        )
         StockSelectionAgentTradePlan.__table__.create(self._engine, checkfirst=True)
 
     def _ensure_intelligence_items_unique_index(self) -> None:

@@ -637,6 +637,11 @@ export type VnpyPaperAgentDecision = {
   tradeId?: number | null;
   rationale?: string | null;
   riskFlags: string[];
+  strategyEvidence?: Record<string, unknown>;
+  positionPlan?: Record<string, unknown>;
+  riskReview?: Record<string, unknown>;
+  agentReview?: Record<string, unknown>;
+  llmReview?: Record<string, unknown>;
   orderResult?: Record<string, unknown>;
   rawCandidate?: Record<string, unknown>;
   createdAt?: string | null;

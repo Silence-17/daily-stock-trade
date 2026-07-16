@@ -25,6 +25,14 @@ logger = logging.getLogger(__name__)
 class StockSelectionAgentRepository:
     """Persist and read stock-selection agent runs and candidate decisions."""
 
+    _DECISION_AUDIT_COLUMNS = {
+        "strategy_evidence": "strategy_evidence_json",
+        "position_plan": "position_plan_json",
+        "risk_review": "risk_review_json",
+        "agent_review": "agent_review_json",
+        "llm_review": "llm_review_json",
+    }
+
     def __init__(self, db_manager: Optional[DatabaseManager] = None) -> None:
         self.db = db_manager or DatabaseManager.get_instance()
 
@@ -139,6 +147,7 @@ class StockSelectionAgentRepository:
         raw_candidate: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         with self.db.get_session() as session:
+            order_result_payload = order_result or {}
             row = StockSelectionAgentDecision(
                 run_id=int(run_id),
                 sequence=int(sequence),
@@ -156,8 +165,13 @@ class StockSelectionAgentRepository:
                 trade_id=trade_id,
                 rationale=rationale,
                 risk_flags_json=self._json_dumps(risk_flags or []),
-                order_result_json=self._json_dumps(order_result or {}),
+                order_result_json=self._json_dumps(order_result_payload),
                 raw_candidate_json=self._json_dumps(raw_candidate or {}),
+            )
+            self._sync_decision_audit_columns(
+                row,
+                order_result_payload,
+                clear_missing=True,
             )
             session.add(row)
             session.commit()
@@ -434,7 +448,14 @@ class StockSelectionAgentRepository:
             row.quantity = quantity
             row.price = price
             row.trade_id = trade_id
-            row.order_result_json = self._json_dumps(order_result or {})
+            previous_order_result = self._json_loads(row.order_result_json, {})
+            order_result_payload = order_result or {}
+            self._sync_decision_audit_columns(
+                row,
+                order_result_payload,
+                previous_order_result,
+            )
+            row.order_result_json = self._json_dumps(order_result_payload)
             session.commit()
             session.refresh(row)
             return self._decision_to_dict(row)
@@ -2245,6 +2266,48 @@ class StockSelectionAgentRepository:
             logger.warning("Invalid stock selection agent JSON payload ignored")
             return fallback
 
+    @classmethod
+    def _sync_decision_audit_columns(
+        cls,
+        row: StockSelectionAgentDecision,
+        *payloads: Dict[str, Any],
+        clear_missing: bool = False,
+    ) -> None:
+        for payload_key, column_name in cls._DECISION_AUDIT_COLUMNS.items():
+            value = next(
+                (
+                    payload.get(payload_key)
+                    for payload in payloads
+                    if isinstance(payload, dict) and isinstance(payload.get(payload_key), dict)
+                ),
+                None,
+            )
+            if isinstance(value, dict):
+                setattr(row, column_name, cls._json_dumps(value))
+            elif clear_missing:
+                setattr(row, column_name, cls._json_dumps({}))
+
+    @classmethod
+    def _decision_audit_payloads(
+        cls,
+        row: StockSelectionAgentDecision,
+        order_result: Dict[str, Any],
+    ) -> Dict[str, Dict[str, Any]]:
+        payloads: Dict[str, Dict[str, Any]] = {}
+        for payload_key, column_name in cls._DECISION_AUDIT_COLUMNS.items():
+            dedicated = cls._json_loads(getattr(row, column_name, None), {})
+            legacy = order_result.get(payload_key)
+            if isinstance(dedicated, dict) and dedicated:
+                value = dedicated
+            elif isinstance(legacy, dict):
+                value = legacy
+            else:
+                value = {}
+            payloads[payload_key] = value
+            if value and not isinstance(order_result.get(payload_key), dict):
+                order_result[payload_key] = value
+        return payloads
+
     @staticmethod
     def _datetime_filter_value(value: Optional[datetime]) -> Optional[datetime]:
         if value is None:
@@ -2331,6 +2394,10 @@ class StockSelectionAgentRepository:
 
     @classmethod
     def _decision_to_dict(cls, row: StockSelectionAgentDecision) -> Dict[str, Any]:
+        order_result = cls._json_loads(row.order_result_json, {})
+        if not isinstance(order_result, dict):
+            order_result = {}
+        audit_payloads = cls._decision_audit_payloads(row, order_result)
         return {
             "id": int(row.id),
             "run_id": int(row.run_id),
@@ -2349,7 +2416,8 @@ class StockSelectionAgentRepository:
             "trade_id": row.trade_id,
             "rationale": row.rationale,
             "risk_flags": cls._json_loads(row.risk_flags_json, []),
-            "order_result": cls._json_loads(row.order_result_json, {}),
+            **audit_payloads,
+            "order_result": order_result,
             "raw_candidate": cls._json_loads(row.raw_candidate_json, {}),
             "created_at": row.created_at,
         }
