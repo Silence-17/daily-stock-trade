@@ -754,7 +754,7 @@ python main.py --schedule --no-run-immediately
 > 暂停“定时自动买入”只会注销新增买入任务；只要模拟交易总开关仍开启，`vnpy_paper_auto_retry` 会在服务注册时立即扫描一次并继续按 1 至 5 分钟周期恢复已有委托，暂停期间只对账和超时归档，不重提失败计划。API lifespan 创建或注入的 MainEngine/EventEngine 会绑定到 scheduler 后台 service，Web 手动桥接和后台自动任务复用同一 runtime。
 > `GET /api/v1/vnpy-paper/status` 的完整持仓快照会使用进程内 10 秒短 TTL 缓存，减少频繁刷新时重复重放 Portfolio 和拉取行情估值；成交、vn.py 成交回调、账户重置或账户恢复后会主动失效缓存，响应诊断包含 `snapshot_cache_hit` 和 `snapshot_cache_ttl_seconds`。
 > 完整状态的系统健康视图还会汇总持仓价格覆盖率、新鲜率、价格来源/provider 分布、缺失/陈旧/状态未知代码和价格日期范围；这些指标只归纳当前 Portfolio 快照，不会额外请求行情。Web“可用性诊断”会显示相同的覆盖率与来源摘要。
-> 完整状态还会把上述估值健康结果按 UTC 15 分钟时间桶持久化，同一桶内重复轮询只保留首条观测，历史保留 120 天。`diagnostics.system_health` 的估值组件及 Web“估值价格源趋势”展示 7/30/90 天观测数、平均/最低覆盖率、平均/最低新鲜率、降级占比和 provider 使用量；没有样本时返回空指标，不推断为健康。轻量状态不会写入观测，只读取已有趋势；存储故障会降级为诊断错误，不阻断模拟交易状态。
+> 完整状态还会把上述估值健康结果按 UTC 15 分钟时间桶持久化，同一桶内重复轮询只保留首条观测，历史保留 120 天。`diagnostics.system_health` 的估值组件及 Web“估值价格源趋势”展示 7/30/90 天观测数、平均/最低覆盖率、平均/最低新鲜率、降级占比和 provider 使用量；没有样本时返回空指标，不推断为健康。轻量状态不会写入观测，只读取已有趋势；存储故障会返回稳定的 `valuation_health_history_unavailable` 标记且不暴露底层异常文本，也不阻断当前估值和模拟交易状态。
 > readiness 与系统健康还会展示持久化的最近一次自动运行结果，包括运行时间/ID、原始跳过或失败 reason，以及候选和提交计数。该信息不依赖后台 task event 保留期；历史非成功结果只作为 warning，不会单独成为当前硬阻断。
 > `diagnostics.backend` 返回 API 版本、vn.py paper contract、可选 build id、Python 版本和进程启动时间。Web 当前要求 contract 3；旧后端未报告版本或 contract 更低时，“可用性诊断”会显示“需更新”。部署可选设置 `DSA_BUILD_ID`，CI/云平台也会自动读取常见的 Git commit 环境变量。
 > `diagnostics.vnpy_runtime.connect` 将 `request_accepted` 与 `connected` 分开：前者只表示 `MainEngine.connect()` 调用返回，后者必须由网关状态钩子确认。连接异常以 `connect_failed` 降级且不阻断 API 启动；无法确认的异步网关显示 warning，明确断开显示 blocked，并以 `vnpy_gateway_disconnected` 阻止新增委托。支持状态钩子的网关会在每次状态读取时动态刷新。

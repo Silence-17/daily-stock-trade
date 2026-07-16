@@ -165,7 +165,7 @@ def _with_valuation_health_history(payload: Dict[str, Any]) -> Dict[str, Any]:
         diagnostics["valuation_health_trends"] = {
             "schema_version": 1,
             "available": False,
-            "error": str(exc),
+            "reason": "valuation_health_history_unavailable",
             "windows": [],
         }
     payload["diagnostics"] = diagnostics
