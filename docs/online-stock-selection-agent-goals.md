@@ -84,7 +84,7 @@
 - 自动模拟交易会写入 `stock_selection_agent_runs`，记录 run id、触发来源、策略、市场、参数、候选数、成交数、跳过数和诊断。
 - 自动模拟交易 run 诊断新增 `agent_plan`，记录策略、市场、候选数量、每票预算、执行模式、规则派生 `plan_profile`、`execution_policy`、`sizing_plan`、`adaptive_controls`、仓位计划模板、风控预算、候选过滤器、gate 和预期产物。
 - 自动模拟交易设置新增默认关闭的 `auto_llm_plan_enabled`：开启后会在调用 AlphaSift 前生成本轮 `llm_dynamic_plan`，允许 LLM 在已知策略白名单内选择策略，并只在已保存上限内收紧候选数、每票预算和最低分；失败时回退保存配置并落审计。
-- 自动模拟交易会写入 `stock_selection_agent_decisions`，记录候选代码、名称、评分、理由、风险/跳过原因、计划金额、成交数量、成交价和关联 `trade_id`；候选 `order_result` 内含 `position_plan`、`risk_review` 和 `agent_review`。
+- 自动模拟交易会写入 `stock_selection_agent_decisions`，记录候选代码、名称、评分、理由、风险/跳过原因、计划金额、成交数量、成交价和关联 `trade_id`；候选 `order_result` 内含版本化 `strategy_evidence`、`position_plan`、`risk_review` 和 `agent_review`。`strategy_evidence` 保存实际上游提供的规则命中、因子分解、筛选/最终分数和解释，证据不足时明确标记 `summary_only` 而不反推命中。
 - 自动模拟交易会写入 `stock_selection_agent_trade_plans`，记录计划金额、执行模式、计划状态、成交回报和跳过原因；交易计划 `order_result` 同步保存候选级仓位计划、规则风控复核、规则 Agent 买入前二次复核和可选 LLM 买入前复核。
 - 自动模拟交易设置新增默认关闭的 `auto_llm_review_enabled`：开启后在规则风控通过后调用 LLM 生成 `order_result.llm_review`；`blocked`、模型不可用、JSON 解析失败或调用异常都会 fail-closed 跳过候选，不会继续生成或提交买入计划。
 - 自动模拟交易 run 诊断新增 `agent_summary`，聚合本轮结果、候选/计划/成交/跳过计数、数据质量、主要跳过原因、风控复核统计、Agent 复核状态统计和 LLM 复核状态统计。
@@ -109,7 +109,7 @@
 需要做：
 
 - 扩展 `stock_selection_agent_runs`，Agent 计划阶段、跨市场动态目标、规则派生计划档位/降级动作、默认关闭的 LLM 动态计划、每轮运行总结、每日结构化总结、规则 Agent 复核统计、LLM 买入前复核统计、基础复核质量摘要、版本化收益/风险目标、默认关闭的 LLM 买入前复核和手动 LLM 复盘已有基础诊断；继续积累生产样本的长期校准与多市场验证证据。
-- 扩展候选决策 schema，候选级 `position_plan`、规则 `risk_review`、规则 Agent `agent_review` 与可选 LLM `llm_review` 已写入 `order_result`，LLM 动态计划和买入复核已记录基础提示词/评估版本，run 级人工验收已有独立表级合同；继续补候选级策略命中明细和多模型质量合同。
+- 扩展候选决策 schema，候选级 `strategy_evidence`、`position_plan`、规则 `risk_review`、规则 Agent `agent_review` 与可选 LLM `llm_review` 已写入 `order_result`，LLM 动态计划和买入复核已记录基础提示词/评估版本，run 级人工验收已有独立表级合同；候选级策略命中、因子分解和证据完整性状态已落地，继续积累多模型质量合同的生产样本。
 - 引入 Agent 工作流：拉候选 -> 补上下文 -> LLM/规则复核 -> 风控 -> 生成交易计划。
 - Web 选股页增加“Agent 解释”和“本轮自动交易计划”视图。
 - 增加任务历史列表与详情页。
