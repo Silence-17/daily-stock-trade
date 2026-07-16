@@ -451,6 +451,34 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertEqual(result["reason"], "cash_below_min_lot")
         self.assertIn("one A-share lot", result["message"])
 
+    def test_price_unavailable_preserves_resolution_audit(self) -> None:
+        with patch.object(
+            self.service.data_fetcher_manager,
+            "get_realtime_quote",
+            side_effect=RuntimeError("configured_quote_failure"),
+        ):
+            result = self.service.submit_order(
+                symbol="000001",
+                side="buy",
+                market="cn",
+                cash_amount=1200,
+                price=None,
+                raw={"name": "missing-quote-candidate", "score": 89},
+            )
+
+        self.assertFalse(result["accepted"])
+        self.assertEqual(result["status"], "skipped")
+        self.assertEqual(result["reason"], "price_unavailable")
+        self.assertEqual(result["cash_amount"], 1200.0)
+        self.assertEqual(
+            result["raw"]["price_resolution"],
+            {"requested_price": None, "source": "unavailable"},
+        )
+        self.assertEqual(result["raw"]["name"], "missing-quote-candidate")
+        account_id = int(self.service.get_settings().account_id)
+        trades = self.service.portfolio.list_trade_events(account_id=account_id, page=1)
+        self.assertEqual(trades["items"], [])
+
     def test_hk_order_requires_current_fx_rate_for_base_currency_cash_check(self) -> None:
         result = self.service.submit_order(
             symbol="00700",
@@ -3525,6 +3553,137 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
             assert gateway is not None
             state = gateway.get_state_snapshot()
             self.assertEqual(state["order_count"], 3)
+            self.assertEqual(state["trade_count"], 2)
+            self.assertEqual(state["active_order_ids"], [])
+        finally:
+            bridge.unregister()
+            main_engine.close()
+
+    @unittest.skipUnless(importlib.util.find_spec("vnpy"), "optional vn.py runtime is not installed")
+    def test_builtin_simulated_gateway_isolates_missing_candidate_quote(self) -> None:
+        from vnpy.event import EventEngine
+        from vnpy.trader.engine import MainEngine
+
+        from src.services.vnpy_simulated_gateway import DsaSimulatedGateway
+
+        class SelectiveQuoteManager(_FakeDataFetcherManager):
+            def get_realtime_quote(self, symbol: str):
+                if symbol == "000001":
+                    raise RuntimeError("configured_quote_failure")
+                return super().get_realtime_quote(symbol)
+
+        event_engine = EventEngine()
+        main_engine = MainEngine(event_engine)
+        main_engine.add_gateway(DsaSimulatedGateway, "DSA_SIM")
+        main_engine.connect(
+            {
+                "fill_delay_ms": 50,
+                "duplicate_trade_event_count": 2,
+            },
+            "DSA_SIM",
+        )
+        service = VnpyPaperTradingService(
+            data_fetcher_manager=SelectiveQuoteManager(price=10.0),
+            config_path=self.config_path,
+            vnpy_main_engine=main_engine,
+            vnpy_event_engine=event_engine,
+        )
+        bridge = service.attach_vnpy_event_engine(event_engine)
+        service.update_settings(
+            {
+                "auto_trade_enabled": True,
+                "auto_trade_time_gate_enabled": False,
+                "auto_execution_mode": "vnpy_paper",
+                "vnpy_gateway_name": "DSA_SIM",
+                "auto_strategy": "dual_low",
+                "auto_max_results": 3,
+                "auto_cash_per_order": 1200,
+            }
+        )
+        fake_alphasift = MagicMock()
+        fake_alphasift.screen.return_value = {
+            "quality_status": "ok",
+            "candidates": [
+                {
+                    "code": "600519",
+                    "name": "priced-candidate-1",
+                    "score": 90,
+                    "price": 10.0,
+                    "amount": 200000000,
+                },
+                {
+                    "code": "000001",
+                    "name": "missing-quote-candidate",
+                    "score": 89,
+                    "price": None,
+                    "amount": 200000000,
+                },
+                {
+                    "code": "300750",
+                    "name": "priced-candidate-3",
+                    "score": 88,
+                    "price": 10.0,
+                    "amount": 200000000,
+                },
+            ],
+            "warnings": [],
+            "source_errors": [],
+        }
+
+        try:
+            with patch(
+                "src.services.vnpy_paper_trading_service.AlphaSiftService",
+                return_value=fake_alphasift,
+            ):
+                result = service.run_auto_trade_once()
+
+            self.assertEqual(
+                [item["status"] for item in result["orders"]],
+                ["submitted", "skipped", "submitted"],
+            )
+            self.assertEqual(result["orders"][1]["reason"], "price_unavailable")
+            deadline = time.monotonic() + 5.0
+            detail = None
+            expected_statuses = ["filled", "skipped", "filled"]
+            while time.monotonic() < deadline:
+                detail = service.agent_repo.get_run_detail(result["agent_run_uid"])
+                if (
+                    detail
+                    and [item["status"] for item in detail["trade_plans"]]
+                    == expected_statuses
+                    and [item["status"] for item in detail["decisions"]]
+                    == expected_statuses
+                ):
+                    break
+                time.sleep(0.05)
+
+            self.assertIsNotNone(detail)
+            assert detail is not None
+            self.assertEqual(detail["submitted_count"], 2)
+            self.assertEqual(detail["skipped_count"], 1)
+            skipped_plan = detail["trade_plans"][1]
+            self.assertEqual(skipped_plan["skip_reason"], "price_unavailable")
+            self.assertEqual(
+                skipped_plan["order_result"]["raw"]["price_resolution"],
+                {"requested_price": None, "source": "unavailable"},
+            )
+            self.assertEqual(
+                skipped_plan["order_result"]["raw"]["name"],
+                "missing-quote-candidate",
+            )
+
+            account_id = int(service.get_settings().account_id)
+            trades = service.portfolio.list_trade_events(account_id=account_id, page=1)
+            self.assertEqual(len(trades["items"]), 2)
+            self.assertEqual(
+                {item["symbol"] for item in trades["items"]},
+                {"600519", "300750"},
+            )
+            gateway = main_engine.get_gateway("DSA_SIM")
+            self.assertIsNotNone(gateway)
+            assert gateway is not None
+            state = gateway.get_state_snapshot()
+            self.assertEqual(state["order_count"], 2)
             self.assertEqual(state["trade_count"], 2)
             self.assertEqual(state["active_order_ids"], [])
         finally:
