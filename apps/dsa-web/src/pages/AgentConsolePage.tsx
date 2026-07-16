@@ -560,6 +560,26 @@ const AgentConsolePage: React.FC = () => {
   const selectedFundFlowRoutingItems = Object.entries(selectedFundFlowRoutingSources || {})
     .map(([source, raw]) => ({ source, state: asRecord(raw) }))
     .filter((item) => item.state);
+  const selectedNewsRouting = asRecord(selectedCandidateContextRouting?.news);
+  const selectedNewsRoutingSources = asRecord(selectedNewsRouting?.sources);
+  const selectedNewsPriorityValue = (
+    selectedNewsRouting?.effectivePriority
+    ?? selectedNewsRouting?.effective_priority
+    ?? selectedNewsRouting?.priority
+  );
+  const selectedNewsPriority = Array.isArray(selectedNewsPriorityValue)
+    ? selectedNewsPriorityValue.map((item) => String(item || '')).filter(Boolean)
+    : String(selectedNewsPriorityValue || '').split(',').map((item) => item.trim()).filter(Boolean);
+  const selectedNewsNextPriorityValue = (
+    selectedNewsRouting?.nextRecommendedPriority
+    ?? selectedNewsRouting?.next_recommended_priority
+  );
+  const selectedNewsNextPriority = Array.isArray(selectedNewsNextPriorityValue)
+    ? selectedNewsNextPriorityValue.map((item) => String(item || '')).filter(Boolean)
+    : [];
+  const selectedNewsRoutingItems = Object.entries(selectedNewsRoutingSources || {})
+    .map(([source, raw]) => ({ source, state: asRecord(raw) }))
+    .filter((item) => item.state);
   const selectedPortfolioOptimizer = asRecord(selectedPortfolioAllocation?.optimizer);
   const selectedPlanProfile = asRecord(selectedPlan?.planProfile) ?? asRecord(selectedPlan?.plan_profile);
   const selectedAdaptiveControls = (
@@ -2418,6 +2438,47 @@ const AgentConsolePage: React.FC = () => {
                                         + `（失败 ${failures}${cooldown > 0 ? `，冷却 ${cooldown}s` : ''}）`;
                                     }).join(' / ')
                                     : selectedFundFlowPriority.join(' → ') || 'tushare_ths → akshare'}
+                                </div>
+                              ) : null}
+                              {selectedNewsRouting ? (
+                                <div
+                                  className="text-xs font-normal text-secondary-text"
+                                  data-testid="agent-news-source-routing"
+                                >
+                                  新闻：
+                                  {selectedNewsPriority.join(' → ') || '未配置可用来源'}
+                                  {selectedNewsRoutingItems.length > 0
+                                    ? ` · ${selectedNewsRoutingItems.map(({ source, state }) => {
+                                      const failures = Number(state?.failures || 0);
+                                      const cooldown = Number(
+                                        state?.cooldownRemainingSeconds
+                                        ?? state?.cooldown_remaining_seconds
+                                        ?? 0,
+                                      );
+                                      return `${source} ${String(state?.state || '-')}`
+                                        + `（失败 ${failures}${cooldown > 0 ? `，冷却 ${cooldown}s` : ''}）`;
+                                    }).join(' / ')}`
+                                    : ''}
+                                  {' · 阈值 '}
+                                  {String(
+                                    selectedNewsRouting.failureThreshold
+                                    ?? selectedNewsRouting.failure_threshold
+                                    ?? '-',
+                                  )}
+                                  {' · 半开 '}
+                                  {String(
+                                    selectedNewsRouting.halfOpenMaxCalls
+                                    ?? selectedNewsRouting.half_open_max_calls
+                                    ?? '-',
+                                  )}
+                                  {selectedNewsRouting.crossProcessPersistence
+                                    || selectedNewsRouting.cross_process_persistence
+                                    ? ' · 跨重启恢复'
+                                    : ''}
+                                  {selectedNewsNextPriority.length > 0
+                                    && selectedNewsNextPriority.join(',') !== selectedNewsPriority.join(',')
+                                    ? ` · 下轮 ${selectedNewsNextPriority.join(' → ')}`
+                                    : ''}
                                 </div>
                               ) : null}
                             </dd>

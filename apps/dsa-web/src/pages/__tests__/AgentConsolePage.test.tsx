@@ -143,6 +143,31 @@ const runSummary = {
             },
           },
         },
+        news: {
+          mode: 'cross_run_health_weighted_failover',
+          basePriority: ['anspire', 'tavily'],
+          effectivePriority: ['tavily', 'anspire'],
+          adjusted: true,
+          failureThreshold: 3,
+          cooldownSeconds: 300,
+          halfOpenMaxCalls: 1,
+          crossProcessPersistence: true,
+          nextRecommendedPriority: ['anspire', 'tavily'],
+          sources: {
+            anspire: {
+              state: 'open',
+              failures: 3,
+              disabled: true,
+              cooldownRemainingSeconds: 120,
+            },
+            tavily: {
+              state: 'closed',
+              failures: 0,
+              disabled: false,
+              cooldownRemainingSeconds: 0,
+            },
+          },
+        },
       },
     },
     crossRunQuality: {
@@ -918,6 +943,12 @@ describe('AgentConsolePage', () => {
     expect(screen.getByTestId('agent-source-routing')).toHaveTextContent('cn/tushare_ths open');
     expect(screen.getByTestId('agent-source-routing')).toHaveTextContent('失败 3，冷却 180s');
     expect(screen.getByTestId('agent-source-routing')).toHaveTextContent('cn/akshare closed');
+    expect(screen.getByTestId('agent-news-source-routing')).toHaveTextContent('新闻：tavily → anspire');
+    expect(screen.getByTestId('agent-news-source-routing')).toHaveTextContent('anspire open');
+    expect(screen.getByTestId('agent-news-source-routing')).toHaveTextContent('失败 3，冷却 120s');
+    expect(screen.getByTestId('agent-news-source-routing')).toHaveTextContent('阈值 3 · 半开 1');
+    expect(screen.getByTestId('agent-news-source-routing')).toHaveTextContent('跨重启恢复');
+    expect(screen.getByTestId('agent-news-source-routing')).toHaveTextContent('下轮 anspire → tavily');
     expect(screen.getAllByText('score 85.0').length).toBeGreaterThan(0);
     expect(screen.getByText('建议人工确认')).toBeInTheDocument();
     expect(screen.getByText('100.0%')).toBeInTheDocument();
