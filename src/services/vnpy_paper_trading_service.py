@@ -22,7 +22,7 @@ from collections import Counter
 from dataclasses import asdict, dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -105,6 +105,8 @@ AUTO_CROSS_MARKET_LINKS = {
     "tw": ("us",),
 }
 NON_DIRECTIONAL_MARKET_INDEX_CODES = {"VIX"}
+AUTO_MARKET_EVIDENCE_TIMEOUT_SECONDS = 15.0
+AUTO_MARKET_EVIDENCE_MAX_WORKERS = 4
 LLM_DYNAMIC_AGENT_PLAN_PROMPT_VERSION = "vnpy_paper_dynamic_agent_plan_v2"
 LLM_DYNAMIC_AGENT_PLAN_EVALUATOR_VERSION = "dynamic_plan_guardrails_v1"
 LLM_PRE_TRADE_REVIEW_PROMPT_VERSION = "vnpy_paper_pre_trade_review_v1"
@@ -305,6 +307,9 @@ class VnpyPaperTradingService:
 
     _lock = threading.RLock()
     _status_snapshot_cache: Dict[Tuple[str, int], Dict[str, Any]] = {}
+    _market_evidence_slots = threading.BoundedSemaphore(
+        AUTO_MARKET_EVIDENCE_MAX_WORKERS
+    )
 
     def __init__(
         self,
@@ -9917,16 +9922,64 @@ class VnpyPaperTradingService:
                 self._write_config_payload(payload)
             return peak
 
-    def _live_market_index_evidence(self, market: str) -> Dict[str, Any]:
+    def _run_market_evidence_call(
+        self,
+        callback: Callable[[], Any],
+        *,
+        label: str,
+    ) -> Tuple[Optional[Any], Optional[str], int]:
+        started_at = time.monotonic()
+        if not self._market_evidence_slots.acquire(blocking=False):
+            return None, "worker_pool_exhausted", 0
+        result: Dict[str, Any] = {}
+        error: Dict[str, str] = {}
+
+        def run() -> None:
+            try:
+                result["value"] = callback()
+            except Exception as exc:  # noqa: BLE001 - caller converts failures to audited evidence.
+                error["value"] = str(exc)[:300]
+            finally:
+                self._market_evidence_slots.release()
+
+        worker = threading.Thread(
+            target=run,
+            daemon=True,
+            name=f"market-evidence-{label}",
+        )
         try:
-            raw_indices = self.data_fetcher_manager.get_main_indices(region=market)
-        except Exception as exc:  # noqa: BLE001 - configured gate fails closed with audited evidence.
-            logger.warning("Failed to fetch live index evidence for %s: %s", market, exc)
+            worker.start()
+        except Exception:
+            self._market_evidence_slots.release()
+            return None, "worker_start_failed", int(
+                (time.monotonic() - started_at) * 1000
+            )
+        worker.join(timeout=AUTO_MARKET_EVIDENCE_TIMEOUT_SECONDS)
+        duration_ms = int((time.monotonic() - started_at) * 1000)
+        if worker.is_alive():
+            return None, "timeout", duration_ms
+        if error:
+            return None, error["value"], duration_ms
+        return result.get("value"), None, duration_ms
+
+    def _live_market_index_evidence(self, market: str) -> Dict[str, Any]:
+        raw_indices, error, duration_ms = self._run_market_evidence_call(
+            lambda: self.data_fetcher_manager.get_main_indices(region=market),
+            label=f"indices-{market}",
+        )
+        if error:
+            logger.warning("Failed to fetch live index evidence for %s: %s", market, error)
             return {
                 "available": False,
                 "market": market,
-                "error": str(exc)[:300],
-                "evidence_reason": "index_fetch_failed",
+                "duration_ms": duration_ms,
+                "timeout_seconds": AUTO_MARKET_EVIDENCE_TIMEOUT_SECONDS,
+                "error": error,
+                "evidence_reason": (
+                    "index_fetch_timeout" if error == "timeout" else
+                    "index_worker_pool_exhausted" if error == "worker_pool_exhausted" else
+                    "index_fetch_failed"
+                ),
             }
 
         indices: List[Dict[str, Any]] = []
@@ -9950,6 +10003,7 @@ class VnpyPaperTradingService:
             return {
                 "available": False,
                 "market": market,
+                "duration_ms": duration_ms,
                 "index_count": 0,
                 "indices": [],
                 "evidence_reason": "index_quotes_empty",
@@ -9958,6 +10012,7 @@ class VnpyPaperTradingService:
         return {
             "available": True,
             "market": market,
+            "duration_ms": duration_ms,
             "index_count": len(indices),
             "aggregate_change_pct": round(aggregate, 6),
             "aggregation": "equal_weight_mean",
@@ -9965,16 +10020,24 @@ class VnpyPaperTradingService:
         }
 
     def _live_cn_breadth_evidence(self) -> Dict[str, Any]:
-        try:
-            stats = self.data_fetcher_manager.get_market_stats(
+        stats, error, duration_ms = self._run_market_evidence_call(
+            lambda: self.data_fetcher_manager.get_market_stats(
                 purpose="vnpy_paper_intraday_risk"
-            )
-        except Exception as exc:  # noqa: BLE001 - configured gate fails closed with audited evidence.
-            logger.warning("Failed to fetch live A-share breadth evidence: %s", exc)
+            ),
+            label="breadth-cn",
+        )
+        if error:
+            logger.warning("Failed to fetch live A-share breadth evidence: %s", error)
             return {
                 "available": False,
-                "error": str(exc)[:300],
-                "evidence_reason": "breadth_fetch_failed",
+                "duration_ms": duration_ms,
+                "timeout_seconds": AUTO_MARKET_EVIDENCE_TIMEOUT_SECONDS,
+                "error": error,
+                "evidence_reason": (
+                    "breadth_fetch_timeout" if error == "timeout" else
+                    "breadth_worker_pool_exhausted" if error == "worker_pool_exhausted" else
+                    "breadth_fetch_failed"
+                ),
             }
         stats = stats if isinstance(stats, dict) else {}
         up_count = _safe_int(stats.get("up_count"))
@@ -9983,12 +10046,14 @@ class VnpyPaperTradingService:
         if up_count is None or down_count is None or flat_count is None:
             return {
                 "available": False,
+                "duration_ms": duration_ms,
                 "evidence_reason": "breadth_counts_missing",
             }
         participants = up_count + down_count + flat_count
         if min(up_count, down_count, flat_count) < 0 or participants <= 0:
             return {
                 "available": False,
+                "duration_ms": duration_ms,
                 "up_count": up_count,
                 "down_count": down_count,
                 "flat_count": flat_count,
@@ -9996,6 +10061,7 @@ class VnpyPaperTradingService:
             }
         return {
             "available": True,
+            "duration_ms": duration_ms,
             "up_count": up_count,
             "down_count": down_count,
             "flat_count": flat_count,
