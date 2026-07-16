@@ -24,6 +24,9 @@ import src.auth as auth
 from api.app import create_app
 from api.v1.endpoints.vnpy_paper_trading import _system_health_payload
 from src.config import Config
+from src.repositories.portfolio_valuation_health_repo import (
+    PortfolioValuationHealthRepository,
+)
 from src.repositories.runtime_scheduler_repo import RuntimeSchedulerRepository
 from src.repositories.stock_selection_agent_repo import StockSelectionAgentRepository
 from src.services.runtime_scheduler import RuntimeSchedulerService
@@ -215,6 +218,54 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
         )
         self.assertEqual(valuation["oldest_price_date"], "2026-07-14")
         self.assertEqual(valuation["latest_price_date"], "2026-07-15")
+
+    def test_valuation_health_history_deduplicates_and_aggregates_windows(self) -> None:
+        repo = PortfolioValuationHealthRepository(DatabaseManager.get_instance())
+        first_at = datetime(2026, 7, 10, 8, 1)
+        degraded = {
+            "status": "warning",
+            "position_count": 4,
+            "account_count": 1,
+            "available_count": 3,
+            "fresh_count": 2,
+            "missing_count": 1,
+            "unknown_count": 0,
+            "stale_count": 1,
+            "coverage_pct": 75.0,
+            "fresh_coverage_pct": 50.0,
+            "source_counts": {"daily_close": 2, "unavailable": 1, "realtime": 1},
+            "provider_counts": {"stock_daily": 2, "unknown": 1, "tencent": 1},
+        }
+        ready = {
+            **degraded,
+            "status": "ready",
+            "available_count": 4,
+            "fresh_count": 4,
+            "missing_count": 0,
+            "stale_count": 0,
+            "coverage_pct": 100.0,
+            "fresh_coverage_pct": 100.0,
+            "provider_counts": {"tencent": 4},
+        }
+
+        first = repo.record_observation(degraded, observed_at=first_at)
+        duplicate = repo.record_observation(ready, observed_at=first_at + timedelta(minutes=5))
+        repo.record_observation(ready, observed_at=datetime(2026, 7, 16, 8, 1))
+        trends = repo.trends(now=datetime(2026, 7, 17, 8, 1))
+
+        self.assertTrue(first["inserted"])
+        self.assertFalse(duplicate["inserted"])
+        windows = {item["window_days"]: item for item in trends["windows"]}
+        self.assertEqual(windows[7]["observation_count"], 2)
+        self.assertEqual(windows[7]["degraded_count"], 1)
+        self.assertEqual(windows[7]["average_coverage_pct"], 87.5)
+        self.assertEqual(windows[7]["minimum_fresh_coverage_pct"], 50.0)
+        providers = {
+            item["provider"]: item for item in windows[7]["provider_usage"]
+        }
+        self.assertEqual(windows[7]["provider_usage"][0]["provider"], "tencent")
+        self.assertEqual(providers["tencent"]["position_observation_count"], 5)
+        self.assertEqual(providers["tencent"]["observation_count"], 2)
 
     def test_system_health_blocks_latched_drawdown_until_recovery_threshold(self) -> None:
         health = _system_health_payload({
@@ -544,6 +595,7 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
                     "price": 10.0,
                 },
             )
+            observed_status_resp = self.client.get("/api/v1/vnpy-paper/status")
 
         self.assertEqual(status_resp.status_code, 200)
         self.assertTrue(status_resp.json()["enabled"])
@@ -558,6 +610,18 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
             "industry_snapshot_unavailable",
         )
         self.assertEqual(health_components["industry_exposure"]["position_count"], 0)
+        observed_health_components = {
+            item["key"]: item
+            for item in observed_status_resp.json()["diagnostics"]["system_health"]["components"]
+        }
+        valuation_trends = observed_health_components["valuation"]["trends"]
+        self.assertEqual(valuation_trends["schema_version"], 1)
+        self.assertEqual(valuation_trends["bucket_minutes"], 15)
+        valuation_windows = {
+            item["window_days"]: item for item in valuation_trends["windows"]
+        }
+        self.assertEqual(valuation_windows[7]["observation_count"], 1)
+        self.assertEqual(valuation_windows[7]["average_coverage_pct"], 100.0)
         self.assertEqual(order_resp.status_code, 200)
         payload = order_resp.json()
         self.assertTrue(payload["accepted"])

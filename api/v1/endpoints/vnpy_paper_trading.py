@@ -53,6 +53,9 @@ from api.v1.schemas.vnpy_paper_trading import (
     VnpyPaperVnpyTradeCallbackRequest,
 )
 from src.repositories.stock_selection_agent_repo import StockSelectionAgentRepository
+from src.repositories.portfolio_valuation_health_repo import (
+    PortfolioValuationHealthRepository,
+)
 from src.services.portfolio_service import PortfolioBusyError
 from src.services.runtime_scheduler import RuntimeSchedulerService
 from src.services.stock_selection_agent_backtest_service import StockSelectionAgentBacktestService
@@ -143,6 +146,28 @@ def _with_system_health(payload: Dict[str, Any]) -> Dict[str, Any]:
     diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), dict) else {}
     diagnostics = dict(diagnostics)
     diagnostics["system_health"] = _system_health_payload(payload)
+    payload["diagnostics"] = diagnostics
+    return payload
+
+
+def _with_valuation_health_history(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Persist full snapshot health and attach bounded historical trends."""
+    diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), dict) else {}
+    diagnostics = dict(diagnostics)
+    valuation = _snapshot_valuation_health(payload)
+    try:
+        repository = PortfolioValuationHealthRepository()
+        if valuation.get("reason") in {"valuation_ready", "valuation_degraded"}:
+            repository.record_observation(valuation)
+        diagnostics["valuation_health_trends"] = repository.trends()
+    except Exception as exc:  # pragma: no cover - health history must not break status.
+        logger.warning("Persist or aggregate valuation health failed: %s", exc)
+        diagnostics["valuation_health_trends"] = {
+            "schema_version": 1,
+            "available": False,
+            "error": str(exc),
+            "windows": [],
+        }
     payload["diagnostics"] = diagnostics
     return payload
 
@@ -559,6 +584,9 @@ def _system_health_payload(status_payload: Dict[str, Any]) -> Dict[str, Any]:
     )
 
     valuation = _snapshot_valuation_health(status_payload)
+    valuation_trends = diagnostics.get("valuation_health_trends")
+    if isinstance(valuation_trends, dict):
+        valuation["trends"] = valuation_trends
     add_component(
         key="valuation",
         label="持仓估值",
@@ -1712,6 +1740,7 @@ def _with_status_dependencies(
     payload = _with_alphasift_status(payload)
     payload = _with_scheduler_status(payload, scheduler)
     payload = _with_vnpy_runtime_status(payload, request)
+    payload = _with_valuation_health_history(payload)
     return _with_system_health(payload)
 
 
