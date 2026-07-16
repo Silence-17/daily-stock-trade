@@ -1,0 +1,341 @@
+# -*- coding: utf-8 -*-
+"""Observe a configured vn.py gateway for a bounded period without placing orders."""
+
+from __future__ import annotations
+
+import argparse
+import importlib
+import json
+import sys
+import time
+from collections import Counter
+from dataclasses import replace
+from datetime import datetime, timezone
+from pathlib import Path
+from threading import Lock
+from typing import Any, Dict, Iterable
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from src.services.vnpy_runtime import (  # noqa: E402
+    bootstrap_vnpy_runtime,
+    load_vnpy_runtime_settings,
+)
+
+EVENT_NAMES = ("order", "trade", "account", "position")
+
+
+def _utc_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _connection_status(diagnostics: Dict[str, Any]) -> str:
+    if not diagnostics.get("available"):
+        return "unavailable"
+    connect = diagnostics.get("connect")
+    if not isinstance(connect, dict):
+        return "not_requested"
+    status = str(connect.get("status") or "").strip().lower()
+    if status:
+        return status
+    if connect.get("connected") is True:
+        return "connected"
+    if connect.get("request_accepted") is True:
+        return "connection_unconfirmed"
+    return "unknown"
+
+
+def evaluate_soak(
+    *,
+    runtime_available: bool,
+    duration_completed: bool,
+    interrupted: bool,
+    sample_counts: Dict[str, int],
+    event_counts: Dict[str, int],
+    required_events: Iterable[str],
+    min_connected_ratio: float,
+) -> Dict[str, Any]:
+    total_samples = sum(max(0, int(value or 0)) for value in sample_counts.values())
+    connected_samples = max(0, int(sample_counts.get("connected") or 0))
+    connected_ratio = connected_samples / total_samples if total_samples else 0.0
+    required = sorted({str(item).strip().lower() for item in required_events if str(item).strip()})
+    missing_events = [name for name in required if int(event_counts.get(name) or 0) <= 0]
+    failures = []
+    if not runtime_available:
+        failures.append("runtime_unavailable")
+    if interrupted:
+        failures.append("interrupted")
+    elif not duration_completed:
+        failures.append("duration_incomplete")
+    if total_samples <= 0:
+        failures.append("no_connection_samples")
+    elif connected_samples <= 0:
+        failures.append("connection_never_confirmed")
+    if total_samples > 0 and connected_ratio + 1e-12 < min_connected_ratio:
+        failures.append("connected_ratio_below_threshold")
+    if missing_events:
+        failures.append("required_events_missing")
+    return {
+        "ok": not failures,
+        "failures": failures,
+        "total_samples": total_samples,
+        "connected_samples": connected_samples,
+        "connected_ratio": round(connected_ratio, 6),
+        "min_connected_ratio": min_connected_ratio,
+        "required_events": required,
+        "missing_events": missing_events,
+    }
+
+
+def _register_event_counters(event_engine: Any) -> tuple[Counter[str], list[tuple[str, Any]]]:
+    module = importlib.import_module("vnpy.trader.event")
+    event_types = {
+        "order": getattr(module, "EVENT_ORDER", None),
+        "trade": getattr(module, "EVENT_TRADE", None),
+        "account": getattr(module, "EVENT_ACCOUNT", None),
+        "position": getattr(module, "EVENT_POSITION", None),
+    }
+    counters: Counter[str] = Counter()
+    lock = Lock()
+    registrations = []
+    for name, event_type in event_types.items():
+        if not event_type:
+            continue
+
+        def handler(_event: Any, *, event_name: str = name) -> None:
+            with lock:
+                counters[event_name] += 1
+
+        event_engine.register(event_type, handler)
+        registrations.append((event_type, handler))
+    return counters, registrations
+
+
+def _unregister_event_counters(event_engine: Any, registrations: list[tuple[str, Any]]) -> None:
+    unregister = getattr(event_engine, "unregister", None)
+    if not callable(unregister):
+        return
+    for event_type, handler in registrations:
+        unregister(event_type, handler)
+
+
+def _safe_runtime_summary(diagnostics: Dict[str, Any]) -> Dict[str, Any]:
+    reconnect = diagnostics.get("auto_reconnect")
+    reconnect = reconnect if isinstance(reconnect, dict) else {}
+    connect = diagnostics.get("connect")
+    connect = connect if isinstance(connect, dict) else {}
+    return {
+        "available": bool(diagnostics.get("available")),
+        "mode": diagnostics.get("mode"),
+        "reason": diagnostics.get("reason"),
+        "gateway_added": bool(
+            isinstance(diagnostics.get("gateway"), dict)
+            and diagnostics["gateway"].get("added")
+        ),
+        "connection_status": _connection_status(diagnostics),
+        "confirmation_source": connect.get("confirmation_source"),
+        "settings_source": connect.get("settings_source"),
+        "auto_reconnect": {
+            "enabled": bool(reconnect.get("enabled")),
+            "running": bool(reconnect.get("running")),
+            "attempt_count": int(reconnect.get("attempt_count") or 0),
+            "success_count": int(reconnect.get("success_count") or 0),
+            "failure_count": int(reconnect.get("failure_count") or 0),
+            "consecutive_failure_count": int(
+                reconnect.get("consecutive_failure_count") or 0
+            ),
+            "last_result": reconnect.get("last_result"),
+            "last_reason": reconnect.get("last_reason"),
+        },
+    }
+
+
+def _bounded_float(
+    parser: argparse.ArgumentParser,
+    name: str,
+    value: float,
+    *,
+    minimum: float,
+    maximum: float,
+) -> float:
+    if value < minimum or value > maximum:
+        parser.error(f"{name} must be between {minimum} and {maximum}")
+    return value
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--duration-seconds", type=float, default=300.0)
+    parser.add_argument("--sample-interval-seconds", type=float, default=5.0)
+    parser.add_argument("--startup-grace-seconds", type=float, default=30.0)
+    parser.add_argument("--min-connected-ratio", type=float, default=0.99)
+    parser.add_argument(
+        "--require-event",
+        action="append",
+        default=[],
+        choices=EVENT_NAMES,
+        help="Require at least one observed event of this type; may be repeated.",
+    )
+    parser.add_argument(
+        "--simulated-disconnect-at-seconds",
+        type=float,
+        default=0.0,
+        help="Explicit DsaSimulatedGateway-only disconnect injection (0 disables it).",
+    )
+    parser.add_argument("--output-json", type=Path)
+    args = parser.parse_args(argv)
+    duration = _bounded_float(
+        parser, "--duration-seconds", args.duration_seconds, minimum=1.0, maximum=86400.0
+    )
+    interval = _bounded_float(
+        parser,
+        "--sample-interval-seconds",
+        args.sample_interval_seconds,
+        minimum=0.1,
+        maximum=60.0,
+    )
+    startup_grace = _bounded_float(
+        parser,
+        "--startup-grace-seconds",
+        args.startup_grace_seconds,
+        minimum=0.0,
+        maximum=600.0,
+    )
+    min_ratio = _bounded_float(
+        parser, "--min-connected-ratio", args.min_connected_ratio, minimum=0.0, maximum=1.0
+    )
+    disconnect_at = _bounded_float(
+        parser,
+        "--simulated-disconnect-at-seconds",
+        args.simulated_disconnect_at_seconds,
+        minimum=0.0,
+        maximum=86400.0,
+    )
+
+    loaded_settings = load_vnpy_runtime_settings()
+    settings = replace(loaded_settings, auto_attach_events=False)
+    if disconnect_at > 0 and not str(settings.gateway_class or "").endswith(
+        ":DsaSimulatedGateway"
+    ):
+        parser.error(
+            "--simulated-disconnect-at-seconds is only valid for DsaSimulatedGateway"
+        )
+
+    started_at = _utc_iso()
+    started_monotonic = time.monotonic()
+    measurement_started = started_monotonic
+    sample_counts: Counter[str] = Counter()
+    transitions = []
+    event_counts: Counter[str] = Counter()
+    registrations: list[tuple[str, Any]] = []
+    runtime_handle = bootstrap_vnpy_runtime(settings=settings)
+    interrupted = False
+    disconnect_injected = False
+    last_status = None
+    try:
+        runtime_ready = bool(
+            runtime_handle.diagnostics.get("available")
+            and runtime_handle.main_engine is not None
+            and runtime_handle.event_engine is not None
+        )
+        if runtime_ready:
+            event_counts, registrations = _register_event_counters(
+                runtime_handle.event_engine
+            )
+
+        if runtime_ready:
+            grace_deadline = time.monotonic() + startup_grace
+            while time.monotonic() < grace_deadline:
+                diagnostics = runtime_handle.refresh_diagnostics()
+                if _connection_status(diagnostics) == "connected":
+                    break
+                time.sleep(min(0.2, max(0.01, grace_deadline - time.monotonic())))
+
+            measurement_started = time.monotonic()
+            measurement_deadline = measurement_started + duration
+            next_sample_at = measurement_started
+            while True:
+                now = time.monotonic()
+                if now >= measurement_deadline:
+                    break
+                if (
+                    disconnect_at > 0
+                    and not disconnect_injected
+                    and now - measurement_started >= disconnect_at
+                ):
+                    gateway = runtime_handle.main_engine.get_gateway(settings.gateway_name)
+                    gateway.close()
+                    disconnect_injected = True
+                diagnostics = runtime_handle.refresh_diagnostics()
+                status = _connection_status(diagnostics)
+                sample_counts[status] += 1
+                if status != last_status:
+                    transitions.append(
+                        {
+                            "elapsed_seconds": round(now - measurement_started, 3),
+                            "from": last_status,
+                            "to": status,
+                        }
+                    )
+                    last_status = status
+                next_sample_at += interval
+                time.sleep(
+                    max(
+                        0.0,
+                        min(next_sample_at, measurement_deadline) - time.monotonic(),
+                    )
+                )
+    except KeyboardInterrupt:
+        interrupted = True
+    finally:
+        if runtime_handle.event_engine is not None:
+            _unregister_event_counters(runtime_handle.event_engine, registrations)
+        final_diagnostics = runtime_handle.refresh_diagnostics()
+        runtime_handle.close()
+
+    ended_monotonic = time.monotonic()
+    observed_duration = max(0.0, ended_monotonic - measurement_started)
+    evaluation = evaluate_soak(
+        runtime_available=bool(final_diagnostics.get("available")),
+        duration_completed=observed_duration + 0.05 >= duration,
+        interrupted=interrupted,
+        sample_counts=dict(sample_counts),
+        event_counts=dict(event_counts),
+        required_events=args.require_event,
+        min_connected_ratio=min_ratio,
+    )
+    result = {
+        "schema_version": 1,
+        "ok": evaluation["ok"],
+        "started_at": started_at,
+        "ended_at": _utc_iso(),
+        "gateway": {
+            "class": settings.gateway_class,
+            "name": settings.gateway_name,
+        },
+        "requested_duration_seconds": duration,
+        "observed_duration_seconds": round(observed_duration, 3),
+        "sample_interval_seconds": interval,
+        "startup_grace_seconds": startup_grace,
+        "sample_counts": dict(sorted(sample_counts.items())),
+        "transitions": transitions[:200],
+        "event_counts": {
+            name: int(event_counts.get(name) or 0) for name in EVENT_NAMES
+        },
+        "disconnect_injected": disconnect_injected,
+        "runtime": _safe_runtime_summary(final_diagnostics),
+        "evaluation": evaluation,
+    }
+    output = json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True)
+    if args.output_json is not None:
+        args.output_json.expanduser().write_text(output + "\n", encoding="utf-8")
+    print(output)
+    if interrupted:
+        return 130
+    return 0 if result["ok"] else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

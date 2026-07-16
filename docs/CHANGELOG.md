@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [新功能] 新增零下单 `scripts/check_vnpy_gateway_soak.py` 长跑验收器，可按启动宽限期、采样间隔、最低连接率和必需订单/成交/账户/持仓事件验证任意已配置 vn.py gateway，聚合状态切换与自动重连统计且不输出连接文件路径或内容；内置 gateway 支持显式单次断线注入
 - [修复] vn.py 原生中文订单状态现统一映射为 DSA 状态，交易计划落库后立即对账 MainEngine 终态，避免 gateway 在 `send_order()` 返回前同步拒单或成交时因 `vt_orderid` 尚未持久化而永久停留在 `submitted`
 - [测试] 内置 `DsaSimulatedGateway` 新增默认关闭的每 N 单拒绝和重复成交事件故障注入，`check_vnpy_adapter.py --fault-matrix` 通过真实 MainEngine/EventEngine 验证拒单透传、重复回报去重，并与断线重连矩阵共同纳入 vn.py 安装验收
 - [改进] vn.py gateway 重连新增异步持久化事件队列：首次连续失败写入 `vnpy_gateway_reconnect_failed`，退避首次达到上限写入 `vnpy_gateway_reconnect_backoff_capped`，恢复写入 `vnpy_gateway_reconnected` resolved 事件；复用现有告警历史、通知路由和去重冷却，关闭 runtime 时排空队列且诊断不包含连接路径或凭据

@@ -149,6 +149,20 @@
 
 安装脚本会校验 Python 版本，安装项目依赖与 `requirements-vnpy.txt`，优先选择 LiteLLM wheel，并把 pip 构建缓存放在 `.venv-vnpy/.pip-cache`。若 AlphaSift 的远程 Git 安装受限，可先准备固定提交的本地源码，再传 `-AlphaSiftSource <repo-relative-path>`；仅诊断 adapter 时可传 `-SkipProjectDependencies`，但该模式不能作为完整 DSA API 运行环境。验收脚本会构造真实 `OrderRequest`，调用测试 MainEngine bridge，启动内置 `DsaSimulatedGateway` 完成标准订单、显式拒单、重复成交回报去重和三轮在途订单重连，再关闭 vn.py EventEngine/MainEngine。
 
+真实 gateway 配置完成后，可在不下单的情况下做长跑连接验收：
+
+```powershell
+.\.venv-vnpy\Scripts\python.exe scripts\check_vnpy_gateway_soak.py `
+  --duration-seconds 21600 `
+  --sample-interval-seconds 5 `
+  --startup-grace-seconds 60 `
+  --min-connected-ratio 0.995 `
+  --require-event account `
+  --output-json "$env:TEMP\vnpy-gateway-soak.json"
+```
+
+该命令读取现有 `VNPY_*` 环境配置，禁用 DSA 业务事件桥，只注册只读事件计数器，不创建 Agent run、交易计划或订单。连接率、从未确认连接、运行时不可用、时长未完成及任一 `--require-event` 缺失都会返回非零退出码。空仓账户不一定产生 position 事件，因此只在明确有持仓时要求 `--require-event position`；order/trade 也只应在独立模拟账户已有外部活动时要求。JSON 仅包含 gateway 类/名称、聚合连接状态、事件计数和重连统计，不包含连接文件路径或参数内容。
+
 runtime 启动前会创建部署工作目录下已忽略的 `.vntrader/`，供 vn.py 保存本地运行状态，避免受限服务账户回退写入用户主目录。需要由 DSA 托管 vn.py EventEngine/MainEngine 时，显式设置：
 
 - `VNPY_RUNTIME_ENABLED=true`：启动时尝试创建 `vnpy.event.EventEngine` 与 `vnpy.trader.engine.MainEngine`。
