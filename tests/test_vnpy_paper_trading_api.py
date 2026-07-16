@@ -1084,6 +1084,7 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
                     "auto_hotspot_retreat_gate_enabled": True,
                     "auto_hotspot_retreat_min_drop": 30,
                     "auto_intraday_market_gate_enabled": True,
+                    "auto_intraday_require_provider_timestamp": True,
                     "auto_intraday_index_min_change_pct": -1.5,
                     "auto_intraday_breadth_min_score": 45,
                     "auto_cross_market_gate_enabled": True,
@@ -1146,6 +1147,9 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
         self.assertTrue(response.json()["settings"]["auto_hotspot_retreat_gate_enabled"])
         self.assertEqual(response.json()["settings"]["auto_hotspot_retreat_min_drop"], 30)
         self.assertTrue(response.json()["settings"]["auto_intraday_market_gate_enabled"])
+        self.assertTrue(
+            response.json()["settings"]["auto_intraday_require_provider_timestamp"]
+        )
         self.assertEqual(
             response.json()["settings"]["auto_intraday_index_min_change_pct"], -1.5
         )

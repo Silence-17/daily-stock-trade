@@ -2645,14 +2645,27 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
 
     def test_intraday_market_gate_uses_live_cn_index_and_breadth_without_snapshot(self) -> None:
         manager = MagicMock()
+        provider_timestamp = datetime.now(timezone.utc).isoformat()
         manager.get_main_indices.return_value = [
-            {"code": "sh000001", "name": "上证指数", "change_pct": -0.4},
-            {"code": "sz399006", "name": "创业板指", "change_pct": 0.2},
+            {
+                "code": "sh000001",
+                "name": "上证指数",
+                "change_pct": -0.4,
+                "provider_timestamp": provider_timestamp,
+            },
+            {
+                "code": "sz399006",
+                "name": "创业板指",
+                "change_pct": 0.2,
+                "provider_timestamp": provider_timestamp,
+            },
         ]
         manager.get_market_stats.return_value = {
             "up_count": 1200,
             "down_count": 700,
             "flat_count": 100,
+            "provider_timestamp": provider_timestamp,
+            "provider_timestamp_coverage_pct": 100.0,
         }
         self.service.data_fetcher_manager = manager
         settings = replace(
@@ -2682,9 +2695,18 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
 
     def test_intraday_market_gate_blocks_weak_live_index_before_breadth(self) -> None:
         manager = MagicMock()
+        provider_timestamp = datetime.now(timezone.utc).isoformat()
         manager.get_main_indices.return_value = [
-            {"code": "sh000001", "change_pct": -2.4},
-            {"code": "sz399006", "change_pct": -1.8},
+            {
+                "code": "sh000001",
+                "change_pct": -2.4,
+                "provider_timestamp": provider_timestamp,
+            },
+            {
+                "code": "sz399006",
+                "change_pct": -1.8,
+                "provider_timestamp": provider_timestamp,
+            },
         ]
         self.service.data_fetcher_manager = manager
         settings = replace(
@@ -2713,6 +2735,7 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         settings = replace(
             self.service.get_settings(),
             auto_intraday_market_gate_enabled=True,
+            auto_intraday_require_provider_timestamp=False,
         )
 
         reason, diagnostics = self.service._market_context_pre_trade_risk(settings)
@@ -2722,6 +2745,101 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertEqual(
             diagnostics["intraday_market"]["breadth"]["evidence_reason"],
             "breadth_counts_missing",
+        )
+
+    def test_intraday_market_gate_requires_provider_timestamp_by_default(self) -> None:
+        manager = MagicMock()
+        manager.get_main_indices.return_value = [
+            {
+                "code": "sh000001",
+                "change_pct": 0.5,
+                "provider": "akshare",
+                "data_granularity": "realtime",
+            }
+        ]
+        self.service.data_fetcher_manager = manager
+        settings = replace(
+            self.service.get_settings(),
+            auto_intraday_market_gate_enabled=True,
+        )
+
+        reason, diagnostics = self.service._market_context_pre_trade_risk(settings)
+
+        self.assertEqual(reason, "intraday_market_index_unavailable")
+        index = diagnostics["intraday_market"]["index"]
+        self.assertTrue(index["require_provider_timestamp"])
+        self.assertEqual(
+            index["rejected_indices"][0]["rejection_reason"],
+            "provider_timestamp_required",
+        )
+
+    def test_intraday_market_gate_requires_fresh_breadth_provider_timestamp(self) -> None:
+        manager = MagicMock()
+        manager.get_main_indices.return_value = [
+            {
+                "code": "sh000001",
+                "change_pct": 0.5,
+                "provider_timestamp": datetime.now(timezone.utc).isoformat(),
+                "data_granularity": "realtime",
+            }
+        ]
+        manager.get_market_stats.return_value = {
+            "up_count": 1200,
+            "down_count": 700,
+            "flat_count": 100,
+            "provider": "akshare",
+        }
+        self.service.data_fetcher_manager = manager
+        settings = replace(
+            self.service.get_settings(),
+            auto_intraday_market_gate_enabled=True,
+        )
+
+        reason, diagnostics = self.service._market_context_pre_trade_risk(settings)
+
+        self.assertEqual(reason, "intraday_market_breadth_unavailable")
+        breadth = diagnostics["intraday_market"]["breadth"]
+        self.assertEqual(breadth["provider_timestamp_status"], "unavailable")
+        self.assertEqual(
+            breadth["evidence_reason"],
+            "breadth_provider_timestamp_required",
+        )
+
+    def test_intraday_market_gate_rejects_partial_breadth_timestamp_coverage(self) -> None:
+        now_iso = datetime.now(timezone.utc).isoformat()
+        manager = MagicMock()
+        manager.get_main_indices.return_value = [
+            {
+                "code": "sh000001",
+                "change_pct": 0.5,
+                "provider": "tickflow",
+                "provider_timestamp": now_iso,
+                "data_granularity": "realtime",
+            }
+        ]
+        manager.get_market_stats.return_value = {
+            "up_count": 3000,
+            "down_count": 1000,
+            "flat_count": 100,
+            "provider": "partial_source",
+            "provider_timestamp": now_iso,
+            "provider_timestamp_coverage_pct": 75.0,
+        }
+        self.service.data_fetcher_manager = manager
+        settings = replace(
+            self.service.get_settings(),
+            auto_intraday_market_gate_enabled=True,
+        )
+
+        reason, diagnostics = self.service._market_context_pre_trade_risk(settings)
+
+        self.assertEqual(reason, "intraday_market_breadth_unavailable")
+        breadth = diagnostics["intraday_market"]["breadth"]
+        self.assertEqual(breadth["provider_timestamp_status"], "fresh")
+        self.assertEqual(breadth["provider_timestamp_coverage_pct"], 75.0)
+        self.assertEqual(
+            breadth["evidence_reason"],
+            "breadth_provider_timestamp_required",
         )
 
     def test_intraday_market_gate_rejects_explicit_end_of_day_index_fallback(self) -> None:

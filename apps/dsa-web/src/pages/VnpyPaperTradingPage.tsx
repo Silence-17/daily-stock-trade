@@ -125,6 +125,7 @@ type SettingsForm = {
   autoHotspotRetreatGateEnabled: boolean;
   autoHotspotRetreatMinDrop: string;
   autoIntradayMarketGateEnabled: boolean;
+  autoIntradayRequireProviderTimestamp: boolean;
   autoIntradayIndexMinChangePct: string;
   autoIntradayBreadthMinScore: string;
   autoCrossMarketGateEnabled: boolean;
@@ -236,6 +237,7 @@ const defaultSettingsForm: SettingsForm = {
   autoHotspotRetreatGateEnabled: false,
   autoHotspotRetreatMinDrop: '25',
   autoIntradayMarketGateEnabled: false,
+  autoIntradayRequireProviderTimestamp: true,
   autoIntradayIndexMinChangePct: '-2',
   autoIntradayBreadthMinScore: '35',
   autoCrossMarketGateEnabled: false,
@@ -590,6 +592,7 @@ function settingsToForm(status: VnpyPaperStatusResponse): SettingsForm {
     autoHotspotRetreatGateEnabled: Boolean(settings.autoHotspotRetreatGateEnabled),
     autoHotspotRetreatMinDrop: String(settings.autoHotspotRetreatMinDrop ?? 25),
     autoIntradayMarketGateEnabled: Boolean(settings.autoIntradayMarketGateEnabled),
+    autoIntradayRequireProviderTimestamp: settings.autoIntradayRequireProviderTimestamp ?? true,
     autoIntradayIndexMinChangePct: String(settings.autoIntradayIndexMinChangePct ?? -2),
     autoIntradayBreadthMinScore: String(settings.autoIntradayBreadthMinScore ?? 35),
     autoCrossMarketGateEnabled: Boolean(settings.autoCrossMarketGateEnabled),
@@ -702,6 +705,7 @@ function buildSettingsUpdate(settingsForm: SettingsForm): VnpyPaperSettingsUpdat
     autoHotspotRetreatGateEnabled: settingsForm.autoHotspotRetreatGateEnabled,
     autoHotspotRetreatMinDrop: parseNumber(settingsForm.autoHotspotRetreatMinDrop) ?? 25,
     autoIntradayMarketGateEnabled: settingsForm.autoIntradayMarketGateEnabled,
+    autoIntradayRequireProviderTimestamp: settingsForm.autoIntradayRequireProviderTimestamp,
     autoIntradayIndexMinChangePct: parseNumber(settingsForm.autoIntradayIndexMinChangePct) ?? -2,
     autoIntradayBreadthMinScore: parseNumber(settingsForm.autoIntradayBreadthMinScore) ?? 35,
     autoCrossMarketGateEnabled: settingsForm.autoCrossMarketGateEnabled,
@@ -3720,6 +3724,19 @@ const VnpyPaperTradingPage: React.FC = () => {
                 }))}
               />
               盘中指数与实时宽度风控
+            </label>
+            <label className="flex items-center gap-2 text-sm text-foreground">
+              <input
+                type="checkbox"
+                className={CHECKBOX_CLASS}
+                disabled={!settingsForm.autoIntradayMarketGateEnabled}
+                checked={settingsForm.autoIntradayRequireProviderTimestamp}
+                onChange={(event) => setSettingsForm((prev) => ({
+                  ...prev,
+                  autoIntradayRequireProviderTimestamp: event.target.checked,
+                }))}
+              />
+              要求可验证行情时间
             </label>
             <label className="flex items-center gap-2 text-sm text-foreground">
               <input

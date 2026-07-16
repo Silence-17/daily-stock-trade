@@ -80,6 +80,7 @@ describe('vnpyPaperTradingApi', () => {
           auto_hotspot_retreat_gate_enabled: true,
           auto_hotspot_retreat_min_drop: 30,
           auto_intraday_market_gate_enabled: true,
+          auto_intraday_require_provider_timestamp: true,
           auto_intraday_index_min_change_pct: -1.5,
           auto_intraday_breadth_min_score: 45,
           auto_cross_market_gate_enabled: true,
@@ -180,6 +181,7 @@ describe('vnpyPaperTradingApi', () => {
     expect(result.settings.autoHotspotRetreatGateEnabled).toBe(true);
     expect(result.settings.autoHotspotRetreatMinDrop).toBe(30);
     expect(result.settings.autoIntradayMarketGateEnabled).toBe(true);
+    expect(result.settings.autoIntradayRequireProviderTimestamp).toBe(true);
     expect(result.settings.autoIntradayIndexMinChangePct).toBe(-1.5);
     expect(result.settings.autoIntradayBreadthMinScore).toBe(45);
     expect(result.settings.autoCrossMarketGateEnabled).toBe(true);
@@ -1193,6 +1195,7 @@ describe('vnpyPaperTradingApi', () => {
       autoHotspotRetreatGateEnabled: true,
       autoHotspotRetreatMinDrop: 30,
       autoIntradayMarketGateEnabled: true,
+      autoIntradayRequireProviderTimestamp: true,
       autoIntradayIndexMinChangePct: -1.5,
       autoIntradayBreadthMinScore: 45,
       autoCrossMarketGateEnabled: true,
@@ -1267,6 +1270,7 @@ describe('vnpyPaperTradingApi', () => {
       auto_hotspot_retreat_gate_enabled: true,
       auto_hotspot_retreat_min_drop: 30,
       auto_intraday_market_gate_enabled: true,
+      auto_intraday_require_provider_timestamp: true,
       auto_intraday_index_min_change_pct: -1.5,
       auto_intraday_breadth_min_score: 45,
       auto_cross_market_gate_enabled: true,

@@ -1084,6 +1084,7 @@ class TickFlowFetcher(BaseFetcher):
             "total_amount": 0.0,
         }
         valid_rows = 0
+        provider_timestamps: List[str] = []
 
         for quote in quotes:
             if not quote:
@@ -1114,6 +1115,11 @@ class TickFlowFetcher(BaseFetcher):
             )
 
             valid_rows += 1
+            provider_timestamp = self._format_provider_timestamp(
+                quote.get("timestamp") or quote.get("time") or quote.get("ts")
+            )
+            if provider_timestamp:
+                provider_timestamps.append(provider_timestamp)
 
             if abs(last_price - limit_up) <= limit_up_tolerance:
                 stats["limit_up_count"] += 1
@@ -1130,5 +1136,14 @@ class TickFlowFetcher(BaseFetcher):
         if valid_rows == 0:
             logger.warning("[TickFlowFetcher] no valid A-share rows for market stats")
             return None
+
+        timestamp_coverage_pct = round(len(provider_timestamps) / valid_rows * 100, 6)
+        stats["provider_timestamp"] = (
+            min(provider_timestamps)
+            if len(provider_timestamps) == valid_rows
+            else None
+        )
+        stats["provider_timestamp_coverage_pct"] = timestamp_coverage_pct
+        stats["data_granularity"] = "realtime"
 
         return stats
