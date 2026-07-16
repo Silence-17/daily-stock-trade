@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [改进] 自动选股候选新闻支持按最近 30 天同策略/市场 provider 健康趋势生成请求级顺序；新闻缓存按显式路由隔离，provider 异常继续故障转移，并将完整尝试链写入 `news/<provider>` 跨运行健康证据，缓存命中不重复累计旧尝试
 - [改进] AlphaSift 候选上下文健康趋势新增 `quote/<provider>`、`fund_flow/<provider>`、`news/<provider>` 明细；provider 明细标记为仅趋势证据，不重复计入本轮数据质量分。自动 Agent 使用最近 30 天同策略/市场资金流 provider 趋势和当前熔断状态计算请求级顺序，路由变化只作用于本次增强并隔离基本面缓存，不修改全局配置
 - [改进] 自动选股候选缺少有效价格且实时行情获取失败时，`price_unavailable` 跳过结果保留请求价格、解析来源、候选上下文和预算审计，不向 vn.py 提交未知价格委托，也不阻断同轮其他候选
 - [测试] 新增真实 MainEngine/EventEngine 三候选行情缺价隔离矩阵，验证中间候选行情源异常时前后候选仍独立成交、运行汇总为两笔提交一笔跳过、重复成交回报不重复入账且网关无残留活动订单

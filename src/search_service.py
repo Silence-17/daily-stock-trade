@@ -16,10 +16,10 @@ import re
 import threading
 import time
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
-from typing import List, Dict, Any, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 from itertools import cycle
 from urllib.parse import parse_qsl, unquote, urlparse
 import requests
@@ -141,6 +141,8 @@ class SearchResponse:
     success: bool = True
     error_message: Optional[str] = None
     search_time: float = 0.0  # 搜索耗时（秒）
+    provider_attempts: List[Dict[str, Any]] = field(default_factory=list)
+    cache_hit: bool = False
     
     def to_context(self, max_results: int = 5) -> str:
         """将搜索结果转换为可用于 AI 分析的上下文"""
@@ -2504,6 +2506,35 @@ class SearchService:
         """检查是否有可用的搜索引擎"""
         return any(p.is_available for p in self._providers)
 
+    def news_provider_priority(self) -> List[str]:
+        """Return the configured, currently available news provider order."""
+        return [
+            str(provider.name or "").strip().lower()
+            for provider in self._providers
+            if provider.is_available and str(provider.name or "").strip()
+        ]
+
+    def _ordered_news_providers(
+        self,
+        provider_priority: Optional[Sequence[str]],
+    ) -> List[BaseSearchProvider]:
+        available = [provider for provider in self._providers if provider.is_available]
+        if not provider_priority:
+            return available
+
+        by_name = {
+            str(provider.name or "").strip().lower(): provider
+            for provider in available
+            if str(provider.name or "").strip()
+        }
+        ordered: List[BaseSearchProvider] = []
+        for raw_name in provider_priority:
+            provider = by_name.get(str(raw_name or "").strip().lower())
+            if provider is not None and provider not in ordered:
+                ordered.append(provider)
+        ordered.extend(provider for provider in available if provider not in ordered)
+        return ordered
+
     def _cache_key(self, query: str, max_results: int, days: int) -> str:
         """Build a cache key from query parameters."""
         return f"{query}|{max_results}|{days}"
@@ -3578,7 +3609,8 @@ class SearchService:
         stock_code: str,
         stock_name: str,
         max_results: int = 5,
-        focus_keywords: Optional[List[str]] = None
+        focus_keywords: Optional[List[str]] = None,
+        provider_priority: Optional[Sequence[str]] = None,
     ) -> SearchResponse:
         """
         搜索股票相关新闻
@@ -3632,10 +3664,20 @@ class SearchService:
             provider_max_results,
         )
 
+        provider_route = [
+            str(provider.name or "").strip().lower()
+            for provider in self._ordered_news_providers(provider_priority)
+        ]
+        provider_route_suffix = (
+            f"|provider_route={','.join(provider_route)}"
+            if provider_priority
+            else ""
+        )
         cache_key = self._cache_key(
             (
                 f"{query}|target={stock_code}:{stock_name}|"
                 f"news_pref={'zh' if prefer_chinese else 'default'}"
+                f"{provider_route_suffix}"
             ),
             max_results,
             search_days,
@@ -3643,6 +3685,7 @@ class SearchService:
         cached, cache_owner, cache_event = self._get_cached_or_reserve(cache_key)
         if cached is not None:
             logger.info(f"使用缓存搜索结果: {stock_name}({stock_code})")
+            cached.cache_hit = True
             self._record_news_search_run(
                 provider=cached.provider or "SearchCache",
                 operation="search_stock_news_cache",
@@ -3658,6 +3701,7 @@ class SearchService:
             cached = self._wait_for_cached(cache_key, cache_event)
             if cached is not None:
                 logger.info(f"使用并发填充后的缓存搜索结果: {stock_name}({stock_code})")
+                cached.cache_hit = True
                 self._record_news_search_run(
                     provider=cached.provider or "SearchCache",
                     operation="search_stock_news_cache_wait",
@@ -3671,6 +3715,7 @@ class SearchService:
             cached, cache_owner, cache_event = self._get_cached_or_reserve(cache_key)
             if cached is not None:
                 logger.info(f"使用等待后命中的缓存搜索结果: {stock_name}({stock_code})")
+                cached.cache_hit = True
                 self._record_news_search_run(
                     provider=cached.provider or "SearchCache",
                     operation="search_stock_news_cache_retry",
@@ -3687,9 +3732,8 @@ class SearchService:
             had_provider_success = False
             best_ranked_response: Optional[SearchResponse] = None
             best_ranked_stats: Optional[Dict[str, int]] = None
-            for provider in self._providers:
-                if not provider.is_available:
-                    continue
+            provider_attempts: List[Dict[str, Any]] = []
+            for provider in self._ordered_news_providers(provider_priority):
 
                 search_kwargs: Dict[str, Any] = {}
                 if isinstance(provider, TavilySearchProvider):
@@ -3719,7 +3763,12 @@ class SearchService:
                         error_type=type(exc).__name__,
                         error_message=exc,
                     )
-                    raise
+                    provider_attempts.append({
+                        "provider": str(provider.name or "").strip().lower(),
+                        "result": "failed",
+                        "error": type(exc).__name__,
+                    })
+                    continue
                 filtered_response = self._filter_news_response(
                     response,
                     search_days=search_days,
@@ -3761,6 +3810,11 @@ class SearchService:
                             response.error_message or "过滤后无有效新闻"
                         ),
                     )
+                    provider_attempts.append({
+                        "provider": str(provider.name or "").strip().lower(),
+                        "result": "ok" if admitted_count else "unavailable",
+                        "record_count": admitted_count,
+                    })
                     if not admitted_count:
                         logger.info(
                             "%s 搜索成功但准入过滤后无有效新闻，继续尝试下一引擎",
@@ -3790,6 +3844,7 @@ class SearchService:
                             provider.name,
                             stats["direct_count"],
                         )
+                        limited_response.provider_attempts = list(provider_attempts)
                         self._put_cache(cache_key, limited_response)
                         return limited_response
 
@@ -3833,6 +3888,11 @@ class SearchService:
                             response.error_message or "过滤后无有效新闻"
                         ),
                     )
+                    provider_attempts.append({
+                        "provider": str(provider.name or "").strip().lower(),
+                        "result": "unavailable" if response.success else "failed",
+                        "record_count": filtered_count,
+                    })
                     if response.success and not filtered_response.results:
                         logger.info(
                             "%s 搜索成功但过滤后无有效新闻，继续尝试下一引擎",
@@ -3846,6 +3906,7 @@ class SearchService:
                         )
 
             if best_ranked_response is not None:
+                best_ranked_response.provider_attempts = list(provider_attempts)
                 self._put_cache(cache_key, best_ranked_response)
                 return best_ranked_response
 
@@ -3856,6 +3917,7 @@ class SearchService:
                     provider="Filtered",
                     success=True,
                     error_message=None,
+                    provider_attempts=list(provider_attempts),
                 )
             
             # 所有引擎都失败
@@ -3864,7 +3926,8 @@ class SearchService:
                 results=[],
                 provider="None",
                 success=False,
-                error_message="所有搜索引擎都不可用或搜索失败"
+                error_message="所有搜索引擎都不可用或搜索失败",
+                provider_attempts=list(provider_attempts),
             )
         finally:
             if cache_owner and cache_event is not None:

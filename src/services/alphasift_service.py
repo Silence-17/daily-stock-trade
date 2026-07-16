@@ -1317,13 +1317,19 @@ class AlphaSiftService:
             market=market,
             source_health_items=source_health_trends,
         )
-        fund_flow_priority = list(
-            candidate_context_routing.get("fund_flow", {}).get("effective_priority") or []
-        )
+        enrichment_kwargs: Dict[str, Any] = {}
         if candidate_context_routing.get("fund_flow", {}).get("adjusted"):
+            enrichment_kwargs["capital_flow_source_priority"] = list(
+                candidate_context_routing["fund_flow"].get("effective_priority") or []
+            )
+        if candidate_context_routing.get("news", {}).get("adjusted"):
+            enrichment_kwargs["news_provider_priority"] = list(
+                candidate_context_routing["news"].get("effective_priority") or []
+            )
+        if enrichment_kwargs:
             selected, dsa_enrichment = _enrich_candidates_with_dsa(
                 selected,
-                capital_flow_source_priority=fund_flow_priority,
+                **enrichment_kwargs,
             )
         else:
             selected, dsa_enrichment = _enrich_candidates_with_dsa(selected)
@@ -1332,15 +1338,16 @@ class AlphaSiftService:
             source_health_items=source_health_trends,
         )
         candidate_context_routing["quote"] = post_enrichment_routing["quote"]
-        applied_fund_flow = candidate_context_routing["fund_flow"]
-        post_fund_flow = post_enrichment_routing["fund_flow"]
-        applied_fund_flow["post_run_sources"] = post_fund_flow.get("sources", {})
-        applied_fund_flow["next_recommended_priority"] = list(
-            post_fund_flow.get("effective_priority") or []
-        )
-        applied_fund_flow["post_run_trend_weights"] = list(
-            post_fund_flow.get("trend_weights") or []
-        )
+        for route_group in ("fund_flow", "news"):
+            applied_route = candidate_context_routing[route_group]
+            post_route = post_enrichment_routing[route_group]
+            applied_route["post_run_sources"] = post_route.get("sources", {})
+            applied_route["next_recommended_priority"] = list(
+                post_route.get("effective_priority") or []
+            )
+            applied_route["post_run_trend_weights"] = list(
+                post_route.get("trend_weights") or []
+            )
         dsa_enrichment["source_routing"] = candidate_context_routing
         candidate_context_routing = (
             dsa_enrichment.get("source_routing")
@@ -2365,12 +2372,21 @@ def build_alphasift_candidate_context_source_routing(
     market: str,
     source_health_items: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
+    news_routing = _get_dsa_news_source_routing()
+    news_priority = list(news_routing.get("priority") or [])
     return {
         "quote": _get_dsa_realtime_source_routing(),
         "fund_flow": _health_weighted_candidate_context_route(
             _get_dsa_capital_flow_source_routing(),
             group="fund_flow",
             base_priority=["tushare_ths", "akshare"],
+            market=market,
+            source_health_items=source_health_items,
+        ),
+        "news": _health_weighted_candidate_context_route(
+            news_routing,
+            group="news",
+            base_priority=news_priority,
             market=market,
             source_health_items=source_health_items,
         ),
@@ -3836,6 +3852,27 @@ def _get_dsa_capital_flow_source_routing() -> Dict[str, Any]:
         }
 
 
+def _get_dsa_news_source_routing() -> Dict[str, Any]:
+    try:
+        service = _get_dsa_search_service()
+        priority_getter = getattr(service, "news_provider_priority", None)
+        priority = priority_getter() if callable(priority_getter) else []
+        normalized_priority = _dedupe_strings(
+            [_env_text(source).lower() for source in priority if _env_text(source)]
+        )
+        return {
+            "mode": "ordered_failover",
+            "priority": normalized_priority,
+            "sources": {
+                source: {"available": True, "failures": 0, "disabled": False}
+                for source in normalized_priority
+            },
+        }
+    except Exception as exc:  # noqa: BLE001 - diagnostics must not block screening.
+        logger.debug("Failed to read DSA news source routing: %s", exc)
+        return {"mode": "ordered_failover", "priority": [], "sources": {}}
+
+
 def get_dsa_fundamental_context(
     stock_code: str,
     *,
@@ -3852,7 +3889,13 @@ def get_dsa_fundamental_context(
     return _compact_fundamental_context(_remove_non_finite_json_values(_to_plain(context)))
 
 
-def search_dsa_stock_news(stock_code: str, stock_name: str = "", max_results: int = 3) -> Dict[str, Any]:
+def search_dsa_stock_news(
+    stock_code: str,
+    stock_name: str = "",
+    max_results: int = 3,
+    *,
+    provider_priority: Optional[List[str]] = None,
+) -> Dict[str, Any]:
     service = _get_dsa_search_service()
     if not getattr(service, "is_available", False):
         return {
@@ -3861,7 +3904,10 @@ def search_dsa_stock_news(stock_code: str, stock_name: str = "", max_results: in
             "results": [],
         }
 
-    response = service.search_stock_news(stock_code, stock_name or stock_code, max_results=max_results)
+    search_kwargs: Dict[str, Any] = {"max_results": max_results}
+    if provider_priority:
+        search_kwargs["provider_priority"] = provider_priority
+    response = service.search_stock_news(stock_code, stock_name or stock_code, **search_kwargs)
     results = []
     for item in getattr(response, "results", []) or []:
         results.append(
@@ -3880,6 +3926,8 @@ def search_dsa_stock_news(stock_code: str, stock_name: str = "", max_results: in
             "success": bool(getattr(response, "success", False)),
             "error": getattr(response, "error_message", None),
             "results": results,
+            "provider_attempts": _to_plain(getattr(response, "provider_attempts", [])),
+            "cache_hit": bool(getattr(response, "cache_hit", False)),
         }
     )
 
@@ -3906,6 +3954,7 @@ def _enrich_candidates_with_dsa(
     candidates: List[Dict[str, Any]],
     *,
     capital_flow_source_priority: Optional[List[str]] = None,
+    news_provider_priority: Optional[List[str]] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     limit = min(len(candidates), DSA_ENRICHMENT_MAX_CANDIDATES)
     results: Dict[int, Tuple[bool, List[str]]] = {}
@@ -3932,6 +3981,7 @@ def _enrich_candidates_with_dsa(
                 include_fundamentals=True,
                 profile="post_rank_full",
                 capital_flow_source_priority=capital_flow_source_priority,
+                news_provider_priority=news_provider_priority,
             )
             candidate.update(enriched)
             context = enriched.get("dsa_context", {})
@@ -4097,6 +4147,7 @@ def _summarize_dsa_candidate_context_source_health(
         news = context.get("news") if isinstance(context.get("news"), dict) else {}
         news_results = news.get("results") if isinstance(news.get("results"), list) else []
         news_skipped = bool(news.get("skipped"))
+        news_cache_hit = bool(news.get("cache_hit"))
         news_success = bool(news.get("success"))
         _record_dsa_context_source_observation(
             providers["news"],
@@ -4108,10 +4159,37 @@ def _summarize_dsa_candidate_context_source_health(
                 else _env_text(news.get("error")) or "stock_news_unavailable"
             ),
         )
-        news_provider = _env_text(news.get("provider") or news.get("source")).lower()
-        if news_provider and not news_skipped:
+        observed_news_providers: set[str] = set()
+        provider_attempts = news.get("provider_attempts") if not news_cache_hit else []
+        for attempt in provider_attempts if isinstance(provider_attempts, list) else []:
+            if not isinstance(attempt, dict):
+                continue
+            news_provider = _env_text(attempt.get("provider")).lower()
+            if not news_provider or news_provider in observed_news_providers:
+                continue
+            observed_news_providers.add(news_provider)
+            attempt_result = _env_text(attempt.get("result")).lower()
+            attempt_status = "ok" if attempt_result in {"ok", "available", "success"} else (
+                "partial" if attempt_result in {"partial", "degraded", "stale"} else "unavailable"
+            )
             _record_dsa_context_source_observation(
                 provider_bucket(f"news/{news_provider}"),
+                status=attempt_status,
+                rows=max(0, int(_safe_float(attempt.get("record_count")) or 0)),
+                error=None if attempt_status != "unavailable" else (
+                    _env_text(attempt.get("error")) or f"{news_provider}_{attempt_result or 'unavailable'}"
+                ),
+            )
+        selected_news_provider = _env_text(news.get("provider") or news.get("source")).lower()
+        if (
+            selected_news_provider
+            and selected_news_provider not in observed_news_providers
+            and selected_news_provider not in {"none", "filtered", "searchcache"}
+            and not news_skipped
+            and not news_cache_hit
+        ):
+            _record_dsa_context_source_observation(
+                provider_bucket(f"news/{selected_news_provider}"),
                 status="ok" if news_success else "unavailable",
                 rows=len(news_results),
                 error=None if news_success else _env_text(news.get("error")) or "stock_news_unavailable",
@@ -4193,6 +4271,7 @@ def _build_dsa_candidate_context(
     include_fundamentals: bool = True,
     profile: str = "post_rank_full",
     capital_flow_source_priority: Optional[List[str]] = None,
+    news_provider_priority: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     code = _env_text(candidate.get("code"))
     name = _env_text(candidate.get("name"))
@@ -4265,7 +4344,14 @@ def _build_dsa_candidate_context(
     if include_news:
         if not _news_has_results(news):
             try:
-                news = search_dsa_stock_news(code, _env_text(candidate.get("name")) or name or code, max_results=3)
+                news_kwargs: Dict[str, Any] = {"max_results": 3}
+                if news_provider_priority:
+                    news_kwargs["provider_priority"] = news_provider_priority
+                news = search_dsa_stock_news(
+                    code,
+                    _env_text(candidate.get("name")) or name or code,
+                    **news_kwargs,
+                )
                 if not news.get("success"):
                     warnings.append(news.get("error") or "stock_news_unavailable")
             except Exception as exc:  # noqa: BLE001
