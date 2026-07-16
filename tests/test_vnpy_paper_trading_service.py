@@ -3007,6 +3007,13 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertEqual(audit["trade_plans"][0]["execution_mode"], "dry_run")
         self.assertIsNone(audit["trade_plans"][0]["trade_id"])
         decision_order = audit["decisions"][0]["order_result"]
+        self.assertEqual(audit["decisions"][0]["position_plan"], decision_order["position_plan"])
+        self.assertEqual(
+            audit["decisions"][0]["strategy_evidence"],
+            decision_order["strategy_evidence"],
+        )
+        self.assertEqual(audit["decisions"][0]["risk_review"], decision_order["risk_review"])
+        self.assertEqual(audit["decisions"][0]["agent_review"], decision_order["agent_review"])
         plan_order = audit["trade_plans"][0]["order_result"]
         self.assertEqual(decision_order["position_plan"]["symbol"], "600519")
         self.assertEqual(decision_order["position_plan"]["planned_cash_amount"], 1200.0)
@@ -3045,6 +3052,51 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertEqual(plan_order["agent_review"]["status"], "warning")
         trades = self.service.portfolio.list_trade_events(account_id=int(self.service.get_settings().account_id), page=1)
         self.assertEqual(trades["items"], [])
+
+    def test_agent_decision_audit_fields_fall_back_to_legacy_order_result(self) -> None:
+        run = self.service.agent_repo.create_run(
+            run_uid="legacy-decision-audit",
+            trigger_source="unit_test",
+            strategy="dual_low",
+            market="cn",
+        )
+        decision = self.service.agent_repo.record_decision(
+            run_id=run["id"],
+            sequence=1,
+            symbol="600519",
+            market="cn",
+            action="buy",
+            status="planned",
+            order_result={
+                "strategy_evidence": {"status": "detailed"},
+                "position_plan": {"symbol": "600519"},
+                "risk_review": {"status": "passed"},
+                "agent_review": {"status": "passed"},
+                "llm_review": {"status": "warning"},
+            },
+        )
+        with self.service.agent_repo.db.get_session() as session:
+            session.execute(
+                text(
+                    "UPDATE stock_selection_agent_decisions SET "
+                    "strategy_evidence_json = NULL, position_plan_json = NULL, "
+                    "risk_review_json = NULL, agent_review_json = NULL, llm_review_json = NULL "
+                    "WHERE id = :decision_id"
+                ),
+                {"decision_id": decision["id"]},
+            )
+            session.commit()
+
+        detail = self.service.agent_repo.get_run_detail("legacy-decision-audit")
+
+        self.assertIsNotNone(detail)
+        assert detail is not None
+        legacy = detail["decisions"][0]
+        self.assertEqual(legacy["strategy_evidence"], {"status": "detailed"})
+        self.assertEqual(legacy["position_plan"], {"symbol": "600519"})
+        self.assertEqual(legacy["risk_review"], {"status": "passed"})
+        self.assertEqual(legacy["agent_review"], {"status": "passed"})
+        self.assertEqual(legacy["llm_review"], {"status": "warning"})
 
     def test_candidate_strategy_evidence_does_not_infer_missing_rule_matches(self) -> None:
         settings = self.service.get_settings()
@@ -3901,6 +3953,27 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertEqual(audit["trade_plans"][0]["status"], "filled")
         self.assertEqual(audit["trade_plans"][0]["trade_id"], callback["trade_id"])
         self.assertEqual(audit["trade_plans"][0]["submitted_price"], 10.2)
+        decision = audit["decisions"][0]
+        self.assertEqual(decision["position_plan"]["symbol"], "600519")
+        self.assertEqual(decision["risk_review"]["status"], "passed")
+        self.assertEqual(decision["agent_review"]["reviewer"], "rule_agent_v1")
+        self.assertEqual(
+            decision["order_result"]["strategy_evidence"],
+            decision["strategy_evidence"],
+        )
+        with self.service.agent_repo.db.get_session() as session:
+            persisted = session.execute(
+                text(
+                    "SELECT strategy_evidence_json, position_plan_json, "
+                    "risk_review_json, agent_review_json, llm_review_json "
+                    "FROM stock_selection_agent_decisions WHERE id = :decision_id"
+                ),
+                {"decision_id": decision["id"]},
+            ).mappings().one()
+        self.assertEqual(json.loads(persisted["position_plan_json"])["symbol"], "600519")
+        self.assertEqual(json.loads(persisted["risk_review_json"])["status"], "passed")
+        self.assertEqual(json.loads(persisted["agent_review_json"])["reviewer"], "rule_agent_v1")
+        self.assertEqual(json.loads(persisted["llm_review_json"]), {})
 
         duplicate = self.service.sync_vnpy_trade_callback(
             vt_orderid="SIM.1",

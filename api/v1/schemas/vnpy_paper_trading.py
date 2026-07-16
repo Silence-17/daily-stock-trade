@@ -598,6 +598,11 @@ class VnpyPaperAgentDecision(BaseModel):
     trade_id: Optional[int] = None
     rationale: Optional[str] = None
     risk_flags: List[str] = Field(default_factory=list)
+    strategy_evidence: Dict[str, Any] = Field(default_factory=dict)
+    position_plan: Dict[str, Any] = Field(default_factory=dict)
+    risk_review: Dict[str, Any] = Field(default_factory=dict)
+    agent_review: Dict[str, Any] = Field(default_factory=dict)
+    llm_review: Dict[str, Any] = Field(default_factory=dict)
     order_result: Dict[str, Any] = Field(default_factory=dict)
     raw_candidate: Dict[str, Any] = Field(default_factory=dict)
     created_at: Optional[Any] = None
