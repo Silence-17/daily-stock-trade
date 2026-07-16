@@ -140,34 +140,94 @@ class PortfolioValuationHealthRepository:
         days: int,
     ) -> Dict[str, Any]:
         count = len(rows)
-        degraded = sum(1 for row in rows if row.status != "ready")
+        health_rows = [row for row in rows if int(row.position_count or 0) > 0]
+        health_count = len(health_rows)
+        degraded = sum(1 for row in health_rows if row.status != "ready")
+        position_observation_count = sum(
+            max(0, int(row.position_count or 0)) for row in health_rows
+        )
+        available_position_observation_count = sum(
+            max(0, min(int(row.available_count or 0), int(row.position_count or 0)))
+            for row in health_rows
+        )
+        fresh_position_observation_count = sum(
+            max(
+                0,
+                min(
+                    int(row.fresh_count or 0),
+                    int(row.available_count or 0),
+                    int(row.position_count or 0),
+                ),
+            )
+            for row in health_rows
+        )
+        coverage_values = [
+            cls._percentage(
+                max(0, min(int(row.available_count or 0), int(row.position_count or 0))),
+                int(row.position_count or 0),
+            )
+            for row in health_rows
+        ]
+        fresh_coverage_values = [
+            cls._percentage(
+                max(
+                    0,
+                    min(
+                        int(row.fresh_count or 0),
+                        int(row.available_count or 0),
+                        int(row.position_count or 0),
+                    ),
+                ),
+                int(row.position_count or 0),
+            )
+            for row in health_rows
+        ]
         provider_totals: Dict[str, int] = {}
         provider_observations: Dict[str, int] = {}
-        for row in rows:
+        for row in health_rows:
             for provider, raw_count in cls._json_loads(row.provider_counts_json).items():
-                count_value = int(raw_count or 0)
+                count_value = max(0, int(raw_count or 0))
                 provider_totals[provider] = provider_totals.get(provider, 0) + count_value
                 if count_value > 0:
                     provider_observations[provider] = provider_observations.get(provider, 0) + 1
+        attributed_position_observation_count = sum(provider_totals.values())
         return {
             "window_days": days,
             "observation_count": count,
+            "health_observation_count": health_count,
+            "empty_position_observation_count": count - health_count,
             "degraded_count": degraded,
-            "degraded_pct": round(degraded / count * 100.0, 2) if count else None,
-            "average_coverage_pct": cls._average([row.coverage_pct for row in rows]),
-            "minimum_coverage_pct": cls._minimum([row.coverage_pct for row in rows]),
-            "average_fresh_coverage_pct": cls._average(
-                [row.fresh_coverage_pct for row in rows]
+            "degraded_pct": round(degraded / health_count * 100.0, 2) if health_count else None,
+            "position_observation_count": position_observation_count,
+            "available_position_observation_count": available_position_observation_count,
+            "fresh_position_observation_count": fresh_position_observation_count,
+            "position_weighted_coverage_pct": cls._percentage(
+                available_position_observation_count,
+                position_observation_count,
             ),
-            "minimum_fresh_coverage_pct": cls._minimum(
-                [row.fresh_coverage_pct for row in rows]
+            "position_weighted_fresh_coverage_pct": cls._percentage(
+                fresh_position_observation_count,
+                position_observation_count,
             ),
-            "latest_observed_at": rows[-1].observed_at.isoformat() if rows else None,
+            "average_coverage_pct": cls._average(coverage_values),
+            "minimum_coverage_pct": cls._minimum(coverage_values),
+            "average_fresh_coverage_pct": cls._average(fresh_coverage_values),
+            "minimum_fresh_coverage_pct": cls._minimum(fresh_coverage_values),
+            "latest_observed_at": health_rows[-1].observed_at.isoformat() if health_rows else None,
+            "provider_attributed_position_observation_count": attributed_position_observation_count,
+            "provider_attribution_coverage_pct": cls._percentage(
+                attributed_position_observation_count,
+                position_observation_count,
+            ),
             "provider_usage": [
                 {
                     "provider": provider,
                     "position_observation_count": provider_totals[provider],
                     "observation_count": provider_observations.get(provider, 0),
+                    "share_pct": cls._percentage(
+                        provider_totals[provider],
+                        attributed_position_observation_count,
+                    ),
                 }
                 for provider in sorted(
                     provider_totals,
@@ -177,12 +237,18 @@ class PortfolioValuationHealthRepository:
         }
 
     @staticmethod
-    def _average(values: List[float]) -> Optional[float]:
+    def _average(values: List[Optional[float]]) -> Optional[float]:
+        values = [value for value in values if value is not None]
         return round(sum(values) / len(values), 2) if values else None
 
     @staticmethod
-    def _minimum(values: List[float]) -> Optional[float]:
+    def _minimum(values: List[Optional[float]]) -> Optional[float]:
+        values = [value for value in values if value is not None]
         return round(min(values), 2) if values else None
+
+    @staticmethod
+    def _percentage(numerator: int, denominator: int) -> Optional[float]:
+        return round(numerator / denominator * 100.0, 2) if denominator > 0 else None
 
     @staticmethod
     def _json_dumps(value: Any) -> str:

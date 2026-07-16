@@ -47,7 +47,7 @@
 - `GET /api/v1/vnpy-paper/status` 新增 `diagnostics.system_health`，把本地账本、选股来源、自动化调度、调度窗口、交易窗口、持仓估值和 vn.py bridge 统一成跨模块健康视图；Web “可用性诊断”会优先展示该结构化摘要，旧后端再回退到 readiness 或本地推导。
 - Web 模拟交易页首屏状态加载失败时已区分后端旧进程/路由未加载（404）、状态接口超时和本地服务连接失败，并给出对应排障提示。
 - Web 模拟交易页会展示持仓估值降级提示，基于状态诊断、Portfolio 快照限制和持仓级 `price_available` / `price_stale` 标记缺价或陈旧价格，并在当前持仓表显示价格源。
-- 完整状态快照会把估值覆盖率、新鲜率、降级状态和 provider 使用量按 15 分钟桶持久化，保留 120 天；`diagnostics.system_health` 与 Web 模拟交易页展示 7/30/90 天观测数、平均/最低覆盖率、平均/最低新鲜率、降级占比和 provider 使用趋势。轻量状态只读取历史，不伪造当前观测。
+- 完整状态快照会把估值覆盖率、新鲜率、降级状态和 provider 使用量按 15 分钟桶持久化，保留 120 天；`diagnostics.system_health` 与 Web 模拟交易页展示 7/30/90 天有效/总观测数、时间平均/最低及持仓观测加权覆盖率与新鲜率、降级占比和 provider 份额。空仓单独计数且不进入健康分母，轻量状态只读取历史，不伪造当前观测。
 - `GET /api/v1/vnpy-paper/status` 已新增 `diagnostics.alphasift`，readiness 会展示 AlphaSift 选股依赖是否启用、可用、版本和策略数量，便于解释自动交易是否具备候选来源。
 
 未完成：
