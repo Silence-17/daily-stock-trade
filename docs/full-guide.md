@@ -790,7 +790,7 @@ python main.py --schedule --no-run-immediately
 > `POST /api/v1/vnpy-paper/trade-plans/recovery/run` 可在页面确认后手动运行一次受限恢复扫描，复用后台恢复逻辑。活跃计划提交满 60 秒后即可通过注入的 `MainEngine.get_order` / `get_all_trades` 对账并补同步漏失回报；未满 30 分钟且无证据时继续等待，超过 30 分钟仍无证据才安全归档。响应除超时归档、重试、提交、跳过和失败计数外，还返回 `reconciled_count`、`protected_count` 和 `reconciliation_failed_count`。
 > `vnpy_paper` 成交回报按 `vt_tradeid` 幂等累计，一张委托可分多笔更新 `part_filled`，累计达到计划数量后才变为 `filled`。网关明确取消、拒绝或失败，以及 `vnpy_order_timeout`、`vnpy_partial_fill_timeout`、`vnpy_cancel_timeout` 都不会进入自动重试队列；MainEngine 查询异常也会保护原活跃计划。撤单请求期间或超时归档后的迟到成交仍按原 `vt_orderid` 入账，避免真实成交丢失。
 > 自动卖出风控支持 `auto_sell_position_pct` 设置每次卖出的持仓比例；留空时默认整仓卖出，设置为 `50` 时止损、止盈、移动止损或最大持仓天数触发后只提交当前持仓 50% 的卖出计划，并在 Agent 审计的 `position_plan` 中记录 `sizing_method=position_pct`、持仓数量和卖出比例。
-> 自动卖出风控支持 `auto_no_progress_days` 与 `auto_no_progress_min_return_pct`：持仓达到指定天数且浮盈不高于阈值时会以 `no_progress_timeout` 生成卖出计划；收益阈值留空时按 0% 处理。
+> 自动卖出风控支持 `auto_no_progress_days` 与 `auto_no_progress_min_return_pct`：持仓达到指定天数且浮盈不高于阈值时会以 `no_progress_timeout` 生成卖出计划；收益阈值留空时按 0% 处理。持仓天数按完整成交历史分页读取并 FIFO 重放当前未平仓批次，清仓后重新建仓会重置；卖出检查先于数据质量、账户和市场买入门禁执行，后续买入被拦截时已提交卖单仍计入 Agent run 审计。
 > 自动卖出风控还支持 `auto_signal_exit_enabled`：开启后会读取当前持仓对应的 active `DecisionSignal`，命中 `sell/reduce/avoid` 防守信号时以 `strategy_invalidated` 生成卖出计划，并把信号摘要写入候选原始载荷和 Agent 风控审计。
 > 自动卖出风控还支持默认关闭的 `auto_rebalance_enabled`：开启后会复用单票、总仓位和行业仓位暴露上限，超限时按超出金额计算卖出数量，生成 `rebalance_*_exceeded` 卖出计划；也可通过 `auto_target_position_weights` / `auto_target_industry_weights` 设置股票或行业目标权益占比，超配时生成 `rebalance_target_position_weight_exceeded` / `rebalance_target_industry_weight_exceeded`。买入侧会将预算缩减到股票和行业目标的最小剩余缺口，已有持仓可补足显式股票目标，并在跨币种换算后按市场整手取可执行数量；不足一手时以 `target_weight_below_min_lot` 跳过。候选原始载荷会记录 `target_weight_sizing`、`rebalance_plan`、目标权重、当前值、剩余缺口和可执行金额。
 >
