@@ -10596,6 +10596,139 @@ class VnpyPaperTradingService:
             return " / ".join(str(item) for item in tags[:8])
         return None
 
+    @classmethod
+    def _candidate_strategy_evidence(
+        cls,
+        candidate: Dict[str, Any],
+        settings: VnpyPaperSettings,
+    ) -> Dict[str, Any]:
+        """Normalize bounded upstream strategy evidence without inferring rule matches."""
+
+        containers = [candidate]
+        raw = candidate.get("raw")
+        if isinstance(raw, dict):
+            containers.append(raw)
+
+        def first_value(*keys: str) -> Any:
+            for container in containers:
+                for key in keys:
+                    if key in container and container.get(key) is not None:
+                        return container.get(key)
+            return None
+
+        def bounded_scalar(value: Any) -> Any:
+            if value is None or isinstance(value, bool):
+                return value
+            if isinstance(value, int):
+                return value
+            if isinstance(value, float):
+                return value if math.isfinite(value) else None
+            return str(value).strip()[:300]
+
+        def bounded_mapping(value: Any, *, limit: int = 20) -> Dict[str, Any]:
+            if not isinstance(value, dict):
+                return {}
+            result: Dict[str, Any] = {}
+            for key, item in list(value.items())[:limit]:
+                text_key = str(key).strip()[:80]
+                if not text_key:
+                    continue
+                if isinstance(item, dict):
+                    result[text_key] = {
+                        str(nested_key).strip()[:80]: bounded_scalar(nested_value)
+                        for nested_key, nested_value in list(item.items())[:10]
+                        if str(nested_key).strip()
+                    }
+                else:
+                    result[text_key] = bounded_scalar(item)
+            return result
+
+        match_value = first_value(
+            "strategy_matches",
+            "matched_rules",
+            "rule_matches",
+            "match_details",
+            "strategy_signals",
+            "signals",
+        )
+        matches: List[Dict[str, Any]] = []
+        if isinstance(match_value, dict):
+            match_items = list(match_value.items())[:20]
+            for key, value in match_items:
+                if isinstance(value, dict):
+                    item = bounded_mapping(value, limit=12)
+                    item.setdefault("key", str(key).strip()[:80])
+                else:
+                    item = {"key": str(key).strip()[:80], "value": bounded_scalar(value)}
+                if item.get("key"):
+                    matches.append(item)
+        elif isinstance(match_value, (list, tuple)):
+            for value in list(match_value)[:20]:
+                if isinstance(value, dict):
+                    item = bounded_mapping(value, limit=12)
+                    if item:
+                        matches.append(item)
+                else:
+                    text = str(value or "").strip()
+                    if text:
+                        matches.append({"key": text[:80]})
+
+        factor_scores = {
+            key: value
+            for key, value in bounded_mapping(
+                first_value("factor_scores", "factorScores")
+            ).items()
+            if value is not None
+        }
+        rationale = cls._candidate_rationale(candidate)
+        screen_score = _safe_float(first_value("screen_score", "screenScore"))
+        final_score = cls._candidate_score(candidate)
+        rank = _safe_int(first_value("rank", "screen_rank", "screenRank"))
+        llm_score = _safe_float(first_value("llm_score", "llmScore"))
+        llm_confidence = _safe_float(first_value("llm_confidence", "llmConfidence"))
+        llm_tags = cls._candidate_quality_text_list(first_value("llm_tags", "llmTags"))[:12]
+        llm_thesis = first_value("llm_thesis", "llmThesis")
+
+        evidence_fields: List[str] = []
+        if matches:
+            evidence_fields.append("rule_matches")
+        if factor_scores:
+            evidence_fields.append("factor_scores")
+        if screen_score is not None:
+            evidence_fields.append("screen_score")
+        if final_score is not None:
+            evidence_fields.append("final_score")
+        if rationale:
+            evidence_fields.append("rationale")
+        if llm_score is not None or llm_confidence is not None or llm_tags or llm_thesis:
+            evidence_fields.append("llm_overlay")
+
+        if matches or factor_scores:
+            evidence_status = "detailed"
+        elif evidence_fields:
+            evidence_status = "summary_only"
+        else:
+            evidence_status = "unavailable"
+
+        return {
+            "schema_version": 1,
+            "strategy": settings.auto_strategy,
+            "status": evidence_status,
+            "rank": rank,
+            "screen_score": screen_score,
+            "final_score": final_score,
+            "matches": matches,
+            "factor_scores": factor_scores,
+            "rationale": str(rationale).strip()[:1000] if rationale else None,
+            "llm_overlay": {
+                "score": llm_score,
+                "confidence": llm_confidence,
+                "tags": llm_tags,
+                "thesis": str(llm_thesis).strip()[:1000] if llm_thesis else None,
+            },
+            "evidence_fields": evidence_fields,
+        }
+
     def _candidate_pre_trade_risk_reason(
         self,
         candidate: Dict[str, Any],
@@ -11049,6 +11182,10 @@ class VnpyPaperTradingService:
             },
         }
         audit_order = dict(order)
+        audit_order["strategy_evidence"] = self._candidate_strategy_evidence(
+            candidate,
+            settings,
+        )
         audit_order["position_plan"] = {
             "side": side,
             "market": settings.auto_market,

@@ -256,6 +256,19 @@ function orderPositionPlan(decision: VnpyPaperAgentDecision): Record<string, unk
   return asRecord(orderResult?.positionPlan) ?? asRecord(orderResult?.position_plan);
 }
 
+function orderStrategyEvidence(decision: VnpyPaperAgentDecision): Record<string, unknown> | null {
+  const orderResult = asRecord(decision.orderResult);
+  return asRecord(orderResult?.strategyEvidence) ?? asRecord(orderResult?.strategy_evidence);
+}
+
+function formatEvidenceValue(value: unknown): string {
+  if (value == null || value === '') return '-';
+  if (typeof value === 'boolean') return value ? '是' : '否';
+  if (typeof value === 'number') return formatNumber(value);
+  if (typeof value === 'object') return JSON.stringify(value);
+  return String(value);
+}
+
 function versionHint(record: Record<string, unknown> | null): string {
   const promptVersion = record?.promptVersion ?? record?.prompt_version;
   const evaluatorVersion = record?.evaluatorVersion ?? record?.evaluator_version;
@@ -267,7 +280,7 @@ function versionHint(record: Record<string, unknown> | null): string {
 
 function statusTone(status: string): string {
   const normalizedStatus = status.replace(/([A-Z])/g, '_$1').toLowerCase();
-  if (['completed', 'filled', 'executed', 'passed', 'audited'].includes(normalizedStatus)) {
+  if (['completed', 'filled', 'executed', 'passed', 'audited', 'detailed'].includes(normalizedStatus)) {
     return 'border-success/30 bg-success/10 text-success';
   }
   if (['failed', 'unavailable', 'blocked', 'failed_execution', 'needs_review'].includes(normalizedStatus)) {
@@ -283,6 +296,7 @@ function statusTone(status: string): string {
     'part_filled',
     'warning',
     'guarded',
+    'summary_only',
   ].includes(normalizedStatus)) {
     return 'border-warning/30 bg-warning/10 text-warning';
   }
@@ -2662,6 +2676,12 @@ function DecisionTable({ decisions }: { decisions: VnpyPaperAgentDecision[] }) {
                 const llmReviewStatus = String(llmReview?.status || '');
                 const llmReviewSummary = String(llmReview?.summary || llmReview?.reason || '');
                 const llmReviewVersionHint = versionHint(llmReview);
+                const strategyEvidence = orderStrategyEvidence(item);
+                const strategyEvidenceStatus = String(strategyEvidence?.status || '');
+                const strategyEvidenceMatches = asRecordList(strategyEvidence?.matches);
+                const strategyFactorScores = asRecord(
+                  strategyEvidence?.factorScores ?? strategyEvidence?.factor_scores,
+                );
                 const positionPlan = orderPositionPlan(item);
                 const portfolioAllocation = (
                   asRecord(positionPlan?.portfolioAllocation)
@@ -2777,6 +2797,38 @@ function DecisionTable({ decisions }: { decisions: VnpyPaperAgentDecision[] }) {
                       <div className="line-clamp-3">{item.rationale || '-'}</div>
                       {item.riskFlags.length > 0 ? (
                         <div className="mt-1 text-warning">{item.riskFlags.join(' / ')}</div>
+                      ) : null}
+                      {strategyEvidence ? (
+                        <div className="mt-2 space-y-1" data-testid={`strategy-evidence-${item.id}`}>
+                          <span className={`inline-flex rounded-full border px-2 py-1 ${statusTone(strategyEvidenceStatus)}`}>
+                            策略证据 {strategyEvidenceStatus || '-'}
+                          </span>
+                          <div>
+                            {String(strategyEvidence.strategy || '-')}
+                            {' · 排名 '}{formatEvidenceValue(strategyEvidence.rank)}
+                            {' · 筛选分 '}{formatEvidenceValue(
+                              strategyEvidence.screenScore ?? strategyEvidence.screen_score,
+                            )}
+                          </div>
+                          {strategyEvidenceMatches.length > 0 ? (
+                            <div data-testid={`strategy-matches-${item.id}`}>
+                              {strategyEvidenceMatches.map((match) => {
+                                const label = match.label ?? match.name ?? match.key ?? '-';
+                                const value = match.status ?? match.matched ?? match.value;
+                                return `${String(label)}=${formatEvidenceValue(value)}`;
+                              }).join(' / ')}
+                            </div>
+                          ) : strategyEvidenceStatus === 'summary_only' ? (
+                            <div>上游仅提供分数或摘要</div>
+                          ) : null}
+                          {strategyFactorScores && Object.keys(strategyFactorScores).length > 0 ? (
+                            <div data-testid={`strategy-factors-${item.id}`}>
+                              {Object.entries(strategyFactorScores).slice(0, 8).map(([key, value]) => (
+                                `${key}=${formatEvidenceValue(value)}`
+                              )).join(' / ')}
+                            </div>
+                          ) : null}
+                        </div>
                       ) : null}
                       {agentReview ? (
                         <div className="mt-2 space-y-1" data-testid={`agent-review-${item.id}`}>

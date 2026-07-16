@@ -2857,7 +2857,16 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
                     "code": "600519",
                     "name": "贵州茅台",
                     "score": 80,
+                    "screen_score": 78,
+                    "rank": 1,
                     "price": 10.0,
+                    "factor_scores": {"value": 88.0, "momentum": 72.5},
+                    "raw": {
+                        "matched_rules": [
+                            {"key": "pe_below_limit", "status": "passed", "value": 18.2},
+                            {"key": "momentum_positive", "matched": True},
+                        ],
+                    },
                     "data_quality": "partial",
                     "missing_fields": ["industry"],
                     "data_sources": ["em_datacenter"],
@@ -2922,6 +2931,21 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertEqual(decision_order["position_plan"]["symbol"], "600519")
         self.assertEqual(decision_order["position_plan"]["planned_cash_amount"], 1200.0)
         self.assertEqual(decision_order["position_plan"]["execution_mode"], "dry_run")
+        strategy_evidence = decision_order["strategy_evidence"]
+        self.assertEqual(strategy_evidence["schema_version"], 1)
+        self.assertEqual(strategy_evidence["strategy"], "dual_low")
+        self.assertEqual(strategy_evidence["status"], "detailed")
+        self.assertEqual(strategy_evidence["rank"], 1)
+        self.assertEqual(strategy_evidence["screen_score"], 78.0)
+        self.assertEqual(strategy_evidence["final_score"], 80.0)
+        self.assertEqual(strategy_evidence["factor_scores"], {"value": 88.0, "momentum": 72.5})
+        self.assertEqual(strategy_evidence["matches"][0]["key"], "pe_below_limit")
+        self.assertEqual(strategy_evidence["matches"][0]["status"], "passed")
+        self.assertEqual(strategy_evidence["matches"][1]["matched"], True)
+        self.assertEqual(
+            strategy_evidence["evidence_fields"],
+            ["rule_matches", "factor_scores", "screen_score", "final_score"],
+        )
         self.assertEqual(decision_order["risk_review"]["status"], "passed")
         self.assertEqual(decision_order["risk_review"]["reason"], "dry_run")
         self.assertEqual(decision_order["risk_review"]["candidate_data_quality"]["status"], "partial")
@@ -2935,11 +2959,31 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         )
         self.assertEqual(decision_order["risk_review"]["candidate_data_quality"]["data_sources"], ["em_datacenter"])
         self.assertEqual(plan_order["position_plan"]["symbol"], "600519")
+        self.assertEqual(plan_order["strategy_evidence"], strategy_evidence)
         self.assertEqual(plan_order["risk_review"]["review_source"], "rule_based_auto_trade")
         self.assertEqual(plan_order["risk_review"]["candidate_data_quality"]["status"], "partial")
         self.assertEqual(plan_order["agent_review"]["status"], "warning")
         trades = self.service.portfolio.list_trade_events(account_id=int(self.service.get_settings().account_id), page=1)
         self.assertEqual(trades["items"], [])
+
+    def test_candidate_strategy_evidence_does_not_infer_missing_rule_matches(self) -> None:
+        settings = self.service.get_settings()
+
+        evidence = self.service._candidate_strategy_evidence(
+            {
+                "code": "600519",
+                "score": 80,
+                "reason": "low valuation summary",
+                "factor_scores": {"missing": float("nan")},
+            },
+            settings,
+        )
+
+        self.assertEqual(evidence["status"], "summary_only")
+        self.assertEqual(evidence["matches"], [])
+        self.assertEqual(evidence["factor_scores"], {})
+        self.assertEqual(evidence["rationale"], "low valuation summary")
+        self.assertEqual(evidence["evidence_fields"], ["final_score", "rationale"])
 
     def test_auto_trade_llm_review_passes_candidate_before_plan(self) -> None:
         self.service.update_settings(

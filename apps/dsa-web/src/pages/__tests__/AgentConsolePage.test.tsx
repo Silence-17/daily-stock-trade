@@ -284,6 +284,20 @@ const runDetail = {
     rationale: 'low valuation and improving momentum',
     riskFlags: [],
     orderResult: {
+      strategyEvidence: {
+        schemaVersion: 1,
+        strategy: 'dual_low',
+        status: 'detailed',
+        rank: 1,
+        screenScore: 78,
+        finalScore: 80,
+        matches: [
+          { key: 'pe_below_limit', status: 'passed', value: 18.2 },
+          { key: 'momentum_positive', matched: true },
+        ],
+        factorScores: { value: 88, momentum: 72.5 },
+        evidenceFields: ['rule_matches', 'factor_scores', 'screen_score', 'final_score'],
+      },
       positionPlan: {
         sizingMethod: 'score_inverse_volatility_20d_allocation',
         portfolioAllocation: {
@@ -927,6 +941,12 @@ describe('AgentConsolePage', () => {
     expect(screen.getByTestId('portfolio-optimizer-input-1')).toHaveTextContent('目标权重 80.0%');
     expect(screen.getByTestId('portfolio-optimizer-input-1')).toHaveTextContent('优化权重 75.0%');
     expect(screen.getByTestId('portfolio-covariance-input-1')).toHaveTextContent('协方差样本 20');
+    expect(screen.getByTestId('strategy-evidence-1')).toHaveTextContent('策略证据 detailed');
+    expect(screen.getByTestId('strategy-evidence-1')).toHaveTextContent('dual_low · 排名 1.00 · 筛选分 78.00');
+    expect(screen.getByTestId('strategy-matches-1')).toHaveTextContent('pe_below_limit=passed');
+    expect(screen.getByTestId('strategy-matches-1')).toHaveTextContent('momentum_positive=是');
+    expect(screen.getByTestId('strategy-factors-1')).toHaveTextContent('value=88.00');
+    expect(screen.getByTestId('strategy-factors-1')).toHaveTextContent('momentum=72.50');
     expect(screen.getByTestId('agent-llm-recap')).toHaveTextContent('LLM recap generated');
     expect(screen.getByTestId('agent-review-1')).toHaveTextContent('Agent 复核 passed');
     expect(screen.getByText('Pre-trade Agent review passed')).toBeInTheDocument();
