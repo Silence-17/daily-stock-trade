@@ -5127,6 +5127,144 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertIn('"event_type": "data_quality_stale"', triggers[0]["diagnostics"])
         self.assertIn(result["agent_run_uid"], triggers[0]["diagnostics"])
 
+    def test_data_quality_gate_preserves_sell_and_persists_run_counts(self) -> None:
+        self.service.submit_order(
+            symbol="600519",
+            side="buy",
+            market="cn",
+            quantity=100,
+            price=10.0,
+        )
+        self.service.update_settings(
+            {
+                "auto_trade_enabled": True,
+                "auto_trade_time_gate_enabled": False,
+                "auto_sell_enabled": True,
+                "auto_stop_loss_pct": 5,
+                "auto_strategy": "dual_low",
+                "auto_max_results": 1,
+                "auto_cash_per_order": 1200,
+            }
+        )
+        fake_alphasift = MagicMock()
+        fake_alphasift.screen.return_value = {
+            "quality_status": "stale",
+            "source_errors": ["last_good_cache_only"],
+            "candidates": [
+                {"code": "000001", "name": "平安银行", "score": 80, "price": 10.0},
+            ],
+            "warnings": [],
+        }
+
+        with patch(
+            "src.services.portfolio_service.PortfolioService._fetch_realtime_position_price",
+            return_value=(9.0, "unit-test"),
+        ), patch(
+            "src.services.vnpy_paper_trading_service.AlphaSiftService",
+            return_value=fake_alphasift,
+        ):
+            result = self.service.run_auto_trade_once()
+
+        self.assertTrue(result["accepted"])
+        self.assertEqual(result["reason"], "data_quality_stale")
+        self.assertEqual(result["candidate_count"], 1)
+        self.assertEqual(result["planned_count"], 0)
+        self.assertEqual(result["submitted_count"], 1)
+        self.assertEqual(result["skipped_count"], 1)
+        self.assertEqual(
+            [(item["side"], item.get("reason")) for item in result["orders"]],
+            [("sell", None), ("buy", "data_quality_stale")],
+        )
+
+        audit = self.service.agent_repo.get_run_detail(result["agent_run_uid"])
+        self.assertIsNotNone(audit)
+        assert audit is not None
+        self.assertEqual(audit["status"], "completed")
+        self.assertEqual(audit["candidate_count"], 1)
+        self.assertEqual(audit["planned_count"], 0)
+        self.assertEqual(audit["submitted_count"], 1)
+        self.assertEqual(audit["skipped_count"], 1)
+        self.assertEqual(
+            [(item["side"], item["status"], item.get("skip_reason")) for item in audit["trade_plans"]],
+            [("sell", "filled", None), ("buy", "skipped", "data_quality_stale")],
+        )
+        self.assertEqual(
+            [(item["action"], item["reason"]) for item in audit["decisions"]],
+            [("sell", "stop_loss_triggered"), ("skip", "data_quality_stale")],
+        )
+
+    def test_account_and_market_gates_preserve_risk_reducing_sell(self) -> None:
+        self.service.submit_order(
+            symbol="600519",
+            side="buy",
+            market="cn",
+            quantity=100,
+            price=10.0,
+        )
+        self.service.update_settings(
+            {
+                "auto_trade_enabled": True,
+                "auto_trade_time_gate_enabled": False,
+                "auto_sell_enabled": True,
+                "auto_stop_loss_pct": 5,
+                "auto_min_cash_balance": 100000,
+                "auto_market_light_gate_enabled": True,
+                "auto_market_light_block_statuses": ["yellow"],
+                "auto_strategy": "dual_low",
+                "auto_max_results": 1,
+                "auto_cash_per_order": 1200,
+            }
+        )
+        fake_alphasift = MagicMock()
+        fake_alphasift.screen.return_value = {
+            "quality_status": "ok",
+            "candidates": [
+                {"code": "000001", "name": "平安银行", "score": 80, "price": 10.0},
+            ],
+            "warnings": [],
+        }
+
+        with patch(
+            "src.services.portfolio_service.PortfolioService._fetch_realtime_position_price",
+            return_value=(9.0, "unit-test"),
+        ), patch(
+            "src.services.vnpy_paper_trading_service.AlphaSiftService",
+            return_value=fake_alphasift,
+        ), patch(
+            "src.services.vnpy_paper_trading_service.load_previous_snapshot",
+            return_value={
+                "region": "cn",
+                "trade_date": date.today().isoformat(),
+                "status": "yellow",
+                "score": 45,
+            },
+        ):
+            result = self.service.run_auto_trade_once()
+
+        self.assertEqual(result["submitted_count"], 1)
+        self.assertEqual(result["skipped_count"], 1)
+        self.assertEqual(
+            [(item["side"], item.get("reason")) for item in result["orders"]],
+            [("sell", None), ("buy", "cash_low_watermark")],
+        )
+        audit = self.service.agent_repo.get_run_detail(result["agent_run_uid"])
+        self.assertIsNotNone(audit)
+        assert audit is not None
+        self.assertEqual(audit["submitted_count"], 1)
+        self.assertEqual(audit["skipped_count"], 1)
+        self.assertEqual(audit["diagnostics"]["account_risk"]["cash"], 99900.0)
+        self.assertEqual(audit["diagnostics"]["account_risk"]["observed_value"], 99900.0)
+        self.assertEqual(audit["diagnostics"]["account_risk"]["threshold"], 100000.0)
+        self.assertEqual(audit["diagnostics"]["market_context_risk"]["status"], "blocked")
+        self.assertEqual(
+            audit["diagnostics"]["market_context_risk"]["reason"],
+            "market_light_yellow",
+        )
+        self.assertEqual(
+            [(item["action"], item["reason"]) for item in audit["decisions"]],
+            [("sell", "stop_loss_triggered"), ("skip", "cash_low_watermark")],
+        )
+
     def test_auto_trade_records_alert_when_alphasift_screen_fails(self) -> None:
         self.service.update_settings(
             {
@@ -5393,6 +5531,78 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
             audit["diagnostics"]["agent_plan"]["sell_policy"]["no_progress_days"],
             5,
         )
+
+    def test_position_holding_days_reads_all_trade_pages(self) -> None:
+        today = date.today()
+        events = [
+            {
+                "id": index + 1,
+                "trade_date": (today - timedelta(days=120 - index)).isoformat(),
+                "side": "buy",
+                "quantity": 1,
+            }
+            for index in range(101)
+        ]
+        events.reverse()
+
+        def list_events(**kwargs):
+            page = kwargs["page"]
+            start = (page - 1) * 100
+            return {
+                "items": events[start : start + 100],
+                "total": len(events),
+                "page": page,
+                "page_size": kwargs["page_size"],
+            }
+
+        with patch.object(
+            self.service.portfolio,
+            "list_trade_events",
+            side_effect=list_events,
+        ) as list_trade_events:
+            holding_days = self.service._position_holding_days(account_id=1, symbol="600519")
+
+        self.assertEqual(holding_days, 120)
+        self.assertEqual(list_trade_events.call_count, 2)
+        self.assertEqual(list_trade_events.call_args_list[0].kwargs["page_size"], 100)
+        self.assertNotIn("side", list_trade_events.call_args_list[0].kwargs)
+
+    def test_position_holding_days_resets_after_full_exit_and_reentry(self) -> None:
+        today = date.today()
+        payload = {
+            "items": [
+                {
+                    "id": 3,
+                    "trade_date": (today - timedelta(days=4)).isoformat(),
+                    "side": "buy",
+                    "quantity": 100,
+                },
+                {
+                    "id": 2,
+                    "trade_date": (today - timedelta(days=20)).isoformat(),
+                    "side": "sell",
+                    "quantity": 100,
+                },
+                {
+                    "id": 1,
+                    "trade_date": (today - timedelta(days=40)).isoformat(),
+                    "side": "buy",
+                    "quantity": 100,
+                },
+            ],
+            "total": 3,
+            "page": 1,
+            "page_size": 100,
+        }
+
+        with patch.object(
+            self.service.portfolio,
+            "list_trade_events",
+            return_value=payload,
+        ):
+            holding_days = self.service._position_holding_days(account_id=1, symbol="600519")
+
+        self.assertEqual(holding_days, 4)
 
     def test_auto_trade_rebalance_sells_single_position_excess_when_enabled(self) -> None:
         self.service.submit_order(

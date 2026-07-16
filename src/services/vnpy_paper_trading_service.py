@@ -2698,8 +2698,8 @@ class VnpyPaperTradingService:
                 run_id=run_id,
                 status="completed" if candidates else "skipped",
                 candidate_count=len(candidates),
-                planned_count=0,
-                submitted_count=0,
+                planned_count=planned_count,
+                submitted_count=submitted_count,
                 skipped_count=skipped_count,
                 message_count=len(result["messages"]),
                 error=None if candidates else reason,
@@ -9083,29 +9083,59 @@ class VnpyPaperTradingService:
         return round(min(position_quantity, target), 8)
 
     def _position_holding_days(self, *, account_id: int, symbol: str) -> Optional[int]:
+        trades: List[Dict[str, Any]] = []
+        page = 1
         try:
-            payload = self.portfolio.list_trade_events(
-                account_id=account_id,
-                symbol=symbol,
-                side="buy",
-                page=1,
-                page_size=200,
-            )
+            while True:
+                payload = self.portfolio.list_trade_events(
+                    account_id=account_id,
+                    symbol=symbol,
+                    page=page,
+                    page_size=100,
+                )
+                items = payload.get("items") if isinstance(payload, dict) else None
+                if not isinstance(items, list):
+                    raise ValueError("trade history items are unavailable")
+                trades.extend(item for item in items if isinstance(item, dict))
+                total = _safe_int(payload.get("total")) or 0
+                if not items or page * 100 >= total:
+                    break
+                page += 1
         except Exception as exc:  # noqa: BLE001
             logger.warning("Failed to resolve holding days for %s: %s", symbol, exc)
             return None
-        dates: List[date] = []
-        for item in payload.get("items") or []:
+
+        dated_trades: List[Tuple[date, int, str, float]] = []
+        for item in trades:
             text = str(item.get("trade_date") or "").strip()
             if not text:
                 continue
             try:
-                dates.append(date.fromisoformat(text[:10]))
+                trade_date = date.fromisoformat(text[:10])
             except ValueError:
                 continue
-        if not dates:
+            side = str(item.get("side") or "").strip().lower()
+            quantity = _safe_float(item.get("quantity")) or 0.0
+            if side not in {"buy", "sell"} or quantity <= PAPER_EPS:
+                continue
+            dated_trades.append((trade_date, _safe_int(item.get("id")) or 0, side, quantity))
+
+        lots: List[List[Any]] = []
+        for trade_date, _trade_id, side, quantity in sorted(dated_trades):
+            if side == "buy":
+                lots.append([trade_date, quantity])
+                continue
+            remaining = quantity
+            while lots and remaining > PAPER_EPS:
+                consumed = min(float(lots[0][1]), remaining)
+                lots[0][1] = float(lots[0][1]) - consumed
+                remaining -= consumed
+                if float(lots[0][1]) <= PAPER_EPS:
+                    lots.pop(0)
+
+        if not lots:
             return None
-        return max(0, (date.today() - min(dates)).days)
+        return max(0, (date.today() - lots[0][0]).days)
 
     @staticmethod
     def _auto_sell_reason(
