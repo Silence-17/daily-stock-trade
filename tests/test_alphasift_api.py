@@ -301,6 +301,9 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
                     "cn/akshare": {"failures": 0, "disabled": False},
                 },
             },
+        ), patch(
+            "src.services.alphasift_service._get_dsa_news_source_routing",
+            return_value={"mode": "ordered_failover", "priority": [], "sources": {}},
         ):
             routing = alphasift_service.build_alphasift_candidate_context_source_routing(
                 market="cn",
@@ -327,6 +330,20 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
         weights = {item["source"]: item for item in fund_flow["trend_weights"]}
         self.assertLess(weights["tushare_ths"]["weight"], weights["akshare"]["weight"])
 
+    def test_news_source_routing_reads_configured_provider_order(self) -> None:
+        service = SimpleNamespace(
+            news_provider_priority=MagicMock(return_value=["Anspire", "Bocha", "anspire"]),
+        )
+        with patch(
+            "src.services.alphasift_service._get_dsa_search_service",
+            return_value=service,
+        ):
+            routing = alphasift_service._get_dsa_news_source_routing()
+
+        self.assertEqual(routing["priority"], ["anspire", "bocha"])
+        self.assertEqual(list(routing["sources"]), ["anspire", "bocha"])
+        service.news_provider_priority.assert_called_once_with()
+
     def test_candidate_context_source_health_keeps_provider_level_evidence(self) -> None:
         health = alphasift_service._summarize_dsa_candidate_context_source_health([
             {
@@ -344,8 +361,12 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
                     },
                     "news": {
                         "success": True,
-                        "provider": "bocha",
+                        "provider": "tavily",
                         "results": [{"title": "test"}],
+                        "provider_attempts": [
+                            {"provider": "bocha", "result": "failed", "error": "TimeoutError"},
+                            {"provider": "tavily", "result": "ok", "record_count": 1},
+                        ],
                     },
                 }
             }
@@ -354,7 +375,28 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
         self.assertEqual(health["quote/tencent"]["status"], "ok")
         self.assertEqual(health["fund_flow/tushare_ths"]["status"], "unavailable")
         self.assertEqual(health["fund_flow/akshare"]["status"], "ok")
-        self.assertEqual(health["news/bocha"]["status"], "ok")
+        self.assertEqual(health["news/bocha"]["status"], "unavailable")
+        self.assertEqual(health["news/tavily"]["status"], "ok")
+
+    def test_candidate_context_source_health_does_not_replay_cached_news_attempts(self) -> None:
+        health = alphasift_service._summarize_dsa_candidate_context_source_health([{
+            "dsa_context": {
+                "news": {
+                    "success": True,
+                    "provider": "tavily",
+                    "cache_hit": True,
+                    "results": [{"title": "cached"}],
+                    "provider_attempts": [
+                        {"provider": "bocha", "result": "failed"},
+                        {"provider": "tavily", "result": "ok", "record_count": 1},
+                    ],
+                },
+            },
+        }])
+
+        self.assertEqual(health["news"]["status"], "ok")
+        self.assertNotIn("news/bocha", health)
+        self.assertNotIn("news/tavily", health)
 
     def test_screen_passes_health_weighted_fund_flow_priority_to_enrichment(self) -> None:
         config = self._config(enabled=True)
@@ -382,6 +424,18 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
             {
                 "group": "candidate_context",
                 "source": "fund_flow/akshare",
+                "observation_count": 10,
+                "degraded_observation_count": 0,
+            },
+            {
+                "group": "candidate_context",
+                "source": "news/bocha",
+                "observation_count": 10,
+                "degraded_observation_count": 9,
+            },
+            {
+                "group": "candidate_context",
+                "source": "news/tavily",
                 "observation_count": 10,
                 "degraded_observation_count": 0,
             },
@@ -413,6 +467,16 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
                 },
             ],
         ), patch(
+            "src.services.alphasift_service._get_dsa_news_source_routing",
+            return_value={
+                "mode": "ordered_failover",
+                "priority": ["bocha", "tavily"],
+                "sources": {
+                    "bocha": {"failures": 0, "disabled": False},
+                    "tavily": {"failures": 0, "disabled": False},
+                },
+            },
+        ), patch(
             "src.services.alphasift_service._write_alphasift_screen_cache",
         ):
             payload = alphasift_service.AlphaSiftService(config).screen(
@@ -430,6 +494,10 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
             ["akshare", "tushare_ths"],
         )
         self.assertEqual(
+            enrichment.call_args.kwargs["news_provider_priority"],
+            ["tavily", "bocha"],
+        )
+        self.assertEqual(
             payload["source_routing"]["candidate_context"]["fund_flow"]["effective_priority"],
             ["akshare", "tushare_ths"],
         )
@@ -440,6 +508,10 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
         self.assertTrue(
             payload["source_routing"]["candidate_context"]["fund_flow"]["post_run_sources"]
             ["cn/akshare"]["disabled"]
+        )
+        self.assertEqual(
+            payload["source_routing"]["candidate_context"]["news"]["effective_priority"],
+            ["tavily", "bocha"],
         )
 
     def test_status_preserves_adapter_available_false_without_diagnostics(self) -> None:

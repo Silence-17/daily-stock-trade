@@ -164,6 +164,95 @@ class SearchNewsFreshnessTestCase(unittest.TestCase):
         p1.search.assert_called_once()
         p2.search.assert_called_once()
 
+    def test_search_stock_news_request_priority_isolates_cache_and_attempts(self) -> None:
+        fresh = datetime.now().date().isoformat()
+        service = SearchService(
+            bocha_keys=["dummy_key"],
+            searxng_public_instances_enabled=False,
+            news_max_age_days=3,
+            news_strategy_profile="short",
+        )
+        p1 = SimpleNamespace(
+            is_available=True,
+            name="P1",
+            search=MagicMock(return_value=_response([
+                _result("贵州茅台 600519 P1 最新公告", fresh),
+            ])),
+        )
+        p2 = SimpleNamespace(
+            is_available=True,
+            name="P2",
+            search=MagicMock(return_value=_response([
+                _result("贵州茅台 600519 P2 最新公告", fresh),
+            ])),
+        )
+        service._providers = [p1, p2]
+
+        p2_first = service.search_stock_news(
+            "600519",
+            "贵州茅台",
+            max_results=1,
+            provider_priority=["p2", "p1"],
+        )
+        p1_first = service.search_stock_news(
+            "600519",
+            "贵州茅台",
+            max_results=1,
+            provider_priority=["P1", "P2"],
+        )
+        p1_cached = service.search_stock_news(
+            "600519",
+            "贵州茅台",
+            max_results=1,
+            provider_priority=["p1", "p2"],
+        )
+
+        self.assertEqual(p2_first.results[0].title, "贵州茅台 600519 P2 最新公告")
+        self.assertEqual(p1_first.results[0].title, "贵州茅台 600519 P1 最新公告")
+        self.assertEqual(p2_first.provider_attempts, [
+            {"provider": "p2", "result": "ok", "record_count": 1},
+        ])
+        self.assertEqual(p1_first.provider_attempts, [
+            {"provider": "p1", "result": "ok", "record_count": 1},
+        ])
+        self.assertIs(p1_cached, p1_first)
+        self.assertTrue(p1_cached.cache_hit)
+        p1.search.assert_called_once()
+        p2.search.assert_called_once()
+
+    def test_search_stock_news_provider_exception_falls_back_and_is_audited(self) -> None:
+        fresh = datetime.now().date().isoformat()
+        service = SearchService(
+            bocha_keys=["dummy_key"],
+            searxng_public_instances_enabled=False,
+            news_max_age_days=3,
+            news_strategy_profile="short",
+        )
+        failed = SimpleNamespace(
+            is_available=True,
+            name="Failed",
+            search=MagicMock(side_effect=TimeoutError("provider timeout")),
+        )
+        fallback = SimpleNamespace(
+            is_available=True,
+            name="Fallback",
+            search=MagicMock(return_value=_response([
+                _result("贵州茅台 600519 回购公告", fresh),
+            ])),
+        )
+        service._providers = [failed, fallback]
+
+        response = service.search_stock_news("600519", "贵州茅台", max_results=1)
+
+        self.assertEqual(response.results[0].title, "贵州茅台 600519 回购公告")
+        self.assertEqual(response.provider_attempts[0], {
+            "provider": "failed",
+            "result": "failed",
+            "error": "TimeoutError",
+        })
+        self.assertEqual(response.provider_attempts[1]["provider"], "fallback")
+        self.assertEqual(response.provider_attempts[1]["result"], "ok")
+
     def test_search_stock_news_records_provider_diagnostics_for_fallback(self) -> None:
         """News search provider attempts should appear in run-flow diagnostics."""
         today = datetime.now().date()
