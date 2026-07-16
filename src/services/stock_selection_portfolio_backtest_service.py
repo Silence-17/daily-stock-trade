@@ -25,6 +25,31 @@ from src.storage import DatabaseManager, StockDaily
 class StockSelectionPortfolioBacktestService:
     """Run sequential equal-weight periods from dated strategy replays."""
 
+    COST_PROFILE_VERSION = "dsa-cost-profile-v1"
+    COST_PROFILES = {
+        "cn_retail_reference": {
+            "commission_bps": 3.0,
+            "minimum_commission": 5.0,
+            "sell_tax_bps": 0.0,
+            "sell_tax_mode": "cn_historical_stamp_duty",
+            "slippage_bps": 5.0,
+        },
+        "cn_low_commission_reference": {
+            "commission_bps": 1.0,
+            "minimum_commission": 5.0,
+            "sell_tax_bps": 0.0,
+            "sell_tax_mode": "cn_historical_stamp_duty",
+            "slippage_bps": 5.0,
+        },
+        "zero_cost_baseline": {
+            "commission_bps": 0.0,
+            "minimum_commission": 0.0,
+            "sell_tax_bps": 0.0,
+            "sell_tax_mode": "explicit",
+            "slippage_bps": 0.0,
+        },
+    }
+
     CN_STAMP_DUTY_REGIMES = (
         (date(2005, 1, 24), 10.0, 10.0, "mof_tax_2005_11_bilateral"),
         (date(2007, 5, 30), 30.0, 30.0, "mof_tax_2007_84_bilateral"),
@@ -58,6 +83,7 @@ class StockSelectionPortfolioBacktestService:
         top_k: int = 5,
         final_holding_bars: int = 20,
         initial_capital: float = 100_000.0,
+        cost_profile: str = "custom",
         commission_bps: float = 3.0,
         minimum_commission: float = 0.0,
         sell_tax_bps: float = 0.0,
@@ -72,6 +98,24 @@ class StockSelectionPortfolioBacktestService:
         min_hard_coverage: float = 0.95,
         min_score_coverage: float = 0.80,
     ) -> Dict[str, Any]:
+        cost_profile = str(cost_profile or "custom").strip().lower()
+        requested_cost_assumptions = {
+            "commission_bps": commission_bps,
+            "minimum_commission": minimum_commission,
+            "sell_tax_bps": sell_tax_bps,
+            "sell_tax_mode": sell_tax_mode,
+            "slippage_bps": slippage_bps,
+        }
+        effective_cost_assumptions = self._resolve_cost_profile(
+            cost_profile=cost_profile,
+            market=market,
+            requested=requested_cost_assumptions,
+        )
+        commission_bps = float(effective_cost_assumptions["commission_bps"])
+        minimum_commission = float(effective_cost_assumptions["minimum_commission"])
+        sell_tax_bps = float(effective_cost_assumptions["sell_tax_bps"])
+        sell_tax_mode = str(effective_cost_assumptions["sell_tax_mode"])
+        slippage_bps = float(effective_cost_assumptions["slippage_bps"])
         self._validate(
             date_from=date_from,
             date_to=date_to,
@@ -145,6 +189,8 @@ class StockSelectionPortfolioBacktestService:
                 persisted_corporate_action_count=len(persisted_corporate_actions),
                 explicit_corporate_action_count=len(corporate_actions or []),
                 include_persisted_corporate_actions=include_persisted_corporate_actions,
+                cost_profile=cost_profile,
+                requested_cost_assumptions=requested_cost_assumptions,
             )
         if accounting_mode != "equal_weight_approximation":
             raise ValueError("accounting_mode must be cash_ledger or equal_weight_approximation")
@@ -335,6 +381,10 @@ class StockSelectionPortfolioBacktestService:
                 "weighting": "equal_weight_completed_holdings",
                 "rebalance": "retain_overlapping_symbols_equal_weight_approximation",
                 "blocked_exit": "mark_to_market_and_carry_until_next_rebalance_attempt",
+                "cost_profile": cost_profile,
+                "cost_profile_version": self.COST_PROFILE_VERSION,
+                "requested_cost_assumptions": requested_cost_assumptions,
+                "effective_cost_assumptions": effective_cost_assumptions,
                 "commission_bps_per_side": commission_bps,
                 "slippage_bps_per_side": slippage_bps,
                 "tradeability_gate_enabled": enforce_tradeability,
@@ -369,6 +419,8 @@ class StockSelectionPortfolioBacktestService:
         persisted_corporate_action_count: int,
         explicit_corporate_action_count: int,
         include_persisted_corporate_actions: bool,
+        cost_profile: str,
+        requested_cost_assumptions: Dict[str, Any],
     ) -> Dict[str, Any]:
         cash = float(initial_capital)
         equity = float(initial_capital)
@@ -893,6 +945,16 @@ class StockSelectionPortfolioBacktestService:
                 "same_day_event_order": "corporate_action_before_trade",
                 "lot_size": lot_size,
                 "cash_constraint": "buys_capped_by_available_cash",
+                "cost_profile": cost_profile,
+                "cost_profile_version": self.COST_PROFILE_VERSION,
+                "requested_cost_assumptions": dict(requested_cost_assumptions),
+                "effective_cost_assumptions": {
+                    "commission_bps": commission_bps,
+                    "minimum_commission": minimum_commission,
+                    "sell_tax_bps": sell_tax_bps,
+                    "sell_tax_mode": sell_tax_mode,
+                    "slippage_bps": slippage_bps,
+                },
                 "commission_bps_per_side": commission_bps,
                 "minimum_commission_per_trade": minimum_commission,
                 "sell_tax_bps": sell_tax_bps,
@@ -921,6 +983,23 @@ class StockSelectionPortfolioBacktestService:
                 "uses_current_data_fallback": False,
             },
         }
+
+    @staticmethod
+    def _resolve_cost_profile(
+        *,
+        cost_profile: str,
+        market: str,
+        requested: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        profile = str(cost_profile or "custom").strip().lower()
+        if profile == "custom":
+            return dict(requested)
+        configured = StockSelectionPortfolioBacktestService.COST_PROFILES.get(profile)
+        if configured is None:
+            raise ValueError("unsupported cost_profile")
+        if profile.startswith("cn_") and str(market).lower() != "cn":
+            raise ValueError(f"{profile} is supported only for the cn market")
+        return dict(configured)
 
     @staticmethod
     def _normalize_target_weights(raw: Optional[Dict[str, float]]) -> Dict[str, float]:

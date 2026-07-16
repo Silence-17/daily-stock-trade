@@ -127,6 +127,10 @@ class AlphaSiftPortfolioBacktestRequest(BaseModel):
     top_k: int = Field(5, ge=1, le=100)
     final_holding_bars: int = Field(20, ge=1, le=250)
     initial_capital: float = Field(100000, gt=0)
+    cost_profile: str = Field(
+        "custom",
+        pattern="^(custom|cn_retail_reference|cn_low_commission_reference|zero_cost_baseline)$",
+    )
     commission_bps: float = Field(3, ge=0, le=1000)
     minimum_commission: float = Field(0, ge=0)
     sell_tax_bps: float = Field(0, ge=0, le=1000)
@@ -419,6 +423,7 @@ def alphasift_run_portfolio_backtest(
             top_k=payload.top_k,
             final_holding_bars=payload.final_holding_bars,
             initial_capital=payload.initial_capital,
+            cost_profile=payload.cost_profile,
             commission_bps=payload.commission_bps,
             minimum_commission=payload.minimum_commission,
             sell_tax_bps=payload.sell_tax_bps,

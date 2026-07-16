@@ -370,9 +370,14 @@ const AgentConsolePage: React.FC = () => {
   const [portfolioDateFrom, setPortfolioDateFrom] = useState('');
   const [portfolioDateTo, setPortfolioDateTo] = useState('');
   const [portfolioTargetWeights, setPortfolioTargetWeights] = useState('');
+  const [portfolioCostProfile, setPortfolioCostProfile] = useState<
+    'custom' | 'cn_retail_reference' | 'cn_low_commission_reference' | 'zero_cost_baseline'
+  >('custom');
+  const [portfolioCommissionBps, setPortfolioCommissionBps] = useState('3');
   const [portfolioMinimumCommission, setPortfolioMinimumCommission] = useState('');
   const [portfolioSellTaxBps, setPortfolioSellTaxBps] = useState('');
   const [portfolioSellTaxMode, setPortfolioSellTaxMode] = useState<'explicit' | 'cn_historical_stamp_duty'>('explicit');
+  const [portfolioSlippageBps, setPortfolioSlippageBps] = useState('5');
   const [portfolioCorporateActions, setPortfolioCorporateActions] = useState('');
   const [includePersistedCorporateActions, setIncludePersistedCorporateActions] = useState(true);
   const [portfolioBacktest, setPortfolioBacktest] = useState<AlphaSiftPortfolioBacktestResponse | null>(null);
@@ -815,12 +820,20 @@ const AgentConsolePage: React.FC = () => {
     setSuccess('');
     try {
       const minimumCommission = Number(portfolioMinimumCommission);
+      const commissionBps = Number(portfolioCommissionBps);
       const sellTaxBps = portfolioSellTaxMode === 'explicit' ? Number(portfolioSellTaxBps) : 0;
+      const slippageBps = Number(portfolioSlippageBps);
+      if (!Number.isFinite(commissionBps) || commissionBps < 0 || commissionBps > 1000) {
+        throw new Error('佣金必须在 0 到 1000 bps 之间');
+      }
       if (!Number.isFinite(minimumCommission) || minimumCommission < 0) {
         throw new Error('最低佣金必须是不小于 0 的数字');
       }
       if (portfolioSellTaxMode === 'explicit' && (!Number.isFinite(sellTaxBps) || sellTaxBps < 0 || sellTaxBps > 1000)) {
         throw new Error('卖出税率必须在 0 到 1000 bps 之间');
+      }
+      if (!Number.isFinite(slippageBps) || slippageBps < 0 || slippageBps > 1000) {
+        throw new Error('滑点必须在 0 到 1000 bps 之间');
       }
       const payload = await alphasiftApi.runPortfolioBacktest({
         strategy: filters.strategy.trim() || 'dual_low',
@@ -830,9 +843,12 @@ const AgentConsolePage: React.FC = () => {
         topK: 5,
         benchmarkSymbol: (filters.market || 'cn') === 'cn' ? '000300' : undefined,
         targetWeights: parsePortfolioTargetWeights(portfolioTargetWeights),
+        costProfile: portfolioCostProfile,
+        commissionBps,
         minimumCommission,
         sellTaxBps,
         sellTaxMode: portfolioSellTaxMode,
+        slippageBps,
         corporateActions: parsePortfolioCorporateActions(portfolioCorporateActions),
         includePersistedCorporateActions,
       });
@@ -990,6 +1006,9 @@ const AgentConsolePage: React.FC = () => {
   const portfolioTaxCoverageFrom = String(
     portfolioBacktest?.methodology.historicalTaxCoverageFrom || '',
   );
+  const portfolioEffectiveCosts = asRecord(portfolioBacktest?.methodology.effectiveCostAssumptions);
+  const portfolioResultCostProfile = String(portfolioBacktest?.methodology.costProfile || 'custom');
+  const portfolioCostProfileVersion = String(portfolioBacktest?.methodology.costProfileVersion || '');
 
   const renderStatusBadge = (status: string, label?: string) => (
     <span className={`inline-flex items-center rounded-full border px-2 py-1 text-xs ${statusTone(status)}`}>
@@ -1512,6 +1531,31 @@ const AgentConsolePage: React.FC = () => {
                 aria-label="组合目标权重"
                 placeholder="600519=60, 000001=30"
               />
+              <select
+                data-testid="agent-portfolio-cost-profile"
+                className={`${INPUT_CLASS} sm:w-56`}
+                value={portfolioCostProfile}
+                onChange={(event) => setPortfolioCostProfile(event.target.value as typeof portfolioCostProfile)}
+                aria-label="组合回测成本档位"
+              >
+                <option value="custom">自定义成本</option>
+                <option value="cn_retail_reference">A 股常规参考 · 3 bps / 最低 5</option>
+                <option value="cn_low_commission_reference">A 股低佣参考 · 1 bps / 最低 5</option>
+                <option value="zero_cost_baseline">零成本对照</option>
+              </select>
+              <input
+                data-testid="agent-portfolio-commission-bps"
+                className={`${INPUT_CLASS} sm:w-32`}
+                type="number"
+                min="0"
+                max="1000"
+                step="0.1"
+                value={portfolioCommissionBps}
+                onChange={(event) => setPortfolioCommissionBps(event.target.value)}
+                disabled={portfolioCostProfile !== 'custom'}
+                aria-label="佣金 bps"
+                placeholder="佣金 bps"
+              />
               <input
                 data-testid="agent-portfolio-minimum-commission"
                 className={`${INPUT_CLASS} sm:w-32`}
@@ -1520,6 +1564,7 @@ const AgentConsolePage: React.FC = () => {
                 step="0.01"
                 value={portfolioMinimumCommission}
                 onChange={(event) => setPortfolioMinimumCommission(event.target.value)}
+                disabled={portfolioCostProfile !== 'custom'}
                 aria-label="每笔最低佣金"
                 placeholder="最低佣金"
               />
@@ -1532,7 +1577,7 @@ const AgentConsolePage: React.FC = () => {
                 step="0.1"
                 value={portfolioSellTaxBps}
                 onChange={(event) => setPortfolioSellTaxBps(event.target.value)}
-                disabled={portfolioSellTaxMode !== 'explicit'}
+                disabled={portfolioCostProfile !== 'custom' || portfolioSellTaxMode !== 'explicit'}
                 aria-label="卖出税率 bps"
                 placeholder="卖出税 bps"
               />
@@ -1541,11 +1586,25 @@ const AgentConsolePage: React.FC = () => {
                 className={`${INPUT_CLASS} sm:w-44`}
                 value={portfolioSellTaxMode}
                 onChange={(event) => setPortfolioSellTaxMode(event.target.value as 'explicit' | 'cn_historical_stamp_duty')}
+                disabled={portfolioCostProfile !== 'custom'}
                 aria-label="卖出税模式"
               >
                 <option value="explicit">固定卖出税率</option>
                 <option value="cn_historical_stamp_duty">A 股历史印花税</option>
               </select>
+              <input
+                data-testid="agent-portfolio-slippage-bps"
+                className={`${INPUT_CLASS} sm:w-32`}
+                type="number"
+                min="0"
+                max="1000"
+                step="0.1"
+                value={portfolioSlippageBps}
+                onChange={(event) => setPortfolioSlippageBps(event.target.value)}
+                disabled={portfolioCostProfile !== 'custom'}
+                aria-label="滑点 bps"
+                placeholder="滑点 bps"
+              />
               <Button
                 data-testid="agent-portfolio-backtest-run"
                 variant="secondary"
@@ -1577,6 +1636,23 @@ const AgentConsolePage: React.FC = () => {
           />
           {portfolioBacktest ? (
             <div className="mt-3 space-y-3" data-testid="agent-portfolio-backtest-results">
+              <div
+                className="flex flex-wrap items-center gap-2 text-xs text-secondary-text"
+                data-testid="agent-portfolio-cost-profile-audit"
+              >
+                <span>
+                  成本档位：{portfolioResultCostProfile}
+                  {portfolioCostProfileVersion ? ` · ${portfolioCostProfileVersion}` : ''}
+                </span>
+                {portfolioEffectiveCosts ? (
+                  <span className="border border-border bg-surface px-2 py-1">
+                    佣金 {formatNumber(portfolioEffectiveCosts.commissionBps)} bps · 最低{' '}
+                    {formatMoney(portfolioEffectiveCosts.minimumCommission)} · 税制{' '}
+                    {String(portfolioEffectiveCosts.sellTaxMode || '-')} · 滑点{' '}
+                    {formatNumber(portfolioEffectiveCosts.slippageBps)} bps
+                  </span>
+                ) : null}
+              </div>
               {portfolioTaxRegimes.length > 0 ? (
                 <div
                   className="flex flex-wrap items-center gap-2 text-xs text-secondary-text"

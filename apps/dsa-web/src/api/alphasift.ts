@@ -580,9 +580,12 @@ export const alphasiftApi = {
     topK?: number;
     benchmarkSymbol?: string;
     targetWeights?: Record<string, number>;
+    costProfile?: 'custom' | 'cn_retail_reference' | 'cn_low_commission_reference' | 'zero_cost_baseline';
+    commissionBps?: number;
     minimumCommission?: number;
     sellTaxBps?: number;
     sellTaxMode?: 'explicit' | 'cn_historical_stamp_duty';
+    slippageBps?: number;
     corporateActions?: AlphaSiftPortfolioCorporateActionInput[];
     includePersistedCorporateActions?: boolean;
   }): Promise<AlphaSiftPortfolioBacktestResponse> {
@@ -596,11 +599,12 @@ export const alphasiftApi = {
         top_k: payload.topK ?? 5,
         final_holding_bars: 20,
         initial_capital: 100000,
-        commission_bps: 3,
+        cost_profile: payload.costProfile ?? 'custom',
+        commission_bps: payload.commissionBps ?? 3,
         minimum_commission: payload.minimumCommission ?? 0,
         sell_tax_bps: payload.sellTaxBps ?? 0,
         sell_tax_mode: payload.sellTaxMode ?? 'explicit',
-        slippage_bps: 5,
+        slippage_bps: payload.slippageBps ?? 5,
         benchmark_symbol: payload.benchmarkSymbol || null,
         enforce_tradeability: true,
         accounting_mode: 'cash_ledger',

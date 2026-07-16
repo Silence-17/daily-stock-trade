@@ -511,6 +511,63 @@ class StockSelectionPortfolioBacktestServiceTestCase(unittest.TestCase):
         self.assertEqual(result["methodology"]["historical_tax_coverage_from"], "2005-01-24")
         self.assertEqual(result["methodology"]["sell_tax_regimes"][1]["buy_tax_bps"], 30)
 
+    def test_cost_profile_atomically_overrides_requested_assumptions(self) -> None:
+        with self.db.get_session() as session:
+            session.add_all([
+                StockDaily(code="600001", date=date(2024, 1, 2), open=1, close=1, volume=1000, pct_chg=0),
+                StockDaily(code="600001", date=date(2024, 1, 3), open=1, close=1, volume=1000, pct_chg=0),
+            ])
+            session.commit()
+        self.repository.list_dates.return_value = [date(2024, 1, 1)]
+        self.replay.replay.return_value = {
+            "candidates": [{"symbol": "600001", "name": "profile", "screen_score": 90}],
+            "compatibility": {},
+        }
+
+        result = self.service.run(
+            strategy="dual_low",
+            market="cn",
+            date_from=date(2024, 1, 1),
+            date_to=date(2024, 1, 1),
+            final_holding_bars=2,
+            initial_capital=1000,
+            cost_profile="cn_low_commission_reference",
+            commission_bps=999,
+            minimum_commission=0,
+            sell_tax_bps=999,
+            sell_tax_mode="explicit",
+            slippage_bps=999,
+            accounting_mode="cash_ledger",
+        )
+
+        methodology = result["methodology"]
+        self.assertEqual(methodology["cost_profile"], "cn_low_commission_reference")
+        self.assertEqual(methodology["cost_profile_version"], "dsa-cost-profile-v1")
+        self.assertEqual(methodology["requested_cost_assumptions"]["commission_bps"], 999)
+        self.assertEqual(methodology["effective_cost_assumptions"], {
+            "commission_bps": 1.0,
+            "minimum_commission": 5.0,
+            "sell_tax_bps": 0.0,
+            "sell_tax_mode": "cn_historical_stamp_duty",
+            "slippage_bps": 5.0,
+        })
+        self.assertEqual(methodology["commission_bps_per_side"], 1)
+        self.assertEqual(methodology["minimum_commission_per_trade"], 5)
+        self.assertEqual(methodology["slippage_bps_per_side"], 5)
+
+        with self.assertRaisesRegex(ValueError, "only for the cn market"):
+            self.service._resolve_cost_profile(
+                cost_profile="cn_retail_reference",
+                market="us",
+                requested={},
+            )
+        with self.assertRaisesRegex(ValueError, "unsupported cost_profile"):
+            self.service._resolve_cost_profile(
+                cost_profile="broker_guess",
+                market="cn",
+                requested={},
+            )
+
     def test_historical_stamp_duty_regimes_are_side_aware_and_bounded(self) -> None:
         cases = [
             (date(2005, 1, 24), 10, 10, "mof_tax_2005_11_bilateral"),

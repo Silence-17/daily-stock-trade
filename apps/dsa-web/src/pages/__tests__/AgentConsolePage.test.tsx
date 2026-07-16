@@ -785,6 +785,15 @@ describe('AgentConsolePage', () => {
       methodology: {
         lookaheadProtection: true,
         configuredTargetWeights: { '600519': 60, '000001': 30 },
+        costProfile: 'cn_retail_reference',
+        costProfileVersion: 'dsa-cost-profile-v1',
+        effectiveCostAssumptions: {
+          commissionBps: 3,
+          minimumCommission: 5,
+          sellTaxBps: 0,
+          sellTaxMode: 'cn_historical_stamp_duty',
+          slippageBps: 5,
+        },
         historicalTaxCoverageFrom: '2005-01-24',
         sellTaxRegimes: [{
           effectiveFrom: '2007-05-30',
@@ -1138,6 +1147,13 @@ describe('AgentConsolePage', () => {
     fireEvent.change(screen.getByTestId('agent-portfolio-sell-tax-mode'), {
       target: { value: 'cn_historical_stamp_duty' },
     });
+    fireEvent.change(screen.getByTestId('agent-portfolio-cost-profile'), {
+      target: { value: 'cn_retail_reference' },
+    });
+    expect(screen.getByTestId('agent-portfolio-commission-bps')).toBeDisabled();
+    expect(screen.getByTestId('agent-portfolio-minimum-commission')).toBeDisabled();
+    expect(screen.getByTestId('agent-portfolio-sell-tax-mode')).toBeDisabled();
+    expect(screen.getByTestId('agent-portfolio-slippage-bps')).toBeDisabled();
     fireEvent.change(screen.getByTestId('agent-portfolio-corporate-actions'), {
       target: {
         value: '[{"symbol":"600519","effective_date":"2024-01-15","action_type":"cash_dividend","cash_dividend_per_share":1.5},{"symbol":"000001","effective_date":"2024-01-20","action_type":"split_adjustment","split_ratio":1.5,"cash_in_lieu_price":9.8}]',
@@ -1153,9 +1169,12 @@ describe('AgentConsolePage', () => {
       topK: 5,
       benchmarkSymbol: '000300',
       targetWeights: { '600519': 60, '000001': 30 },
+      costProfile: 'cn_retail_reference',
+      commissionBps: 3,
       minimumCommission: 5,
       sellTaxBps: 0,
       sellTaxMode: 'cn_historical_stamp_duty',
+      slippageBps: 5,
       corporateActions: [{
         symbol: '600519',
         effectiveDate: '2024-01-15',
@@ -1182,6 +1201,12 @@ describe('AgentConsolePage', () => {
     expect(screen.getByTestId('agent-portfolio-corporate-action-audit')).toHaveTextContent('补偿 ¥4.00');
     expect(screen.getByTestId('agent-portfolio-target-audit')).toHaveTextContent('600519 60.0%');
     expect(screen.getByTestId('agent-portfolio-target-audit')).toHaveTextContent('000001 30.0%');
+    expect(screen.getByTestId('agent-portfolio-cost-profile-audit')).toHaveTextContent(
+      '成本档位：cn_retail_reference · dsa-cost-profile-v1',
+    );
+    expect(screen.getByTestId('agent-portfolio-cost-profile-audit')).toHaveTextContent(
+      '佣金 3.00 bps · 最低 ¥5.00 · 税制 cn_historical_stamp_duty · 滑点 5.00 bps',
+    );
     expect(screen.getByTestId('agent-portfolio-tax-regimes')).toHaveTextContent('历史税制覆盖：2005-01-24');
     expect(screen.getByTestId('agent-portfolio-tax-regimes')).toHaveTextContent('2007-05-30 买 30.00 bps / 卖 30.00 bps');
     expect(screen.getByTestId('agent-portfolio-tax-regimes')).toHaveTextContent('2008-09-19 买 0.00 bps / 卖 10.00 bps');
