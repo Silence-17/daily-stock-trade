@@ -103,6 +103,30 @@ class TestTushareFetcherFollowUps(unittest.TestCase):
 
         # Data not ready, should fall back to Thursday (19th)
         self.assertEqual(result, "20260319")
+
+    def test_main_indices_marks_index_daily_as_end_of_day(self) -> None:
+        fetcher = self._make_fetcher()
+        fetcher._api.index_daily.return_value = pd.DataFrame(
+            {
+                "trade_date": ["20260319"],
+                "close": [3200.0],
+                "pre_close": [3180.0],
+                "change": [20.0],
+                "pct_chg": [0.63],
+                "open": [3188.0],
+                "high": [3210.0],
+                "low": [3175.0],
+                "vol": [1000.0],
+                "amount": [2000.0],
+            }
+        )
+
+        with patch.object(fetcher, "_check_rate_limit"):
+            result = fetcher.get_main_indices("cn")
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result[0]["data_date"], "2026-03-19")
+        self.assertEqual(result[0]["data_granularity"], "end_of_day")
         
           
     def test_get_sector_rankings_rate_limits_calendar_and_rankings_api(self) -> None:

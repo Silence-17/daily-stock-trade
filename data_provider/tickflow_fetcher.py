@@ -1034,6 +1034,10 @@ class TickFlowFetcher(BaseFetcher):
                     "volume": self._safe_float(quote.get("volume")) or 0.0,
                     "amount": self._safe_float(quote.get("amount")) or 0.0,
                     "amplitude": amplitude or 0.0,
+                    "provider_timestamp": self._format_provider_timestamp(
+                        quote.get("timestamp") or quote.get("time") or quote.get("ts")
+                    ),
+                    "data_granularity": "realtime",
                 }
             )
 

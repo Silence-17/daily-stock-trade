@@ -62,7 +62,9 @@ class TestTickFlowMarketReviewFallback(unittest.TestCase):
 
         data = DataFetcherManager.get_main_indices(manager, region="cn")
 
-        self.assertEqual(data, [{"code": "000001"}])
+        self.assertEqual(data[0]["code"], "000001")
+        self.assertEqual(data[0]["provider"], "tickflow")
+        self.assertIsNotNone(data[0]["fetched_at"])
         self.assertEqual(fallback.index_calls, 0)
 
     def test_manager_falls_back_when_tickflow_indices_fail(self):
@@ -75,7 +77,9 @@ class TestTickFlowMarketReviewFallback(unittest.TestCase):
 
         data = DataFetcherManager.get_main_indices(manager, region="cn")
 
-        self.assertEqual(data, [{"code": "fallback"}])
+        self.assertEqual(data[0]["code"], "fallback")
+        self.assertEqual(data[0]["provider"], "akshare")
+        self.assertIsNotNone(data[0]["fetched_at"])
         self.assertEqual(fallback.index_calls, 1)
 
     def test_manager_falls_back_when_tickflow_indices_missing(self):
@@ -88,7 +92,8 @@ class TestTickFlowMarketReviewFallback(unittest.TestCase):
 
         data = DataFetcherManager.get_main_indices(manager, region="cn")
 
-        self.assertEqual(data, [{"code": "fallback"}])
+        self.assertEqual(data[0]["code"], "fallback")
+        self.assertEqual(data[0]["provider"], "akshare")
         self.assertEqual(fallback.index_calls, 1)
 
     def test_manager_skips_tickflow_for_non_cn_indices(self):
@@ -101,7 +106,8 @@ class TestTickFlowMarketReviewFallback(unittest.TestCase):
 
         data = DataFetcherManager.get_main_indices(manager, region="us")
 
-        self.assertEqual(data, [{"code": "^GSPC"}])
+        self.assertEqual(data[0]["code"], "^GSPC")
+        self.assertEqual(data[0]["provider"], "yfinance")
         self.assertEqual(fallback.index_calls, 1)
 
     def test_manager_falls_back_when_tickflow_market_stats_fails(self):
@@ -118,6 +124,8 @@ class TestTickFlowMarketReviewFallback(unittest.TestCase):
         data = DataFetcherManager.get_market_stats(manager, purpose="market_review:cn")
 
         self.assertEqual(data["up_count"], 1)
+        self.assertEqual(data["provider"], "akshare")
+        self.assertIsNotNone(data["fetched_at"])
         self.assertEqual(fallback.stats_calls, 1)
 
     @patch("src.config.get_config")
