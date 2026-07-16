@@ -118,6 +118,7 @@ type SettingsForm = {
   autoConsecutiveLossCooldownMinutes: string;
   autoMarketLightGateEnabled: boolean;
   autoMarketLightBlockMode: 'red' | 'red_yellow';
+  autoMarketContextMaxAgeDays: string;
   autoMarketBreadthGateEnabled: boolean;
   autoMarketBreadthMinScore: string;
   autoHotspotRetreatGateEnabled: boolean;
@@ -223,6 +224,7 @@ const defaultSettingsForm: SettingsForm = {
   autoConsecutiveLossCooldownMinutes: '1440',
   autoMarketLightGateEnabled: false,
   autoMarketLightBlockMode: 'red',
+  autoMarketContextMaxAgeDays: '7',
   autoMarketBreadthGateEnabled: false,
   autoMarketBreadthMinScore: '35',
   autoHotspotRetreatGateEnabled: false,
@@ -571,6 +573,7 @@ function settingsToForm(status: VnpyPaperStatusResponse): SettingsForm {
     autoMarketLightBlockMode: (settings.autoMarketLightBlockStatuses || []).includes('yellow')
       ? 'red_yellow'
       : 'red',
+    autoMarketContextMaxAgeDays: String(settings.autoMarketContextMaxAgeDays ?? 7),
     autoMarketBreadthGateEnabled: Boolean(settings.autoMarketBreadthGateEnabled),
     autoMarketBreadthMinScore: String(settings.autoMarketBreadthMinScore ?? 35),
     autoHotspotRetreatGateEnabled: Boolean(settings.autoHotspotRetreatGateEnabled),
@@ -677,6 +680,7 @@ function buildSettingsUpdate(settingsForm: SettingsForm): VnpyPaperSettingsUpdat
     autoMarketLightBlockStatuses: settingsForm.autoMarketLightBlockMode === 'red_yellow'
       ? ['red', 'yellow']
       : ['red'],
+    autoMarketContextMaxAgeDays: parseNumber(settingsForm.autoMarketContextMaxAgeDays) ?? 7,
     autoMarketBreadthGateEnabled: settingsForm.autoMarketBreadthGateEnabled,
     autoMarketBreadthMinScore: parseNumber(settingsForm.autoMarketBreadthMinScore) ?? 35,
     autoHotspotRetreatGateEnabled: settingsForm.autoHotspotRetreatGateEnabled,
@@ -4117,6 +4121,20 @@ const VnpyPaperTradingPage: React.FC = () => {
                 <option value="red">仅红灯</option>
                 <option value="red_yellow">红灯和黄灯</option>
               </select>
+            </label>
+            <label className="space-y-1 text-xs text-secondary-text">
+              市场快照最长年龄（天）
+              <input
+                className={INPUT_CLASS}
+                type="number"
+                min={1}
+                max={30}
+                value={settingsForm.autoMarketContextMaxAgeDays}
+                onChange={(event) => setSettingsForm((prev) => ({
+                  ...prev,
+                  autoMarketContextMaxAgeDays: event.target.value,
+                }))}
+              />
             </label>
             <label className="space-y-1 text-xs text-secondary-text">
               最低市场宽度分

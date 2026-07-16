@@ -1526,6 +1526,11 @@ class StockSelectionAgentRepository:
                 if isinstance(market_context_risk.get("hotspot_retreat"), dict)
                 else {}
             )
+            freshness = (
+                market_context_risk.get("freshness")
+                if isinstance(market_context_risk.get("freshness"), dict)
+                else {}
+            )
             timeline.append(
                 {
                     "stage": "market_context_risk",
@@ -1535,6 +1540,7 @@ class StockSelectionAgentRepository:
                         + (f": {risk_reason}" if risk_reason else "")
                         + f", breadth={breadth.get('score')}"
                         + f", hotspot_drop={retreat.get('score_drop')}"
+                        + f", age_days={freshness.get('age_days')}"
                     ),
                     "timestamp": started_at,
                     "details": dict(market_context_risk),

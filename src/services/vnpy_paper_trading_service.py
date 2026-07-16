@@ -173,6 +173,7 @@ class VnpyPaperSettings:
     auto_consecutive_loss_cooldown_minutes: int = 1440
     auto_market_light_gate_enabled: bool = False
     auto_market_light_block_statuses: List[str] = field(default_factory=lambda: ["red"])
+    auto_market_context_max_age_days: int = 7
     auto_market_breadth_gate_enabled: bool = False
     auto_market_breadth_min_score: int = 35
     auto_hotspot_retreat_gate_enabled: bool = False
@@ -4553,6 +4554,9 @@ class VnpyPaperTradingService:
         auto_market_breadth_min_score = _safe_int(
             raw.get("auto_market_breadth_min_score")
         )
+        auto_market_context_max_age_days = _safe_int(
+            raw.get("auto_market_context_max_age_days")
+        )
         auto_hotspot_retreat_min_drop = _safe_int(
             raw.get("auto_hotspot_retreat_min_drop")
         )
@@ -4782,6 +4786,15 @@ class VnpyPaperTradingService:
                 raw.get("auto_market_light_gate_enabled", defaults.auto_market_light_gate_enabled)
             ),
             auto_market_light_block_statuses=auto_market_light_block_statuses,
+            auto_market_context_max_age_days=max(
+                1,
+                min(
+                    30,
+                    auto_market_context_max_age_days
+                    if auto_market_context_max_age_days is not None
+                    else defaults.auto_market_context_max_age_days,
+                ),
+            ),
             auto_market_breadth_gate_enabled=bool(
                 raw.get(
                     "auto_market_breadth_gate_enabled",
@@ -5302,6 +5315,7 @@ class VnpyPaperTradingService:
                 ),
                 "market_light_gate_enabled": settings.auto_market_light_gate_enabled,
                 "market_light_block_statuses": list(settings.auto_market_light_block_statuses or []),
+                "market_context_max_age_days": settings.auto_market_context_max_age_days,
                 "market_breadth_gate_enabled": settings.auto_market_breadth_gate_enabled,
                 "market_breadth_min_score": settings.auto_market_breadth_min_score,
                 "hotspot_retreat_gate_enabled": settings.auto_hotspot_retreat_gate_enabled,
@@ -5955,6 +5969,12 @@ class VnpyPaperTradingService:
             layers.append("market_breadth")
         if settings.auto_hotspot_retreat_gate_enabled:
             layers.append("hotspot_retreat")
+        if (
+            settings.auto_market_light_gate_enabled
+            or settings.auto_market_breadth_gate_enabled
+            or settings.auto_hotspot_retreat_gate_enabled
+        ):
+            layers.append("market_context_freshness")
         if settings.auto_failure_fuse_enabled:
             layers.append("failure_fuse")
         if settings.auto_sell_enabled:
@@ -6016,6 +6036,26 @@ class VnpyPaperTradingService:
                 [
                     {"reason": "cash_low_watermark", "action": "skip_buy_and_alert", "alert": True},
                     {"reason": "account_drawdown_limit_reached", "action": "skip_buy_and_alert", "alert": True},
+                ]
+            )
+        if (
+            settings.auto_market_light_gate_enabled
+            or settings.auto_market_breadth_gate_enabled
+            or settings.auto_hotspot_retreat_gate_enabled
+        ):
+            actions.extend(
+                [
+                    {
+                        "reason": "market_context_unavailable",
+                        "action": "skip_buy",
+                        "alert": False,
+                    },
+                    {
+                        "reason": "market_context_stale",
+                        "action": "skip_buy",
+                        "max_age_days": settings.auto_market_context_max_age_days,
+                        "alert": False,
+                    },
                 ]
             )
         if settings.auto_market_light_gate_enabled:
@@ -9564,6 +9604,12 @@ class VnpyPaperTradingService:
             "schema_version": 1,
             "enabled": enabled,
             "market": str(settings.auto_market or "").strip().lower(),
+            "freshness": {
+                "max_age_days": settings.auto_market_context_max_age_days,
+                "trade_date": None,
+                "age_days": None,
+                "status": "unchecked",
+            },
             "market_light": {
                 "enabled": settings.auto_market_light_gate_enabled,
                 "block_statuses": list(settings.auto_market_light_block_statuses or []),
@@ -9591,6 +9637,8 @@ class VnpyPaperTradingService:
                 return "market_breadth_unavailable"
             if settings.auto_hotspot_retreat_gate_enabled:
                 return "hotspot_retreat_unavailable"
+            if settings.auto_market_light_gate_enabled:
+                return "market_context_unavailable"
             return None
 
         if not enabled:
@@ -9633,6 +9681,46 @@ class VnpyPaperTradingService:
             )
             return reason, diagnostics
         diagnostics["snapshot"] = snapshot
+        snapshot_trade_date = str(snapshot.get("trade_date") or "").strip()
+        diagnostics["freshness"]["trade_date"] = snapshot_trade_date or None
+        try:
+            snapshot_date = date.fromisoformat(snapshot_trade_date)
+        except (TypeError, ValueError):
+            reason = unavailable_reason()
+            diagnostics["freshness"].update(
+                {"status": "invalid", "evidence_reason": "invalid_trade_date"}
+            )
+            diagnostics.update(
+                {
+                    "status": "unavailable",
+                    "reason": reason,
+                    "evidence_reason": "market_context_trade_date_invalid",
+                }
+            )
+            return reason, diagnostics
+        age_days = (date.today() - snapshot_date).days
+        diagnostics["freshness"]["age_days"] = age_days
+        if age_days < 0:
+            reason = unavailable_reason()
+            diagnostics["freshness"].update(
+                {"status": "invalid", "evidence_reason": "future_trade_date"}
+            )
+            diagnostics.update(
+                {
+                    "status": "unavailable",
+                    "reason": reason,
+                    "evidence_reason": "market_context_trade_date_future",
+                }
+            )
+            return reason, diagnostics
+        if age_days > int(settings.auto_market_context_max_age_days):
+            reason = "market_context_stale"
+            diagnostics["freshness"].update(
+                {"status": "stale", "evidence_reason": "max_age_exceeded"}
+            )
+            diagnostics.update({"status": "blocked", "reason": reason})
+            return reason, diagnostics
+        diagnostics["freshness"]["status"] = "fresh"
         status = str(snapshot.get("status") or "").strip().lower()
         if (
             settings.auto_market_light_gate_enabled

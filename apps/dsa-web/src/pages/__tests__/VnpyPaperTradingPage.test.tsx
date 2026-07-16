@@ -124,6 +124,7 @@ const statusResponse = {
     autoConsecutiveLossCooldownMinutes: 1440,
     autoMarketLightGateEnabled: false,
     autoMarketLightBlockStatuses: ['red'],
+    autoMarketContextMaxAgeDays: 7,
     autoMarketBreadthGateEnabled: false,
     autoMarketBreadthMinScore: 35,
     autoHotspotRetreatGateEnabled: false,
@@ -1917,6 +1918,7 @@ describe('VnpyPaperTradingPage', () => {
     fireEvent.change(screen.getByLabelText('连续亏损冷却（分钟）'), { target: { value: '120' } });
     fireEvent.click(screen.getByLabelText('大盘红绿灯风控'));
     fireEvent.change(screen.getByLabelText('红绿灯拦截'), { target: { value: 'red_yellow' } });
+    fireEvent.change(screen.getByLabelText('市场快照最长年龄（天）'), { target: { value: '5' } });
     fireEvent.click(screen.getByLabelText('市场宽度风控'));
     fireEvent.change(screen.getByLabelText('最低市场宽度分'), { target: { value: '42' } });
     fireEvent.click(screen.getByLabelText('热点退潮风控'));
@@ -1985,6 +1987,7 @@ describe('VnpyPaperTradingPage', () => {
         autoConsecutiveLossCooldownMinutes: 120,
         autoMarketLightGateEnabled: true,
         autoMarketLightBlockStatuses: ['red', 'yellow'],
+        autoMarketContextMaxAgeDays: 5,
         autoMarketBreadthGateEnabled: true,
         autoMarketBreadthMinScore: 42,
         autoHotspotRetreatGateEnabled: true,
