@@ -302,6 +302,7 @@ class CircuitBreaker:
     CLOSED = "closed"      # 正常状态
     OPEN = "open"          # 熔断状态（不可用）
     HALF_OPEN = "half_open"  # 半开状态（试探性请求）
+    STATE_SCHEMA_VERSION = 1
     
     def __init__(
         self,
@@ -462,6 +463,79 @@ class CircuitBreaker:
                 }
             return snapshot
     
+    def export_state(self, *, saved_at: Optional[float] = None) -> Dict[str, Any]:
+        """Export restart-safe state without carrying half-open probe leases."""
+        with self._lock:
+            persisted_states: Dict[str, Dict[str, Any]] = {}
+            for source, info in self._states.items():
+                state = str(info.get('state') or self.CLOSED)
+                failures = max(0, int(info.get('failures') or 0))
+                if state == self.CLOSED and failures == 0:
+                    continue
+                persisted_states[source] = {
+                    'state': self.OPEN if state == self.HALF_OPEN else state,
+                    'failures': failures,
+                    'last_failure_time': float(info.get('last_failure_time') or 0.0),
+                    'last_error': info.get('last_error'),
+                }
+            return {
+                'version': self.STATE_SCHEMA_VERSION,
+                'saved_at': float(time.time() if saved_at is None else saved_at),
+                'states': persisted_states,
+            }
+
+    def restore_state(
+        self,
+        payload: Any,
+        *,
+        max_age_seconds: Optional[float] = None,
+        now: Optional[float] = None,
+    ) -> int:
+        """Restore validated persisted state and return the restored source count."""
+        if not isinstance(payload, dict) or payload.get('version') != self.STATE_SCHEMA_VERSION:
+            raise ValueError("unsupported circuit-breaker state payload")
+        current_time = float(time.time() if now is None else now)
+        saved_at = float(payload.get('saved_at') or 0.0)
+        if not math.isfinite(saved_at) or saved_at <= 0 or saved_at > current_time + 300:
+            raise ValueError("invalid circuit-breaker state timestamp")
+        if max_age_seconds is not None and current_time - saved_at > float(max_age_seconds):
+            raise ValueError("stale circuit-breaker state payload")
+        raw_states = payload.get('states')
+        if not isinstance(raw_states, dict):
+            raise ValueError("invalid circuit-breaker source states")
+
+        restored: Dict[str, Dict[str, Any]] = {}
+        for source, raw_info in raw_states.items():
+            if not isinstance(source, str) or not source or len(source) > 512:
+                continue
+            if not isinstance(raw_info, dict):
+                continue
+            state = str(raw_info.get('state') or self.CLOSED)
+            if state not in {self.CLOSED, self.OPEN, self.HALF_OPEN}:
+                continue
+            failures = max(0, int(raw_info.get('failures') or 0))
+            last_failure_time = float(raw_info.get('last_failure_time') or 0.0)
+            if not math.isfinite(last_failure_time) or last_failure_time < 0:
+                continue
+            last_error = raw_info.get('last_error')
+            if last_error is not None:
+                last_error = str(last_error)[:300]
+            if state == self.HALF_OPEN:
+                state = self.OPEN
+            if state == self.CLOSED and failures == 0:
+                continue
+            restored[source] = {
+                'state': state,
+                'failures': failures,
+                'last_failure_time': last_failure_time,
+                'half_open_calls': 0,
+                'last_error': last_error,
+            }
+
+        with self._lock:
+            self._states = restored
+        return len(restored)
+
     def reset(self, source: Optional[str] = None) -> None:
         """重置熔断器状态"""
         with self._lock:

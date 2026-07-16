@@ -193,6 +193,32 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
 
         self.assertEqual(payload["source_health"]["snapshot"]["sina"]["failures"], 2)
 
+    def test_status_includes_candidate_quote_recovery_policy(self) -> None:
+        config = self._config(enabled=True)
+        quote_routing = {
+            "mode": "circuit_breaker_failover",
+            "cross_process_persistence": True,
+            "restored_sources": 1,
+            "sources": {"cn/efinance": {"state": "open"}},
+        }
+
+        with (
+            patch(
+                "src.services.alphasift_service._call_alphasift_status",
+                return_value={"available": True, "strategy_count": 8},
+            ),
+            patch(
+                "src.services.alphasift_service._get_dsa_realtime_source_routing",
+                return_value=quote_routing,
+            ),
+        ):
+            payload = alphasift_endpoint.alphasift_status(config=config)
+
+        self.assertEqual(
+            payload["source_routing"]["candidate_context"]["quote"],
+            quote_routing,
+        )
+
     def test_snapshot_source_routing_demotes_persistently_degraded_source(self) -> None:
         config = self._config(enabled=True)
         with patch.dict(alphasift_service.os.environ, {"SNAPSHOT_SOURCE_PRIORITY": ""}, clear=False):

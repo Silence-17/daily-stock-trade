@@ -156,6 +156,7 @@ from api.v1 import api_v1_router
 from api.middlewares.auth import add_auth_middleware
 from api.middlewares.error_handler import add_error_handlers
 from api.v1.schemas.common import HealthResponse
+from data_provider.base import DataFetcherManager
 from src.auth import is_auth_enabled
 from src.data.stock_index_loader import find_existing_stock_index_path
 from src.repositories.runtime_scheduler_repo import RuntimeSchedulerRepository
@@ -273,6 +274,12 @@ async def app_lifespan(app: FastAPI):
     os.environ.pop(RUNTIME_SCHEDULER_SUPPRESS_START_ENV, None)
     os.environ.pop(RUNTIME_SCHEDULER_DISABLE_DAILY_ENV, None)
     os.environ.pop(RUNTIME_SCHEDULER_ARGS_ENV, None)
+    from src.config import get_config
+
+    source_health_recovery = DataFetcherManager.configure_realtime_source_health_persistence(
+        getattr(get_config(), "database_path", "./data/stock_analysis.db")
+    )
+    app.state.realtime_source_health_recovery = source_health_recovery
     runtime_scheduler_service = RuntimeSchedulerService(
         owns_schedule=runtime_owns_schedule,
         force_enabled=runtime_force_enabled,
@@ -335,6 +342,9 @@ async def app_lifespan(app: FastAPI):
         ):
             if hasattr(app.state, attr_name):
                 delattr(app.state, attr_name)
+        DataFetcherManager.disable_realtime_source_health_persistence()
+        if hasattr(app.state, "realtime_source_health_recovery"):
+            delattr(app.state, "realtime_source_health_recovery")
 
 
 def create_app(static_dir: Optional[Path] = None) -> FastAPI:

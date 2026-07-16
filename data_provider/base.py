@@ -14,9 +14,12 @@
 3. 指数退避重试机制
 """
 
+import json
 import logging
+import os
 import random
 import time
+from pathlib import Path
 from threading import BoundedSemaphore, RLock, Thread
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
@@ -630,6 +633,10 @@ class DataFetcherManager:
     }
     _daily_source_health = CircuitBreaker(failure_threshold=3, cooldown_seconds=300.0)
     _realtime_source_health = CircuitBreaker(failure_threshold=3, cooldown_seconds=300.0)
+    _realtime_source_health_state_path: Optional[Path] = None
+    _realtime_source_health_state_lock = RLock()
+    _realtime_source_health_restored_sources = 0
+    _REALTIME_SOURCE_HEALTH_STATE_MAX_AGE_SECONDS = 86400.0
     _CONCEPT_RANKINGS_CACHE_TTL_SECONDS = 300.0
     _CONCEPT_RANKINGS_EMPTY_CACHE_TTL_SECONDS = 30.0
     _concept_rankings_cache_lock = RLock()
@@ -842,7 +849,12 @@ class DataFetcherManager:
     @classmethod
     def _is_realtime_source_available(cls, source: str, market: str) -> bool:
         key = cls._realtime_health_key(source, market)
-        if cls._realtime_source_health.is_available(key):
+        before = cls._realtime_source_health.export_state().get("states", {}).get(key)
+        available = cls._realtime_source_health.is_available(key)
+        after = cls._realtime_source_health.export_state().get("states", {}).get(key)
+        if before != after:
+            cls._persist_realtime_source_health()
+        if available:
             return True
         logger.info(
             "[数据源健康度] %s 实时行情跳过短期熔断的数据源: %s",
@@ -853,7 +865,12 @@ class DataFetcherManager:
 
     @classmethod
     def _record_realtime_source_success(cls, source: str, market: str) -> None:
-        cls._realtime_source_health.record_success(cls._realtime_health_key(source, market))
+        key = cls._realtime_health_key(source, market)
+        before = cls._realtime_source_health.export_state().get("states", {}).get(key)
+        cls._realtime_source_health.record_success(key)
+        after = cls._realtime_source_health.export_state().get("states", {}).get(key)
+        if before != after:
+            cls._persist_realtime_source_health()
 
     @classmethod
     def _record_realtime_source_failure(
@@ -866,12 +883,77 @@ class DataFetcherManager:
             cls._realtime_health_key(source, market),
             error=error,
         )
+        cls._persist_realtime_source_health()
 
     @classmethod
     def _record_realtime_source_inconclusive(cls, source: str, market: str) -> None:
-        cls._realtime_source_health.record_inconclusive(
-            cls._realtime_health_key(source, market)
-        )
+        key = cls._realtime_health_key(source, market)
+        before = cls._realtime_source_health.export_state().get("states", {}).get(key)
+        cls._realtime_source_health.record_inconclusive(key)
+        after = cls._realtime_source_health.export_state().get("states", {}).get(key)
+        if before != after:
+            cls._persist_realtime_source_health()
+
+    @classmethod
+    def configure_realtime_source_health_persistence(cls, database_path: str) -> Dict[str, Any]:
+        """Bind restart recovery to a state file beside the configured database."""
+        db_path = Path(str(database_path or "./data/stock_analysis.db")).expanduser()
+        state_path = db_path.parent / "realtime_source_health.json"
+        with cls._realtime_source_health_state_lock:
+            cls._realtime_source_health_state_path = state_path
+            cls._realtime_source_health_restored_sources = 0
+            cls._realtime_source_health.reset()
+            if not state_path.is_file():
+                return {"enabled": True, "restored_sources": 0}
+            try:
+                payload = json.loads(state_path.read_text(encoding="utf-8"))
+                restored = cls._realtime_source_health.restore_state(
+                    payload,
+                    max_age_seconds=cls._REALTIME_SOURCE_HEALTH_STATE_MAX_AGE_SECONDS,
+                )
+            except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+                logger.warning("[source-health] ignored invalid persisted realtime state: %s", exc)
+                return {"enabled": True, "restored_sources": 0, "ignored_invalid_state": True}
+            cls._realtime_source_health_restored_sources = restored
+            logger.info("[source-health] restored %s realtime provider states", restored)
+            return {"enabled": True, "restored_sources": restored}
+
+    @classmethod
+    def disable_realtime_source_health_persistence(cls) -> None:
+        """Detach disk persistence without changing current in-memory health."""
+        with cls._realtime_source_health_state_lock:
+            cls._realtime_source_health_state_path = None
+            cls._realtime_source_health_restored_sources = 0
+
+    @classmethod
+    def _persist_realtime_source_health(cls) -> None:
+        with cls._realtime_source_health_state_lock:
+            state_path = cls._realtime_source_health_state_path
+            if state_path is None:
+                return
+            temp_path = state_path.with_name(
+                f".{state_path.name}.{os.getpid()}.{id(cls)}.tmp"
+            )
+            try:
+                state_path.parent.mkdir(parents=True, exist_ok=True)
+                payload = cls._realtime_source_health.export_state()
+                for raw_state in payload.get("states", {}).values():
+                    if isinstance(raw_state, dict):
+                        raw_state["last_error"] = sanitize_diagnostic_text(
+                            raw_state.get("last_error"),
+                            max_length=300,
+                        ) or None
+                temp_path.write_text(
+                    json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+                    encoding="utf-8",
+                )
+                os.replace(temp_path, state_path)
+            except OSError as exc:
+                logger.warning("[source-health] failed to persist realtime state: %s", exc)
+                try:
+                    temp_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     @classmethod
     def realtime_source_health_snapshot(cls) -> Dict[str, Dict[str, Any]]:
@@ -896,12 +978,15 @@ class DataFetcherManager:
             "failure_threshold": int(cls._realtime_source_health.failure_threshold),
             "cooldown_seconds": float(cls._realtime_source_health.cooldown_seconds),
             "half_open_max_calls": int(cls._realtime_source_health.half_open_max_calls),
+            "cross_process_persistence": cls._realtime_source_health_state_path is not None,
+            "restored_sources": int(cls._realtime_source_health_restored_sources),
         }
 
     @classmethod
     def reset_realtime_source_health(cls) -> None:
         """Reset manager-level realtime provider health for tests/admin diagnostics."""
         cls._realtime_source_health.reset()
+        cls._persist_realtime_source_health()
 
     def _get_cached_stock_name(self, stock_code: str) -> Optional[str]:
         self._ensure_concurrency_guards()
