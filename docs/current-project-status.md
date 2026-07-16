@@ -72,7 +72,7 @@ Snapshot date: 2026-07-17
 
 Local API: `http://127.0.0.1:8000`
 
-- Build `intraday-cross-market-risk-20260717` runs under Python 3.13.14 with launcher PID `6744` and listener PID `8812`. DSA_SIM is connected, the MainEngine bridge is available, and all four order/trade/account/position callbacks are registered.
+- Build `market-evidence-timeout-20260717` runs under Python 3.13.14 with launcher PID `10776` and listener PID `12976`. DSA_SIM is connected, the MainEngine bridge is available, and all four order/trade/account/position callbacks are registered.
 - The status API returns both new gates disabled for the saved account, so this deployment does not change live order behavior until explicitly enabled. OpenAPI exposes `auto_intraday_market_gate_enabled` and `auto_cross_market_gate_enabled` plus their thresholds; `/paper-trading` and `/agent-console` both return HTTP 200.
 - A headless Playwright check using the installed Chrome executable found exactly one visible instance of each new switch and threshold label at 1440x1000. The switch and threshold regions have no visible overlap or clipping; screenshots were retained only in the local temporary directory as review evidence and were not added to the repository.
 
@@ -133,11 +133,11 @@ The readiness and system health status are `warning` because the current time is
 ## Recent Validation
 
 - `python -m pytest tests/test_vnpy_paper_trading_service.py tests/test_vnpy_paper_trading_api.py -q -p no:cacheprovider`
-  - 204 passed and 4 optional vn.py tests skipped. Coverage includes live CN index/breadth pass and fail-closed paths, linked-market weakness/missing quotes, VIX exclusion, persisted settings, prior snapshot gates, sell-first behavior, and existing order lifecycle/recovery contracts.
+  - 206 passed and 4 optional vn.py tests skipped. Coverage includes live CN index/breadth pass and fail-closed paths, linked-market weakness/missing quotes, VIX exclusion, provider timeout and worker-pool exhaustion, persisted settings, prior snapshot gates, sell-first behavior, and existing order lifecycle/recovery contracts.
 - `npm.cmd test -- --run src/api/__tests__/vnpyPaperTrading.test.ts src/pages/__tests__/VnpyPaperTradingPage.test.tsx`, `npm.cmd run lint`, and `npm.cmd run build`
   - 61 focused Web tests passed. The settings API maps all five new fields and the page saves both switches and three thresholds. Lint reported zero errors and the pre-existing `SettingsPage.tsx:553` Hook warning; the production build passed.
 - Read-only post-restart smoke on `http://127.0.0.1:8000`
-  - Build `intraday-cross-market-risk-20260717` reports connected DSA_SIM, an available vn.py bridge, four registered callbacks, contract version 3, and no required health blockers. Latest Agent run remains `ss-agent-20260716081103-27d104bb` with zero submitted orders; the restart and UI smoke created no Agent run or order.
+  - Build `market-evidence-timeout-20260717` reports connected DSA_SIM, an available vn.py bridge, four registered callbacks, contract version 3, and no required health blockers. Latest Agent run remains `ss-agent-20260716081103-27d104bb` with zero submitted orders; the restart and UI smoke created no Agent run or order.
 
 - `python -m pytest tests/test_vnpy_runtime.py tests/test_vnpy_adapter.py tests/test_vnpy_simulated_gateway.py tests/test_vnpy_paper_trading_api.py tests/test_vnpy_paper_trading_service.py -q -p no:cacheprovider`
   - 223 passed and 7 optional vn.py tests skipped under Python 3.14. Coverage includes gateway/runtime degradation, reconnect events, API contracts, native Chinese status normalization, immediate submission reconciliation, mixed-candidate run counts, missing-price audit, concurrent trade-callback idempotency, and existing order lifecycle/recovery behavior.
