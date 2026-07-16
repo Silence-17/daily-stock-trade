@@ -84,7 +84,7 @@ if (-not $SkipProjectDependencies) {
 if ($LASTEXITCODE -ne 0) {
     throw "Failed to install optional vn.py dependencies."
 }
-& $venvPython (Join-Path $root "scripts\check_vnpy_adapter.py") --require-vnpy --reconnect-cycles 3
+& $venvPython (Join-Path $root "scripts\check_vnpy_adapter.py") --require-vnpy --fault-matrix --reconnect-cycles 3
 if ($LASTEXITCODE -ne 0) {
     throw "vn.py runtime smoke check failed."
 }

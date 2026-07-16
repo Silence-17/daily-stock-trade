@@ -127,3 +127,79 @@ class VnpySimulatedGatewayTestCase(unittest.TestCase):
             self.assertEqual(state["position_count"], 1)
         finally:
             main_engine.close()
+
+    def test_fault_injection_rejects_order_and_duplicates_trade_callback(self) -> None:
+        from vnpy.event import EventEngine
+        from vnpy.trader.constant import Direction, Exchange, Offset, OrderType, Status
+        from vnpy.trader.engine import MainEngine
+        from vnpy.trader.event import EVENT_TRADE
+        from vnpy.trader.object import OrderRequest
+
+        from src.services.vnpy_simulated_gateway import DsaSimulatedGateway
+
+        event_engine = EventEngine()
+        main_engine = MainEngine(event_engine)
+        main_engine.add_gateway(DsaSimulatedGateway, "DSA_SIM")
+        observed_trade_ids = []
+
+        def capture_trade(event) -> None:
+            observed_trade_ids.append(event.data.vt_tradeid)
+
+        event_engine.register(EVENT_TRADE, capture_trade)
+        main_engine.connect(
+            {
+                "fill_delay_ms": 20,
+                "reject_every_nth_order": 2,
+                "duplicate_trade_event_count": 2,
+            },
+            "DSA_SIM",
+        )
+        request = OrderRequest(
+            symbol="600519",
+            exchange=Exchange.SSE,
+            direction=Direction.LONG,
+            type=OrderType.LIMIT,
+            volume=100,
+            price=10,
+            offset=Offset.NONE,
+            reference="dsa:test:fault_matrix",
+        )
+        try:
+            filled_orderid = main_engine.send_order(request, "DSA_SIM")
+            rejected_orderid = main_engine.send_order(request, "DSA_SIM")
+
+            deadline = time.monotonic() + 3.0
+            while time.monotonic() < deadline:
+                filled = main_engine.get_order(filled_orderid)
+                if filled is not None and filled.status == Status.ALLTRADED and len(observed_trade_ids) >= 2:
+                    break
+                time.sleep(0.02)
+
+            filled = main_engine.get_order(filled_orderid)
+            rejected = main_engine.get_order(rejected_orderid)
+            trades = [
+                trade
+                for trade in main_engine.get_all_trades()
+                if trade.vt_orderid == filled_orderid
+            ]
+            gateway = main_engine.get_gateway("DSA_SIM")
+            self.assertIsNotNone(gateway)
+            assert gateway is not None
+            state = gateway.get_state_snapshot()
+
+            self.assertEqual(filled.status, Status.ALLTRADED)
+            self.assertEqual(rejected.status, Status.REJECTED)
+            self.assertEqual(rejected.rejected_reason, "simulated_configured_rejection")
+            self.assertEqual(len(observed_trade_ids), 2)
+            self.assertEqual(len(set(observed_trade_ids)), 1)
+            self.assertEqual(len(trades), 1)
+            self.assertEqual(
+                state["fault_injection"],
+                {
+                    "reject_every_nth_order": 2,
+                    "duplicate_trade_event_count": 2,
+                },
+            )
+        finally:
+            event_engine.unregister(EVENT_TRADE, capture_trade)
+            main_engine.close()
