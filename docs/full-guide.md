@@ -757,6 +757,7 @@ python main.py --schedule --no-run-immediately
 > readiness 与系统健康还会展示持久化的最近一次自动运行结果，包括运行时间/ID、原始跳过或失败 reason，以及候选和提交计数。该信息不依赖后台 task event 保留期；历史非成功结果只作为 warning，不会单独成为当前硬阻断。
 > `diagnostics.backend` 返回 API 版本、vn.py paper contract、可选 build id、Python 版本和进程启动时间。Web 当前要求 contract 3；旧后端未报告版本或 contract 更低时，“可用性诊断”会显示“需更新”。部署可选设置 `DSA_BUILD_ID`，CI/云平台也会自动读取常见的 Git commit 环境变量。
 > `diagnostics.vnpy_runtime.connect` 将 `request_accepted` 与 `connected` 分开：前者只表示 `MainEngine.connect()` 调用返回，后者必须由网关状态钩子确认。连接异常以 `connect_failed` 降级且不阻断 API 启动；无法确认的异步网关显示 warning，明确断开显示 blocked，并以 `vnpy_gateway_disconnected` 阻止新增委托。支持状态钩子的网关会在每次状态读取时动态刷新。
+> 需要无人值守恢复时，可显式设置 `VNPY_AUTO_RECONNECT_ENABLED=true`，并以 `VNPY_AUTO_RECONNECT_INTERVAL_SECONDS` 配置 5 至 3600 秒检查间隔。后台监控只重试明确失败或断开的连接，连接状态无法确认时不会重复登录；`VNPY_AUTO_RECONNECT_CONFIRMATION_GRACE_SECONDS` 提供 5 至 600 秒异步连接确认宽限期（默认 30），避免登录初始化期间重复连接。每次重试都会重新读取外部连接 JSON，诊断和系统健康只记录次数、时间、结果与下次检查，不记录凭据。三个配置均需重启进程生效。
 > Web 模拟交易页还会读取 `GET /api/v1/vnpy-paper/task-event-summary` 展示“任务趋势”，按最近持久化事件聚合 completed/skipped/failed/started 分布、任务级失败率、平均耗时和最近失败/跳过时间。
 >
 > “长期稳定性”通过 `GET /api/v1/vnpy-paper/task-metrics` 提供 7/30/90 天窗口，按 completed/skipped/failed 终态运行计算成功率、失败率、跳过率、平均/P95 耗时和连续失败，并展示任务级与逐日趋势；started 事件不计入成功率分母。

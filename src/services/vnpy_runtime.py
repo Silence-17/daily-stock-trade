@@ -12,8 +12,9 @@ import json
 import logging
 import os
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from threading import RLock
+from threading import Event, RLock, Thread
 from typing import Any, Dict, Optional, Tuple
 
 from src.services.vnpy_paper_trading_service import VnpyPaperTradingService
@@ -29,6 +30,9 @@ class VnpyRuntimeSettings:
     connect_settings_path: Optional[str] = None
     connect_on_start: bool = False
     auto_attach_events: bool = True
+    auto_reconnect_enabled: bool = False
+    auto_reconnect_interval_seconds: int = 60
+    auto_reconnect_confirmation_grace_seconds: int = 30
 
 
 class VnpyRuntimeHandle:
@@ -49,6 +53,8 @@ class VnpyRuntimeHandle:
         self.event_bridge = event_bridge
         self.diagnostics = diagnostics or {}
         self._diagnostics_lock = RLock()
+        self._auto_reconnect_stop = Event()
+        self._auto_reconnect_thread: Optional[Thread] = None
 
     def refresh_diagnostics(self) -> Dict[str, Any]:
         """Refresh gateway state exposed by runtimes with a status hook."""
@@ -61,8 +67,143 @@ class VnpyRuntimeHandle:
             )
             return self.diagnostics
 
+    def start_auto_reconnect(self) -> None:
+        """Start the opt-in gateway reconnect monitor."""
+
+        with self._diagnostics_lock:
+            state = self.diagnostics.setdefault("auto_reconnect", {})
+            state.update(
+                {
+                    "enabled": self.settings.auto_reconnect_enabled,
+                    "interval_seconds": self.settings.auto_reconnect_interval_seconds,
+                    "confirmation_grace_seconds": (
+                        self.settings.auto_reconnect_confirmation_grace_seconds
+                    ),
+                    "running": False,
+                }
+            )
+            if not self.settings.auto_reconnect_enabled:
+                state["reason"] = "disabled"
+                return
+            if (
+                not self.settings.enabled
+                or not self.settings.connect_on_start
+                or self.main_engine is None
+                or not self.settings.gateway_name
+            ):
+                state["reason"] = "runtime_connect_not_configured"
+                return
+            if self._auto_reconnect_thread is not None and self._auto_reconnect_thread.is_alive():
+                state["running"] = True
+                state["reason"] = None
+                return
+            self._auto_reconnect_stop.clear()
+            state.setdefault("attempt_count", 0)
+            state.setdefault("success_count", 0)
+            state.setdefault("failure_count", 0)
+            state["reason"] = None
+            state["running"] = True
+            state["next_check_at"] = _future_iso(
+                self.settings.auto_reconnect_interval_seconds
+            )
+            thread = Thread(
+                target=self._auto_reconnect_loop,
+                name="vnpy-auto-reconnect",
+                daemon=True,
+            )
+            self._auto_reconnect_thread = thread
+            thread.start()
+
+    def run_auto_reconnect_check(self) -> Dict[str, Any]:
+        """Run one deterministic reconnect check for the monitor and tests."""
+
+        with self._diagnostics_lock:
+            state = self.diagnostics.setdefault("auto_reconnect", {})
+            state["last_check_at"] = _utc_iso()
+            if not self.settings.auto_reconnect_enabled:
+                state["last_result"] = "disabled"
+                state["last_reason"] = "disabled"
+                return state
+            _refresh_gateway_connection(
+                main_engine=self.main_engine,
+                gateway_name=self.settings.gateway_name,
+                diagnostics=self.diagnostics,
+            )
+            connect = self.diagnostics.get("connect")
+            status = connect.get("status") if isinstance(connect, dict) else None
+            if status not in {"failed", "disconnected"}:
+                state["last_check_result"] = "not_required"
+                state["last_check_reason"] = status or "connect_status_unavailable"
+                return state
+            if (
+                status == "disconnected"
+                and isinstance(connect, dict)
+                and connect.get("request_accepted") is True
+                and not connect.get("confirmed_at")
+                and _within_confirmation_grace(
+                    connect.get("request_accepted_at"),
+                    self.settings.auto_reconnect_confirmation_grace_seconds,
+                )
+            ):
+                state["last_check_result"] = "confirmation_pending"
+                state["last_check_reason"] = "connection_confirmation_grace"
+                return state
+
+            state["attempt_count"] = int(state.get("attempt_count") or 0) + 1
+            state["last_attempt_at"] = _utc_iso()
+            state["last_check_result"] = "reconnect_attempted"
+            state["last_check_reason"] = status
+            _connect_gateway(
+                main_engine=self.main_engine,
+                gateway_name=self.settings.gateway_name,
+                settings_path=self.settings.connect_settings_path,
+                diagnostics=self.diagnostics,
+            )
+            _refresh_gateway_connection(
+                main_engine=self.main_engine,
+                gateway_name=self.settings.gateway_name,
+                diagnostics=self.diagnostics,
+            )
+            connect = self.diagnostics.get("connect")
+            connected = bool(
+                isinstance(connect, dict) and connect.get("connected") is True
+            )
+            if connected:
+                state["success_count"] = int(state.get("success_count") or 0) + 1
+                state["last_result"] = "reconnected"
+                state["last_reason"] = None
+                state["last_success_at"] = _utc_iso()
+            else:
+                state["failure_count"] = int(state.get("failure_count") or 0) + 1
+                state["last_result"] = "failed"
+                state["last_reason"] = (
+                    connect.get("reason")
+                    if isinstance(connect, dict)
+                    else "connect_status_unavailable"
+                )
+            return state
+
+    def _auto_reconnect_loop(self) -> None:
+        interval = self.settings.auto_reconnect_interval_seconds
+        try:
+            while not self._auto_reconnect_stop.wait(interval):
+                self.run_auto_reconnect_check()
+                with self._diagnostics_lock:
+                    state = self.diagnostics.setdefault("auto_reconnect", {})
+                    state["next_check_at"] = _future_iso(interval)
+        finally:
+            with self._diagnostics_lock:
+                state = self.diagnostics.setdefault("auto_reconnect", {})
+                state["running"] = False
+                state["next_check_at"] = None
+
     def close(self) -> None:
         """Release created vn.py resources best-effort."""
+
+        self._auto_reconnect_stop.set()
+        thread = self._auto_reconnect_thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=5)
 
         if callable(getattr(self.event_bridge, "unregister", None)):
             try:
@@ -91,6 +232,19 @@ def load_vnpy_runtime_settings() -> VnpyRuntimeSettings:
         connect_settings_path=_env_text("VNPY_CONNECT_SETTINGS_PATH"),
         connect_on_start=_env_bool("VNPY_CONNECT_ON_START", default=False),
         auto_attach_events=_env_bool("VNPY_AUTO_ATTACH_EVENTS", default=True),
+        auto_reconnect_enabled=_env_bool("VNPY_AUTO_RECONNECT_ENABLED", default=False),
+        auto_reconnect_interval_seconds=_env_int(
+            "VNPY_AUTO_RECONNECT_INTERVAL_SECONDS",
+            default=60,
+            minimum=5,
+            maximum=3600,
+        ),
+        auto_reconnect_confirmation_grace_seconds=_env_int(
+            "VNPY_AUTO_RECONNECT_CONFIRMATION_GRACE_SECONDS",
+            default=30,
+            minimum=5,
+            maximum=600,
+        ),
     )
 
 
@@ -108,12 +262,23 @@ def bootstrap_vnpy_runtime(
         "gateway_name": settings.gateway_name,
         "connect_on_start": settings.connect_on_start,
         "auto_attach_events": settings.auto_attach_events,
+        "auto_reconnect": {
+            "enabled": settings.auto_reconnect_enabled,
+            "interval_seconds": settings.auto_reconnect_interval_seconds,
+            "confirmation_grace_seconds": (
+                settings.auto_reconnect_confirmation_grace_seconds
+            ),
+            "running": False,
+            "reason": "disabled" if not settings.auto_reconnect_enabled else None,
+        },
         "mode": "disabled",
         "available": False,
         "reason": "disabled",
     }
     if not settings.enabled:
-        return VnpyRuntimeHandle(settings=settings, diagnostics=diagnostics)
+        handle = VnpyRuntimeHandle(settings=settings, diagnostics=diagnostics)
+        handle.start_auto_reconnect()
+        return handle
 
     try:
         runtime_data_dir = Path.cwd().joinpath(".vntrader")
@@ -145,7 +310,9 @@ def bootstrap_vnpy_runtime(
             }
         )
         logger.warning("vn.py runtime bootstrap failed: %s", exc)
-        return VnpyRuntimeHandle(settings=settings, diagnostics=diagnostics)
+        handle = VnpyRuntimeHandle(settings=settings, diagnostics=diagnostics)
+        handle.start_auto_reconnect()
+        return handle
 
     if settings.gateway_class:
         _add_gateway(
@@ -182,13 +349,15 @@ def bootstrap_vnpy_runtime(
             }
             logger.warning("vn.py EventEngine attach failed: %s", exc)
 
-    return VnpyRuntimeHandle(
+    handle = VnpyRuntimeHandle(
         settings=settings,
         event_engine=event_engine,
         main_engine=main_engine,
         event_bridge=event_bridge,
         diagnostics=diagnostics,
     )
+    handle.start_auto_reconnect()
+    return handle
 
 
 def _add_gateway(
@@ -339,6 +508,7 @@ def _connect_gateway(
         logger.warning("vn.py gateway connect failed: %s", exc)
         return
     diagnostics["connect"]["request_accepted"] = True
+    diagnostics["connect"]["request_accepted_at"] = _utc_iso()
     _refresh_gateway_connection(
         main_engine=main_engine,
         gateway_name=gateway_name,
@@ -382,6 +552,7 @@ def _refresh_gateway_connection(
                 "connected": True,
                 "status": "connected",
                 "reason": None,
+                "confirmed_at": _utc_iso(),
             }
         )
     elif confirmed is False:
@@ -448,3 +619,39 @@ def _env_bool(name: str, *, default: bool) -> bool:
     if value is None or not value.strip():
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(
+    name: str,
+    *,
+    default: int,
+    minimum: int,
+    maximum: int,
+) -> int:
+    value = os.getenv(name)
+    try:
+        parsed = int(str(value).strip()) if value is not None else default
+    except (TypeError, ValueError):
+        parsed = default
+    return min(maximum, max(minimum, parsed))
+
+
+def _utc_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _future_iso(seconds: int) -> str:
+    return (datetime.now(timezone.utc) + timedelta(seconds=seconds)).isoformat()
+
+
+def _within_confirmation_grace(value: Any, grace_seconds: int) -> bool:
+    if not value:
+        return False
+    try:
+        accepted_at = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return False
+    if accepted_at.tzinfo is None:
+        accepted_at = accepted_at.replace(tzinfo=timezone.utc)
+    age = (datetime.now(timezone.utc) - accepted_at.astimezone(timezone.utc)).total_seconds()
+    return 0 <= age < grace_seconds

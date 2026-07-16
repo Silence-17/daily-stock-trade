@@ -782,6 +782,11 @@ def _system_health_payload(status_payload: Dict[str, Any]) -> Dict[str, Any]:
         if isinstance(vnpy_runtime.get("connect"), dict)
         else {}
     )
+    runtime_auto_reconnect = (
+        vnpy_runtime.get("auto_reconnect")
+        if isinstance(vnpy_runtime.get("auto_reconnect"), dict)
+        else {}
+    )
     runtime_connect_required = bool(
         vnpy_required
         and vnpy_runtime.get("enabled")
@@ -858,7 +863,11 @@ def _system_health_payload(status_payload: Dict[str, Any]) -> Dict[str, Any]:
             if not vnpy_required
             else str(vnpy_bridge.get("mode") or "not_configured")
             if not vnpy_bridge_available
-            else "网关明确报告未连接"
+            else (
+                "网关明确报告未连接；自动重连监控运行中"
+                if runtime_auto_reconnect.get("running")
+                else "网关明确报告未连接"
+            )
             if bridge_connection_failed
             else str(runtime_connect.get("message") or runtime_connect.get("reason"))
             if runtime_connect_failed
@@ -873,6 +882,24 @@ def _system_health_payload(status_payload: Dict[str, Any]) -> Dict[str, Any]:
             "connection_status": effective_connection_status,
             "connection_confirmed": effective_connection_confirmed,
             "connection_confirmation_source": effective_confirmation_source,
+            "auto_reconnect_enabled": bool(
+                runtime_auto_reconnect.get("enabled")
+            ),
+            "auto_reconnect_running": bool(
+                runtime_auto_reconnect.get("running")
+            ),
+            "auto_reconnect_attempt_count": int(
+                runtime_auto_reconnect.get("attempt_count") or 0
+            ),
+            "auto_reconnect_confirmation_grace_seconds": int(
+                runtime_auto_reconnect.get("confirmation_grace_seconds") or 0
+            ),
+            "auto_reconnect_last_result": runtime_auto_reconnect.get(
+                "last_result"
+            ),
+            "auto_reconnect_next_check_at": runtime_auto_reconnect.get(
+                "next_check_at"
+            ),
         },
     )
 

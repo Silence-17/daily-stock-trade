@@ -3797,6 +3797,9 @@ class SystemConfigServiceTestCase(unittest.TestCase):
                 {"key": "VNPY_RUNTIME_ENABLED", "value": "true"},
                 {"key": "VNPY_GATEWAY_CLASS", "value": "vnpy_ctp:CtpGateway"},
                 {"key": "VNPY_CONNECT_ON_START", "value": "false"},
+                {"key": "VNPY_AUTO_RECONNECT_ENABLED", "value": "true"},
+                {"key": "VNPY_AUTO_RECONNECT_INTERVAL_SECONDS", "value": "60"},
+                {"key": "VNPY_AUTO_RECONNECT_CONFIRMATION_GRACE_SECONDS", "value": "30"},
             ],
             reload_now=True,
         )
@@ -3811,6 +3814,9 @@ class SystemConfigServiceTestCase(unittest.TestCase):
         self.assertIn("启动期配置", warning)
         self.assertIn("MainEngine", warning)
         self.assertIn("EventEngine", warning)
+        self.assertIn("VNPY_AUTO_RECONNECT_ENABLED", warning)
+        self.assertIn("VNPY_AUTO_RECONNECT_INTERVAL_SECONDS", warning)
+        self.assertIn("VNPY_AUTO_RECONNECT_CONFIRMATION_GRACE_SECONDS", warning)
         self.assertIn("重启当前进程后生效", warning)
 
     def test_update_warns_when_runtime_model_references_are_cleared(self) -> None:

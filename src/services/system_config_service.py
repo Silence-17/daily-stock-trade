@@ -2101,6 +2101,9 @@ class SystemConfigService:
             "VNPY_CONNECT_SETTINGS_PATH",
             "VNPY_CONNECT_ON_START",
             "VNPY_AUTO_ATTACH_EVENTS",
+            "VNPY_AUTO_RECONNECT_ENABLED",
+            "VNPY_AUTO_RECONNECT_INTERVAL_SECONDS",
+            "VNPY_AUTO_RECONNECT_CONFIRMATION_GRACE_SECONDS",
         }
         if vnpy_runtime_keys:
             warnings.append(

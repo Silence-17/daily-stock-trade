@@ -414,6 +414,16 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
                     "connection_status": "disconnected",
                     "connection_confirmation_source": "gateway.connected",
                 },
+                "vnpy_runtime": {
+                    "auto_reconnect": {
+                        "enabled": True,
+                        "running": True,
+                        "attempt_count": 2,
+                        "confirmation_grace_seconds": 30,
+                        "last_result": "failed",
+                        "next_check_at": "2026-07-16T12:01:00+00:00",
+                    },
+                },
             },
         })
 
@@ -428,6 +438,15 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
             component["connection_confirmation_source"],
             "gateway.connected",
         )
+        self.assertTrue(component["auto_reconnect_enabled"])
+        self.assertTrue(component["auto_reconnect_running"])
+        self.assertEqual(component["auto_reconnect_attempt_count"], 2)
+        self.assertEqual(
+            component["auto_reconnect_confirmation_grace_seconds"],
+            30,
+        )
+        self.assertEqual(component["auto_reconnect_last_result"], "failed")
+        self.assertIn("自动重连监控运行中", component["detail"])
 
     def test_status_and_manual_order_use_local_paper_account(self) -> None:
         with patch(
