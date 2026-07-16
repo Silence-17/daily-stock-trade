@@ -892,6 +892,19 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
                 "base_priority": "sina,efinance",
                 "effective_priority": "efinance,sina",
                 "adjusted": True,
+                "candidate_context": {
+                    "quote": {
+                        "mode": "circuit_breaker_failover",
+                        "sources": {
+                            "cn/efinance": {
+                                "state": "open",
+                                "failures": 3,
+                                "disabled": True,
+                                "cooldown_remaining_seconds": 240,
+                            }
+                        },
+                    }
+                },
             },
         }
         fake_analyzer = MagicMock()
@@ -955,6 +968,15 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertEqual(
             audit["diagnostics"]["source_routing"]["effective_priority"],
             "efinance,sina",
+        )
+        quote_routing = audit["diagnostics"]["source_routing"]["candidate_context"][
+            "quote"
+        ]
+        self.assertEqual(quote_routing["mode"], "circuit_breaker_failover")
+        self.assertEqual(quote_routing["sources"]["cn/efinance"]["state"], "open")
+        self.assertEqual(
+            quote_routing["sources"]["cn/efinance"]["cooldown_remaining_seconds"],
+            240,
         )
         self.assertTrue(plan["gates"]["llm_dynamic_plan_enabled"])
         self.assertTrue(plan["gates"]["llm_dynamic_plan_applied"])

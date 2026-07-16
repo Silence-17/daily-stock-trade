@@ -2237,7 +2237,27 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
 
     def test_screen_enriches_top_candidates_with_dsa_context(self) -> None:
         config = self._config(enabled=True)
-        fake_manager = SimpleNamespace(get_stock_name=MagicMock(return_value="贵州茅台"))
+        fake_manager = SimpleNamespace(
+            get_stock_name=MagicMock(return_value="贵州茅台"),
+            realtime_source_health_snapshot=MagicMock(
+                return_value={
+                    "cn/efinance": {
+                        "state": "open",
+                        "failures": 3,
+                        "disabled": True,
+                        "cooldown_remaining_seconds": 240,
+                        "last_error": "timeout",
+                    },
+                    "cn/akshare_em": {
+                        "state": "closed",
+                        "failures": 0,
+                        "disabled": False,
+                        "cooldown_remaining_seconds": 0,
+                        "last_error": None,
+                    },
+                }
+            ),
+        )
         fake_module = _make_adapter_module(
             screen=MagicMock(
                 return_value={
@@ -2302,6 +2322,16 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
         self.assertEqual(
             payload["dsa_enrichment"]["source_health"]["fund_flow"]["last_rows"],
             1,
+        )
+        quote_routing = payload["source_routing"]["candidate_context"]["quote"]
+        self.assertEqual(quote_routing["mode"], "circuit_breaker_failover")
+        self.assertEqual(quote_routing["sources"]["cn/efinance"]["state"], "open")
+        self.assertTrue(quote_routing["sources"]["cn/efinance"]["disabled"])
+        self.assertEqual(
+            payload["dsa_enrichment"]["source_routing"]["quote"]["sources"][
+                "cn/akshare_em"
+            ]["state"],
+            "closed",
         )
 
     def test_screen_reports_degraded_dsa_candidate_context_sources(self) -> None:

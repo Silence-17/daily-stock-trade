@@ -15,6 +15,7 @@
 """
 
 import logging
+import math
 import time
 from threading import RLock
 from dataclasses import dataclass, field
@@ -323,7 +324,8 @@ class CircuitBreaker:
                 'state': self.CLOSED,
                 'failures': 0,
                 'last_failure_time': 0.0,
-                'half_open_calls': 0
+                'half_open_calls': 0,
+                'last_error': None,
             }
         return self._states[source]
     
@@ -400,6 +402,7 @@ class CircuitBreaker:
             state['state'] = self.CLOSED
             state['failures'] = 0
             state['half_open_calls'] = 0
+            state['last_error'] = None
     
     def record_failure(self, source: str, error: Optional[str] = None) -> None:
         """记录失败请求"""
@@ -409,6 +412,7 @@ class CircuitBreaker:
 
             state['failures'] += 1
             state['last_failure_time'] = current_time
+            state['last_error'] = str(error)[:300] if error else None
 
             if state['state'] == self.HALF_OPEN:
                 # 半开状态下失败，继续熔断
@@ -427,6 +431,36 @@ class CircuitBreaker:
         """获取所有数据源状态"""
         with self._lock:
             return {source: info['state'] for source, info in self._states.items()}
+
+    def get_snapshot(self) -> Dict[str, Dict[str, Any]]:
+        """Return an immutable diagnostic snapshot without consuming probe slots."""
+        with self._lock:
+            current_time = time.time()
+            snapshot: Dict[str, Dict[str, Any]] = {}
+            for source, info in self._states.items():
+                state = str(info.get('state') or self.CLOSED)
+                elapsed = max(0.0, current_time - float(info.get('last_failure_time') or 0.0))
+                cooldown_remaining = (
+                    max(0.0, self.cooldown_seconds - elapsed)
+                    if state in {self.OPEN, self.HALF_OPEN}
+                    else 0.0
+                )
+                snapshot[source] = {
+                    'state': state,
+                    'failures': int(info.get('failures') or 0),
+                    'failure_threshold': int(self.failure_threshold),
+                    'cooldown_seconds': float(self.cooldown_seconds),
+                    'cooldown_remaining_seconds': int(math.ceil(cooldown_remaining)),
+                    'half_open_calls': int(info.get('half_open_calls') or 0),
+                    'half_open_max_calls': int(self.half_open_max_calls),
+                    'disabled': bool(
+                        state == self.OPEN and cooldown_remaining > 0
+                        or state == self.HALF_OPEN
+                        and int(info.get('half_open_calls') or 0) >= self.half_open_max_calls
+                    ),
+                    'last_error': info.get('last_error'),
+                }
+            return snapshot
     
     def reset(self, source: Optional[str] = None) -> None:
         """重置熔断器状态"""

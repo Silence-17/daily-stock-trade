@@ -107,6 +107,25 @@ const runSummary = {
         { source: 'efinance', weight: 1, effectiveRank: 1 },
         { source: 'sina', weight: 0.38, effectiveRank: 2 },
       ],
+      candidateContext: {
+        quote: {
+          mode: 'circuit_breaker_failover',
+          sources: {
+            'cn/efinance': {
+              state: 'open',
+              failures: 3,
+              disabled: true,
+              cooldownRemainingSeconds: 240,
+            },
+            'cn/akshare_em': {
+              state: 'closed',
+              failures: 0,
+              disabled: false,
+              cooldownRemainingSeconds: 0,
+            },
+          },
+        },
+      },
     },
     crossRunQuality: {
       state: 'healthy',
@@ -860,6 +879,9 @@ describe('AgentConsolePage', () => {
     expect(screen.getByTestId('agent-source-routing')).toHaveTextContent('dynamic_health');
     expect(screen.getByTestId('agent-source-routing')).toHaveTextContent('efinance,sina');
     expect(screen.getByTestId('agent-source-routing')).toHaveTextContent('已按健康权重调整');
+    expect(screen.getByTestId('agent-source-routing')).toHaveTextContent('cn/efinance open');
+    expect(screen.getByTestId('agent-source-routing')).toHaveTextContent('失败 3，冷却 240s');
+    expect(screen.getByTestId('agent-source-routing')).toHaveTextContent('cn/akshare_em closed');
     expect(screen.getAllByText('score 85.0').length).toBeGreaterThan(0);
     expect(screen.getByText('建议人工确认')).toBeInTheDocument();
     expect(screen.getByText('100.0%')).toBeInTheDocument();

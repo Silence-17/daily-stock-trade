@@ -167,6 +167,40 @@ class CircuitBreakerConcurrencyTestCase(unittest.TestCase):
         breaker.record_inconclusive("src")
         self.assertEqual(breaker.get_status()["src"], CircuitBreaker.CLOSED)
 
+    def test_snapshot_exposes_cooldown_without_consuming_half_open_probe(self):
+        breaker = CircuitBreaker(
+            failure_threshold=1,
+            cooldown_seconds=60.0,
+            half_open_max_calls=1,
+        )
+        breaker.record_failure("src", "provider timeout")
+
+        opened = breaker.get_snapshot()["src"]
+
+        self.assertEqual(opened["state"], CircuitBreaker.OPEN)
+        self.assertEqual(opened["failures"], 1)
+        self.assertTrue(opened["disabled"])
+        self.assertGreater(opened["cooldown_remaining_seconds"], 0)
+        self.assertEqual(opened["half_open_calls"], 0)
+        self.assertEqual(opened["last_error"], "provider timeout")
+
+        with breaker._lock:
+            breaker._states["src"]["last_failure_time"] -= breaker.cooldown_seconds + 1
+        before_probe = breaker.get_snapshot()["src"]
+        self.assertEqual(before_probe["state"], CircuitBreaker.OPEN)
+        self.assertEqual(before_probe["half_open_calls"], 0)
+
+        self.assertTrue(breaker.is_available("src"))
+        after_probe = breaker.get_snapshot()["src"]
+        self.assertEqual(after_probe["state"], CircuitBreaker.HALF_OPEN)
+        self.assertEqual(after_probe["half_open_calls"], 1)
+
+        breaker.record_success("src")
+        recovered = breaker.get_snapshot()["src"]
+        self.assertEqual(recovered["state"], CircuitBreaker.CLOSED)
+        self.assertEqual(recovered["failures"], 0)
+        self.assertIsNone(recovered["last_error"])
+
 
 if __name__ == "__main__":
     unittest.main()

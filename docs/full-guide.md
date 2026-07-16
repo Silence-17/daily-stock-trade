@@ -767,6 +767,8 @@ python main.py --schedule --no-run-immediately
 >
 > Agent 控制台通过 `GET /api/v1/vnpy-paper/agent-runs/data-quality-trends` 展示 7/30/90 天跨 run 数据质量趋势，包括 ok/partial/stale/unavailable/unknown 分布、降级率、警告、source error、逐日结果，以及具体 snapshot/daily 和候选上下文 `quote/fund_flow/news` 来源的健康观测。来源表展示观测数、降级次数/比例、最新状态和最新/最大失败计数；缺少整体质量或来源快照的旧 run 不会被推断为健康。
 >
+> 候选实时行情在配置顺序之上使用 provider 级恢复路由：同一市场/provider 连续 3 次异常后冷却 5 分钟并切换到后续来源，冷却结束只放行一个半开探测，成功恢复、失败重新冷却。单股票空结果不累计整源失败。每轮 Agent run 会把 provider 的状态、失败数、冷却剩余和脱敏错误保存在 `diagnostics.source_routing.candidate_context.quote`，控制台与 snapshot 动态路由一起展示；该熔断状态驻留当前服务进程，重启后重新观测。
+>
 > Agent 控制台可调用 `POST /api/v1/vnpy-paper/agent-runs/backtest`，复用当前策略、市场和运行时间筛选，按已记录候选价格和严格晚于决策日期的本地日线计算 1/5/10/20 个交易日的覆盖率、胜率、平均/中位收益和平均最大有利/不利波动。默认不联网补行情，也不会重跑策略或触发交易；缺价和未来日线不足会降低覆盖率。它用于评价已记录候选，不等同于 point-in-time 全市场历史策略回放。
 
 > Agent 控制台也支持单日 AlphaSift 时间点策略重放。先通过 `POST /api/v1/alphasift/replay/snapshots` 导入当日标准化全市场因子，再用 `GET /api/v1/alphasift/replay/compatibility` 检查硬过滤与评分字段覆盖率，最后调用 `POST /api/v1/alphasift/replay/run`。重放只读取指定日期快照，不使用当前数据或 LLM；默认硬过滤完整行低于 95%或评分完整行低于 80%时拒绝运行。该单日接口本身不计算跨日组合、成本或基准收益。

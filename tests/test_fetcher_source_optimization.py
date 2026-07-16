@@ -460,6 +460,145 @@ class TestFetcherSourceOptimization(unittest.TestCase):
         finally:
             DataFetcherManager.reset_daily_source_health()
 
+    @patch("src.config.get_config")
+    def test_realtime_source_health_skips_failing_source_and_recovers_half_open(
+        self,
+        mock_get_config,
+    ):
+        mock_get_config.return_value = SimpleNamespace(
+            enable_realtime_quote=True,
+            realtime_source_priority="efinance,akshare_em",
+            realtime_cache_ttl=600,
+        )
+        DataFetcherManager.reset_realtime_source_health()
+        try:
+            primary = MagicMock()
+            primary.name = "EfinanceFetcher"
+            primary.priority = 0
+            primary.get_realtime_quote.side_effect = RuntimeError("primary timeout")
+
+            backup = MagicMock()
+            backup.name = "AkshareFetcher"
+            backup.priority = 1
+            backup.get_realtime_quote.return_value = _make_quote("600519")
+
+            manager = DataFetcherManager(fetchers=[primary, backup])
+            for _ in range(3):
+                quote = manager.get_realtime_quote("600519")
+                self.assertIsNotNone(quote)
+
+            quote = manager.get_realtime_quote("600519")
+
+            self.assertIsNotNone(quote)
+            self.assertEqual(primary.get_realtime_quote.call_count, 3)
+            self.assertEqual(backup.get_realtime_quote.call_count, 4)
+            opened = DataFetcherManager.realtime_source_health_snapshot()["cn/efinance"]
+            self.assertEqual(opened["state"], "open")
+            self.assertEqual(opened["failures"], 3)
+            self.assertTrue(opened["disabled"])
+            self.assertIn("primary timeout", opened["last_error"])
+
+            health_key = DataFetcherManager._realtime_health_key("efinance", "cn")
+            breaker = DataFetcherManager._realtime_source_health
+            with breaker._lock:
+                breaker._states[health_key]["last_failure_time"] -= breaker.cooldown_seconds + 1
+            primary.get_realtime_quote.reset_mock(side_effect=True)
+            primary.get_realtime_quote.return_value = _make_quote("600519")
+            backup.get_realtime_quote.reset_mock()
+
+            recovered_quote = manager.get_realtime_quote("600519")
+
+            self.assertIsNotNone(recovered_quote)
+            primary.get_realtime_quote.assert_called_once_with("600519")
+            backup.get_realtime_quote.assert_not_called()
+            recovered = DataFetcherManager.realtime_source_health_snapshot()["cn/efinance"]
+            self.assertEqual(recovered["state"], "closed")
+            self.assertEqual(recovered["failures"], 0)
+            self.assertFalse(recovered["disabled"])
+            self.assertIsNone(recovered["last_error"])
+        finally:
+            DataFetcherManager.reset_realtime_source_health()
+
+    @patch("src.config.get_config")
+    def test_realtime_source_health_does_not_open_on_symbol_specific_empty_result(
+        self,
+        mock_get_config,
+    ):
+        mock_get_config.return_value = SimpleNamespace(
+            enable_realtime_quote=True,
+            realtime_source_priority="efinance,akshare_em",
+            realtime_cache_ttl=600,
+        )
+        DataFetcherManager.reset_realtime_source_health()
+        try:
+            primary = MagicMock()
+            primary.name = "EfinanceFetcher"
+            primary.priority = 0
+            primary.get_realtime_quote.return_value = None
+
+            backup = MagicMock()
+            backup.name = "AkshareFetcher"
+            backup.priority = 1
+            backup.get_realtime_quote.return_value = _make_quote("600519")
+
+            manager = DataFetcherManager(fetchers=[primary, backup])
+            for _ in range(3):
+                self.assertIsNotNone(manager.get_realtime_quote("600519"))
+            primary.get_realtime_quote.return_value = _make_quote("600519")
+
+            quote = manager.get_realtime_quote("600519")
+
+            self.assertIsNotNone(quote)
+            self.assertEqual(primary.get_realtime_quote.call_count, 4)
+            state = DataFetcherManager.realtime_source_health_snapshot()["cn/efinance"]
+            self.assertEqual(state["state"], "closed")
+            self.assertEqual(state["failures"], 0)
+        finally:
+            DataFetcherManager.reset_realtime_source_health()
+
+    @patch("src.config.get_config")
+    def test_offshore_realtime_source_health_fails_over_during_cooldown(
+        self,
+        mock_get_config,
+    ):
+        mock_get_config.return_value = SimpleNamespace(
+            enable_realtime_quote=True,
+            realtime_source_priority="efinance,akshare_em",
+            realtime_cache_ttl=600,
+        )
+        DataFetcherManager.reset_realtime_source_health()
+        try:
+            longbridge = MagicMock()
+            longbridge.name = "LongbridgeFetcher"
+            longbridge.priority = 0
+            longbridge.is_available_for_request.return_value = True
+            longbridge.get_realtime_quote.side_effect = RuntimeError("gateway timeout")
+
+            yfinance = MagicMock()
+            yfinance.name = "YfinanceFetcher"
+            yfinance.priority = 1
+            yfinance.is_available_for_request.return_value = True
+            yfinance.get_realtime_quote.return_value = _make_quote("AAPL")
+
+            manager = DataFetcherManager(fetchers=[longbridge, yfinance])
+            for _ in range(3):
+                quote = manager.get_realtime_quote("AAPL")
+                self.assertIsNotNone(quote)
+                self.assertEqual(quote.fallback_from, "longbridge")
+
+            quote = manager.get_realtime_quote("AAPL")
+
+            self.assertIsNotNone(quote)
+            self.assertEqual(quote.fallback_from, "longbridge")
+            self.assertEqual(longbridge.get_realtime_quote.call_count, 3)
+            self.assertEqual(yfinance.get_realtime_quote.call_count, 4)
+            state = DataFetcherManager.realtime_source_health_snapshot()["us/longbridge"]
+            self.assertEqual(state["state"], "open")
+            self.assertEqual(state["failures"], 3)
+            self.assertTrue(state["disabled"])
+        finally:
+            DataFetcherManager.reset_realtime_source_health()
+
 
 if __name__ == "__main__":
     unittest.main()
