@@ -137,6 +137,7 @@ class AlphaSiftReplayApiTestCase(unittest.TestCase):
                     "top_k": 3,
                     "final_holding_bars": 10,
                     "initial_capital": 200000,
+                    "cost_profile": "cn_retail_reference",
                     "commission_bps": 4,
                     "minimum_commission": 5,
                     "sell_tax_bps": 5,
@@ -166,6 +167,7 @@ class AlphaSiftReplayApiTestCase(unittest.TestCase):
         self.assertEqual(response.json()["metrics"]["excess_return_pct"], 5)
         call = service.run.call_args.kwargs
         self.assertEqual(call["top_k"], 3)
+        self.assertEqual(call["cost_profile"], "cn_retail_reference")
         self.assertEqual(call["commission_bps"], 4)
         self.assertEqual(call["minimum_commission"], 5)
         self.assertEqual(call["sell_tax_bps"], 5)
