@@ -89,6 +89,8 @@ ALPHASIFT_FALLBACK_STRATEGIES = (
     "shrink_pullback",
     "volume_breakout",
 )
+DEFAULT_AUTO_ALPHASIFT_LLM_TIMEOUT_SECONDS = 45
+DEFAULT_AUTO_ALPHASIFT_LLM_MAX_RETRIES = 0
 ALLOWED_AUTO_MARKETS = {"cn", "hk", "us", "jp", "kr", "tw"}
 LLM_DYNAMIC_AGENT_PLAN_PROMPT_VERSION = "vnpy_paper_dynamic_agent_plan_v2"
 LLM_DYNAMIC_AGENT_PLAN_EVALUATOR_VERSION = "dynamic_plan_guardrails_v1"
@@ -210,6 +212,24 @@ def _safe_int(value: Any) -> Optional[int]:
     except (TypeError, ValueError):
         return None
     return number
+
+
+def _resolve_auto_alphasift_llm_policy() -> Dict[str, Any]:
+    timeout = _safe_int(os.getenv("VNPY_AUTO_ALPHASIFT_LLM_TIMEOUT_SEC"))
+    max_retries = _safe_int(os.getenv("VNPY_AUTO_ALPHASIFT_LLM_MAX_RETRIES"))
+    return {
+        "timeout_seconds": (
+            max(1, timeout)
+            if timeout is not None
+            else DEFAULT_AUTO_ALPHASIFT_LLM_TIMEOUT_SECONDS
+        ),
+        "max_retries": (
+            max(0, max_retries)
+            if max_retries is not None
+            else DEFAULT_AUTO_ALPHASIFT_LLM_MAX_RETRIES
+        ),
+        "fallback": "screen_score",
+    }
 
 
 class VnpyPaperTradingService:
@@ -2190,6 +2210,7 @@ class VnpyPaperTradingService:
             recent_run_context=recent_run_context,
         )
         settings = self._apply_llm_dynamic_agent_plan(settings, llm_dynamic_plan)
+        alphasift_llm_policy = _resolve_auto_alphasift_llm_policy()
         run_diagnostics = {
             "engine": "vnpy_local_paper_ledger",
             "execution_mode": settings.auto_execution_mode,
@@ -2206,6 +2227,7 @@ class VnpyPaperTradingService:
             "llm_dynamic_plan": llm_dynamic_plan,
             "market_objective": market_objective,
             "cross_run_quality": cross_run_quality,
+            "alphasift_llm_policy": alphasift_llm_policy,
         }
         run = self.agent_repo.create_run(
             run_uid=run_uid,
@@ -2423,6 +2445,8 @@ class VnpyPaperTradingService:
                 market=settings.auto_market,
                 max_results=settings.auto_max_results,
                 source_health_trends=source_health_trends,
+                llm_timeout_seconds=int(alphasift_llm_policy["timeout_seconds"]),
+                llm_max_retries=int(alphasift_llm_policy["max_retries"]),
             )
         except Exception as exc:
             planned_count = sum(1 for item in orders if item.get("status") == "planned")

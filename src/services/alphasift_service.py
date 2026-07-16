@@ -1242,6 +1242,8 @@ class AlphaSiftService:
         market: str,
         max_results: int,
         source_health_trends: Optional[List[Dict[str, Any]]] = None,
+        llm_timeout_seconds: Optional[int] = None,
+        llm_max_retries: Optional[int] = None,
     ) -> Dict[str, Any]:
         _ensure_alphasift_enabled(self.config)
         _ensure_alphasift_available_for_use()
@@ -1264,6 +1266,8 @@ class AlphaSiftService:
                 max_results,
                 self.config,
                 snapshot_source_priority=str(source_routing["effective_priority"]),
+                llm_timeout_seconds=llm_timeout_seconds,
+                llm_max_retries=llm_max_retries,
             )
         except ValueError as exc:
             raise HTTPException(
@@ -1992,6 +1996,8 @@ def _call_alphasift_screen(
     config: Config,
     *,
     snapshot_source_priority: Optional[str] = None,
+    llm_timeout_seconds: Optional[int] = None,
+    llm_max_retries: Optional[int] = None,
 ) -> Any:
     signature = inspect.signature(screen)
     params = signature.parameters
@@ -2019,13 +2025,20 @@ def _call_alphasift_screen(
     if supports_use_llm:
         kwargs["use_llm"] = True
     if supports_context:
-        kwargs["context"] = _build_alphasift_context(config, max_results=max_results)
+        kwargs["context"] = _build_alphasift_context(
+            config,
+            max_results=max_results,
+            llm_timeout_seconds=llm_timeout_seconds,
+            llm_max_retries=llm_max_retries,
+        )
 
     with (
         _alphasift_runtime_env(
             config,
             max_results=max_results,
             snapshot_source_priority=snapshot_source_priority,
+            llm_timeout_seconds=llm_timeout_seconds,
+            llm_max_retries=llm_max_retries,
         ),
         _alphasift_dsa_daily_history_provider(),
         _alphasift_litellm_headers(config),
@@ -2057,11 +2070,15 @@ def _alphasift_runtime_env(
     *,
     max_results: Optional[int] = None,
     snapshot_source_priority: Optional[str] = None,
+    llm_timeout_seconds: Optional[int] = None,
+    llm_max_retries: Optional[int] = None,
 ) -> Iterator[None]:
     updates = _build_alphasift_runtime_env(
         config,
         max_results=max_results,
         snapshot_source_priority=snapshot_source_priority,
+        llm_timeout_seconds=llm_timeout_seconds,
+        llm_max_retries=llm_max_retries,
     )
     if not updates:
         yield
@@ -2221,6 +2238,8 @@ def _build_alphasift_runtime_env(
     *,
     max_results: Optional[int] = None,
     snapshot_source_priority: Optional[str] = None,
+    llm_timeout_seconds: Optional[int] = None,
+    llm_max_retries: Optional[int] = None,
 ) -> Dict[str, str]:
     # Bridge runtime only: only inject resolved DSA values for this request/process scope.
     # User .env/config is never rewritten here; unset channels/models are not silently migrated.
@@ -2246,7 +2265,12 @@ def _build_alphasift_runtime_env(
     put("LITELLM_CONFIG", config.litellm_config_path)
     if os.getenv("LLM_TEMPERATURE") not in (None, ""):
         put("LLM_TEMPERATURE", config.llm_temperature)
-    put_default("LLM_TIMEOUT_SEC", str(DSA_ALPHASIFT_LLM_TIMEOUT_SECONDS))
+    if llm_timeout_seconds is not None:
+        put("LLM_TIMEOUT_SEC", max(1, int(llm_timeout_seconds)))
+    else:
+        put_default("LLM_TIMEOUT_SEC", str(DSA_ALPHASIFT_LLM_TIMEOUT_SECONDS))
+    if llm_max_retries is not None:
+        put("LLM_MAX_RETRIES", max(0, int(llm_max_retries)))
     put_default("LLM_MAX_TOKENS", str(DSA_ALPHASIFT_LLM_MAX_TOKENS))
 
     channels = _normalize_dsa_llm_channels(config)
@@ -3179,7 +3203,13 @@ class DsaEastMoneyHotspotProvider:
         return records
 
 
-def _build_alphasift_context(config: Config, *, max_results: Optional[int] = None) -> Dict[str, Any]:
+def _build_alphasift_context(
+    config: Config,
+    *,
+    max_results: Optional[int] = None,
+    llm_timeout_seconds: Optional[int] = None,
+    llm_max_retries: Optional[int] = None,
+) -> Dict[str, Any]:
     # context.llm.model/fallback/model_list 与 LiteLLM 路由语义保持一致，
     # 参见 https://docs.litellm.ai/docs/proxy/configs#the-model_list-key
     channels = _normalize_dsa_llm_channels(config)
@@ -3189,7 +3219,16 @@ def _build_alphasift_context(config: Config, *, max_results: Optional[int] = Non
             "model": litellm_model,
             "fallback_models": fallback_models,
             "temperature": config.llm_temperature,
-            "timeout_sec": _resolve_alphasift_llm_timeout_seconds(),
+            "timeout_sec": (
+                max(1, int(llm_timeout_seconds))
+                if llm_timeout_seconds is not None
+                else _resolve_alphasift_llm_timeout_seconds()
+            ),
+            "max_retries": (
+                max(0, int(llm_max_retries))
+                if llm_max_retries is not None
+                else _resolve_alphasift_llm_max_retries()
+            ),
             "max_tokens": _resolve_alphasift_llm_max_tokens(),
             "channels": channels,
             "model_list": _build_alphasift_litellm_model_list(config, channels),
@@ -3381,6 +3420,13 @@ def _resolve_alphasift_llm_timeout_seconds() -> int:
     if configured is not None and configured > 0:
         return int(configured)
     return DSA_ALPHASIFT_LLM_TIMEOUT_SECONDS
+
+
+def _resolve_alphasift_llm_max_retries() -> int:
+    configured = _safe_float(os.getenv("LLM_MAX_RETRIES"))
+    if configured is not None and configured >= 0:
+        return int(configured)
+    return 1
 
 
 def _resolve_alphasift_llm_max_tokens() -> int:
