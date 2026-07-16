@@ -115,6 +115,7 @@ NON_RETRYABLE_TRADE_PLAN_FAILURE_REASONS = {
 }
 ACTIVE_VNPY_TRADE_PLAN_STATUSES = {"submitted", "part_filled", "cancel_requested"}
 AUTO_SIGNAL_EXIT_ACTIONS = {"reduce", "sell", "avoid"}
+DEFAULT_AUTO_MIN_DATA_QUALITY_SCORE = 60.0
 
 
 @dataclass(frozen=True)
@@ -153,7 +154,7 @@ class VnpyPaperSettings:
     auto_exclude_suspended: bool = True
     auto_exclude_price_limit: bool = True
     auto_min_turnover: Optional[float] = None
-    auto_min_data_quality_score: Optional[float] = None
+    auto_min_data_quality_score: Optional[float] = DEFAULT_AUTO_MIN_DATA_QUALITY_SCORE
     auto_cross_run_quality_gate_enabled: bool = False
     auto_cross_run_horizon_days: int = 5
     auto_cross_run_min_mature_samples: int = 10
@@ -2458,12 +2459,14 @@ class VnpyPaperTradingService:
         data_quality = self._screen_data_quality(screen, candidates)
         data_quality.update(self._screen_data_quality_score(screen, candidates, data_quality))
         quality_score = _safe_float(data_quality.get("score"))
+        hard_quality_blocked = data_quality["status"] in {"stale", "unavailable"}
         quality_threshold_blocked = bool(
-            settings.auto_min_data_quality_score is not None
+            not hard_quality_blocked
+            and settings.auto_min_data_quality_score is not None
             and quality_score is not None
             and quality_score + PAPER_EPS < settings.auto_min_data_quality_score
         )
-        if data_quality["status"] in {"stale", "unavailable"} or quality_threshold_blocked:
+        if hard_quality_blocked or quality_threshold_blocked:
             reason = (
                 f"data_quality_{data_quality['status']}"
                 if data_quality["status"] in {"stale", "unavailable"}
@@ -4581,7 +4584,7 @@ class VnpyPaperTradingService:
             auto_min_data_quality_score=(
                 min(100.0, max(0.0, auto_min_data_quality_score))
                 if auto_min_data_quality_score is not None
-                else None
+                else defaults.auto_min_data_quality_score
             ),
             auto_cross_run_quality_gate_enabled=bool(
                 raw.get(

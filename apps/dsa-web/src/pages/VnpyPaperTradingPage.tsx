@@ -170,6 +170,8 @@ type TaskEventFilterForm = {
 
 type PaperAccountHistoryFilter = 'all' | 'current' | 'archived' | 'active';
 
+const DEFAULT_AUTO_MIN_DATA_QUALITY_SCORE = 60;
+
 const defaultSettingsForm: SettingsForm = {
   enabled: true,
   initialCash: '100000',
@@ -204,7 +206,7 @@ const defaultSettingsForm: SettingsForm = {
   autoExcludeSuspended: true,
   autoExcludePriceLimit: true,
   autoMinTurnover: '',
-  autoMinDataQualityScore: '',
+  autoMinDataQualityScore: String(DEFAULT_AUTO_MIN_DATA_QUALITY_SCORE),
   autoCrossRunQualityGateEnabled: false,
   autoCrossRunHorizonDays: '5',
   autoCrossRunMinMatureSamples: '10',
@@ -541,7 +543,7 @@ function settingsToForm(status: VnpyPaperStatusResponse): SettingsForm {
     autoExcludePriceLimit: Boolean(settings.autoExcludePriceLimit ?? true),
     autoMinTurnover: settings.autoMinTurnover == null ? '' : String(settings.autoMinTurnover),
     autoMinDataQualityScore: settings.autoMinDataQualityScore == null
-      ? ''
+      ? String(DEFAULT_AUTO_MIN_DATA_QUALITY_SCORE)
       : String(settings.autoMinDataQualityScore),
     autoCrossRunQualityGateEnabled: Boolean(settings.autoCrossRunQualityGateEnabled),
     autoCrossRunHorizonDays: String(settings.autoCrossRunHorizonDays ?? 5),
@@ -640,7 +642,7 @@ function buildSettingsUpdate(settingsForm: SettingsForm): VnpyPaperSettingsUpdat
       : null,
     autoMinDataQualityScore: settingsForm.autoMinDataQualityScore.trim()
       ? parseNumber(settingsForm.autoMinDataQualityScore)
-      : null,
+      : DEFAULT_AUTO_MIN_DATA_QUALITY_SCORE,
     autoCrossRunQualityGateEnabled: settingsForm.autoCrossRunQualityGateEnabled,
     autoCrossRunHorizonDays: parseNumber(settingsForm.autoCrossRunHorizonDays) ?? 5,
     autoCrossRunMinMatureSamples: parseNumber(settingsForm.autoCrossRunMinMatureSamples) ?? 10,
@@ -4118,7 +4120,7 @@ const VnpyPaperTradingPage: React.FC = () => {
                   ...prev,
                   autoMinDataQualityScore: event.target.value,
                 }))}
-                placeholder="留空仅审计"
+                placeholder="0 表示仅审计"
               />
             </label>
             <label className="space-y-1 text-xs text-secondary-text">

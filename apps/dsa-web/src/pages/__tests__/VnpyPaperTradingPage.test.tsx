@@ -116,7 +116,7 @@ const statusResponse = {
     autoExcludeSuspended: true,
     autoExcludePriceLimit: true,
     autoMinTurnover: null,
-    autoMinDataQualityScore: null,
+    autoMinDataQualityScore: 60,
     autoMinCashBalance: null,
     autoMaxDrawdownPct: null,
     autoDrawdownRecoveryHysteresisPct: 0,
@@ -1468,6 +1468,7 @@ describe('VnpyPaperTradingPage', () => {
     );
 
     expect(await screen.findByRole('heading', { name: 'vn.py 模拟交易' })).toBeInTheDocument();
+    expect(screen.getByLabelText('最低数据质量分')).toHaveValue(60);
     await waitFor(() => expect(getStatus).toHaveBeenCalledWith({
       includeSnapshot: false,
       includeRecentTrades: false,
