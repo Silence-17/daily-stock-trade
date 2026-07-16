@@ -137,6 +137,119 @@ def _run_reconnect_soak(
     }
 
 
+def _run_fault_matrix(
+    *,
+    main_engine: Any,
+    event_engine: Any,
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    from vnpy.trader.event import EVENT_TRADE
+
+    gateway = main_engine.get_gateway("DSA_SIM")
+    if gateway is None or not callable(getattr(gateway, "get_state_snapshot", None)):
+        raise VnpyAdapterError("built-in simulated gateway fault diagnostics are unavailable")
+
+    before = gateway.get_state_snapshot()
+    reject_order_number = int(before.get("order_count") or 0) + 2
+    fault_settings = {
+        "fill_delay_ms": 50,
+        "preserve_state_on_reconnect": True,
+        "reject_every_nth_order": reject_order_number,
+        "duplicate_trade_event_count": 2,
+    }
+    observed_trade_ids: list[str] = []
+
+    def _capture_trade(event: Any) -> None:
+        observed_trade_ids.append(str(getattr(getattr(event, "data", None), "vt_tradeid", "")))
+
+    event_engine.register(EVENT_TRADE, _capture_trade)
+    try:
+        main_engine.connect(fault_settings, "DSA_SIM")
+        bridge = VnpyMainEngineBridge(main_engine=main_engine, gateway_name="DSA_SIM")
+        filled_submission = bridge.send_order(
+            {
+                **payload,
+                "source": "adapter_fault_matrix",
+                "plan_uid": "fault-matrix-fill",
+                "reference": "dsa:adapter_fault_matrix:fault-matrix-fill",
+            }
+        )
+        filled_orderid = str(filled_submission.get("vt_orderid") or "")
+        filled_order = _wait_for_terminal_order(main_engine, filled_orderid)
+
+        rejected_submission = bridge.send_order(
+            {
+                **payload,
+                "source": "adapter_fault_matrix",
+                "plan_uid": "fault-matrix-reject",
+                "reference": "dsa:adapter_fault_matrix:fault-matrix-reject",
+            }
+        )
+        rejected_orderid = str(rejected_submission.get("vt_orderid") or "")
+        rejected_order = _wait_for_terminal_order(main_engine, rejected_orderid)
+
+        callback_deadline = time.monotonic() + 3.0
+        filled_trade_ids: list[str] = []
+        stored_trades: list[Any] = []
+        while time.monotonic() < callback_deadline:
+            stored_trades = [
+                trade
+                for trade in main_engine.get_all_trades()
+                if str(getattr(trade, "vt_orderid", "")) == filled_orderid
+            ]
+            target_trade_ids = {
+                str(getattr(trade, "vt_tradeid", ""))
+                for trade in stored_trades
+                if str(getattr(trade, "vt_tradeid", ""))
+            }
+            filled_trade_ids = [
+                trade_id
+                for trade_id in observed_trade_ids
+                if trade_id in target_trade_ids
+            ]
+            if len(stored_trades) == 1 and len(filled_trade_ids) >= 2:
+                break
+            time.sleep(0.05)
+        filled_status = getattr(getattr(filled_order, "status", None), "name", None)
+        rejected_status = getattr(getattr(rejected_order, "status", None), "name", None)
+        rejected_reason = str(getattr(rejected_order, "rejected_reason", "") or "")
+        unique_callback_ids = set(filled_trade_ids)
+        if filled_status != "ALLTRADED":
+            raise VnpyAdapterError(f"fault matrix fill order ended as {filled_status}")
+        if rejected_status != "REJECTED" or rejected_reason != "simulated_configured_rejection":
+            raise VnpyAdapterError(
+                "fault matrix rejection was not surfaced as simulated_configured_rejection"
+            )
+        if len(filled_trade_ids) != 2 or len(unique_callback_ids) != 1:
+            raise VnpyAdapterError(
+                "fault matrix expected two callbacks carrying one duplicate trade id"
+            )
+        if len(stored_trades) != 1:
+            raise VnpyAdapterError(
+                f"fault matrix expected one deduplicated MainEngine trade, got {len(stored_trades)}"
+            )
+        return {
+            "ok": True,
+            "filled_order_status": filled_status,
+            "rejected_order_status": rejected_status,
+            "rejected_reason": rejected_reason,
+            "duplicate_trade_callback_count": len(filled_trade_ids),
+            "unique_trade_callback_count": len(unique_callback_ids),
+            "main_engine_trade_count": len(stored_trades),
+            "state_after": gateway.get_state_snapshot(),
+        }
+    finally:
+        event_engine.unregister(EVENT_TRADE, _capture_trade)
+        main_engine.connect(
+            {
+                "preserve_state_on_reconnect": True,
+                "reject_every_nth_order": 0,
+                "duplicate_trade_event_count": 1,
+            },
+            "DSA_SIM",
+        )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -149,6 +262,14 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         default=0,
         help="Run N disconnect/reconnect cycles with an in-flight DSA_SIM order (0-50).",
+    )
+    parser.add_argument(
+        "--fault-matrix",
+        action="store_true",
+        help=(
+            "Verify one configured rejection and duplicate trade-event deduplication "
+            "through the real DSA_SIM MainEngine/EventEngine path."
+        ),
     )
     args = parser.parse_args(argv)
     if args.reconnect_cycles < 0 or args.reconnect_cycles > 50:
@@ -256,6 +377,12 @@ def main(argv: list[str] | None = None) -> int:
             }
             if not result["simulated_gateway_smoke"]["filled"]:
                 raise VnpyAdapterError("built-in vn.py simulated gateway did not fill the smoke order")
+            if args.fault_matrix:
+                result["fault_matrix"] = _run_fault_matrix(
+                    main_engine=runtime_handle.main_engine,
+                    event_engine=runtime_handle.event_engine,
+                    payload=payload,
+                )
             if args.reconnect_cycles:
                 result["reconnect_soak"] = _run_reconnect_soak(
                     main_engine=runtime_handle.main_engine,
@@ -273,7 +400,7 @@ def main(argv: list[str] | None = None) -> int:
                 runtime_handle.close()
     else:
         result["fallback"] = "vnpy is not importable; DSA local paper mode remains usable."
-        if args.require_vnpy or args.reconnect_cycles:
+        if args.require_vnpy or args.reconnect_cycles or args.fault_matrix:
             result["ok"] = False
             result["error"] = {
                 "type": "VnpyRuntimeUnavailable",

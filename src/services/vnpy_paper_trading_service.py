@@ -3825,7 +3825,12 @@ class VnpyPaperTradingService:
             )
         return result
 
-    def _reconcile_vnpy_trade_plan(self, plan: Dict[str, Any]) -> Dict[str, Any]:
+    def _reconcile_vnpy_trade_plan(
+        self,
+        plan: Dict[str, Any],
+        *,
+        terminal_only: bool = False,
+    ) -> Dict[str, Any]:
         order_result = plan.get("order_result") if isinstance(plan.get("order_result"), dict) else {}
         raw = order_result.get("raw") if isinstance(order_result.get("raw"), dict) else {}
         vt_orderid = str(
@@ -3865,10 +3870,26 @@ class VnpyPaperTradingService:
                 )
 
         order = snapshot.get("order")
-        if order is not None:
+        order_status = (
+            self._normalize_vnpy_status(
+                self._event_text(self._event_value(order, "status"))
+            )
+            if order is not None
+            else ""
+        )
+        order_is_terminal_or_partial = bool(
+            self._vnpy_order_failure_reason(order_status) is not None
+            or self._vnpy_order_is_part_filled(order_status)
+            or order_status in {"alltraded", "all_traded", "filled"}
+        )
+        should_sync_order = bool(
+            order is not None
+            and (not terminal_only or trades or order_is_terminal_or_partial)
+        )
+        if should_sync_order:
             synced_order = self.sync_vnpy_order_callback(
                 vt_orderid=vt_orderid,
-                status=self._event_text(self._event_value(order, "status")),
+                status=order_status,
                 symbol=self._event_value(order, "symbol"),
                 side=self._side_from_vnpy_direction(self._event_value(order, "direction")),
                 market=self._market_from_vnpy_exchange(self._event_value(order, "exchange")),
@@ -3887,7 +3908,7 @@ class VnpyPaperTradingService:
             if not synced_order.get("accepted") and synced_order.get("reason") == "vnpy_order_plan_not_found":
                 raise VnpyAdapterError("vn.py order reconciliation plan disappeared")
 
-        observed = bool(order is not None or trades)
+        observed = bool(should_sync_order or trades)
         refreshed = self.agent_repo.get_trade_plan(str(plan.get("plan_uid") or "")) if observed else None
         return {
             "supported": True,
@@ -3897,6 +3918,49 @@ class VnpyPaperTradingService:
             "trade_count": len(trades),
             "status": refreshed.get("status") if isinstance(refreshed, dict) else plan.get("status"),
         }
+
+    def _reconcile_new_vnpy_submission(
+        self,
+        *,
+        plan_uid: str,
+        order: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        if (
+            str(order.get("source") or "") != "vnpy_main_engine"
+            or self._trade_plan_status(order) != "submitted"
+        ):
+            return None
+        plan = self.agent_repo.get_trade_plan(plan_uid)
+        if not isinstance(plan, dict):
+            return None
+        try:
+            deadline = (
+                time.monotonic() + 0.25
+                if self.vnpy_event_engine is not None
+                else time.monotonic()
+            )
+            while True:
+                reconciliation = self._reconcile_vnpy_trade_plan(
+                    plan,
+                    terminal_only=True,
+                )
+                if reconciliation.get("observed") or time.monotonic() >= deadline:
+                    break
+                time.sleep(0.01)
+        except Exception as exc:  # noqa: BLE001 - recovery scan owns uncertain query failures.
+            logger.warning(
+                "Immediate vn.py submission reconciliation failed for %s: %s",
+                plan_uid,
+                exc,
+            )
+            return None
+        if not reconciliation.get("observed"):
+            return None
+        refreshed = self.agent_repo.get_trade_plan(plan_uid)
+        if not isinstance(refreshed, dict):
+            return None
+        result = refreshed.get("order_result")
+        return result if isinstance(result, dict) else None
 
     def _auto_retry_candidate_trade_plans(self, *, scan_limit: int) -> List[Dict[str, Any]]:
         runs = self.agent_repo.list_recent_runs(
@@ -4174,6 +4238,12 @@ class VnpyPaperTradingService:
                     trade_id=_safe_int(order.get("trade_id")),
                     order_result=order,
                 )
+            reconciled_order = self._reconcile_new_vnpy_submission(
+                plan_uid=plan_key,
+                order=order,
+            )
+            if reconciled_order is not None:
+                order = reconciled_order
             run_id = _safe_int(plan.get("run_id"))
             if run_id is not None:
                 self.agent_repo.refresh_run_trade_counts(run_id)
@@ -4328,7 +4398,15 @@ class VnpyPaperTradingService:
     @staticmethod
     def _normalize_vnpy_status(status: Any) -> str:
         text = str(status or "").strip().lower()
-        return text.replace(" ", "_").replace("-", "_")
+        normalized = text.replace(" ", "_").replace("-", "_")
+        return {
+            "提交中": "submitting",
+            "未成交": "nottraded",
+            "部分成交": "parttraded",
+            "全部成交": "alltraded",
+            "已撤销": "cancelled",
+            "拒单": "rejected",
+        }.get(normalized, normalized)
 
     @staticmethod
     def _vnpy_order_failure_reason(order_status: str) -> Optional[str]:
@@ -11113,7 +11191,7 @@ class VnpyPaperTradingService:
             raw_candidate=candidate,
         )
         planned_cash_amount = self._order_base_cash_amount(order, settings=settings)
-        self.agent_repo.record_trade_plan(
+        trade_plan = self.agent_repo.record_trade_plan(
             plan_uid=f"plan-{run_id}-{sequence}-{uuid.uuid4().hex[:8]}",
             run_id=run_id,
             decision_id=int(decision["id"]),
@@ -11132,6 +11210,10 @@ class VnpyPaperTradingService:
             skip_reason=reason if not order.get("accepted") else None,
             risk_flags=risk_flags,
             order_result=audit_order,
+        )
+        self._reconcile_new_vnpy_submission(
+            plan_uid=str(trade_plan.get("plan_uid") or ""),
+            order=order,
         )
         return decision
 

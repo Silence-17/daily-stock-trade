@@ -144,10 +144,10 @@
 
 ```powershell
 .\scripts\setup_vnpy_runtime.ps1 -PythonExecutable "python"
-.\.venv-vnpy\Scripts\python.exe scripts\check_vnpy_adapter.py --require-vnpy --reconnect-cycles 3
+.\.venv-vnpy\Scripts\python.exe scripts\check_vnpy_adapter.py --require-vnpy --fault-matrix --reconnect-cycles 3
 ```
 
-安装脚本会校验 Python 版本，安装项目依赖与 `requirements-vnpy.txt`，优先选择 LiteLLM wheel，并把 pip 构建缓存放在 `.venv-vnpy/.pip-cache`。若 AlphaSift 的远程 Git 安装受限，可先准备固定提交的本地源码，再传 `-AlphaSiftSource <repo-relative-path>`；仅诊断 adapter 时可传 `-SkipProjectDependencies`，但该模式不能作为完整 DSA API 运行环境。验收脚本会构造真实 `OrderRequest`，调用测试 MainEngine bridge，启动内置 `DsaSimulatedGateway` 完成一笔标准订单/成交事件和三轮在途订单重连，再关闭 vn.py EventEngine/MainEngine。
+安装脚本会校验 Python 版本，安装项目依赖与 `requirements-vnpy.txt`，优先选择 LiteLLM wheel，并把 pip 构建缓存放在 `.venv-vnpy/.pip-cache`。若 AlphaSift 的远程 Git 安装受限，可先准备固定提交的本地源码，再传 `-AlphaSiftSource <repo-relative-path>`；仅诊断 adapter 时可传 `-SkipProjectDependencies`，但该模式不能作为完整 DSA API 运行环境。验收脚本会构造真实 `OrderRequest`，调用测试 MainEngine bridge，启动内置 `DsaSimulatedGateway` 完成标准订单、显式拒单、重复成交回报去重和三轮在途订单重连，再关闭 vn.py EventEngine/MainEngine。
 
 runtime 启动前会创建部署工作目录下已忽略的 `.vntrader/`，供 vn.py 保存本地运行状态，避免受限服务账户回退写入用户主目录。需要由 DSA 托管 vn.py EventEngine/MainEngine 时，显式设置：
 
@@ -181,6 +181,8 @@ VNPY_AUTO_ATTACH_EVENTS=true
 ## vn.py bridge 边界
 
 - `vnpy_paper` 模式负责把 DSA 通过风控后的买入计划和自动卖出计划转换为 vn.py `OrderRequest` 并调用 `MainEngine.send_order`，也可把提交态计划转换为 vn.py `CancelRequest` 并调用 `MainEngine.cancel_order` 发起撤单；订单状态、成交、账户和持仓回报可通过 `/vnpy-events/*` 同步回 DSA，或在宿主进程注入 EventEngine 后通过 `/vnpy-events/attach` 注册自动回调。DSA 也可以在 `VNPY_RUNTIME_ENABLED=true` 时创建 EventEngine/MainEngine 并按配置 add gateway/connect；连接请求与确认状态分开审计，已知断开状态会阻止新增委托。内置 `DsaSimulatedGateway` 默认在重连时保留资金、持仓、订单和计数器，恢复未完成延迟成交且保证单次成交，设置 `preserve_state_on_reconnect=false` 可显式重置。该模拟网关已完成事件回写与循环重连验收；真实券商 gateway 的连接参数、重连和长跑仍需部署方显式验证。
+- vn.py 4.4 原生 `Status` 的中文值（提交中、未成交、部分成交、全部成交、已撤销、拒单）会统一映射到 DSA 状态。新计划写入 `vt_orderid` 后立即对账一次 MainEngine 终态，修复同步拒单/成交事件早于计划落库的竞态；查询不到终态或查询异常时保持提交态，由正常 EventEngine 回调和既有恢复扫描继续处理。
+- `DsaSimulatedGateway` 的连接 JSON 可显式设置 `reject_every_nth_order`（默认 `0`，不注入拒单）和 `duplicate_trade_event_count`（默认 `1`，范围 1-5）做故障验收；生产模拟运行应保持默认值。`--fault-matrix` 会临时启用并在完成后恢复默认值。
 - bridge 提交成功只代表 vn.py 接收了委托请求，交易计划状态会记录为 `submitted`；订单状态中的部分成交会记录为 `part_filled` 供审计；只有收到并同步成交回报后，本地 Portfolio 才会写入成交并更新现金和持仓。
 - bridge 不可用、gateway 未配置、`OrderRequest` 构造失败或 `send_order` 抛错时，自动交易会把该计划记录为 `failed` 或 `skipped`，不会让整轮 Agent 运行变成 500。
 

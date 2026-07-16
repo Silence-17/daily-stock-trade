@@ -34,6 +34,8 @@ class DsaSimulatedGateway(BaseGateway):
         "initial_balance": 1_000_000.0,
         "fill_delay_ms": 500,
         "preserve_state_on_reconnect": True,
+        "reject_every_nth_order": 0,
+        "duplicate_trade_event_count": 1,
     }
     exchanges = [Exchange.SSE, Exchange.SZSE, Exchange.SEHK, Exchange.SMART]
     connect_without_settings = True
@@ -49,6 +51,8 @@ class DsaSimulatedGateway(BaseGateway):
         self._trade_count = 0
         self._balance = 1_000_000.0
         self._fill_delay_seconds = 0.5
+        self._reject_every_nth_order = 0
+        self._duplicate_trade_event_count = 1
         self._orders: dict[str, OrderData] = {}
         self._timers: dict[str, Timer] = {}
         self._positions: dict[str, dict[str, Any]] = {}
@@ -74,6 +78,14 @@ class DsaSimulatedGateway(BaseGateway):
                 self._positions.clear()
             delay_ms = min(10_000.0, max(10.0, _as_float(payload.get("fill_delay_ms"), 500.0)))
             self._fill_delay_seconds = delay_ms / 1000.0
+            self._reject_every_nth_order = min(
+                10_000,
+                max(0, _as_int(payload.get("reject_every_nth_order"), 0)),
+            )
+            self._duplicate_trade_event_count = min(
+                5,
+                max(1, _as_int(payload.get("duplicate_trade_event_count"), 1)),
+            )
             self._connected = True
             self._closed = False
             self._ever_connected = True
@@ -118,6 +130,12 @@ class DsaSimulatedGateway(BaseGateway):
             self._orders[orderid] = order
 
             rejection = self._order_rejection_reason(req)
+            if (
+                rejection is None
+                and self._reject_every_nth_order > 0
+                and self._order_count % self._reject_every_nth_order == 0
+            ):
+                rejection = "simulated_configured_rejection"
             if rejection:
                 order.status = Status.REJECTED
                 order.rejected_reason = rejection
@@ -169,6 +187,10 @@ class DsaSimulatedGateway(BaseGateway):
                 "position_count": sum(
                     1 for item in self._positions.values() if float(item["volume"]) != 0
                 ),
+                "fault_injection": {
+                    "reject_every_nth_order": self._reject_every_nth_order,
+                    "duplicate_trade_event_count": self._duplicate_trade_event_count,
+                },
             }
 
     def _schedule_fill(self, orderid: str) -> None:
@@ -221,8 +243,10 @@ class DsaSimulatedGateway(BaseGateway):
             )
             self._apply_fill(trade)
             order_snapshot = copy(order)
+            duplicate_trade_event_count = self._duplicate_trade_event_count
         self.on_order(order_snapshot)
-        self.on_trade(trade)
+        for _ in range(duplicate_trade_event_count):
+            self.on_trade(copy(trade))
         self._publish_account()
         self.query_position()
 
@@ -287,3 +311,10 @@ def _as_bool(value: Any, default: bool) -> bool:
     if text in {"0", "false", "no", "off"}:
         return False
     return default
+
+
+def _as_int(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
