@@ -2261,7 +2261,14 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
             ),
             patch(
                 "src.services.alphasift_service.get_dsa_fundamental_context",
-                return_value={"market": "cn", "coverage": {"valuation": "available"}},
+                return_value={
+                    "market": "cn",
+                    "coverage": {"valuation": "available", "capital_flow": "available"},
+                    "capital_flow": {
+                        "status": "available",
+                        "data": {"main_net_inflow": 123.0},
+                    },
+                },
             ),
             patch(
                 "src.services.alphasift_service.search_dsa_stock_news",
@@ -2287,6 +2294,63 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
         self.assertEqual(candidate["dsa_news"][0]["title"], "贵州茅台最新公告")
         self.assertIn("DSA行情", candidate["dsa_analysis_summary"])
         self.assertEqual(payload["dsa_enrichment"]["enriched_count"], 1)
+        context_health = payload["source_health"]["candidate_context"]
+        self.assertEqual(context_health["quote"]["status"], "ok")
+        self.assertEqual(context_health["fund_flow"]["status"], "ok")
+        self.assertEqual(context_health["news"]["status"], "ok")
+        self.assertEqual(context_health["news"]["coverage_pct"], 100.0)
+        self.assertEqual(
+            payload["dsa_enrichment"]["source_health"]["fund_flow"]["last_rows"],
+            1,
+        )
+
+    def test_screen_reports_degraded_dsa_candidate_context_sources(self) -> None:
+        config = self._config(enabled=True)
+        fake_manager = SimpleNamespace(get_stock_name=MagicMock(return_value="Test Stock"))
+        fake_module = _make_adapter_module(
+            screen=MagicMock(
+                return_value={
+                    "candidates": [{"code": "600519", "score": 88.5}],
+                }
+            ),
+        )
+
+        with (
+            patch("src.services.alphasift_service._import_alphasift", return_value=fake_module),
+            patch("src.services.alphasift_service._get_dsa_fetcher_manager", return_value=fake_manager),
+            patch("src.services.alphasift_service.get_dsa_realtime_quote", return_value={}),
+            patch(
+                "src.services.alphasift_service.get_dsa_fundamental_context",
+                return_value={
+                    "capital_flow": {"status": "unavailable", "data": {}},
+                },
+            ),
+            patch(
+                "src.services.alphasift_service.search_dsa_stock_news",
+                return_value={
+                    "success": False,
+                    "error": "search_down",
+                    "results": [],
+                },
+            ),
+        ):
+            payload = self._screen(
+                config,
+                market="cn",
+                strategy="dual_low",
+                max_results=5,
+                mock_enrichment=False,
+            )
+
+        context_health = payload["source_health"]["candidate_context"]
+        self.assertEqual(context_health["quote"]["status"], "unavailable")
+        self.assertEqual(context_health["quote"]["failures"], 1)
+        self.assertIn("realtime_quote_missing", context_health["quote"]["errors"])
+        self.assertEqual(context_health["fund_flow"]["status"], "unavailable")
+        self.assertEqual(context_health["fund_flow"]["failures"], 1)
+        self.assertEqual(context_health["news"]["status"], "unavailable")
+        self.assertEqual(context_health["news"]["failures"], 1)
+        self.assertIn("search_down", context_health["news"]["errors"])
 
     def test_screen_reuses_alphasift_dsa_context_without_refetch(self) -> None:
         config = self._config(enabled=True)

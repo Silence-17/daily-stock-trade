@@ -1841,6 +1841,21 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
                         "sina": {"failures": 2, "disabled": False},
                         "eastmoney": {"failures": 0, "disabled": False},
                     },
+                    "candidate_context": {
+                        "news": {
+                            "status": "unavailable",
+                            "failures": 1,
+                            "successes": 0,
+                            "last_rows": 0,
+                            "errors": ["search_down"],
+                        },
+                        "fund_flow": {
+                            "status": "ok",
+                            "failures": 0,
+                            "successes": 1,
+                            "last_rows": 1,
+                        },
+                    },
                 },
             },
         )
@@ -2097,6 +2112,18 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
         self.assertEqual(source_health["snapshot/sina"]["degraded_rate_pct"], 100.0)
         self.assertEqual(source_health["snapshot/sina"]["max_failures"], 2)
         self.assertEqual(source_health["snapshot/eastmoney"]["latest_status"], "ok")
+        self.assertEqual(
+            source_health["candidate_context/news"]["degraded_rate_pct"],
+            100.0,
+        )
+        self.assertEqual(
+            source_health["candidate_context/news"]["latest_status"],
+            "unavailable",
+        )
+        self.assertEqual(
+            source_health["candidate_context/fund_flow"]["latest_status"],
+            "ok",
+        )
         self.assertEqual(quality_trends["daily"][0]["quality_counts"], {"ok": 1})
         all_quality_trends = all_quality_trends_resp.json()
         self.assertEqual(all_quality_trends["quality_counts"], {"ok": 1, "unavailable": 1})
