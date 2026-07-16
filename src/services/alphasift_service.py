@@ -3860,14 +3860,15 @@ def _get_dsa_news_source_routing() -> Dict[str, Any]:
         normalized_priority = _dedupe_strings(
             [_env_text(source).lower() for source in priority if _env_text(source)]
         )
-        return {
-            "mode": "ordered_failover",
-            "priority": normalized_priority,
-            "sources": {
-                source: {"available": True, "failures": 0, "disabled": False}
-                for source in normalized_priority
-            },
-        }
+        policy_getter = getattr(service, "news_source_health_policy", None)
+        snapshot_getter = getattr(service, "news_source_health_snapshot", None)
+        policy = policy_getter() if callable(policy_getter) else {}
+        snapshot = snapshot_getter() if callable(snapshot_getter) else {}
+        routing = dict(policy) if isinstance(policy, dict) else {}
+        routing.setdefault("mode", "circuit_breaker_failover")
+        routing["priority"] = normalized_priority
+        routing["sources"] = snapshot if isinstance(snapshot, dict) else {}
+        return _remove_non_finite_json_values(routing)
     except Exception as exc:  # noqa: BLE001 - diagnostics must not block screening.
         logger.debug("Failed to read DSA news source routing: %s", exc)
         return {"mode": "ordered_failover", "priority": [], "sources": {}}
@@ -4163,6 +4164,8 @@ def _summarize_dsa_candidate_context_source_health(
         provider_attempts = news.get("provider_attempts") if not news_cache_hit else []
         for attempt in provider_attempts if isinstance(provider_attempts, list) else []:
             if not isinstance(attempt, dict):
+                continue
+            if attempt.get("observed") is False:
                 continue
             news_provider = _env_text(attempt.get("provider")).lower()
             if not news_provider or news_provider in observed_news_providers:

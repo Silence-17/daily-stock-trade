@@ -38,6 +38,10 @@ class RealtimeSourceHealthPersistenceTestCase(unittest.TestCase):
                     "tushare_ths",
                     "permission denied",
                 )
+                DataFetcherManager.record_news_search_source_failure(
+                    "bocha",
+                    "provider timeout",
+                )
 
             state_path = Path(temp_dir) / "provider_source_health.json"
             self.assertTrue(state_path.is_file())
@@ -52,7 +56,7 @@ class RealtimeSourceHealthPersistenceTestCase(unittest.TestCase):
                 database_path
             )
 
-            self.assertEqual(recovery["restored_sources"], 2)
+            self.assertEqual(recovery["restored_sources"], 3)
             restored = DataFetcherManager.realtime_source_health_snapshot()["cn/efinance"]
             self.assertEqual(restored["state"], CircuitBreaker.OPEN)
             self.assertTrue(restored["disabled"])
@@ -61,9 +65,13 @@ class RealtimeSourceHealthPersistenceTestCase(unittest.TestCase):
             ]
             self.assertEqual(flow_restored["state"], CircuitBreaker.OPEN)
             self.assertTrue(flow_restored["disabled"])
+            news_restored = DataFetcherManager.news_search_source_health_snapshot()["bocha"]
+            self.assertEqual(news_restored["state"], CircuitBreaker.OPEN)
+            self.assertTrue(news_restored["disabled"])
 
             DataFetcherManager._record_realtime_source_success("efinance", "cn")
             DataFetcherManager._record_capital_flow_source_success("tushare_ths")
+            DataFetcherManager.record_news_search_source_success("bocha")
             persisted = json.loads(state_path.read_text(encoding="utf-8"))
             self.assertEqual(persisted["states"], {})
 

@@ -333,6 +333,15 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
     def test_news_source_routing_reads_configured_provider_order(self) -> None:
         service = SimpleNamespace(
             news_provider_priority=MagicMock(return_value=["Anspire", "Bocha", "anspire"]),
+            news_source_health_policy=MagicMock(return_value={
+                "mode": "circuit_breaker_failover",
+                "failure_threshold": 3,
+                "cooldown_seconds": 300,
+                "cross_process_persistence": True,
+            }),
+            news_source_health_snapshot=MagicMock(return_value={
+                "anspire": {"state": "open", "failures": 3, "disabled": True},
+            }),
         )
         with patch(
             "src.services.alphasift_service._get_dsa_search_service",
@@ -341,8 +350,45 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
             routing = alphasift_service._get_dsa_news_source_routing()
 
         self.assertEqual(routing["priority"], ["anspire", "bocha"])
-        self.assertEqual(list(routing["sources"]), ["anspire", "bocha"])
+        self.assertTrue(routing["sources"]["anspire"]["disabled"])
+        self.assertEqual(routing["failure_threshold"], 3)
+        self.assertTrue(routing["cross_process_persistence"])
         service.news_provider_priority.assert_called_once_with()
+
+    def test_candidate_context_routing_demotes_open_news_provider(self) -> None:
+        with patch(
+            "src.services.alphasift_service._get_dsa_realtime_source_routing",
+            return_value={"mode": "circuit_breaker_failover", "sources": {}},
+        ), patch(
+            "src.services.alphasift_service._get_dsa_capital_flow_source_routing",
+            return_value={
+                "mode": "circuit_breaker_failover",
+                "priority": ["tushare_ths", "akshare"],
+                "sources": {},
+            },
+        ), patch(
+            "src.services.alphasift_service._get_dsa_news_source_routing",
+            return_value={
+                "mode": "circuit_breaker_failover",
+                "priority": ["anspire", "bocha"],
+                "sources": {
+                    "anspire": {"state": "open", "failures": 3, "disabled": True},
+                    "bocha": {"state": "closed", "failures": 0, "disabled": False},
+                },
+            },
+        ):
+            routing = alphasift_service.build_alphasift_candidate_context_source_routing(
+                market="cn",
+                source_health_items=[],
+            )
+
+        news = routing["news"]
+        self.assertEqual(news["base_priority"], ["anspire", "bocha"])
+        self.assertEqual(news["effective_priority"], ["bocha", "anspire"])
+        self.assertTrue(news["adjusted"])
+        self.assertTrue(next(
+            item for item in news["trend_weights"] if item["source"] == "anspire"
+        )["disabled"])
 
     def test_candidate_context_source_health_keeps_provider_level_evidence(self) -> None:
         health = alphasift_service._summarize_dsa_candidate_context_source_health([
