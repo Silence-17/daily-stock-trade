@@ -2771,6 +2771,53 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
             "index_quotes_empty",
         )
 
+    def test_intraday_market_index_timeout_fails_closed_with_bounded_audit(self) -> None:
+        manager = MagicMock()
+
+        def slow_indices(*, region):
+            time.sleep(0.1)
+            return [{"code": "sh000001", "change_pct": 0.1}]
+
+        manager.get_main_indices.side_effect = slow_indices
+        self.service.data_fetcher_manager = manager
+        settings = replace(
+            self.service.get_settings(),
+            auto_intraday_market_gate_enabled=True,
+        )
+
+        started_at = time.monotonic()
+        with patch(
+            "src.services.vnpy_paper_trading_service.AUTO_MARKET_EVIDENCE_TIMEOUT_SECONDS",
+            0.01,
+        ):
+            reason, diagnostics = self.service._market_context_pre_trade_risk(settings)
+        elapsed = time.monotonic() - started_at
+
+        self.assertEqual(reason, "intraday_market_index_unavailable")
+        self.assertLess(elapsed, 0.08)
+        index = diagnostics["intraday_market"]["index"]
+        self.assertEqual(index["evidence_reason"], "index_fetch_timeout")
+        self.assertEqual(index["timeout_seconds"], 0.01)
+        self.assertGreaterEqual(index["duration_ms"], 5)
+        time.sleep(0.11)
+
+    def test_intraday_market_worker_pool_exhaustion_fails_closed_immediately(self) -> None:
+        slots = self.service._market_evidence_slots
+        acquired = []
+        try:
+            for _ in range(4):
+                acquired.append(slots.acquire(blocking=False))
+            self.assertTrue(all(acquired))
+            evidence = self.service._live_market_index_evidence("cn")
+        finally:
+            for did_acquire in acquired:
+                if did_acquire:
+                    slots.release()
+
+        self.assertFalse(evidence["available"])
+        self.assertEqual(evidence["evidence_reason"], "index_worker_pool_exhausted")
+        self.assertEqual(evidence["duration_ms"], 0)
+
     def test_auto_trade_failure_fuse_skips_after_consecutive_failed_runs(self) -> None:
         self.service.update_settings(
             {
