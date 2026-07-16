@@ -44,6 +44,7 @@ class VnpyRuntimeTestCase(unittest.TestCase):
                 "VNPY_AUTO_ATTACH_EVENTS": "",
                 "VNPY_AUTO_RECONNECT_ENABLED": "",
                 "VNPY_AUTO_RECONNECT_INTERVAL_SECONDS": "",
+                "VNPY_AUTO_RECONNECT_MAX_INTERVAL_SECONDS": "",
                 "VNPY_AUTO_RECONNECT_CONFIRMATION_GRACE_SECONDS": "",
             },
             clear=False,
@@ -57,6 +58,7 @@ class VnpyRuntimeTestCase(unittest.TestCase):
         self.assertTrue(settings.auto_attach_events)
         self.assertFalse(settings.auto_reconnect_enabled)
         self.assertEqual(settings.auto_reconnect_interval_seconds, 60)
+        self.assertEqual(settings.auto_reconnect_max_interval_seconds, 300)
         self.assertEqual(settings.auto_reconnect_confirmation_grace_seconds, 30)
 
     def test_load_settings_clamps_auto_reconnect_interval(self) -> None:
@@ -65,6 +67,7 @@ class VnpyRuntimeTestCase(unittest.TestCase):
             {
                 "VNPY_AUTO_RECONNECT_ENABLED": "true",
                 "VNPY_AUTO_RECONNECT_INTERVAL_SECONDS": "1",
+                "VNPY_AUTO_RECONNECT_MAX_INTERVAL_SECONDS": "9999",
                 "VNPY_AUTO_RECONNECT_CONFIRMATION_GRACE_SECONDS": "9999",
             },
             clear=False,
@@ -73,6 +76,7 @@ class VnpyRuntimeTestCase(unittest.TestCase):
 
         self.assertTrue(settings.auto_reconnect_enabled)
         self.assertEqual(settings.auto_reconnect_interval_seconds, 5)
+        self.assertEqual(settings.auto_reconnect_max_interval_seconds, 3600)
         self.assertEqual(settings.auto_reconnect_confirmation_grace_seconds, 600)
 
     def test_bootstrap_disabled_returns_diagnostics_without_importing_vnpy(self) -> None:
@@ -383,9 +387,39 @@ class VnpyRuntimeTestCase(unittest.TestCase):
         self.assertEqual(result["attempt_count"], 1)
         self.assertEqual(result["success_count"], 0)
         self.assertEqual(result["failure_count"], 1)
+        self.assertEqual(result["consecutive_failure_count"], 1)
+        self.assertEqual(result["current_interval_seconds"], 10)
         self.assertEqual(result["last_result"], "failed")
         self.assertEqual(result["last_reason"], "connect_failed")
         self.assertEqual(len(handle.main_engine.connects), 2)
+
+    def test_auto_reconnect_backoff_caps_and_resets_after_recovery(self) -> None:
+        installed = _install_fake_vnpy_runtime_modules()
+        try:
+            handle = bootstrap_vnpy_runtime(
+                settings=VnpyRuntimeSettings(
+                    enabled=True,
+                    gateway_class="fake_vnpy_gateway:RecoveringGateway",
+                    gateway_name="RECOVERING",
+                    connect_on_start=True,
+                    auto_attach_events=False,
+                    auto_reconnect_enabled=True,
+                    auto_reconnect_interval_seconds=5,
+                    auto_reconnect_max_interval_seconds=8,
+                )
+            )
+            first = dict(handle.run_auto_reconnect_check())
+            second = dict(handle.run_auto_reconnect_check())
+        finally:
+            handle.close()
+            _restore_modules(installed)
+
+        self.assertEqual(first["consecutive_failure_count"], 1)
+        self.assertEqual(first["current_interval_seconds"], 8)
+        self.assertEqual(second["success_count"], 1)
+        self.assertEqual(second["consecutive_failure_count"], 0)
+        self.assertEqual(second["current_interval_seconds"], 5)
+        self.assertIsNotNone(second["backoff_reset_at"])
 
     def test_auto_reconnect_waits_for_async_connection_confirmation(self) -> None:
         installed = _install_fake_vnpy_runtime_modules()
@@ -541,6 +575,19 @@ def _install_fake_vnpy_runtime_modules() -> dict[str, object]:
         def connect(self, setting):
             return None
 
+    class RecoveringGateway:
+        connect_without_settings = True
+
+        def __init__(self):
+            self.connected = False
+            self.failures_remaining = 2
+
+        def connect(self, setting):
+            if self.failures_remaining:
+                self.failures_remaining -= 1
+                raise RuntimeError("temporary login failure")
+            self.connected = True
+
     event_module.EventEngine = EventEngine
     engine_module.MainEngine = MainEngine
     trader_event_module.EVENT_ORDER = "eOrder."
@@ -552,6 +599,7 @@ def _install_fake_vnpy_runtime_modules() -> dict[str, object]:
     gateway_module.UnknownGateway = UnknownGateway
     gateway_module.FailingGateway = FailingGateway
     gateway_module.SlowGateway = SlowGateway
+    gateway_module.RecoveringGateway = RecoveringGateway
     vnpy_module.event = event_module
     vnpy_module.trader = trader_module
     trader_module.engine = engine_module

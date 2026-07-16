@@ -891,6 +891,15 @@ def _system_health_payload(status_payload: Dict[str, Any]) -> Dict[str, Any]:
             "auto_reconnect_attempt_count": int(
                 runtime_auto_reconnect.get("attempt_count") or 0
             ),
+            "auto_reconnect_consecutive_failure_count": int(
+                runtime_auto_reconnect.get("consecutive_failure_count") or 0
+            ),
+            "auto_reconnect_current_interval_seconds": runtime_auto_reconnect.get(
+                "current_interval_seconds"
+            ),
+            "auto_reconnect_max_interval_seconds": runtime_auto_reconnect.get(
+                "max_interval_seconds"
+            ),
             "auto_reconnect_confirmation_grace_seconds": int(
                 runtime_auto_reconnect.get("confirmation_grace_seconds") or 0
             ),

@@ -404,6 +404,14 @@ const settingsHelpZhCN: SettingsHelpMap = {
     impact: ['影响明确断线后的恢复速度和连接请求频率。'],
     notes: ['保存后需要重启进程生效。'],
   },
+  'settings.data_source.VNPY_AUTO_RECONNECT_MAX_INTERVAL_SECONDS': {
+    title: 'vn.py 自动重连最大间隔',
+    summary: '限制连续连接失败时指数退避的最大等待秒数。',
+    usage: '允许 5 至 3600 秒，默认 300 秒；实际值不会低于基础重连间隔。',
+    valueNotes: ['每次连续失败会扩大等待时间，连接恢复后自动回到基础间隔。'],
+    impact: ['降低 gateway 或券商长时间不可用时的登录请求频率。'],
+    notes: ['保存后需要重启进程生效。'],
+  },
   'settings.data_source.VNPY_AUTO_RECONNECT_CONFIRMATION_GRACE_SECONDS': {
     title: 'vn.py 连接确认宽限期',
     summary: '设置异步 connect 请求等待 gateway 确认的时间。',
@@ -1629,6 +1637,14 @@ const settingsHelpEnUS: SettingsHelpMap = {
     valueNotes: ['An interval that is too short may trigger gateway or broker connection-rate limits.'],
     impact: ['Affects recovery latency and connection request frequency after an explicit disconnect.'],
     notes: ['Restart the process after saving for the new interval to take effect.'],
+  },
+  'settings.data_source.VNPY_AUTO_RECONNECT_MAX_INTERVAL_SECONDS': {
+    title: 'vn.py Auto Reconnect Maximum Interval',
+    summary: 'Caps the exponential backoff delay after consecutive connection failures.',
+    usage: 'Accepts 5 to 3600 seconds and defaults to 300. The effective value is never lower than the base reconnect interval.',
+    valueNotes: ['Each consecutive failure increases the delay; a confirmed recovery resets it to the base interval.'],
+    impact: ['Reduces login request frequency while a gateway or broker remains unavailable.'],
+    notes: ['Restart the process after saving for the new maximum to take effect.'],
   },
   'settings.data_source.VNPY_AUTO_RECONNECT_CONFIRMATION_GRACE_SECONDS': {
     title: 'vn.py Connection Confirmation Grace',

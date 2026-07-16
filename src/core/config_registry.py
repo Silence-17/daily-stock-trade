@@ -1159,9 +1159,32 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "default_value": "30",
         "options": [],
         "validation": {"min": 5, "max": 600},
-        "display_order": 189,
+        "display_order": 190,
         "help_key": "settings.data_source.VNPY_AUTO_RECONNECT_CONFIRMATION_GRACE_SECONDS",
         "examples": ["VNPY_AUTO_RECONNECT_CONFIRMATION_GRACE_SECONDS=30"],
+        "docs": [
+            {
+                "label": "vn.py paper trading guide",
+                "href": "https://github.com/ZhuLinsen/daily_stock_analysis/blob/main/docs/vnpy-paper-trading.md",
+            },
+        ],
+        "warning_codes": ["restart_required"],
+    },
+    "VNPY_AUTO_RECONNECT_MAX_INTERVAL_SECONDS": {
+        "title": "vn.py Auto Reconnect Maximum Interval",
+        "description": "Maximum seconds between reconnect attempts after repeated failures, clamped to 5-3600 seconds and never below the base interval.",
+        "category": "data_source",
+        "data_type": "integer",
+        "ui_control": "number",
+        "is_sensitive": False,
+        "is_required": False,
+        "is_editable": True,
+        "default_value": "300",
+        "options": [],
+        "validation": {"min": 5, "max": 3600},
+        "display_order": 189,
+        "help_key": "settings.data_source.VNPY_AUTO_RECONNECT_MAX_INTERVAL_SECONDS",
+        "examples": ["VNPY_AUTO_RECONNECT_MAX_INTERVAL_SECONDS=300"],
         "docs": [
             {
                 "label": "vn.py paper trading guide",
