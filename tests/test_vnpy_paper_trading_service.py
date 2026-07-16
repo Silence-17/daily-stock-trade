@@ -2643,6 +2643,134 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertEqual(diagnostics["freshness"]["age_days"], 4)
         self.assertEqual(diagnostics["freshness"]["max_age_days"], 3)
 
+    def test_intraday_market_gate_uses_live_cn_index_and_breadth_without_snapshot(self) -> None:
+        manager = MagicMock()
+        manager.get_main_indices.return_value = [
+            {"code": "sh000001", "name": "上证指数", "change_pct": -0.4},
+            {"code": "sz399006", "name": "创业板指", "change_pct": 0.2},
+        ]
+        manager.get_market_stats.return_value = {
+            "up_count": 1200,
+            "down_count": 700,
+            "flat_count": 100,
+        }
+        self.service.data_fetcher_manager = manager
+        settings = replace(
+            self.service.get_settings(),
+            auto_intraday_market_gate_enabled=True,
+            auto_intraday_index_min_change_pct=-1.0,
+            auto_intraday_breadth_min_score=50,
+        )
+
+        with patch(
+            "src.services.vnpy_paper_trading_service.load_previous_snapshot"
+        ) as load_snapshot:
+            reason, diagnostics = self.service._market_context_pre_trade_risk(settings)
+
+        self.assertIsNone(reason)
+        self.assertEqual(diagnostics["status"], "passed")
+        self.assertEqual(diagnostics["schema_version"], 2)
+        self.assertEqual(
+            diagnostics["intraday_market"]["index"]["aggregate_change_pct"],
+            -0.1,
+        )
+        self.assertEqual(diagnostics["intraday_market"]["breadth"]["score"], 60.0)
+        manager.get_market_stats.assert_called_once_with(
+            purpose="vnpy_paper_intraday_risk"
+        )
+        load_snapshot.assert_not_called()
+
+    def test_intraday_market_gate_blocks_weak_live_index_before_breadth(self) -> None:
+        manager = MagicMock()
+        manager.get_main_indices.return_value = [
+            {"code": "sh000001", "change_pct": -2.4},
+            {"code": "sz399006", "change_pct": -1.8},
+        ]
+        self.service.data_fetcher_manager = manager
+        settings = replace(
+            self.service.get_settings(),
+            auto_intraday_market_gate_enabled=True,
+            auto_intraday_index_min_change_pct=-2.0,
+        )
+
+        reason, diagnostics = self.service._market_context_pre_trade_risk(settings)
+
+        self.assertEqual(reason, "intraday_market_index_below_threshold")
+        self.assertEqual(diagnostics["status"], "blocked")
+        self.assertEqual(
+            diagnostics["intraday_market"]["index"]["aggregate_change_pct"],
+            -2.1,
+        )
+        manager.get_market_stats.assert_not_called()
+
+    def test_intraday_market_gate_fails_closed_for_missing_cn_breadth(self) -> None:
+        manager = MagicMock()
+        manager.get_main_indices.return_value = [
+            {"code": "sh000001", "change_pct": 0.1},
+        ]
+        manager.get_market_stats.return_value = {}
+        self.service.data_fetcher_manager = manager
+        settings = replace(
+            self.service.get_settings(),
+            auto_intraday_market_gate_enabled=True,
+        )
+
+        reason, diagnostics = self.service._market_context_pre_trade_risk(settings)
+
+        self.assertEqual(reason, "intraday_market_breadth_unavailable")
+        self.assertEqual(diagnostics["status"], "unavailable")
+        self.assertEqual(
+            diagnostics["intraday_market"]["breadth"]["evidence_reason"],
+            "breadth_counts_missing",
+        )
+
+    def test_cross_market_gate_blocks_when_one_linked_market_breaks_threshold(self) -> None:
+        manager = MagicMock()
+        evidence = {
+            "hk": [{"code": "HSI", "change_pct": -2.6}],
+            "us": [
+                {"code": "SPX", "change_pct": -0.3},
+                {"code": "VIX", "change_pct": 8.0},
+            ],
+        }
+        manager.get_main_indices.side_effect = lambda region: evidence[region]
+        self.service.data_fetcher_manager = manager
+        settings = replace(
+            self.service.get_settings(),
+            auto_cross_market_gate_enabled=True,
+            auto_cross_market_min_change_pct=-2.0,
+        )
+
+        reason, diagnostics = self.service._market_context_pre_trade_risk(settings)
+
+        self.assertEqual(reason, "cross_market_index_below_threshold")
+        self.assertEqual(diagnostics["status"], "blocked")
+        self.assertEqual(diagnostics["cross_market"]["linked_markets"], ["hk", "us"])
+        self.assertEqual(diagnostics["cross_market"]["blocked_markets"], ["hk"])
+        us_evidence = diagnostics["cross_market"]["evidence"][1]
+        self.assertEqual(us_evidence["index_count"], 1)
+        self.assertEqual(us_evidence["indices"][0]["code"], "SPX")
+
+    def test_cross_market_gate_fails_closed_when_linked_quotes_are_empty(self) -> None:
+        manager = MagicMock()
+        manager.get_main_indices.side_effect = lambda region: (
+            [{"code": "HSI", "change_pct": 0.1}] if region == "hk" else []
+        )
+        self.service.data_fetcher_manager = manager
+        settings = replace(
+            self.service.get_settings(),
+            auto_cross_market_gate_enabled=True,
+        )
+
+        reason, diagnostics = self.service._market_context_pre_trade_risk(settings)
+
+        self.assertEqual(reason, "cross_market_context_unavailable")
+        self.assertEqual(diagnostics["status"], "unavailable")
+        self.assertEqual(
+            diagnostics["cross_market"]["evidence"][1]["evidence_reason"],
+            "index_quotes_empty",
+        )
+
     def test_auto_trade_failure_fuse_skips_after_consecutive_failed_runs(self) -> None:
         self.service.update_settings(
             {

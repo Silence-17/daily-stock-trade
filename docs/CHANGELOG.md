@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [新功能] 自动模拟交易新增默认关闭的盘中市场与跨市场联动门禁：复用现有主指数/全市场涨跌家数多源取数，按本市场指数均值、A 股实时宽度和版本化关联市场映射 fail-closed 阻断新增买入，并在 Agent run 审计完整记录指数明细、计算口径、阈值和阻断市场
+- [测试] 新增盘中指数、实时宽度、VIX 排除、关联市场下跌/缺数、API 配置和 Web 保存交互回归
 - [改进] 候选决策将 `strategy_evidence`、`position_plan`、`risk_review`、`agent_review` 和 `llm_review` 从订单结果内嵌约定升级为独立持久化/API 字段，成交、撤单与恢复回报不再覆盖候选解释；旧数据库自动补列，旧记录继续从 `order_result` 兼容读取
 - [测试] 新增候选审计字段数据库迁移、旧记录回退、成交回报保留、API 序列化和 Web 新旧合同兼容回归
 - [新功能] Agent run 详情新增基于持久化交易计划与 Portfolio trade id 动态派生的本轮持仓变化，按标的汇总实际买入、卖出、净股数和成交额，并区分已入账、仍有待回报、仅计划和无变化；模拟交易页、Agent 控制台、运行时间线和 JSON 导出复用同一契约

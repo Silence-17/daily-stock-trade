@@ -771,6 +771,8 @@ python main.py --schedule --no-run-immediately
 >
 > 模拟交易页可独立开启大盘红绿灯、市场宽度和热点退潮门禁。宽度门禁检查最近持久化 `MarketLightSnapshot.dimensions.breadth.score`；热点退潮门禁比较最近两次快照的 `dimensions.limit.score`，将涨跌停强度回落作为确定性代理。任一门禁启用后，最新快照必须存在、可读取且日期有效；页面可设置 1 至 30 个自然日的新鲜度上限，默认 7 天，未来或超期快照会 fail-closed。命中或证据不可用时只阻断新增买入，原因、快照年龄和完整输入写入 `diagnostics.market_context_risk` 与 Agent 时间线；止损、止盈和其他卖出风险收缩不受影响。该能力基于盘后持久化快照，不代表盘中实时宽度。
 >
+> 页面还可独立开启盘中指数/实时宽度和跨市场联动门禁。前者使用本市场方向性主指数的等权平均涨跌幅，A 股追加实时涨跌家数宽度；后者按映射 v1 检查关联市场指数（`cn -> hk,us`、`hk -> cn,us`、`us -> hk`、`jp/kr/tw -> us`），并排除美国 `VIX`。启用后证据为空或取数异常均 fail-closed，全部输入和 reason code 写入同一市场风险诊断。当前 provider 尚未统一提供 quote as-of，跨市场判断使用各源最新可用行情，不代表交易所级时间同步。
+>
 > Agent 控制台通过 `GET /api/v1/vnpy-paper/agent-runs/data-quality-trends` 展示 7/30/90 天跨 run 数据质量趋势，包括 ok/partial/stale/unavailable/unknown 分布、降级率、警告、source error、逐日结果，以及具体 snapshot/daily 和候选上下文 `quote/fund_flow/news` 来源的健康观测。来源表展示观测数、降级次数/比例、最新状态和最新/最大失败计数；缺少整体质量或来源快照的旧 run 不会被推断为健康。
 >
 > 候选实时行情和资金流使用 provider 级恢复路由：行情沿用配置顺序；资金流在 Tushare 可用时按 `tushare_ths -> akshare` 尝试独立 THS/AkShare 来源，未配置 Token 或权限不足时透明回退。同一市场/provider 连续 3 次异常后冷却 5 分钟并切换到后续来源，冷却结束只放行一个半开探测，成功恢复、失败重新冷却；单股票空结果不累计整源失败。有效状态原子写入 `DATABASE_PATH` 同目录的 `provider_source_health.json`，API 重启会恢复 24 小时内的失败/熔断状态，但不延续半开探测名额；旧 `realtime_source_health.json` 自动迁移，损坏或过期文件不会阻断启动。Tushare THS 万元字段统一换算为 CNY，10 日净额由最近 10 个交易日单日净额求和。每轮 Agent run 会把两类 provider 状态保存在 `diagnostics.source_routing.candidate_context.quote/fund_flow`，控制台与 snapshot 动态路由一起展示。

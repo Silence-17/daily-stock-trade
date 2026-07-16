@@ -1083,6 +1083,11 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
                     "auto_market_breadth_min_score": 42,
                     "auto_hotspot_retreat_gate_enabled": True,
                     "auto_hotspot_retreat_min_drop": 30,
+                    "auto_intraday_market_gate_enabled": True,
+                    "auto_intraday_index_min_change_pct": -1.5,
+                    "auto_intraday_breadth_min_score": 45,
+                    "auto_cross_market_gate_enabled": True,
+                    "auto_cross_market_min_change_pct": -2.5,
                     "auto_failure_fuse_enabled": True,
                     "auto_failure_fuse_threshold": 2,
                     "auto_failure_fuse_auto_recovery_enabled": True,
@@ -1140,6 +1145,17 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
         self.assertEqual(response.json()["settings"]["auto_market_breadth_min_score"], 42)
         self.assertTrue(response.json()["settings"]["auto_hotspot_retreat_gate_enabled"])
         self.assertEqual(response.json()["settings"]["auto_hotspot_retreat_min_drop"], 30)
+        self.assertTrue(response.json()["settings"]["auto_intraday_market_gate_enabled"])
+        self.assertEqual(
+            response.json()["settings"]["auto_intraday_index_min_change_pct"], -1.5
+        )
+        self.assertEqual(
+            response.json()["settings"]["auto_intraday_breadth_min_score"], 45
+        )
+        self.assertTrue(response.json()["settings"]["auto_cross_market_gate_enabled"])
+        self.assertEqual(
+            response.json()["settings"]["auto_cross_market_min_change_pct"], -2.5
+        )
         self.assertTrue(response.json()["settings"]["auto_failure_fuse_enabled"])
         self.assertEqual(response.json()["settings"]["auto_failure_fuse_threshold"], 2)
         self.assertTrue(

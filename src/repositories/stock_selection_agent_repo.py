@@ -1647,6 +1647,24 @@ class StockSelectionAgentRepository:
                 if isinstance(market_context_risk.get("freshness"), dict)
                 else {}
             )
+            intraday = (
+                market_context_risk.get("intraday_market")
+                if isinstance(market_context_risk.get("intraday_market"), dict)
+                else {}
+            )
+            intraday_index = (
+                intraday.get("index") if isinstance(intraday.get("index"), dict) else {}
+            )
+            intraday_breadth = (
+                intraday.get("breadth")
+                if isinstance(intraday.get("breadth"), dict)
+                else {}
+            )
+            cross_market = (
+                market_context_risk.get("cross_market")
+                if isinstance(market_context_risk.get("cross_market"), dict)
+                else {}
+            )
             timeline.append(
                 {
                     "stage": "market_context_risk",
@@ -1657,6 +1675,9 @@ class StockSelectionAgentRepository:
                         + f", breadth={breadth.get('score')}"
                         + f", hotspot_drop={retreat.get('score_drop')}"
                         + f", age_days={freshness.get('age_days')}"
+                        + f", intraday_index={intraday_index.get('aggregate_change_pct')}"
+                        + f", intraday_breadth={intraday_breadth.get('score')}"
+                        + f", linked_blocked={cross_market.get('blocked_markets')}"
                     ),
                     "timestamp": started_at,
                     "details": dict(market_context_risk),

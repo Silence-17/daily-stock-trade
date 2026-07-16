@@ -64,6 +64,11 @@ export type VnpyPaperSettings = {
   autoMarketBreadthMinScore: number;
   autoHotspotRetreatGateEnabled: boolean;
   autoHotspotRetreatMinDrop: number;
+  autoIntradayMarketGateEnabled: boolean;
+  autoIntradayIndexMinChangePct: number;
+  autoIntradayBreadthMinScore: number;
+  autoCrossMarketGateEnabled: boolean;
+  autoCrossMarketMinChangePct: number;
   autoFailureFuseEnabled: boolean;
   autoFailureFuseThreshold: number;
   autoFailureFuseAutoRecoveryEnabled: boolean;
@@ -1229,6 +1234,21 @@ function buildSettingsPayload(payload: VnpyPaperSettingsUpdate): Record<string, 
   }
   if (hasOwn(payload, 'autoHotspotRetreatMinDrop')) {
     body.auto_hotspot_retreat_min_drop = payload.autoHotspotRetreatMinDrop;
+  }
+  if (hasOwn(payload, 'autoIntradayMarketGateEnabled')) {
+    body.auto_intraday_market_gate_enabled = payload.autoIntradayMarketGateEnabled;
+  }
+  if (hasOwn(payload, 'autoIntradayIndexMinChangePct')) {
+    body.auto_intraday_index_min_change_pct = payload.autoIntradayIndexMinChangePct;
+  }
+  if (hasOwn(payload, 'autoIntradayBreadthMinScore')) {
+    body.auto_intraday_breadth_min_score = payload.autoIntradayBreadthMinScore;
+  }
+  if (hasOwn(payload, 'autoCrossMarketGateEnabled')) {
+    body.auto_cross_market_gate_enabled = payload.autoCrossMarketGateEnabled;
+  }
+  if (hasOwn(payload, 'autoCrossMarketMinChangePct')) {
+    body.auto_cross_market_min_change_pct = payload.autoCrossMarketMinChangePct;
   }
   if (hasOwn(payload, 'autoFailureFuseEnabled')) body.auto_failure_fuse_enabled = payload.autoFailureFuseEnabled;
   if (hasOwn(payload, 'autoFailureFuseThreshold')) {
