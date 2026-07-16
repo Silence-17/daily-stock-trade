@@ -785,6 +785,18 @@ describe('AgentConsolePage', () => {
       methodology: {
         lookaheadProtection: true,
         configuredTargetWeights: { '600519': 60, '000001': 30 },
+        historicalTaxCoverageFrom: '2005-01-24',
+        sellTaxRegimes: [{
+          effectiveFrom: '2007-05-30',
+          buyTaxBps: 30,
+          sellTaxBps: 30,
+          source: 'mof_tax_2007_84_bilateral',
+        }, {
+          effectiveFrom: '2008-09-19',
+          buyTaxBps: 0,
+          sellTaxBps: 10,
+          source: 'mof_2008_09_19_single_sided',
+        }],
       },
     });
     resolveHistoricalUniverse.mockResolvedValue({
@@ -1170,6 +1182,9 @@ describe('AgentConsolePage', () => {
     expect(screen.getByTestId('agent-portfolio-corporate-action-audit')).toHaveTextContent('补偿 ¥4.00');
     expect(screen.getByTestId('agent-portfolio-target-audit')).toHaveTextContent('600519 60.0%');
     expect(screen.getByTestId('agent-portfolio-target-audit')).toHaveTextContent('000001 30.0%');
+    expect(screen.getByTestId('agent-portfolio-tax-regimes')).toHaveTextContent('历史税制覆盖：2005-01-24');
+    expect(screen.getByTestId('agent-portfolio-tax-regimes')).toHaveTextContent('2007-05-30 买 30.00 bps / 卖 30.00 bps');
+    expect(screen.getByTestId('agent-portfolio-tax-regimes')).toHaveTextContent('2008-09-19 买 0.00 bps / 卖 10.00 bps');
     expect(results).toHaveTextContent('成本费用');
     expect(results).toHaveTextContent('¥60.00');
     expect(screen.getByTestId('agent-portfolio-corporate-action-audit')).toHaveTextContent(
