@@ -5880,6 +5880,12 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
                     "quote": {"status": "ok", "successes": 1, "failures": 0},
                     "fund_flow": {"status": "ok", "successes": 1, "failures": 0},
                     "news": {"status": "unavailable", "successes": 0, "failures": 1},
+                    "fund_flow/tushare_ths": {
+                        "status": "unavailable",
+                        "successes": 0,
+                        "failures": 1,
+                        "trend_only": True,
+                    },
                 },
             },
         }

@@ -1313,7 +1313,35 @@ class AlphaSiftService:
 
         candidates = _normalize_candidates(raw_data)
         selected = candidates[:max_results]
-        selected, dsa_enrichment = _enrich_candidates_with_dsa(selected)
+        candidate_context_routing = build_alphasift_candidate_context_source_routing(
+            market=market,
+            source_health_items=source_health_trends,
+        )
+        fund_flow_priority = list(
+            candidate_context_routing.get("fund_flow", {}).get("effective_priority") or []
+        )
+        if candidate_context_routing.get("fund_flow", {}).get("adjusted"):
+            selected, dsa_enrichment = _enrich_candidates_with_dsa(
+                selected,
+                capital_flow_source_priority=fund_flow_priority,
+            )
+        else:
+            selected, dsa_enrichment = _enrich_candidates_with_dsa(selected)
+        post_enrichment_routing = build_alphasift_candidate_context_source_routing(
+            market=market,
+            source_health_items=source_health_trends,
+        )
+        candidate_context_routing["quote"] = post_enrichment_routing["quote"]
+        applied_fund_flow = candidate_context_routing["fund_flow"]
+        post_fund_flow = post_enrichment_routing["fund_flow"]
+        applied_fund_flow["post_run_sources"] = post_fund_flow.get("sources", {})
+        applied_fund_flow["next_recommended_priority"] = list(
+            post_fund_flow.get("effective_priority") or []
+        )
+        applied_fund_flow["post_run_trend_weights"] = list(
+            post_fund_flow.get("trend_weights") or []
+        )
+        dsa_enrichment["source_routing"] = candidate_context_routing
         candidate_context_routing = (
             dsa_enrichment.get("source_routing")
             if isinstance(dsa_enrichment, dict)
@@ -2249,6 +2277,103 @@ def build_alphasift_snapshot_source_routing(
         ),
         "lookback_days": 30,
         "sources": ranked,
+    }
+
+
+def _health_weighted_candidate_context_route(
+    routing: Dict[str, Any],
+    *,
+    group: str,
+    base_priority: List[str],
+    market: str,
+    source_health_items: Optional[List[Dict[str, Any]]],
+) -> Dict[str, Any]:
+    resolved = dict(routing or {})
+    current_sources = resolved.get("sources")
+    current_sources = current_sources if isinstance(current_sources, dict) else {}
+    trends: Dict[str, Dict[str, Any]] = {}
+    prefix = f"{group}/"
+    for raw_item in source_health_items or []:
+        if not isinstance(raw_item, dict) or str(raw_item.get("group") or "") != "candidate_context":
+            continue
+        source = _env_text(raw_item.get("source"))
+        if source.startswith(prefix):
+            trends[source[len(prefix):]] = raw_item
+
+    weighted: List[Dict[str, Any]] = []
+    market_prefix = f"{str(market or '').strip().lower()}/"
+    for base_rank, source in enumerate(base_priority, start=1):
+        trend = trends.get(source, {})
+        observations = max(0, int(_safe_float(trend.get("observation_count")) or 0))
+        degraded_observations = max(
+            0,
+            min(observations, int(_safe_float(trend.get("degraded_observation_count")) or 0)),
+        )
+        historical_weight = (observations - degraded_observations + 4.0) / (observations + 5.0)
+        current = current_sources.get(f"{market_prefix}{source}")
+        if not isinstance(current, dict):
+            current = next(
+                (
+                    value
+                    for key, value in current_sources.items()
+                    if str(key).rsplit("/", 1)[-1] == source and isinstance(value, dict)
+                ),
+                {},
+            )
+        failures = max(0.0, _safe_float(current.get("failures")) or 0.0)
+        disabled = bool(current.get("disabled"))
+        current_weight = 0.0 if disabled else 1.0 / (1.0 + failures)
+        weighted.append({
+            "source": source,
+            "base_rank": base_rank,
+            "weight": round(historical_weight * current_weight, 4),
+            "historical_weight": round(historical_weight, 4),
+            "current_weight": round(current_weight, 4),
+            "observation_count": observations,
+            "degraded_observation_count": degraded_observations,
+            "current_failures": failures,
+            "disabled": disabled,
+        })
+
+    ranked = sorted(
+        weighted,
+        key=lambda item: (
+            bool(item["disabled"]),
+            -float(item["weight"]),
+            int(item["base_rank"]),
+        ),
+    )
+    for effective_rank, item in enumerate(ranked, start=1):
+        item["effective_rank"] = effective_rank
+    effective_priority = [str(item["source"]) for item in ranked]
+    adjusted = effective_priority != base_priority
+    resolved.update({
+        "mode": "cross_run_health_weighted_failover",
+        "base_priority": list(base_priority),
+        "priority": effective_priority,
+        "effective_priority": effective_priority,
+        "adjusted": adjusted,
+        "reason": "health_weighted_priority_adjusted" if adjusted else "base_priority_retained",
+        "lookback_days": 30,
+        "trend_weights": ranked,
+    })
+    return resolved
+
+
+def build_alphasift_candidate_context_source_routing(
+    *,
+    market: str,
+    source_health_items: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    return {
+        "quote": _get_dsa_realtime_source_routing(),
+        "fund_flow": _health_weighted_candidate_context_route(
+            _get_dsa_capital_flow_source_routing(),
+            group="fund_flow",
+            base_priority=["tushare_ths", "akshare"],
+            market=market,
+            source_health_items=source_health_items,
+        ),
     }
 
 
@@ -3715,12 +3840,14 @@ def get_dsa_fundamental_context(
     stock_code: str,
     *,
     quote: Optional[Dict[str, Any]] = None,
+    capital_flow_source_priority: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     manager = _get_dsa_fetcher_manager()
     context = manager.get_fundamental_context(
         stock_code,
         budget_seconds=4.0,
         realtime_quote=quote or None,
+        capital_flow_source_priority=capital_flow_source_priority,
     )
     return _compact_fundamental_context(_remove_non_finite_json_values(_to_plain(context)))
 
@@ -3775,7 +3902,11 @@ def get_dsa_candidate_context(
     return context.get("dsa_context", {})
 
 
-def _enrich_candidates_with_dsa(candidates: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+def _enrich_candidates_with_dsa(
+    candidates: List[Dict[str, Any]],
+    *,
+    capital_flow_source_priority: Optional[List[str]] = None,
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     limit = min(len(candidates), DSA_ENRICHMENT_MAX_CANDIDATES)
     results: Dict[int, Tuple[bool, List[str]]] = {}
 
@@ -3800,6 +3931,7 @@ def _enrich_candidates_with_dsa(candidates: List[Dict[str, Any]]) -> Tuple[List[
                 include_news=True,
                 include_fundamentals=True,
                 profile="post_rank_full",
+                capital_flow_source_priority=capital_flow_source_priority,
             )
             candidate.update(enriched)
             context = enriched.get("dsa_context", {})
@@ -3867,6 +3999,19 @@ def _summarize_dsa_candidate_context_source_health(
         for key in ("quote", "fund_flow", "news")
     }
 
+    def provider_bucket(key: str) -> Dict[str, Any]:
+        return providers.setdefault(
+            key,
+            {
+                "observations": 0,
+                "successes": 0,
+                "partials": 0,
+                "failures": 0,
+                "last_rows": 0,
+                "errors": [],
+            },
+        )
+
     for candidate in candidates:
         context = candidate.get("dsa_context")
         if not isinstance(context, dict):
@@ -3880,6 +4025,14 @@ def _summarize_dsa_candidate_context_source_health(
             rows=1 if quote else 0,
             error="realtime_quote_missing" if quote_price is None else None,
         )
+        quote_provider = _env_text(quote.get("provider") or quote.get("source")).lower()
+        if quote_provider:
+            _record_dsa_context_source_observation(
+                provider_bucket(f"quote/{quote_provider}"),
+                status="ok" if quote_price is not None else "unavailable",
+                rows=1 if quote else 0,
+                error="realtime_quote_missing" if quote_price is None else None,
+            )
 
         fundamentals = (
             context.get("fundamentals")
@@ -3913,6 +4066,33 @@ def _summarize_dsa_candidate_context_source_health(
                 else "capital_flow_unavailable"
             ),
         )
+        observed_flow_providers: set[str] = set()
+        source_chain = capital_flow.get("source_chain")
+        for chain_item in source_chain if isinstance(source_chain, list) else []:
+            if not isinstance(chain_item, dict):
+                continue
+            flow_provider = _env_text(chain_item.get("provider")).lower()
+            if not flow_provider or flow_provider in observed_flow_providers or flow_provider == "fundamental_pipeline":
+                continue
+            observed_flow_providers.add(flow_provider)
+            flow_result = _env_text(chain_item.get("result")).lower()
+            flow_status = "ok" if flow_result in {"ok", "available", "success"} else (
+                "partial" if flow_result in {"partial", "degraded", "stale"} else "unavailable"
+            )
+            _record_dsa_context_source_observation(
+                provider_bucket(f"fund_flow/{flow_provider}"),
+                status=flow_status,
+                rows=len(capital_flow_data) if flow_status in {"ok", "partial"} else 0,
+                error=None if flow_status != "unavailable" else f"{flow_provider}_{flow_result or 'unavailable'}",
+            )
+        selected_flow_provider = _env_text(capital_flow_data.get("provider")).lower()
+        if selected_flow_provider and selected_flow_provider not in observed_flow_providers:
+            _record_dsa_context_source_observation(
+                provider_bucket(f"fund_flow/{selected_flow_provider}"),
+                status=normalized_flow_status,
+                rows=len(capital_flow_data),
+                error=None if normalized_flow_status != "unavailable" else "capital_flow_unavailable",
+            )
 
         news = context.get("news") if isinstance(context.get("news"), dict) else {}
         news_results = news.get("results") if isinstance(news.get("results"), list) else []
@@ -3928,6 +4108,14 @@ def _summarize_dsa_candidate_context_source_health(
                 else _env_text(news.get("error")) or "stock_news_unavailable"
             ),
         )
+        news_provider = _env_text(news.get("provider") or news.get("source")).lower()
+        if news_provider and not news_skipped:
+            _record_dsa_context_source_observation(
+                provider_bucket(f"news/{news_provider}"),
+                status="ok" if news_success else "unavailable",
+                rows=len(news_results),
+                error=None if news_success else _env_text(news.get("error")) or "stock_news_unavailable",
+            )
 
     result: Dict[str, Dict[str, Any]] = {}
     for provider, raw in providers.items():
@@ -3953,6 +4141,7 @@ def _summarize_dsa_candidate_context_source_health(
             "last_rows": int(raw["last_rows"]),
             "disabled": False,
             "errors": _dedupe_strings(raw["errors"])[:5],
+            "trend_only": "/" in provider,
         }
     return result
 
@@ -4003,6 +4192,7 @@ def _build_dsa_candidate_context(
     include_news: bool = True,
     include_fundamentals: bool = True,
     profile: str = "post_rank_full",
+    capital_flow_source_priority: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     code = _env_text(candidate.get("code"))
     name = _env_text(candidate.get("name"))
@@ -4060,7 +4250,14 @@ def _build_dsa_candidate_context(
 
     if include_fundamentals and not fundamentals:
         try:
-            fundamentals = get_dsa_fundamental_context(code, quote=quote)
+            if capital_flow_source_priority:
+                fundamentals = get_dsa_fundamental_context(
+                    code,
+                    quote=quote,
+                    capital_flow_source_priority=capital_flow_source_priority,
+                )
+            else:
+                fundamentals = get_dsa_fundamental_context(code, quote=quote)
         except Exception as exc:  # noqa: BLE001
             warnings.append(f"fundamental_context_failed: {exc}")
             fundamentals = {}

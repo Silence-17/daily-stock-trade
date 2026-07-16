@@ -23,7 +23,7 @@ from pathlib import Path
 from threading import BoundedSemaphore, RLock, Thread
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
-from typing import Callable, Optional, List, Tuple, Dict, Any
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import pandas as pd
 import numpy as np
@@ -1194,18 +1194,24 @@ class DataFetcherManager:
             # Best-effort cleanup during interpreter shutdown.
             pass
 
-    def _get_fundamental_cache_key(self, stock_code: str, budget_seconds: Optional[float] = None) -> str:
+    def _get_fundamental_cache_key(
+        self,
+        stock_code: str,
+        budget_seconds: Optional[float] = None,
+        route_key: Optional[str] = None,
+    ) -> str:
         """生成基本面缓存 key（包含预算分桶以避免低预算结果污染高预算请求）。"""
         normalized_code = normalize_stock_code(stock_code)
+        route_suffix = f"|route={route_key}" if route_key else ""
         if budget_seconds is None:
-            return f"{normalized_code}|budget=default"
+            return f"{normalized_code}|budget=default{route_suffix}"
         try:
             budget = max(0.0, float(budget_seconds))
         except (TypeError, ValueError):
             budget = 0.0
         # 100ms bucket to balance cache reuse and scenario isolation.
         budget_bucket = int(round(budget * 10))
-        return f"{normalized_code}|budget={budget_bucket}"
+        return f"{normalized_code}|budget={budget_bucket}{route_suffix}"
 
     def _prune_fundamental_cache(self, ttl_seconds: int, max_entries: int) -> None:
         """Prune expired and overflow fundamental cache items."""
@@ -3588,6 +3594,7 @@ class DataFetcherManager:
         stock_code: str,
         budget_seconds: Optional[float] = None,
         realtime_quote: Optional[Any] = None,
+        capital_flow_source_priority: Optional[Sequence[str]] = None,
     ) -> Dict[str, Any]:
         """
         Aggregate fundamental blocks with fail-open semantics.
@@ -3620,7 +3627,20 @@ class DataFetcherManager:
 
         cache_ttl = int(config.fundamental_cache_ttl_seconds)
         cache_max_entries = max(0, int(getattr(config, "fundamental_cache_max_entries", 256)))
-        cache_key = self._get_fundamental_cache_key(stock_code, stage_timeout)
+        capital_flow_priority = (
+            self._normalize_capital_flow_source_priority(capital_flow_source_priority)
+            if capital_flow_source_priority
+            else None
+        )
+        cache_key = self._get_fundamental_cache_key(
+            stock_code,
+            stage_timeout,
+            route_key=(
+                "capital_flow:" + ",".join(capital_flow_priority)
+                if capital_flow_priority
+                else None
+            ),
+        )
         if cache_ttl > 0:
             self._prune_fundamental_cache(cache_ttl, cache_max_entries)
             with self._fundamental_cache_lock:
@@ -3832,9 +3852,13 @@ class DataFetcherManager:
         else:
             capital_flow_budget = min(fetch_timeout, remaining_seconds)
             capital_flow_start = time.time()
+            capital_flow_kwargs: Dict[str, Any] = {}
+            if capital_flow_priority:
+                capital_flow_kwargs["source_priority"] = capital_flow_priority
             result_ctx["capital_flow"] = self.get_capital_flow_context(
                 stock_code,
                 budget_seconds=capital_flow_budget,
+                **capital_flow_kwargs,
             )
             _consume_budget(int((time.time() - capital_flow_start) * 1000))
 
@@ -3895,7 +3919,25 @@ class DataFetcherManager:
             self._prune_fundamental_cache(cache_ttl, cache_max_entries)
         return result_ctx
 
-    def get_capital_flow_context(self, stock_code: str, budget_seconds: Optional[float] = None) -> Dict[str, Any]:
+    @staticmethod
+    def _normalize_capital_flow_source_priority(
+        source_priority: Optional[Sequence[str]],
+    ) -> List[str]:
+        supported = ("tushare_ths", "akshare")
+        normalized: List[str] = []
+        for raw in source_priority or ():
+            source = str(raw or "").strip().lower()
+            if source in supported and source not in normalized:
+                normalized.append(source)
+        normalized.extend(source for source in supported if source not in normalized)
+        return normalized
+
+    def get_capital_flow_context(
+        self,
+        stock_code: str,
+        budget_seconds: Optional[float] = None,
+        source_priority: Optional[Sequence[str]] = None,
+    ) -> Dict[str, Any]:
         """资金流向块（Tushare/THS 优先，AkShare 独立兜底）。"""
         from src.config import get_config
 
@@ -3917,20 +3959,21 @@ class DataFetcherManager:
                 [{"provider": "fundamental_pipeline", "result": "failed", "duration_ms": 0}],
                 ["fundamental stage timeout"],
             )
-        routes: List[Tuple[str, Callable[[], Any]]] = []
+        routes_by_source: Dict[str, Callable[[], Any]] = {}
         tushare = self._get_fetcher_by_name("TushareFetcher", capability="capital_flow")
         if tushare is not None and callable(getattr(tushare, "get_capital_flow", None)):
-            routes.append(
-                (
-                    "tushare_ths",
-                    lambda: self._call_fetcher_method(
-                        tushare,
-                        "get_capital_flow",
-                        stock_code,
-                    ),
-                )
+            routes_by_source["tushare_ths"] = lambda: self._call_fetcher_method(
+                tushare,
+                "get_capital_flow",
+                stock_code,
             )
-        routes.append(("akshare", lambda: self._fundamental_adapter.get_capital_flow(stock_code)))
+        routes_by_source["akshare"] = lambda: self._fundamental_adapter.get_capital_flow(stock_code)
+        route_priority = self._normalize_capital_flow_source_priority(source_priority)
+        routes = [
+            (source, routes_by_source[source])
+            for source in route_priority
+            if source in routes_by_source
+        ]
 
         started_at = time.time()
         source_chain: List[Dict[str, Any]] = []
