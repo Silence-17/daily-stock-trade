@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [改进] 自动选股候选缺少有效价格且实时行情获取失败时，`price_unavailable` 跳过结果保留请求价格、解析来源、候选上下文和预算审计，不向 vn.py 提交未知价格委托，也不阻断同轮其他候选
+- [测试] 新增真实 MainEngine/EventEngine 三候选行情缺价隔离矩阵，验证中间候选行情源异常时前后候选仍独立成交、运行汇总为两笔提交一笔跳过、重复成交回报不重复入账且网关无残留活动订单
 - [修复] 自动选股 Agent 完成运行时从持久化交易计划重算提交/跳过计数，避免同步拒单回报先更新计划后又被初始下单汇总覆盖；并发重复 vn.py 成交回报命中唯一约束时按成功幂等回放处理，不再产生误导性对账失败
 - [测试] 新增真实 vn.py MainEngine/EventEngine 三候选混合结果矩阵，验证两单成交、一单同步拒单、重复成交回报去重、决策/计划终态一致、Portfolio 隔离和网关无残留活动订单
 - [新功能] 新增零下单 `scripts/check_vnpy_gateway_soak.py` 长跑验收器，可按启动宽限期、采样间隔、最低连接率和必需订单/成交/账户/持仓事件验证任意已配置 vn.py gateway，聚合状态切换与自动重连统计且不输出连接文件路径或内容；内置 gateway 支持显式单次断线注入

@@ -1469,11 +1469,18 @@ class VnpyPaperTradingService:
 
         fill_price, price_source = self._resolve_order_price(symbol_norm, price)
         if fill_price is None or fill_price <= 0:
+            price_resolution = {
+                "requested_price": _safe_float(price),
+                "source": price_source,
+            }
             return self._skipped_order(
                 symbol=symbol_norm,
                 side=side_norm,
+                quantity=_safe_float(quantity),
+                cash_amount=_safe_float(cash_amount),
                 reason="price_unavailable",
                 message="Price is unavailable; order was not filled.",
+                raw={**(raw or {}), "price_resolution": price_resolution},
             )
 
         fill_quantity = self._resolve_order_quantity(
