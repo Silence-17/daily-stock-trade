@@ -23,6 +23,7 @@
 - 状态接口新增 `diagnostics.auto_trade_readiness`，结构化返回自动交易 readiness：总状态、下一步建议、阻断原因、关注项和本地账本、自动交易开关、runtime scheduler、自动任务、AlphaSift 选股依赖、调度窗口、交易窗口、连续失败熔断、vn.py bridge 等组件状态。`diagnostics.auto_trade_readiness.timing_alignment` 会把自动任务下次触发时间与交易窗口开收盘时间对齐展示；`diagnostics.alphasift` 会轻量返回自动交易依赖的 AlphaSift 启用状态、可用性、版本和策略数量；异常只写入诊断，不会拖垮本地 paper 状态接口。
 - readiness 还会把配置文件中持久化的 `last_auto_run` 映射为“最近运行结果”，返回运行时间、Agent run id、是否接受/跳过、原始 reason code 和候选/提交计数；统一 `system_health` 与 Web“可用性诊断”复用该组件。成功运行显示 ready，最近跳过或未完成显示非必需 warning，不会仅凭历史结果制造当前硬阻断；因此即使 scheduler task event 已清理或缺失，页面仍能解释上一轮为什么没有交易。
 - 状态接口新增 `diagnostics.system_health`，把本地账本、选股来源、自动化调度、调度窗口、交易窗口、持仓估值、行业归属和 vn.py bridge 合并为跨模块健康视图。`required_blockers` 表示会阻断自动执行的必需组件，`warnings` 表示需要关注但不一定阻断的降级，`disabled` 表示因配置或轻量查询暂未启用的组件。
+- `diagnostics.vnpy_runtime.connect` 会区分连接请求已受理与网关已确认连接：`request_accepted=true` 只表示 `MainEngine.connect()` 已返回，只有网关的 `get_connection_status()`、`get_state_snapshot()` 或公开 `connected` 状态确认后才返回 `connected=true`。连接调用异常记录为 `connect_failed` 且不拖垮 API 启动；无法确认的异步第三方网关显示 warning，明确断开时系统健康 blocked，自动新增委托以 `vnpy_gateway_disconnected` 跳过。状态读取会动态刷新支持状态钩子的网关。
 - 完整状态的 `diagnostics.system_health.components[key=valuation]` 会基于已经加载的 Portfolio 快照汇总持仓估值健康，不新增行情请求。字段包括可用/新鲜/缺失/陈旧/状态未知数量、价格覆盖率、新鲜覆盖率、`price_source` / `price_provider` 分布、受影响代码以及最早/最新价格日期；Web“可用性诊断”直接展示覆盖率和来源摘要，轻量状态仍以 `snapshot_not_requested` 返回。
 - 完整状态的 `diagnostics.industry_exposure` 返回行业归属解析状态、持仓总数、已解析/缺失数量、覆盖率、缺失代码和按行业汇总的持仓市值。未配置行业风控时使用 `snapshot_only` 模式，只统计快照已有字段且不发起逐股网络请求；配置行业金额/比例上限或目标行业权重后切换到 `risk_guard` 模式，该组件属于必需风控条件，覆盖不完整会 fail closed。轻量状态只返回 `snapshot_not_requested`，不会拉取持仓或行业数据。
 - 配置 `auto_max_drawdown_pct` 后，账户回撤按账户 ID 持久化的已观测权益峰值计算，峰值至少为初始资金。`diagnostics.account_drawdown` 和 Agent run 的 `diagnostics.account_risk` 返回 `basis=observed_equity_peak`、当前权益、峰值权益、回撤比例和阈值；恢复旧账户会继续使用该账户的峰值，新建/重置账户使用新账户 ID 独立计算。达到阈值时系统健康的“账户回撤”组件阻断新买入，卖出风险处置不受影响；配置的恢复缓冲决定自动解锁线。
@@ -172,7 +173,7 @@ VNPY_AUTO_ATTACH_EVENTS=true
 
 ## vn.py bridge 边界
 
-- `vnpy_paper` 模式负责把 DSA 通过风控后的买入计划和自动卖出计划转换为 vn.py `OrderRequest` 并调用 `MainEngine.send_order`，也可把提交态计划转换为 vn.py `CancelRequest` 并调用 `MainEngine.cancel_order` 发起撤单；订单状态、成交、账户和持仓回报可通过 `/vnpy-events/*` 同步回 DSA，或在宿主进程注入 EventEngine 后通过 `/vnpy-events/attach` 注册自动回调。DSA 也可以在 `VNPY_RUNTIME_ENABLED=true` 时创建 EventEngine/MainEngine 并按配置 add gateway/connect；内置 `DsaSimulatedGateway` 默认在重连时保留资金、持仓、订单和计数器，恢复未完成延迟成交且保证单次成交，设置 `preserve_state_on_reconnect=false` 可显式重置。该模拟网关已完成事件回写与循环重连验收；真实券商 gateway 的连接参数、重连和长跑仍需部署方显式验证。
+- `vnpy_paper` 模式负责把 DSA 通过风控后的买入计划和自动卖出计划转换为 vn.py `OrderRequest` 并调用 `MainEngine.send_order`，也可把提交态计划转换为 vn.py `CancelRequest` 并调用 `MainEngine.cancel_order` 发起撤单；订单状态、成交、账户和持仓回报可通过 `/vnpy-events/*` 同步回 DSA，或在宿主进程注入 EventEngine 后通过 `/vnpy-events/attach` 注册自动回调。DSA 也可以在 `VNPY_RUNTIME_ENABLED=true` 时创建 EventEngine/MainEngine 并按配置 add gateway/connect；连接请求与确认状态分开审计，已知断开状态会阻止新增委托。内置 `DsaSimulatedGateway` 默认在重连时保留资金、持仓、订单和计数器，恢复未完成延迟成交且保证单次成交，设置 `preserve_state_on_reconnect=false` 可显式重置。该模拟网关已完成事件回写与循环重连验收；真实券商 gateway 的连接参数、重连和长跑仍需部署方显式验证。
 - bridge 提交成功只代表 vn.py 接收了委托请求，交易计划状态会记录为 `submitted`；订单状态中的部分成交会记录为 `part_filled` 供审计；只有收到并同步成交回报后，本地 Portfolio 才会写入成交并更新现金和持仓。
 - bridge 不可用、gateway 未配置、`OrderRequest` 构造失败或 `send_order` 抛错时，自动交易会把该计划记录为 `failed` 或 `skipped`，不会让整轮 Agent 运行变成 500。
 

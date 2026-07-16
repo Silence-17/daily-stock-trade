@@ -133,6 +133,37 @@ class VnpyAdapterTestCase(unittest.TestCase):
         self.assertEqual(missing_gateway["reason"], "gateway_name_not_configured")
         self.assertTrue(ready["available"])
         self.assertEqual(ready["mode"], "vnpy_main_engine")
+        self.assertIsNone(ready["connection_confirmed"])
+        self.assertEqual(ready["connection_status"], "unknown")
+
+    def test_bridge_status_reads_gateway_connection_hook(self) -> None:
+        installed = _install_fake_vnpy_modules()
+        main_engine = _FakeMainEngine()
+        main_engine.gateway = types.SimpleNamespace(
+            get_state_snapshot=lambda: {"connected": False}
+        )
+        try:
+            status = get_vnpy_bridge_status(
+                main_engine=main_engine,
+                gateway_name="SIM",
+            )
+            main_engine.gateway.get_state_snapshot = lambda: {"connected": True}
+            recovered = get_vnpy_bridge_status(
+                main_engine=main_engine,
+                gateway_name="SIM",
+            )
+        finally:
+            _restore_modules(installed)
+
+        self.assertTrue(status["available"])
+        self.assertFalse(status["connection_confirmed"])
+        self.assertEqual(status["connection_status"], "disconnected")
+        self.assertEqual(
+            status["connection_confirmation_source"],
+            "get_state_snapshot",
+        )
+        self.assertTrue(recovered["connection_confirmed"])
+        self.assertEqual(recovered["connection_status"], "connected")
 
     def test_main_engine_bridge_submits_order_request(self) -> None:
         installed = _install_fake_vnpy_modules()
@@ -311,6 +342,10 @@ class _FakeMainEngine:
         self.cancel_calls = []
         self.orders = {}
         self.trades = []
+        self.gateway = None
+
+    def get_gateway(self, gateway_name):
+        return self.gateway
 
     def send_order(self, request, gateway_name):
         self.calls.append((request, gateway_name))

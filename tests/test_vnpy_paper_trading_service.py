@@ -3203,6 +3203,39 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         trades = self.service.portfolio.list_trade_events(account_id=int(self.service.get_settings().account_id), page=1)
         self.assertEqual(trades["items"], [])
 
+    def test_vnpy_submit_skips_gateway_that_reports_disconnected(self) -> None:
+        installed = _install_fake_vnpy_modules()
+        main_engine = _FakeMainEngine()
+        main_engine.get_gateway = MagicMock(
+            return_value=types.SimpleNamespace(
+                get_state_snapshot=lambda: {"connected": False}
+            )
+        )
+        service = VnpyPaperTradingService(
+            config_path=self.config_path,
+            vnpy_main_engine=main_engine,
+        )
+        service.update_settings({"vnpy_gateway_name": "SIM"})
+        try:
+            result = service._submit_vnpy_bridge_order(
+                settings=service.get_settings(),
+                account_id=1,
+                symbol="600519",
+                side="buy",
+                market="cn",
+                quantity=100,
+                price=10,
+                cash_amount=1000,
+                source="unit_test",
+            )
+        finally:
+            _restore_modules(installed)
+
+        self.assertFalse(result["accepted"])
+        self.assertEqual(result["status"], "skipped")
+        self.assertEqual(result["reason"], "vnpy_gateway_disconnected")
+        self.assertEqual(main_engine.calls, [])
+
     @unittest.skipUnless(importlib.util.find_spec("vnpy"), "optional vn.py runtime is not installed")
     def test_builtin_simulated_gateway_fills_agent_plan_through_real_event_engine(self) -> None:
         from vnpy.event import EventEngine

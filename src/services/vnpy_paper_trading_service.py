@@ -1645,6 +1645,17 @@ class VnpyPaperTradingService:
                 message=f"vn.py bridge unavailable: {bridge_status.get('reason') or 'unknown'}",
                 raw={"vnpy_bridge": bridge_status, **(raw or {})},
             )
+        if bridge_status.get("connection_confirmed") is False:
+            return self._skipped_order(
+                symbol=symbol,
+                side=side,
+                quantity=quantity,
+                price=price,
+                cash_amount=cash_amount,
+                reason="vnpy_gateway_disconnected",
+                message="vn.py gateway reports that it is disconnected.",
+                raw={"vnpy_bridge": bridge_status, **(raw or {})},
+            )
         try:
             request_payload = build_vnpy_order_request_payload(
                 symbol=symbol,

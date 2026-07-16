@@ -295,6 +295,140 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
         self.assertEqual(component["limit"], 3)
         self.assertIn("consecutive_loss_limit_reached", health["required_blockers"])
 
+    def test_system_health_reports_confirmed_runtime_connection(self) -> None:
+        health = _system_health_payload({
+            "enabled": True,
+            "available": True,
+            "settings": {
+                "enabled": True,
+                "auto_trade_enabled": True,
+                "auto_execution_mode": "vnpy_paper",
+            },
+            "diagnostics": {
+                "vnpy_bridge": {"available": True},
+                "vnpy_runtime": {
+                    "enabled": True,
+                    "connect_on_start": True,
+                    "connect": {
+                        "request_accepted": True,
+                        "connected": True,
+                        "status": "connected",
+                        "confirmation_source": "get_state_snapshot",
+                    },
+                },
+            },
+        })
+
+        component = {
+            item["key"]: item for item in health["components"]
+        }["vnpy_bridge"]
+        self.assertEqual(component["status"], "ready")
+        self.assertEqual(component["reason"], "vnpy_bridge_ready")
+        self.assertTrue(component["connection_confirmed"])
+        self.assertEqual(
+            component["connection_confirmation_source"],
+            "get_state_snapshot",
+        )
+
+    def test_system_health_warns_when_runtime_connection_is_unconfirmed(self) -> None:
+        health = _system_health_payload({
+            "enabled": True,
+            "available": True,
+            "settings": {
+                "enabled": True,
+                "auto_trade_enabled": True,
+                "auto_execution_mode": "vnpy_paper",
+            },
+            "diagnostics": {
+                "vnpy_bridge": {"available": True},
+                "vnpy_runtime": {
+                    "enabled": True,
+                    "connect_on_start": True,
+                    "connect": {
+                        "request_accepted": True,
+                        "connected": False,
+                        "status": "connect_requested",
+                        "reason": "connection_unconfirmed",
+                        "confirmation_source": "unavailable",
+                    },
+                },
+            },
+        })
+
+        component = {
+            item["key"]: item for item in health["components"]
+        }["vnpy_bridge"]
+        self.assertEqual(component["status"], "warning")
+        self.assertEqual(
+            component["reason"],
+            "vnpy_gateway_connection_unconfirmed",
+        )
+        self.assertFalse(component["connection_confirmed"])
+        self.assertIn("vnpy_gateway_connection_unconfirmed", health["warnings"])
+
+    def test_system_health_blocks_failed_runtime_connection(self) -> None:
+        health = _system_health_payload({
+            "enabled": True,
+            "available": True,
+            "settings": {
+                "enabled": True,
+                "auto_trade_enabled": True,
+                "auto_execution_mode": "vnpy_paper",
+            },
+            "diagnostics": {
+                "vnpy_bridge": {"available": True},
+                "vnpy_runtime": {
+                    "enabled": True,
+                    "connect_on_start": True,
+                    "connect": {
+                        "request_accepted": False,
+                        "connected": False,
+                        "status": "failed",
+                        "reason": "connect_failed",
+                        "message": "paper gateway login rejected",
+                    },
+                },
+            },
+        })
+
+        component = {
+            item["key"]: item for item in health["components"]
+        }["vnpy_bridge"]
+        self.assertEqual(component["status"], "blocked")
+        self.assertEqual(component["reason"], "connect_failed")
+        self.assertIn("connect_failed", health["required_blockers"])
+
+    def test_system_health_blocks_injected_bridge_reporting_disconnected(self) -> None:
+        health = _system_health_payload({
+            "enabled": True,
+            "available": True,
+            "settings": {
+                "enabled": True,
+                "auto_trade_enabled": True,
+                "auto_execution_mode": "vnpy_paper",
+            },
+            "diagnostics": {
+                "vnpy_bridge": {
+                    "available": True,
+                    "connection_confirmed": False,
+                    "connection_status": "disconnected",
+                    "connection_confirmation_source": "gateway.connected",
+                },
+            },
+        })
+
+        component = {
+            item["key"]: item for item in health["components"]
+        }["vnpy_bridge"]
+        self.assertEqual(component["status"], "blocked")
+        self.assertEqual(component["reason"], "vnpy_gateway_disconnected")
+        self.assertFalse(component["connection_confirmed"])
+        self.assertEqual(component["connection_status"], "disconnected")
+        self.assertEqual(
+            component["connection_confirmation_source"],
+            "gateway.connected",
+        )
+
     def test_status_and_manual_order_use_local_paper_account(self) -> None:
         with patch(
             "api.v1.endpoints.vnpy_paper_trading.VnpyPaperTradingService",
