@@ -761,7 +761,7 @@ python main.py --schedule --no-run-immediately
 >
 > 连续失败熔断默认保持锁存并支持手动恢复。需要无人值守恢复时，可在模拟交易页显式开启“熔断冷却后自动恢复”并设置冷却分钟数；打开时间会持久化，冷却到期只放行一轮探测，探测失败会重新熔断。页面和状态接口会显示预计探测时间，自动恢复会写入系统告警审计。
 >
-> Agent 控制台通过 `GET /api/v1/vnpy-paper/agent-runs/data-quality-trends` 展示 7/30/90 天跨 run 数据质量趋势，包括 ok/partial/stale/unavailable/unknown 分布、降级率、警告、source error、逐日结果和具体 snapshot/daily 来源的健康观测。来源表展示观测数、降级次数/比例、最新状态和最新/最大失败计数；缺少整体质量或来源快照的旧 run 不会被推断为健康。
+> Agent 控制台通过 `GET /api/v1/vnpy-paper/agent-runs/data-quality-trends` 展示 7/30/90 天跨 run 数据质量趋势，包括 ok/partial/stale/unavailable/unknown 分布、降级率、警告、source error、逐日结果，以及具体 snapshot/daily 和候选上下文 `quote/fund_flow/news` 来源的健康观测。来源表展示观测数、降级次数/比例、最新状态和最新/最大失败计数；缺少整体质量或来源快照的旧 run 不会被推断为健康。
 >
 > Agent 控制台可调用 `POST /api/v1/vnpy-paper/agent-runs/backtest`，复用当前策略、市场和运行时间筛选，按已记录候选价格和严格晚于决策日期的本地日线计算 1/5/10/20 个交易日的覆盖率、胜率、平均/中位收益和平均最大有利/不利波动。默认不联网补行情，也不会重跑策略或触发交易；缺价和未来日线不足会降低覆盖率。它用于评价已记录候选，不等同于 point-in-time 全市场历史策略回放。
 
@@ -783,7 +783,7 @@ python main.py --schedule --no-run-immediately
 > 自动卖出风控还支持默认关闭的 `auto_rebalance_enabled`：开启后会复用单票、总仓位和行业仓位暴露上限，超限时按超出金额计算卖出数量，生成 `rebalance_*_exceeded` 卖出计划；也可通过 `auto_target_position_weights` / `auto_target_industry_weights` 设置股票或行业目标权益占比，超配时生成 `rebalance_target_position_weight_exceeded` / `rebalance_target_industry_weight_exceeded`。买入侧会将预算缩减到股票和行业目标的最小剩余缺口，已有持仓可补足显式股票目标，并在跨币种换算后按市场整手取可执行数量；不足一手时以 `target_weight_below_min_lot` 跳过。候选原始载荷会记录 `target_weight_sizing`、`rebalance_plan`、目标权重、当前值、剩余缺口和可执行金额。
 >
 > 自动买入还支持默认关闭的 `auto_score_weighted_allocation_enabled`。开启后，`auto_allocation_budget`（留空则使用 `auto_cash_per_order`）作为每轮组合预算；`auto_allocation_method` 可选按评分、评分/20 日逆波动率、顺序两两相关性约束，或 `target_tracking_min_variance_20d` 协方差目标跟踪分配。最小方差方法使用运行日及之前的本地 trailing returns 构建协方差矩阵，在显式股票目标剩余缺口（没有缺口时使用候选评分目标）与 `auto_covariance_risk_penalty` 风险惩罚之间求解非负权重；历史不足时 fail-closed。整轮仍受现金保留、每日预算/订单槽位、最大持仓数、单票/总仓位/行业空间、显式目标缺口和整手执行约束；Agent run 与候选仓位计划会记录 `portfolio_allocation`、风险输入、目标向量、协方差矩阵、收敛状态、可执行预算和残差。
-> 自动选股运行还会按筛选完整性、候选覆盖和 snapshot/daily 来源健康生成确定性的 0~100 数据质量分。`auto_min_data_quality_score` 留空时只审计；配置后低于阈值会整轮 fail-closed，原因是 `data_quality_score_below_threshold`。来源健康未观测会明确降为 70 分而不是假定满分，原有 `stale/unavailable` 硬门禁不受阈值设置影响。
+> 自动选股运行还会按筛选完整性、候选覆盖，以及 snapshot/daily 与候选上下文 `quote/fund_flow/news` 来源健康生成确定性的 0~100 数据质量分。`auto_min_data_quality_score` 留空时只审计；配置后低于阈值会整轮 fail-closed，原因是 `data_quality_score_below_threshold`。来源健康未观测会明确降为 70 分而不是假定满分，原有 `stale/unavailable` 硬门禁不受阈值设置影响。候选上下文来源失败只作为独立遥测和评分输入，不会单独拖垮 AlphaSift 候选响应。
 
 > 自动选股还会基于同策略、同市场的持久化候选生成跨运行前瞻状态。默认只审计；开启 `auto_cross_run_quality_gate_enabled` 后，成熟样本胜率低于阈值或评价不可用会阻断新增买入，证据不足不会阻断，自动卖出风控仍会继续执行。评价只读取严格晚于决策日的本地日线，不联网补数或重跑历史策略。
 

@@ -1,6 +1,6 @@
 # Current Project Status
 
-Snapshot date: 2026-07-15
+Snapshot date: 2026-07-16
 
 ## Current State
 
@@ -16,7 +16,7 @@ Snapshot date: 2026-07-15
 - Paper-trading budgets, cash checks, position exposure, and daily usage now use the account base currency. Foreign-market orders convert through the Portfolio FX table, fail closed for new buys when rates are missing or more than seven calendar days old, preserve sell-side risk reduction, and record both base and quote amounts for audit.
 - Explicit stock and industry target weights now cap each automatic buy to the remaining target gap instead of rejecting the whole candidate. Existing positions can be replenished toward an explicit stock target even when the maximum position count is reached or existing positions are normally skipped; the final amount is reduced to an executable market lot and audited in `target_weight_sizing`.
 - Automatic buys now have an optional constrained portfolio-allocation stage with score-weighted, score/inverse-20-day-volatility, correlation-capped, and covariance target-tracking methods. Point-in-time local trailing returns drive the risk methods; missing history or overlap fails closed, and audits include observations, pairwise coefficients or covariance matrices, target vectors, convergence state, caps, intended budget, and executable A-share-lot residual.
-- Every AlphaSift auto-trade run now receives a deterministic 0-100 data-quality score weighted by screen integrity (45%), candidate coverage (35%), and observed snapshot/daily source health (20%). Missing source-health telemetry is marked unobserved at 70 rather than assumed healthy. `auto_min_data_quality_score` is optional and default-off; when configured, a lower-scoring round is blocked and audited as `data_quality_score_below_threshold`. Candidate rule reviews also carry their own coverage score.
+- Every AlphaSift auto-trade run now receives a deterministic 0-100 data-quality score weighted by screen integrity (45%), candidate coverage (35%), and observed source health (20%). Source health now includes snapshot/daily providers and independently observed candidate-context quote, fund-flow, and news retrieval. Missing telemetry is marked unobserved at 70 rather than assumed healthy. `auto_min_data_quality_score` is optional and default-off; when configured, a lower-scoring round is blocked and audited as `data_quality_score_below_threshold`. Candidate rule reviews also carry their own coverage score.
 - The Agent console now runs an on-demand 1/5/10/20-trading-day forward evaluation for persisted buy candidates. It anchors on the recorded decision price, reads only local daily bars strictly later than the decision date, reports coverage and return/excursion metrics, and never reruns a strategy or places an order by default.
 - The same forward evaluation now joins persisted rule and LLM review snapshots, including real `action=skip` risk rejections, and builds a long-horizon quality matrix by reviewer/model plus prompt/evaluator version. It reports mature coverage, passed precision, blocked-loss avoidance, passed/blocked average returns, and return spread without treating missing forward bars as success.
 - Cross-run quality now derives one effective verdict per candidate with LLM-over-rule precedence. Mature low passed precision or blocked-loss avoidance can make the combined state `blocked`; negative passed return or return spread can make it `guarded`. The existing opt-in gate consumes that combined state, while the always-on market objective can only tighten from it; insufficient evidence remains audit-only.
@@ -85,21 +85,27 @@ Local API: `http://127.0.0.1:8000`
   - `truncated=false`
   - 2 task series and 4 daily buckets
 - `GET /api/v1/vnpy-paper/agent-runs/data-quality-trends?days=30`
-  - `total=1`
-  - `scanned_count=1`
-  - `known_count=0`
-  - `quality_counts={"unknown":1}` because the historical run predates quality snapshots
-  - `degraded_rate_pct=0.0`
+  - `scanned_count=4`
+  - `known_count=3`
+  - `quality_counts={"partial":3,"unknown":1}`
+  - `degraded_rate_pct=75.0`
   - `health=warning`
   - `truncated=false`
+  - four legacy snapshot/daily source-health series are visible; candidate-context series will begin with runs created by the new build
 - `GET /paper-trading` returned HTTP 200.
 
-The latest post-change runtime smoke uses listener PID `19708` and build id `local-review-quality-gate-final`; Python 3.13.14, the vn.py runtime, built-in connected `DSA_SIM` gateway, MainEngine bridge, and all four EventEngine callbacks are available while the saved execution mode remains `paper`. The Agent console returns HTTP 200. Read-only cross-run quality found three effective rule-review samples but zero mature passed or blocked 5-day samples, so selection and review states both remain `insufficient_evidence`, review quality is not applied, and the disabled gate remains non-blocking. Agent run count remained two and the latest run remained `ss-agent-20260714013029-481a1aeb`, so verification created no run and submitted no order.
+The latest post-change runtime smoke uses listener PID `3052` and build id `local-context-source-health-final`; Python 3.13.14, the vn.py runtime, built-in connected `DSA_SIM` gateway, MainEngine bridge, and all four EventEngine callbacks are available while the saved execution mode remains `paper`. The paper-trading page and Agent console both return HTTP 200. Before and after the read-only smoke, database counts remained four Agent runs, six trade plans, and eleven Portfolio trades; the latest run remained `ss-agent-20260716013035-66399bbd`, so verification created no run, plan, or order. The next configured automatic selection remained scheduled for 2026-07-16 13:00 Asia/Shanghai.
 
 The readiness and system health status are `warning` because the current time is outside the A-share trading session and the next action is to wait for the next session. There are no required blockers; the scheduling alignment itself is ready.
 
 ## Recent Validation
 
+- `python -m pytest tests/test_alphasift_api.py tests/test_vnpy_paper_trading_service.py tests/test_vnpy_paper_trading_api.py -q -p no:cacheprovider`
+  - 260 passed and 1 optional test skipped, including healthy/degraded candidate-context source aggregation, quality-score impact, cross-run source trend API output, and existing AlphaSift/trading behavior.
+- `python -m flake8 src/services/alphasift_service.py tests/test_alphasift_api.py tests/test_vnpy_paper_trading_service.py tests/test_vnpy_paper_trading_api.py --select=E9,F63,F7,F82`
+  - Passed with no critical Python errors.
+- Read-only runtime smoke on `http://127.0.0.1:8000`
+  - Build `local-context-source-health-final` loaded with connected `DSA_SIM`, four vn.py event callbacks, and HTTP 200 for `/paper-trading` and `/agent-console`; Agent-run, trade-plan, and Portfolio-trade counts remained `4/6/11`.
 - `python -m pytest tests/test_stock_selection_agent_backtest_service.py tests/test_vnpy_paper_trading_service.py tests/test_vnpy_paper_trading_api.py -q -p no:cacheprovider`
   - 166 passed and 1 optional test skipped, including final-review de-duplication, low passed-precision blocking, low blocked-avoidance blocking, insufficient-evidence behavior, dynamic-objective tightening, and existing trading/API paths.
 - `npm.cmd test -- --run src/api/__tests__/vnpyPaperTrading.test.ts src/pages/__tests__/VnpyPaperTradingPage.test.tsx src/pages/__tests__/AgentConsolePage.test.tsx`

@@ -4664,6 +4664,41 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertEqual(quality["components"]["source_health"]["provider_count"], 2)
         self.assertFalse(quality["methodology"]["uses_llm"])
 
+    def test_screen_data_quality_score_includes_candidate_context_sources(self) -> None:
+        candidates = [{
+            "code": "600519",
+            "data_quality": "ok",
+            "missing_fields": [],
+            "data_sources": ["snapshot", "daily"],
+        }]
+        screen = {
+            "quality_status": "ok",
+            "candidates": candidates,
+            "source_health": {
+                "snapshot": {
+                    "sina": {"status": "ok", "successes": 1, "failures": 0},
+                },
+                "candidate_context": {
+                    "quote": {"status": "ok", "successes": 1, "failures": 0},
+                    "fund_flow": {"status": "ok", "successes": 1, "failures": 0},
+                    "news": {"status": "unavailable", "successes": 0, "failures": 1},
+                },
+            },
+        }
+
+        quality = self.service._screen_data_quality(screen, candidates)
+        quality.update(self.service._screen_data_quality_score(screen, candidates, quality))
+
+        self.assertEqual(quality["score"], 95.0)
+        source_component = quality["components"]["source_health"]
+        self.assertEqual(source_component["score"], 75.0)
+        self.assertEqual(source_component["provider_count"], 4)
+        provider_scores = {
+            item["source"]: item["score"] for item in source_component["providers"]
+        }
+        self.assertEqual(provider_scores["candidate_context.news"], 0.0)
+        self.assertEqual(provider_scores["candidate_context.fund_flow"], 100.0)
+
     def test_auto_trade_data_quality_score_gate_blocks_partial_run_below_threshold(self) -> None:
         self.service.update_settings(
             {

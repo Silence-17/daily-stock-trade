@@ -1301,6 +1301,15 @@ class AlphaSiftService:
         candidates = _normalize_candidates(raw_data)
         selected = candidates[:max_results]
         selected, dsa_enrichment = _enrich_candidates_with_dsa(selected)
+        source_health = _get_alphasift_source_health_snapshot(self.config)
+        context_source_health = (
+            dsa_enrichment.get("source_health")
+            if isinstance(dsa_enrichment, dict)
+            else None
+        )
+        if isinstance(context_source_health, dict) and context_source_health:
+            source_health = dict(source_health) if isinstance(source_health, dict) else {}
+            source_health["candidate_context"] = context_source_health
         payload = {
             "enabled": True,
             "candidates": selected,
@@ -1331,7 +1340,7 @@ class AlphaSiftService:
             "risk_enabled": raw_data.get("risk_enabled"),
             "portfolio_diversity_enabled": raw_data.get("portfolio_diversity_enabled"),
             "portfolio_concentration_notes": raw_data.get("portfolio_concentration_notes") or [],
-            "source_health": _get_alphasift_source_health_snapshot(self.config),
+            "source_health": source_health,
             "source_routing": source_routing,
         }
         if not selected and payload["source_errors"]:
@@ -3689,7 +3698,134 @@ def _enrich_candidates_with_dsa(candidates: List[Dict[str, Any]]) -> Tuple[List[
         "requested_count": limit,
         "enriched_count": enriched_count,
         "warnings": _dedupe_strings(warnings),
+        "source_health": _summarize_dsa_candidate_context_source_health(candidates[:limit]),
     }
+
+
+def _summarize_dsa_candidate_context_source_health(
+    candidates: List[Dict[str, Any]],
+) -> Dict[str, Dict[str, Any]]:
+    providers: Dict[str, Dict[str, Any]] = {
+        key: {
+            "observations": 0,
+            "successes": 0,
+            "partials": 0,
+            "failures": 0,
+            "last_rows": 0,
+            "errors": [],
+        }
+        for key in ("quote", "fund_flow", "news")
+    }
+
+    for candidate in candidates:
+        context = candidate.get("dsa_context")
+        if not isinstance(context, dict):
+            continue
+
+        quote = context.get("quote") if isinstance(context.get("quote"), dict) else {}
+        quote_price = _safe_float(quote.get("price"))
+        _record_dsa_context_source_observation(
+            providers["quote"],
+            status="ok" if quote_price is not None else "unavailable",
+            rows=1 if quote else 0,
+            error="realtime_quote_missing" if quote_price is None else None,
+        )
+
+        fundamentals = (
+            context.get("fundamentals")
+            if isinstance(context.get("fundamentals"), dict)
+            else {}
+        )
+        capital_flow = (
+            fundamentals.get("capital_flow")
+            if isinstance(fundamentals.get("capital_flow"), dict)
+            else {}
+        )
+        capital_flow_data = (
+            capital_flow.get("data")
+            if isinstance(capital_flow.get("data"), dict)
+            else {}
+        )
+        capital_flow_status = _env_text(capital_flow.get("status")).lower()
+        if capital_flow_status in {"available", "ok", "complete", "healthy"}:
+            normalized_flow_status = "ok"
+        elif capital_flow_status in {"partial", "degraded", "stale"}:
+            normalized_flow_status = "partial"
+        else:
+            normalized_flow_status = "unavailable"
+        _record_dsa_context_source_observation(
+            providers["fund_flow"],
+            status=normalized_flow_status,
+            rows=len(capital_flow_data),
+            error=(
+                None
+                if normalized_flow_status != "unavailable"
+                else "capital_flow_unavailable"
+            ),
+        )
+
+        news = context.get("news") if isinstance(context.get("news"), dict) else {}
+        news_results = news.get("results") if isinstance(news.get("results"), list) else []
+        news_skipped = bool(news.get("skipped"))
+        news_success = bool(news.get("success"))
+        _record_dsa_context_source_observation(
+            providers["news"],
+            status="unobserved" if news_skipped else "ok" if news_success else "unavailable",
+            rows=len(news_results),
+            error=(
+                None
+                if news_skipped or news_success
+                else _env_text(news.get("error")) or "stock_news_unavailable"
+            ),
+        )
+
+    result: Dict[str, Dict[str, Any]] = {}
+    for provider, raw in providers.items():
+        observations = int(raw["observations"])
+        successes = int(raw["successes"])
+        partials = int(raw["partials"])
+        failures = int(raw["failures"])
+        if observations == 0:
+            status = "unobserved"
+        elif failures == 0 and partials == 0:
+            status = "ok"
+        elif successes > 0 or partials > 0:
+            status = "degraded"
+        else:
+            status = "unavailable"
+        result[provider] = {
+            "status": status,
+            "observations": observations,
+            "successes": successes,
+            "partials": partials,
+            "failures": failures,
+            "coverage_pct": round(successes / observations * 100.0, 2) if observations else 0.0,
+            "last_rows": int(raw["last_rows"]),
+            "disabled": False,
+            "errors": _dedupe_strings(raw["errors"])[:5],
+        }
+    return result
+
+
+def _record_dsa_context_source_observation(
+    provider: Dict[str, Any],
+    *,
+    status: str,
+    rows: int,
+    error: Optional[str],
+) -> None:
+    if status == "unobserved":
+        return
+    provider["observations"] += 1
+    provider["last_rows"] = max(0, int(rows or 0))
+    if status == "ok":
+        provider["successes"] += 1
+    elif status == "partial":
+        provider["partials"] += 1
+    else:
+        provider["failures"] += 1
+    if error:
+        provider["errors"].append(str(error))
 
 
 def _candidate_has_dsa_news(candidate: Dict[str, Any]) -> bool:
