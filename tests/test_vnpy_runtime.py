@@ -7,8 +7,10 @@ import json
 import os
 import sys
 import tempfile
+import time
 import types
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -40,6 +42,9 @@ class VnpyRuntimeTestCase(unittest.TestCase):
                 "VNPY_CONNECT_SETTINGS_PATH": "",
                 "VNPY_CONNECT_ON_START": "",
                 "VNPY_AUTO_ATTACH_EVENTS": "",
+                "VNPY_AUTO_RECONNECT_ENABLED": "",
+                "VNPY_AUTO_RECONNECT_INTERVAL_SECONDS": "",
+                "VNPY_AUTO_RECONNECT_CONFIRMATION_GRACE_SECONDS": "",
             },
             clear=False,
         ):
@@ -50,6 +55,25 @@ class VnpyRuntimeTestCase(unittest.TestCase):
         self.assertIsNone(settings.gateway_name)
         self.assertFalse(settings.connect_on_start)
         self.assertTrue(settings.auto_attach_events)
+        self.assertFalse(settings.auto_reconnect_enabled)
+        self.assertEqual(settings.auto_reconnect_interval_seconds, 60)
+        self.assertEqual(settings.auto_reconnect_confirmation_grace_seconds, 30)
+
+    def test_load_settings_clamps_auto_reconnect_interval(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "VNPY_AUTO_RECONNECT_ENABLED": "true",
+                "VNPY_AUTO_RECONNECT_INTERVAL_SECONDS": "1",
+                "VNPY_AUTO_RECONNECT_CONFIRMATION_GRACE_SECONDS": "9999",
+            },
+            clear=False,
+        ):
+            settings = load_vnpy_runtime_settings()
+
+        self.assertTrue(settings.auto_reconnect_enabled)
+        self.assertEqual(settings.auto_reconnect_interval_seconds, 5)
+        self.assertEqual(settings.auto_reconnect_confirmation_grace_seconds, 600)
 
     def test_bootstrap_disabled_returns_diagnostics_without_importing_vnpy(self) -> None:
         handle = bootstrap_vnpy_runtime(settings=VnpyRuntimeSettings(enabled=False))
@@ -252,6 +276,151 @@ class VnpyRuntimeTestCase(unittest.TestCase):
         )
         handle.close()
 
+    def test_auto_reconnect_check_recovers_confirmed_disconnect(self) -> None:
+        installed = _install_fake_vnpy_runtime_modules()
+        try:
+            handle = bootstrap_vnpy_runtime(
+                settings=VnpyRuntimeSettings(
+                    enabled=True,
+                    gateway_class="fake_vnpy_gateway:SimGateway",
+                    gateway_name="SIM",
+                    connect_on_start=True,
+                    auto_attach_events=False,
+                    auto_reconnect_enabled=True,
+                    auto_reconnect_interval_seconds=5,
+                )
+            )
+            gateway = handle.main_engine.get_gateway("SIM")
+            gateway.connected = False
+            result = handle.run_auto_reconnect_check()
+        finally:
+            handle.close()
+            _restore_modules(installed)
+
+        self.assertEqual(result["attempt_count"], 1)
+        self.assertEqual(result["success_count"], 1)
+        self.assertEqual(result["failure_count"], 0)
+        self.assertEqual(result["last_result"], "reconnected")
+        self.assertTrue(handle.diagnostics["connect"]["connected"])
+        self.assertEqual(len(handle.main_engine.connects), 2)
+
+    def test_auto_reconnect_monitor_recovers_without_status_reads(self) -> None:
+        installed = _install_fake_vnpy_runtime_modules()
+        try:
+            handle = bootstrap_vnpy_runtime(
+                settings=VnpyRuntimeSettings(
+                    enabled=True,
+                    gateway_class="fake_vnpy_gateway:SimGateway",
+                    gateway_name="SIM",
+                    connect_on_start=True,
+                    auto_attach_events=False,
+                    auto_reconnect_enabled=True,
+                    auto_reconnect_interval_seconds=0.05,
+                )
+            )
+            gateway = handle.main_engine.get_gateway("SIM")
+            gateway.connected = False
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                state = handle.diagnostics["auto_reconnect"]
+                if state.get("success_count") == 1:
+                    break
+                time.sleep(0.02)
+            state = dict(handle.diagnostics["auto_reconnect"])
+        finally:
+            handle.close()
+            _restore_modules(installed)
+
+        self.assertEqual(state["attempt_count"], 1)
+        self.assertEqual(state["success_count"], 1)
+        self.assertEqual(state["failure_count"], 0)
+        self.assertEqual(state["last_result"], "reconnected")
+        self.assertTrue(handle.diagnostics["connect"]["connected"])
+
+    def test_auto_reconnect_check_does_not_retry_unconfirmed_gateway(self) -> None:
+        installed = _install_fake_vnpy_runtime_modules()
+        try:
+            handle = bootstrap_vnpy_runtime(
+                settings=VnpyRuntimeSettings(
+                    enabled=True,
+                    gateway_class="fake_vnpy_gateway:UnknownGateway",
+                    gateway_name="UNKNOWN",
+                    connect_on_start=True,
+                    auto_attach_events=False,
+                    auto_reconnect_enabled=True,
+                    auto_reconnect_interval_seconds=5,
+                )
+            )
+            result = handle.run_auto_reconnect_check()
+        finally:
+            handle.close()
+            _restore_modules(installed)
+
+        self.assertEqual(result["attempt_count"], 0)
+        self.assertEqual(result["last_check_result"], "not_required")
+        self.assertEqual(result["last_check_reason"], "connect_requested")
+        self.assertEqual(len(handle.main_engine.connects), 1)
+
+    def test_auto_reconnect_check_audits_failed_retry(self) -> None:
+        installed = _install_fake_vnpy_runtime_modules()
+        try:
+            handle = bootstrap_vnpy_runtime(
+                settings=VnpyRuntimeSettings(
+                    enabled=True,
+                    gateway_class="fake_vnpy_gateway:FailingGateway",
+                    gateway_name="FAIL",
+                    connect_on_start=True,
+                    auto_attach_events=False,
+                    auto_reconnect_enabled=True,
+                    auto_reconnect_interval_seconds=5,
+                )
+            )
+            result = handle.run_auto_reconnect_check()
+        finally:
+            handle.close()
+            _restore_modules(installed)
+
+        self.assertEqual(result["attempt_count"], 1)
+        self.assertEqual(result["success_count"], 0)
+        self.assertEqual(result["failure_count"], 1)
+        self.assertEqual(result["last_result"], "failed")
+        self.assertEqual(result["last_reason"], "connect_failed")
+        self.assertEqual(len(handle.main_engine.connects), 2)
+
+    def test_auto_reconnect_waits_for_async_connection_confirmation(self) -> None:
+        installed = _install_fake_vnpy_runtime_modules()
+        try:
+            handle = bootstrap_vnpy_runtime(
+                settings=VnpyRuntimeSettings(
+                    enabled=True,
+                    gateway_class="fake_vnpy_gateway:SlowGateway",
+                    gateway_name="SLOW",
+                    connect_on_start=True,
+                    auto_attach_events=False,
+                    auto_reconnect_enabled=True,
+                    auto_reconnect_interval_seconds=5,
+                    auto_reconnect_confirmation_grace_seconds=30,
+                )
+            )
+            pending = dict(handle.run_auto_reconnect_check())
+            handle.diagnostics["connect"]["request_accepted_at"] = (
+                datetime.now(timezone.utc) - timedelta(seconds=31)
+            ).isoformat()
+            retried = dict(handle.run_auto_reconnect_check())
+        finally:
+            handle.close()
+            _restore_modules(installed)
+
+        self.assertEqual(pending["attempt_count"], 0)
+        self.assertEqual(pending["last_check_result"], "confirmation_pending")
+        self.assertEqual(
+            pending["last_check_reason"],
+            "connection_confirmation_grace",
+        )
+        self.assertEqual(retried["attempt_count"], 1)
+        self.assertEqual(retried["failure_count"], 1)
+        self.assertEqual(len(handle.main_engine.connects), 2)
+
     def test_bootstrap_keeps_settings_file_required_for_regular_gateway(self) -> None:
         installed = _install_fake_vnpy_runtime_modules()
         try:
@@ -363,6 +532,15 @@ def _install_fake_vnpy_runtime_modules() -> dict[str, object]:
         def connect(self, setting):
             raise RuntimeError("paper gateway login rejected")
 
+    class SlowGateway:
+        connect_without_settings = True
+
+        def __init__(self):
+            self.connected = False
+
+        def connect(self, setting):
+            return None
+
     event_module.EventEngine = EventEngine
     engine_module.MainEngine = MainEngine
     trader_event_module.EVENT_ORDER = "eOrder."
@@ -373,6 +551,7 @@ def _install_fake_vnpy_runtime_modules() -> dict[str, object]:
     gateway_module.StrictGateway = StrictGateway
     gateway_module.UnknownGateway = UnknownGateway
     gateway_module.FailingGateway = FailingGateway
+    gateway_module.SlowGateway = SlowGateway
     vnpy_module.event = event_module
     vnpy_module.trader = trader_module
     trader_module.engine = engine_module

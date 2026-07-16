@@ -572,6 +572,9 @@ class TestVnpyRuntimeFieldsRegistered(unittest.TestCase):
         "VNPY_CONNECT_SETTINGS_PATH",
         "VNPY_CONNECT_ON_START",
         "VNPY_AUTO_ATTACH_EVENTS",
+        "VNPY_AUTO_RECONNECT_ENABLED",
+        "VNPY_AUTO_RECONNECT_INTERVAL_SECONDS",
+        "VNPY_AUTO_RECONNECT_CONFIRMATION_GRACE_SECONDS",
     )
 
     def test_field_definitions_exist(self) -> None:
@@ -582,6 +585,9 @@ class TestVnpyRuntimeFieldsRegistered(unittest.TestCase):
             "VNPY_CONNECT_SETTINGS_PATH": ("string", "text", ""),
             "VNPY_CONNECT_ON_START": ("boolean", "switch", "false"),
             "VNPY_AUTO_ATTACH_EVENTS": ("boolean", "switch", "true"),
+            "VNPY_AUTO_RECONNECT_ENABLED": ("boolean", "switch", "false"),
+            "VNPY_AUTO_RECONNECT_INTERVAL_SECONDS": ("integer", "number", "60"),
+            "VNPY_AUTO_RECONNECT_CONFIRMATION_GRACE_SECONDS": ("integer", "number", "30"),
         }
         for key in self._VNPY_KEYS:
             field = get_field_definition(key)
