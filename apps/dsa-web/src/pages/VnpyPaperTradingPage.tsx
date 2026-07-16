@@ -1426,6 +1426,16 @@ const VnpyPaperTradingPage: React.FC = () => {
   const tradingWindow = asRecord(status?.diagnostics?.tradingWindow);
   const failureFuse = asRecord(status?.diagnostics?.failureFuse);
   const systemHealth = asRecord(status?.diagnostics?.systemHealth);
+  const systemHealthComponents = useMemo(
+    () => asRecordList(systemHealth?.components),
+    [systemHealth?.components],
+  );
+  const valuationHealth = systemHealthComponents.find((item) => item.key === 'valuation');
+  const valuationHealthTrends = asRecord(valuationHealth?.trends);
+  const valuationTrendWindows = asRecordList(valuationHealthTrends?.windows);
+  const valuationTrendLatestObservedAt = valuationTrendWindows
+    .map((item) => item.latestObservedAt)
+    .find(Boolean);
   const autoTradeReadiness = asRecord(status?.diagnostics?.autoTradeReadiness);
   const backendRuntime = asRecord(status?.diagnostics?.backend);
   const backendApiVersion = String(backendRuntime?.apiVersion || '').trim();
@@ -1490,7 +1500,6 @@ const VnpyPaperTradingPage: React.FC = () => {
       };
       return [backendItem, ...items.filter((item) => item.key !== 'backend_version')];
     };
-    const systemHealthComponents = asRecordList(systemHealth?.components);
     if (systemHealthComponents.length > 0) {
       return withBackendVersion(systemHealthComponents.map((item, index) => {
         const itemStatus = item.status;
@@ -1615,7 +1624,7 @@ const VnpyPaperTradingPage: React.FC = () => {
     schedulerStatus?.loopRunning,
     schedulerStatus?.nextRunAt,
     settingsForm.autoTradeEnabled,
-    systemHealth,
+    systemHealthComponents,
     status?.enabled,
     tradingWindowGatesExecution,
     tradingWindowMeta,
@@ -2176,6 +2185,59 @@ const VnpyPaperTradingPage: React.FC = () => {
           ))}
         </div>
       </section>
+
+      {valuationTrendWindows.length > 0 ? (
+        <section className="border-y border-border py-3" data-testid="valuation-health-trends">
+          <div className="flex flex-col gap-1 md:flex-row md:items-end md:justify-between">
+            <div>
+              <h2 className="text-sm font-semibold text-foreground">估值价格源趋势</h2>
+              <p className="mt-1 text-xs text-secondary-text">
+                每 15 分钟最多记录一次完整持仓快照；无历史样本时不推断为健康。
+              </p>
+            </div>
+            <span className="text-xs text-secondary-text">
+              最近观测 {formatDateTime(valuationTrendLatestObservedAt)}
+            </span>
+          </div>
+          <div className="mt-3 grid gap-3 md:grid-cols-3">
+            {valuationTrendWindows.map((item) => {
+              const days = Number(item.windowDays || 0);
+              const observations = Number(item.observationCount || 0);
+              const degradedPct = finiteNumberOrNull(item.degradedPct);
+              const averageCoverage = finiteNumberOrNull(item.averageCoveragePct);
+              const averageFreshCoverage = finiteNumberOrNull(item.averageFreshCoveragePct);
+              const minimumCoverage = finiteNumberOrNull(item.minimumCoveragePct);
+              const minimumFreshCoverage = finiteNumberOrNull(item.minimumFreshCoveragePct);
+              const providerUsage = asRecordList(item.providerUsage)
+                .slice(0, 3)
+                .map((provider) => `${String(provider.provider || 'unknown')} ${formatNumber(provider.positionObservationCount, 0)}`)
+                .join(' · ');
+              return (
+                <div key={days} className="min-w-0 border-l-2 border-cyan/50 pl-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-sm font-semibold text-foreground">{days} 天</span>
+                    <span className="text-xs text-secondary-text">{formatNumber(observations, 0)} 次观测</span>
+                  </div>
+                  <p className="mt-2 text-xs text-secondary-text">
+                    平均覆盖 {averageCoverage === null ? '-' : `${formatNumber(averageCoverage, 2)}%`}
+                    {' · '}新鲜 {averageFreshCoverage === null ? '-' : `${formatNumber(averageFreshCoverage, 2)}%`}
+                  </p>
+                  <p className="mt-1 text-xs text-secondary-text">
+                    最低覆盖 {minimumCoverage === null ? '-' : `${formatNumber(minimumCoverage, 2)}%`}
+                    {' · '}新鲜 {minimumFreshCoverage === null ? '-' : `${formatNumber(minimumFreshCoverage, 2)}%`}
+                  </p>
+                  <p className={`mt-1 text-xs ${degradedPct && degradedPct > 0 ? 'text-warning' : 'text-secondary-text'}`}>
+                    降级占比 {degradedPct === null ? '-' : `${formatNumber(degradedPct, 2)}%`}
+                  </p>
+                  <p className="mt-1 truncate text-xs text-secondary-text" title={providerUsage || '无 provider 观测'}>
+                    Provider {providerUsage || '-'}
+                  </p>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      ) : null}
 
       <section className="grid gap-3 md:grid-cols-3 xl:grid-cols-6">
         <div className="rounded-xl border border-border bg-card/95 px-4 py-3">

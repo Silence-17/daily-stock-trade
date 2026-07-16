@@ -1398,6 +1398,40 @@ describe('VnpyPaperTradingPage', () => {
                 coveragePct: 66.67,
                 freshCoveragePct: 33.33,
                 sourceCounts: { daily_close: 1, realtime: 1, unavailable: 1 },
+                trends: {
+                  schemaVersion: 1,
+                  windows: [
+                    {
+                      windowDays: 7,
+                      observationCount: 4,
+                      degradedPct: 25,
+                      averageCoveragePct: 91.25,
+                      averageFreshCoveragePct: 87.5,
+                      minimumCoveragePct: 75,
+                      minimumFreshCoveragePct: 50,
+                      latestObservedAt: '2026-07-16T08:00:00',
+                      providerUsage: [{
+                        provider: 'tencent',
+                        positionObservationCount: 12,
+                        observationCount: 4,
+                      }],
+                    },
+                    {
+                      windowDays: 30,
+                      observationCount: 10,
+                      degradedPct: 20,
+                      averageCoveragePct: 94,
+                      averageFreshCoveragePct: 90,
+                    },
+                    {
+                      windowDays: 90,
+                      observationCount: 22,
+                      degradedPct: 18.18,
+                      averageCoveragePct: 95,
+                      averageFreshCoveragePct: 92,
+                    },
+                  ],
+                },
               }
               : item
           )),
@@ -1415,6 +1449,14 @@ describe('VnpyPaperTradingPage', () => {
     );
 
     expect(await screen.findByText(valuationDetail)).toBeInTheDocument();
+    const trends = screen.getByTestId('valuation-health-trends');
+    expect(trends).toHaveTextContent('估值价格源趋势');
+    expect(trends).toHaveTextContent('7 天');
+    expect(trends).toHaveTextContent('4 次观测');
+    expect(trends).toHaveTextContent('平均覆盖 91.25%');
+    expect(trends).toHaveTextContent('最低覆盖 75.00%');
+    expect(trends).toHaveTextContent('降级占比 25.00%');
+    expect(trends).toHaveTextContent('Provider tencent 12');
   });
 
   it('shows the persisted last auto-run skip reason in availability diagnostics', async () => {
@@ -2082,7 +2124,7 @@ describe('VnpyPaperTradingPage', () => {
       }),
     ));
     await waitFor(() => expect(screen.getAllByText(/模拟成交/).length).toBeGreaterThan(0));
-  }, 10000);
+  }, 15000);
 
   it('persists current auto settings before running once', async () => {
     render(

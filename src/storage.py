@@ -776,6 +776,45 @@ class RuntimeSchedulerTaskEvent(Base):
     )
 
 
+class PortfolioValuationHealthObservation(Base):
+    """Deduplicated portfolio valuation-source health observation."""
+
+    __tablename__ = 'portfolio_valuation_health_observations'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    scope = Column(String(32), nullable=False, default='active_accounts', index=True)
+    bucket_started_at = Column(DateTime, nullable=False, index=True)
+    observed_at = Column(DateTime, nullable=False, index=True)
+    status = Column(String(24), nullable=False, index=True)
+    position_count = Column(Integer, nullable=False, default=0)
+    account_count = Column(Integer, nullable=False, default=0)
+    available_count = Column(Integer, nullable=False, default=0)
+    fresh_count = Column(Integer, nullable=False, default=0)
+    missing_count = Column(Integer, nullable=False, default=0)
+    unknown_count = Column(Integer, nullable=False, default=0)
+    stale_count = Column(Integer, nullable=False, default=0)
+    coverage_pct = Column(Float, nullable=False, default=100.0)
+    fresh_coverage_pct = Column(Float, nullable=False, default=100.0)
+    source_counts_json = Column(Text)
+    provider_counts_json = Column(Text)
+    oldest_price_date = Column(String(16))
+    latest_price_date = Column(String(16))
+    created_at = Column(DateTime, default=datetime.now, nullable=False, index=True)
+
+    __table_args__ = (
+        UniqueConstraint(
+            'scope',
+            'bucket_started_at',
+            name='uq_portfolio_valuation_health_scope_bucket',
+        ),
+        Index(
+            'ix_portfolio_valuation_health_scope_observed',
+            'scope',
+            'observed_at',
+        ),
+    )
+
+
 class PortfolioCashLedger(Base):
     """Cash in/out events."""
 
