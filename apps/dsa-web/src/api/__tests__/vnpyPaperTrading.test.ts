@@ -74,6 +74,7 @@ describe('vnpyPaperTradingApi', () => {
           auto_consecutive_loss_cooldown_minutes: 120,
           auto_market_light_gate_enabled: true,
           auto_market_light_block_statuses: ['red', 'yellow'],
+          auto_market_context_max_age_days: 5,
           auto_market_breadth_gate_enabled: true,
           auto_market_breadth_min_score: 42,
           auto_hotspot_retreat_gate_enabled: true,
@@ -168,6 +169,7 @@ describe('vnpyPaperTradingApi', () => {
     expect(result.settings.autoConsecutiveLossCooldownMinutes).toBe(120);
     expect(result.settings.autoMarketLightGateEnabled).toBe(true);
     expect(result.settings.autoMarketLightBlockStatuses).toEqual(['red', 'yellow']);
+    expect(result.settings.autoMarketContextMaxAgeDays).toBe(5);
     expect(result.settings.autoMarketBreadthGateEnabled).toBe(true);
     expect(result.settings.autoMarketBreadthMinScore).toBe(42);
     expect(result.settings.autoHotspotRetreatGateEnabled).toBe(true);
@@ -1153,6 +1155,7 @@ describe('vnpyPaperTradingApi', () => {
       autoConsecutiveLossCooldownMinutes: 120,
       autoMarketLightGateEnabled: true,
       autoMarketLightBlockStatuses: ['red', 'yellow'],
+      autoMarketContextMaxAgeDays: 5,
       autoMarketBreadthGateEnabled: true,
       autoMarketBreadthMinScore: 42,
       autoHotspotRetreatGateEnabled: true,
@@ -1221,6 +1224,7 @@ describe('vnpyPaperTradingApi', () => {
       auto_consecutive_loss_cooldown_minutes: 120,
       auto_market_light_gate_enabled: true,
       auto_market_light_block_statuses: ['red', 'yellow'],
+      auto_market_context_max_age_days: 5,
       auto_market_breadth_gate_enabled: true,
       auto_market_breadth_min_score: 42,
       auto_hotspot_retreat_gate_enabled: true,

@@ -694,6 +694,7 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
                     "auto_target_industry_weights": {"白酒": 8},
                     "auto_market_light_gate_enabled": True,
                     "auto_market_light_block_statuses": ["red", "yellow"],
+                    "auto_market_context_max_age_days": 5,
                     "auto_market_breadth_gate_enabled": True,
                     "auto_market_breadth_min_score": 42,
                     "auto_hotspot_retreat_gate_enabled": True,
@@ -750,6 +751,7 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
         self.assertEqual(response.json()["settings"]["auto_target_industry_weights"], {"白酒": 8.0})
         self.assertTrue(response.json()["settings"]["auto_market_light_gate_enabled"])
         self.assertEqual(response.json()["settings"]["auto_market_light_block_statuses"], ["red", "yellow"])
+        self.assertEqual(response.json()["settings"]["auto_market_context_max_age_days"], 5)
         self.assertTrue(response.json()["settings"]["auto_market_breadth_gate_enabled"])
         self.assertEqual(response.json()["settings"]["auto_market_breadth_min_score"], 42)
         self.assertTrue(response.json()["settings"]["auto_hotspot_retreat_gate_enabled"])

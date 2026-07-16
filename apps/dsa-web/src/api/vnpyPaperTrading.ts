@@ -59,6 +59,7 @@ export type VnpyPaperSettings = {
   autoConsecutiveLossCooldownMinutes: number;
   autoMarketLightGateEnabled: boolean;
   autoMarketLightBlockStatuses: string[];
+  autoMarketContextMaxAgeDays: number;
   autoMarketBreadthGateEnabled: boolean;
   autoMarketBreadthMinScore: number;
   autoHotspotRetreatGateEnabled: boolean;
@@ -1169,6 +1170,9 @@ function buildSettingsPayload(payload: VnpyPaperSettingsUpdate): Record<string, 
   }
   if (hasOwn(payload, 'autoMarketLightBlockStatuses')) {
     body.auto_market_light_block_statuses = payload.autoMarketLightBlockStatuses ?? ['red'];
+  }
+  if (hasOwn(payload, 'autoMarketContextMaxAgeDays')) {
+    body.auto_market_context_max_age_days = payload.autoMarketContextMaxAgeDays;
   }
   if (hasOwn(payload, 'autoMarketBreadthGateEnabled')) {
     body.auto_market_breadth_gate_enabled = payload.autoMarketBreadthGateEnabled;

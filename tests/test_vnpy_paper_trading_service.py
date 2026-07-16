@@ -2222,7 +2222,7 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
             return_value=fake_alphasift,
         ), patch(
             "src.services.vnpy_paper_trading_service.load_previous_snapshot",
-            return_value={"region": "cn", "trade_date": "2026-07-02", "status": "yellow", "score": 45},
+            return_value={"region": "cn", "trade_date": date.today().isoformat(), "status": "yellow", "score": 45},
         ):
             result = self.service.run_auto_trade_once()
 
@@ -2257,7 +2257,7 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         }
         snapshot = {
             "region": "cn",
-            "trade_date": "2026-07-02",
+            "trade_date": date.today().isoformat(),
             "status": "green",
             "score": 65,
             "dimensions": {
@@ -2290,6 +2290,19 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         )
         self.assertEqual(timeline["status"], "blocked")
         self.assertIn("breadth=28", timeline["message"])
+        self.assertIn("age_days=0", timeline["message"])
+        plan = audit["diagnostics"]["agent_plan"]
+        self.assertEqual(plan["gates"]["market_context_max_age_days"], 7)
+        self.assertIn(
+            "market_context_freshness",
+            plan["adaptive_controls"]["configured_layers"],
+        )
+        stale_action = next(
+            item
+            for item in plan["adaptive_controls"]["degrade_actions"]
+            if item["reason"] == "market_context_stale"
+        )
+        self.assertEqual(stale_action["max_age_days"], 7)
 
     def test_auto_trade_respects_hotspot_retreat_gate(self) -> None:
         self.service.update_settings(
@@ -2312,7 +2325,7 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         }
         current = {
             "region": "cn",
-            "trade_date": "2026-07-02",
+            "trade_date": date.today().isoformat(),
             "status": "green",
             "score": 62,
             "dimensions": {
@@ -2323,7 +2336,7 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         }
         previous = {
             "region": "cn",
-            "trade_date": "2026-07-01",
+            "trade_date": (date.today() - timedelta(days=1)).isoformat(),
             "status": "green",
             "score": 78,
             "dimensions": {
@@ -2360,7 +2373,7 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         )
         current = {
             "region": "cn",
-            "trade_date": "2026-07-02",
+            "trade_date": date.today().isoformat(),
             "status": "green",
             "score": 62,
             "dimensions": {
@@ -2396,6 +2409,129 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertEqual(diagnostics["status"], "unavailable")
         self.assertEqual(diagnostics["reason"], "market_breadth_unavailable")
         self.assertEqual(diagnostics["evidence_reason"], "market_context_missing")
+
+    def test_market_light_gate_fails_closed_without_latest_snapshot(self) -> None:
+        settings = replace(
+            self.service.get_settings(),
+            auto_market_light_gate_enabled=True,
+        )
+
+        with patch(
+            "src.services.vnpy_paper_trading_service.load_previous_snapshot",
+            return_value=None,
+        ):
+            reason, diagnostics = self.service._market_context_pre_trade_risk(settings)
+
+        self.assertEqual(reason, "market_context_unavailable")
+        self.assertEqual(diagnostics["status"], "unavailable")
+        self.assertEqual(diagnostics["evidence_reason"], "market_context_missing")
+
+    def test_market_context_gate_rejects_stale_snapshot(self) -> None:
+        settings = replace(
+            self.service.get_settings(),
+            auto_market_light_gate_enabled=True,
+            auto_market_context_max_age_days=7,
+        )
+        snapshot = {
+            "region": "cn",
+            "trade_date": (date.today() - timedelta(days=8)).isoformat(),
+            "status": "green",
+            "score": 70,
+            "dimensions": {
+                "breadth": {"score": 70, "available": True},
+                "index": {"score": 70, "available": True},
+                "limit": {"score": 70, "available": True},
+            },
+        }
+
+        with patch(
+            "src.services.vnpy_paper_trading_service.load_previous_snapshot",
+            return_value=snapshot,
+        ):
+            reason, diagnostics = self.service._market_context_pre_trade_risk(settings)
+
+        self.assertEqual(reason, "market_context_stale")
+        self.assertEqual(diagnostics["status"], "blocked")
+        self.assertEqual(diagnostics["freshness"]["status"], "stale")
+        self.assertEqual(diagnostics["freshness"]["age_days"], 8)
+        self.assertEqual(diagnostics["freshness"]["max_age_days"], 7)
+
+    def test_market_context_gate_rejects_invalid_snapshot_date(self) -> None:
+        settings = replace(
+            self.service.get_settings(),
+            auto_market_light_gate_enabled=True,
+        )
+        snapshot = {
+            "region": "cn",
+            "trade_date": "not-a-date",
+            "status": "green",
+            "score": 70,
+        }
+
+        with patch(
+            "src.services.vnpy_paper_trading_service.load_previous_snapshot",
+            return_value=snapshot,
+        ):
+            reason, diagnostics = self.service._market_context_pre_trade_risk(settings)
+
+        self.assertEqual(reason, "market_context_unavailable")
+        self.assertEqual(diagnostics["status"], "unavailable")
+        self.assertEqual(diagnostics["evidence_reason"], "market_context_trade_date_invalid")
+        self.assertEqual(diagnostics["freshness"]["status"], "invalid")
+
+    def test_market_context_gate_rejects_future_snapshot_date(self) -> None:
+        settings = replace(
+            self.service.get_settings(),
+            auto_market_light_gate_enabled=True,
+        )
+        snapshot = {
+            "region": "cn",
+            "trade_date": (date.today() + timedelta(days=1)).isoformat(),
+            "status": "green",
+            "score": 70,
+        }
+
+        with patch(
+            "src.services.vnpy_paper_trading_service.load_previous_snapshot",
+            return_value=snapshot,
+        ):
+            reason, diagnostics = self.service._market_context_pre_trade_risk(settings)
+
+        self.assertEqual(reason, "market_context_unavailable")
+        self.assertEqual(diagnostics["status"], "unavailable")
+        self.assertEqual(diagnostics["evidence_reason"], "market_context_trade_date_future")
+        self.assertEqual(diagnostics["freshness"]["status"], "invalid")
+
+    def test_market_context_freshness_setting_survives_service_restart(self) -> None:
+        self.service.update_settings(
+            {
+                "auto_market_light_gate_enabled": True,
+                "auto_market_context_max_age_days": 3,
+            }
+        )
+        restarted = VnpyPaperTradingService(
+            data_fetcher_manager=_FakeDataFetcherManager(price=10.0),
+            config_path=self.config_path,
+        )
+        settings = restarted.get_settings()
+        snapshot = {
+            "region": "cn",
+            "trade_date": (date.today() - timedelta(days=4)).isoformat(),
+            "status": "green",
+            "score": 70,
+            "dimensions": {},
+        }
+
+        with patch(
+            "src.services.vnpy_paper_trading_service.load_previous_snapshot",
+            return_value=snapshot,
+        ):
+            reason, diagnostics = restarted._market_context_pre_trade_risk(settings)
+
+        self.assertEqual(settings.auto_market_context_max_age_days, 3)
+        self.assertEqual(reason, "market_context_stale")
+        self.assertEqual(diagnostics["freshness"]["age_days"], 4)
+        self.assertEqual(diagnostics["freshness"]["max_age_days"], 3)
 
     def test_auto_trade_failure_fuse_skips_after_consecutive_failed_runs(self) -> None:
         self.service.update_settings(

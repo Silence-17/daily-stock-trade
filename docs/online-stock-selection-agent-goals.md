@@ -143,7 +143,7 @@
 - 自动交易支持候选级基础风控，能以 `st_or_delisting_risk`、`suspended_stock`、`price_limit_reached`、`liquidity_below_threshold` 跳过 ST/退市风险、停牌、涨跌停和成交额过低候选。
 - 自动交易支持账户级基础风控，能以 `cash_low_watermark`、`account_drawdown_limit_reached`、`consecutive_loss_limit_reached` 跳过现金低水位、最大回撤超限和连续已平仓亏损冷却期内的买入候选，并写入告警中心系统事件、复用 alert 路由外发通知。
 - 自动交易支持可选大盘红绿灯风控，能以 `market_light_red` / `market_light_yellow` 在最近大盘复盘快照为红灯或黄灯时跳过买入候选。
-- 自动交易支持默认关闭的独立市场宽度和热点退潮门禁：前者检查最近持久化快照的 breadth 分数，后者比较最近两次快照的 limit 强度回落；命中或已启用规则缺少必要快照时 fail-closed，只阻断新增买入并保留完整诊断。
+- 自动交易支持默认关闭的独立市场宽度和热点退潮门禁：前者检查最近持久化快照的 breadth 分数，后者比较最近两次快照的 limit 强度回落；任一市场门禁启用后会校验最新快照日期，默认只接受 7 个自然日内的快照，缺失、非法、未来或超期证据均 fail-closed，只阻断新增买入并保留完整诊断。
 - 自动交易支持可选连续失败熔断，能以 `failure_fuse_open` 在同策略/同市场连续失败达到阈值后跳过自动买入；状态接口和 Web 页面已展示熔断是否打开、阈值和连续失败数，并提供手动恢复熔断基线入口；熔断打开会写入告警中心 `target=vnpy_paper` 的系统触发历史，并复用 alert 路由外发通知、记录通知尝试。
 - 连续失败熔断保持锁存语义，并新增默认关闭的持久化冷却自动恢复：冷却到期只放行一轮恢复探测，再次失败会重新熔断；手动恢复入口继续保留，状态和告警审计会展示恢复时间与自动恢复事件。
 - 自动交易支持基础卖出风控，默认关闭；开启后在 `paper` 模式下按 `stop_loss_triggered`、`take_profit_triggered`、`trailing_stop_triggered`、`max_holding_days_reached`、`no_progress_timeout` 和 `strategy_invalidated` 写入本地模拟卖出和 Agent 审计，在 `vnpy_paper` 模式下会把卖出提交给 vn.py bridge 并等待成交回报入账；默认整仓退出，也可通过 `auto_sell_position_pct` 按持仓比例分批卖出，设置 `auto_no_progress_days` 后可按超时未走强退出，开启 `auto_signal_exit_enabled` 后会消费 active `sell/reduce/avoid` 决策信号触发策略失效卖出。
@@ -197,7 +197,7 @@
 
 - 每日最大买入次数和每日最大买入金额已按账户基准币种统计，外币汇率缺失时新增买入 fail-closed。
 - 候选级基础风控依赖 AlphaSift/DSA 返回的结构化字段；仍需补更稳定的股票状态源和涨跌停状态源。
-- 市场环境过滤已有基础大盘红绿灯、持久化快照市场宽度和涨跌停强度退潮 gate；仍缺盘中实时市场宽度和多市场联动规则。
+- 市场环境过滤已有基础大盘红绿灯、持久化快照市场宽度、涨跌停强度退潮 gate 和可配置快照新鲜度校验；仍缺盘中实时市场宽度和多市场联动规则。
 - 最大回撤已具备基于已观测权益峰值的持久化锁存和恢复缓冲，恢复时写入 `resolved` 审计事件；连续失败熔断已具备页面诊断、手动恢复、可选冷却自动恢复、告警中心历史和 alert 路由通知。
 
 需要做：
