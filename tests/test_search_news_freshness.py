@@ -17,6 +17,8 @@ if "newspaper" not in sys.modules:
     sys.modules["newspaper"] = mock_np
 
 from src.search_service import SearchResponse, SearchResult, SearchService
+from data_provider.base import DataFetcherManager
+from data_provider.realtime_types import CircuitBreaker
 from src.services.run_diagnostics import (
     activate_run_diagnostic_context,
     current_diagnostic_snapshot,
@@ -52,6 +54,19 @@ def _response(results) -> SearchResponse:
 
 class SearchNewsFreshnessTestCase(unittest.TestCase):
     """Tests for strategy window and strict published_date filtering."""
+
+    def setUp(self) -> None:
+        self._source_health = DataFetcherManager._realtime_source_health
+        DataFetcherManager.disable_provider_source_health_persistence()
+        DataFetcherManager._realtime_source_health = CircuitBreaker(
+            failure_threshold=3,
+            cooldown_seconds=300.0,
+            half_open_max_calls=1,
+        )
+
+    def tearDown(self) -> None:
+        DataFetcherManager.disable_provider_source_health_persistence()
+        DataFetcherManager._realtime_source_health = self._source_health
 
     def _create_service_with_mock_provider(
         self,
@@ -252,6 +267,77 @@ class SearchNewsFreshnessTestCase(unittest.TestCase):
         })
         self.assertEqual(response.provider_attempts[1]["provider"], "fallback")
         self.assertEqual(response.provider_attempts[1]["result"], "ok")
+
+    def test_search_stock_news_circuit_breaker_skips_and_half_open_recovers(self) -> None:
+        fresh = datetime.now().date().isoformat()
+        failed_response = SearchResponse(
+            query="test",
+            results=[],
+            provider="Primary",
+            success=False,
+            error_message="provider timeout",
+        )
+        recovered_response = _response([
+            _result("贵州茅台 600519 业绩公告", fresh),
+        ])
+        primary = SimpleNamespace(
+            is_available=True,
+            name="Primary",
+            search=MagicMock(return_value=failed_response),
+        )
+        fallback = SimpleNamespace(
+            is_available=True,
+            name="Fallback",
+            search=MagicMock(return_value=_response([
+                _result("贵州茅台 600519 回购公告", fresh),
+            ])),
+        )
+        service = SearchService(
+            bocha_keys=["dummy_key"],
+            searxng_public_instances_enabled=False,
+        )
+        service._providers = [primary, fallback]
+
+        for index in range(3):
+            service.search_stock_news(
+                "600519",
+                "贵州茅台",
+                max_results=1,
+                focus_keywords=[f"贵州茅台 600519 测试 {index}"],
+            )
+        skipped = service.search_stock_news(
+            "600519",
+            "贵州茅台",
+            max_results=1,
+            focus_keywords=["贵州茅台 600519 熔断"],
+        )
+
+        self.assertEqual(primary.search.call_count, 3)
+        self.assertEqual(skipped.provider_attempts[0], {
+            "provider": "primary",
+            "result": "circuit_open",
+            "observed": False,
+        })
+        opened = service.news_source_health_snapshot()["primary"]
+        self.assertEqual(opened["state"], CircuitBreaker.OPEN)
+        self.assertTrue(opened["disabled"])
+
+        key = DataFetcherManager._news_search_health_key("primary")
+        breaker = DataFetcherManager._realtime_source_health
+        with breaker._lock:
+            breaker._states[key]["last_failure_time"] -= breaker.cooldown_seconds + 1
+        primary.search.return_value = recovered_response
+        recovered = service.search_stock_news(
+            "600519",
+            "贵州茅台",
+            max_results=1,
+            focus_keywords=["贵州茅台 600519 半开恢复"],
+        )
+
+        self.assertEqual(recovered.results[0].title, "贵州茅台 600519 业绩公告")
+        self.assertEqual(primary.search.call_count, 4)
+        self.assertEqual(service.news_source_health_snapshot()["primary"]["state"], CircuitBreaker.CLOSED)
+        fallback.search.assert_called()
 
     def test_search_stock_news_records_provider_diagnostics_for_fallback(self) -> None:
         """News search provider attempts should appear in run-flow diagnostics."""

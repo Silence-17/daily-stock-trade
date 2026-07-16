@@ -232,7 +232,7 @@
 
 未完成：
 
-- 当前 AlphaSift snapshot/daily 源已有 Web 可见失败计数、错误摘要和具体来源跨 run 降级率；候选补充阶段的行情、资金流和新闻也已作为 `candidate_context.quote/fund_flow/news` 接入同一健康快照、质量评分和跨 run 趋势，并新增 `quote/<provider>`、`fund_flow/<provider>`、`news/<provider>` 明细。自动 Agent 已按最近 30 天同策略/市场历史与当前连续失败生成有边界的 snapshot 来源权重，并以请求级参数动态调整资金流和新闻 provider 顺序；新闻异常继续 fallback，完整尝试链进入跨 run 证据，不同显式路由隔离缓存，且 provider 明细不重复计入本轮质量分。行情与资金流都具备 5 分钟冷却、单半开恢复和 24 小时内跨 API 重启健康延续；新闻继续复用搜索服务的顺序 fallback。
+- 当前 AlphaSift snapshot/daily 源已有 Web 可见失败计数、错误摘要和具体来源跨 run 降级率；候选补充阶段的行情、资金流和新闻也已作为 `candidate_context.quote/fund_flow/news` 接入同一健康快照、质量评分和跨 run 趋势，并新增 `quote/<provider>`、`fund_flow/<provider>`、`news/<provider>` 明细。自动 Agent 已按最近 30 天同策略/市场历史与当前连续失败生成有边界的 snapshot 来源权重，并以请求级参数动态调整资金流和新闻 provider 顺序；新闻异常继续 fallback，完整尝试链进入跨 run 证据，不同显式路由隔离缓存，且 provider 明细不重复计入本轮质量分。行情、资金流和新闻都具备 5 分钟冷却、单半开恢复和 24 小时内跨 API 重启健康延续；新闻无有效结果视为不确定，不错误推进熔断。
 - 自动选股运行已按筛选完整性、候选字段/来源覆盖和 AlphaSift snapshot/daily/候选上下文来源健康生成确定性 0~100 统一质量评分；最低分门禁默认 60，旧空值也归一为 60，`poor/critical` 轮次默认阻止新增买入，显式设 0 才仅审计。行情、资金流和新闻不可用会独立降分并保留错误摘要，不再被笼统视为候选补充失败。
 - 数据质量 `stale/unavailable` 和 AlphaSift 筛选异常已写入告警中心系统事件历史并复用 alert 路由外发通知，Web 模拟交易页已展示最近自动交易告警历史；实时行情、资金流与新闻具备自动切换/恢复，行情与资金流状态可跨 API 重启延续。
 

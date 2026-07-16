@@ -2514,6 +2514,39 @@ class SearchService:
             if provider.is_available and str(provider.name or "").strip()
         ]
 
+    @staticmethod
+    def _news_source_health_manager() -> Any:
+        from data_provider import DataFetcherManager
+
+        return DataFetcherManager
+
+    @classmethod
+    def _is_news_source_available(cls, source: str) -> bool:
+        return bool(cls._news_source_health_manager().is_news_search_source_available(source))
+
+    @classmethod
+    def _record_news_source_success(cls, source: str) -> None:
+        cls._news_source_health_manager().record_news_search_source_success(source)
+
+    @classmethod
+    def _record_news_source_failure(cls, source: str, error: Any) -> None:
+        cls._news_source_health_manager().record_news_search_source_failure(
+            source,
+            str(error or "news search failed"),
+        )
+
+    @classmethod
+    def _record_news_source_inconclusive(cls, source: str) -> None:
+        cls._news_source_health_manager().record_news_search_source_inconclusive(source)
+
+    @classmethod
+    def news_source_health_snapshot(cls) -> Dict[str, Dict[str, Any]]:
+        return cls._news_source_health_manager().news_search_source_health_snapshot()
+
+    @classmethod
+    def news_source_health_policy(cls) -> Dict[str, Any]:
+        return cls._news_source_health_manager().news_search_source_health_policy()
+
     def _ordered_news_providers(
         self,
         provider_priority: Optional[Sequence[str]],
@@ -3734,6 +3767,13 @@ class SearchService:
             best_ranked_stats: Optional[Dict[str, int]] = None
             provider_attempts: List[Dict[str, Any]] = []
             for provider in self._ordered_news_providers(provider_priority):
+                if not self._is_news_source_available(provider.name):
+                    provider_attempts.append({
+                        "provider": str(provider.name or "").strip().lower(),
+                        "result": "circuit_open",
+                        "observed": False,
+                    })
+                    continue
 
                 search_kwargs: Dict[str, Any] = {}
                 if isinstance(provider, TavilySearchProvider):
@@ -3763,6 +3803,7 @@ class SearchService:
                         error_type=type(exc).__name__,
                         error_message=exc,
                     )
+                    self._record_news_source_failure(provider.name, exc)
                     provider_attempts.append({
                         "provider": str(provider.name or "").strip().lower(),
                         "result": "failed",
@@ -3815,6 +3856,10 @@ class SearchService:
                         "result": "ok" if admitted_count else "unavailable",
                         "record_count": admitted_count,
                     })
+                    if admitted_count:
+                        self._record_news_source_success(provider.name)
+                    else:
+                        self._record_news_source_inconclusive(provider.name)
                     if not admitted_count:
                         logger.info(
                             "%s 搜索成功但准入过滤后无有效新闻，继续尝试下一引擎",
@@ -3893,6 +3938,13 @@ class SearchService:
                         "result": "unavailable" if response.success else "failed",
                         "record_count": filtered_count,
                     })
+                    if response.success:
+                        self._record_news_source_inconclusive(provider.name)
+                    else:
+                        self._record_news_source_failure(
+                            provider.name,
+                            response.error_message or "news search failed",
+                        )
                     if response.success and not filtered_response.results:
                         logger.info(
                             "%s 搜索成功但过滤后无有效新闻，继续尝试下一引擎",

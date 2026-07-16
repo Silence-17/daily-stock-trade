@@ -1102,6 +1102,84 @@ class DataFetcherManager:
                 cls._realtime_source_health.reset(key)
         cls._persist_realtime_source_health()
 
+    @classmethod
+    def _news_search_health_key(cls, source: str) -> str:
+        return f"news_search:{str(source or 'unknown').lower()}"
+
+    @classmethod
+    def is_news_search_source_available(cls, source: str) -> bool:
+        key = cls._news_search_health_key(source)
+        before = cls._realtime_source_health.export_state().get("states", {}).get(key)
+        available = cls._realtime_source_health.is_available(key)
+        after = cls._realtime_source_health.export_state().get("states", {}).get(key)
+        if before != after:
+            cls._persist_realtime_source_health()
+        if not available:
+            logger.info("[数据源健康度] 新闻搜索跳过短期熔断的数据源: %s", source)
+        return available
+
+    @classmethod
+    def record_news_search_source_success(cls, source: str) -> None:
+        key = cls._news_search_health_key(source)
+        before = cls._realtime_source_health.export_state().get("states", {}).get(key)
+        cls._realtime_source_health.record_success(key)
+        after = cls._realtime_source_health.export_state().get("states", {}).get(key)
+        if before != after:
+            cls._persist_realtime_source_health()
+
+    @classmethod
+    def record_news_search_source_failure(cls, source: str, error: str) -> None:
+        cls._realtime_source_health.record_failure(
+            cls._news_search_health_key(source),
+            error=error,
+        )
+        cls._persist_realtime_source_health()
+
+    @classmethod
+    def record_news_search_source_inconclusive(cls, source: str) -> None:
+        key = cls._news_search_health_key(source)
+        before = cls._realtime_source_health.export_state().get("states", {}).get(key)
+        cls._realtime_source_health.record_inconclusive(key)
+        after = cls._realtime_source_health.export_state().get("states", {}).get(key)
+        if before != after:
+            cls._persist_realtime_source_health()
+
+    @classmethod
+    def news_search_source_health_snapshot(cls) -> Dict[str, Dict[str, Any]]:
+        """Return news-search provider health without consuming a probe slot."""
+        prefix = "news_search:"
+        result: Dict[str, Dict[str, Any]] = {}
+        for key, value in cls._realtime_source_health.get_snapshot().items():
+            if not key.startswith(prefix):
+                continue
+            state = dict(value)
+            state["last_error"] = sanitize_diagnostic_text(
+                state.get("last_error"),
+                max_length=200,
+            ) or None
+            result[key[len(prefix):]] = state
+        return result
+
+    @classmethod
+    def news_search_source_health_policy(cls) -> Dict[str, Any]:
+        return {
+            "mode": "circuit_breaker_failover",
+            "failure_threshold": int(cls._realtime_source_health.failure_threshold),
+            "cooldown_seconds": float(cls._realtime_source_health.cooldown_seconds),
+            "half_open_max_calls": int(cls._realtime_source_health.half_open_max_calls),
+            "cross_process_persistence": cls._realtime_source_health_state_path is not None,
+            "restored_sources": int(cls._realtime_source_health_restored_sources),
+        }
+
+    @classmethod
+    def reset_news_search_source_health(cls) -> None:
+        """Reset manager-level news-search health for tests/admin diagnostics."""
+        prefix = "news_search:"
+        for key in list(cls._realtime_source_health.get_status()):
+            if key.startswith(prefix):
+                cls._realtime_source_health.reset(key)
+        cls._persist_realtime_source_health()
+
     def _get_cached_stock_name(self, stock_code: str) -> Optional[str]:
         self._ensure_concurrency_guards()
         with self._stock_name_cache_lock:
