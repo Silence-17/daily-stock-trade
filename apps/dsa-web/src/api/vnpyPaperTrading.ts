@@ -645,7 +645,34 @@ export type VnpyPaperAgentDecision = {
 export type VnpyPaperAgentRunDetail = VnpyPaperAgentRunSummary & {
   decisions: VnpyPaperAgentDecision[];
   tradePlans: VnpyPaperAgentTradePlan[];
+  portfolioChange?: VnpyPaperAgentPortfolioChange;
   timeline: VnpyPaperAgentTimelineEvent[];
+};
+
+export type VnpyPaperAgentPortfolioChangeItem = {
+  symbol: string;
+  name?: string | null;
+  market: string;
+  buyQuantity: number;
+  sellQuantity: number;
+  netQuantity: number;
+  buyNotional: number;
+  sellNotional: number;
+  netCashFlow: number;
+  planCount: number;
+  tradeIds: number[];
+};
+
+export type VnpyPaperAgentPortfolioChange = {
+  schemaVersion: number;
+  basis: string;
+  status: 'changed_pending' | 'changed' | 'pending' | 'planned' | 'unchanged';
+  bookedPlanCount: number;
+  pendingPlanCount: number;
+  plannedPlanCount: number;
+  symbolCount: number;
+  items: VnpyPaperAgentPortfolioChangeItem[];
+  updatedAt?: string | null;
 };
 
 export type VnpyPaperAgentTimelineEvent = {

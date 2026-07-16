@@ -1573,6 +1573,27 @@ describe('vnpyPaperTradingApi', () => {
             trade_id: 3,
             risk_flags: [],
           }],
+          portfolio_change: {
+            schema_version: 1,
+            basis: 'persisted_portfolio_trade_ids',
+            status: 'changed',
+            booked_plan_count: 1,
+            pending_plan_count: 0,
+            planned_plan_count: 0,
+            symbol_count: 1,
+            items: [{
+              symbol: '600519',
+              market: 'cn',
+              buy_quantity: 100,
+              sell_quantity: 0,
+              net_quantity: 100,
+              buy_notional: 1000,
+              sell_notional: 0,
+              net_cash_flow: -1000,
+              plan_count: 1,
+              trade_ids: [3],
+            }],
+          },
           timeline: [{
             stage: 'completed',
             status: 'completed',
@@ -1596,6 +1617,10 @@ describe('vnpyPaperTradingApi', () => {
     expect(detail.decisions[0].tradeId).toBe(3);
     expect(detail.tradePlans[0].plannedCashAmount).toBe(1000);
     expect(detail.tradePlans[0].executionMode).toBe('paper');
+    expect(detail.portfolioChange).toBeDefined();
+    expect(detail.portfolioChange?.status).toBe('changed');
+    expect(detail.portfolioChange?.items[0].netQuantity).toBe(100);
+    expect(detail.portfolioChange?.items[0].tradeIds).toEqual([3]);
     expect(detail.timeline[0].stage).toBe('completed');
     expect(detail.timeline[0].details?.statusCounts).toEqual({ filled: 1 });
   });

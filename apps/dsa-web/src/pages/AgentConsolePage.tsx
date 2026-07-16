@@ -41,6 +41,7 @@ import {
 } from '../api/alphasift';
 import { toApiErrorMessage } from '../api/error';
 import { AppPage, Button, InlineAlert } from '../components/common';
+import { PortfolioChangePanel } from '../components/agent';
 
 const INPUT_CLASS =
   'h-10 w-full rounded-xl border border-border bg-surface px-3 text-sm text-foreground outline-none transition-colors focus:border-cyan disabled:cursor-not-allowed disabled:opacity-60';
@@ -2760,6 +2761,7 @@ const AgentConsolePage: React.FC = () => {
                 </div>
               ) : null}
 
+              <PortfolioChangePanel change={selectedRun.portfolioChange} />
               <Timeline events={selectedRun.timeline || []} />
               <DecisionTable decisions={selectedRun.decisions || []} />
               <TradePlanList plans={selectedRun.tradePlans || []} />

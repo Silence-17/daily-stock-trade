@@ -598,6 +598,29 @@ const agentRunDetail = {
     createdAt: '2026-07-01T09:30:01Z',
     updatedAt: '2026-07-01T09:30:01Z',
   }],
+  portfolioChange: {
+    schemaVersion: 1,
+    basis: 'persisted_portfolio_trade_ids',
+    status: 'changed',
+    bookedPlanCount: 1,
+    pendingPlanCount: 0,
+    plannedPlanCount: 0,
+    symbolCount: 1,
+    items: [{
+      symbol: '600519',
+      name: '贵州茅台',
+      market: 'cn',
+      buyQuantity: 100,
+      sellQuantity: 0,
+      netQuantity: 100,
+      buyNotional: 1000,
+      sellNotional: 0,
+      netCashFlow: -1000,
+      planCount: 1,
+      tradeIds: [2],
+    }],
+    updatedAt: '2026-07-01T09:30:01Z',
+  },
   timeline: [{
     stage: 'candidate_decisions',
     status: 'completed',
@@ -662,6 +685,17 @@ const pendingAgentRunDetail = {
     createdAt: '2026-07-01T09:30:01Z',
     updatedAt: '2026-07-01T09:30:01Z',
   }],
+  portfolioChange: {
+    schemaVersion: 1,
+    basis: 'persisted_portfolio_trade_ids',
+    status: 'planned',
+    bookedPlanCount: 0,
+    pendingPlanCount: 0,
+    plannedPlanCount: 1,
+    symbolCount: 0,
+    items: [],
+    updatedAt: null,
+  },
   timeline: [{
     stage: 'trade_plans',
     status: 'completed',
@@ -686,6 +720,11 @@ const skippedManualAgentRunDetail = {
     status: 'skipped',
     skipReason: 'price_unavailable',
   })),
+  portfolioChange: {
+    ...pendingAgentRunDetail.portfolioChange,
+    status: 'unchanged',
+    plannedPlanCount: 0,
+  },
   timeline: [{
     stage: 'trade_plans',
     status: 'completed',
@@ -730,6 +769,14 @@ const submittedVnpyAgentRunDetail = {
       },
     },
   })),
+  portfolioChange: {
+    ...agentRunDetail.portfolioChange,
+    status: 'pending',
+    bookedPlanCount: 0,
+    pendingPlanCount: 1,
+    symbolCount: 0,
+    items: [],
+  },
 };
 
 const taskHealthResponse = {
@@ -1692,7 +1739,7 @@ describe('VnpyPaperTradingPage', () => {
     expect(getAgentReturnRiskCalibrationTrends).toHaveBeenCalledWith(30, undefined);
     fireEvent.click(screen.getByRole('button', { name: '7 天' }));
     await waitFor(() => expect(getAgentReturnRiskCalibrationTrends).toHaveBeenCalledWith(7, undefined));
-    expect(screen.getByText('贵州茅台')).toBeInTheDocument();
+    expect(screen.getAllByText('贵州茅台').length).toBeGreaterThan(0);
     expect(screen.getByText('交易计划')).toBeInTheDocument();
     expect(screen.getByText('Agent 计划')).toBeInTheDocument();
     expect(screen.getAllByText('执行模式').length).toBeGreaterThan(0);
@@ -1716,6 +1763,9 @@ describe('VnpyPaperTradingPage', () => {
     expect(screen.getByRole('button', { name: '导出 JSON' })).toBeInTheDocument();
     expect(screen.getByText('数据质量 partial')).toBeInTheDocument();
     expect(screen.getByText('风控统计')).toBeInTheDocument();
+    expect(screen.getByTestId('portfolio-change-panel')).toHaveTextContent('本轮持仓变化');
+    expect(screen.getByTestId('portfolio-change-panel')).toHaveTextContent('已入账');
+    expect(screen.getByTestId('portfolio-change-panel')).toHaveTextContent('+100');
     expect(screen.getByText('运行时间线')).toBeInTheDocument();
     expect(screen.getByText('2 candidate decisions: buy=1, skip=1')).toBeInTheDocument();
   });
