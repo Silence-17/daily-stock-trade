@@ -53,6 +53,7 @@ import {
 import { alertsApi } from '../api/alerts';
 import { getParsedApiError, toApiErrorMessage } from '../api/error';
 import { AppPage, Button, InlineAlert } from '../components/common';
+import { PortfolioChangePanel } from '../components/agent';
 import type { AlertTriggerItem } from '../types/alerts';
 
 const INPUT_CLASS =
@@ -4993,6 +4994,10 @@ const VnpyPaperTradingPage: React.FC = () => {
                       </div>
                     </div>
                   ) : null}
+                  <PortfolioChangePanel
+                    change={selectedAgentRun.portfolioChange}
+                    currency={currency}
+                  />
                   {(selectedAgentRun.timeline || []).length > 0 ? (
                     <div className="rounded-lg border border-border bg-surface px-3 py-2">
                       <div className="mb-2 text-xs font-semibold text-foreground">运行时间线</div>

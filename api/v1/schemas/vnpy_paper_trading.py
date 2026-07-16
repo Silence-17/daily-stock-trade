@@ -635,9 +635,36 @@ class VnpyPaperAgentTimelineEvent(BaseModel):
     details: Dict[str, Any] = Field(default_factory=dict)
 
 
+class VnpyPaperAgentPortfolioChangeItem(BaseModel):
+    symbol: str
+    name: Optional[str] = None
+    market: str
+    buy_quantity: float = 0
+    sell_quantity: float = 0
+    net_quantity: float = 0
+    buy_notional: float = 0
+    sell_notional: float = 0
+    net_cash_flow: float = 0
+    plan_count: int = 0
+    trade_ids: List[int] = Field(default_factory=list)
+
+
+class VnpyPaperAgentPortfolioChange(BaseModel):
+    schema_version: int = 1
+    basis: str
+    status: str
+    booked_plan_count: int = 0
+    pending_plan_count: int = 0
+    planned_plan_count: int = 0
+    symbol_count: int = 0
+    items: List[VnpyPaperAgentPortfolioChangeItem] = Field(default_factory=list)
+    updated_at: Optional[Any] = None
+
+
 class VnpyPaperAgentRunDetail(VnpyPaperAgentRunSummary):
     decisions: List[VnpyPaperAgentDecision] = Field(default_factory=list)
     trade_plans: List[VnpyPaperAgentTradePlan] = Field(default_factory=list)
+    portfolio_change: Optional[VnpyPaperAgentPortfolioChange] = None
     timeline: List[VnpyPaperAgentTimelineEvent] = Field(default_factory=list)
 
 

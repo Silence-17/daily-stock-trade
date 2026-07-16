@@ -2082,8 +2082,16 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
         self.assertEqual(detail["decisions"][0]["status"], "filled")
         self.assertEqual(detail["trade_plans"][0]["status"], "filled")
         self.assertEqual(detail["trade_plans"][0]["trade_id"], run_payload["orders"][0]["trade_id"])
+        self.assertEqual(detail["portfolio_change"]["status"], "changed")
+        self.assertEqual(detail["portfolio_change"]["items"][0]["symbol"], "600519")
+        self.assertEqual(detail["portfolio_change"]["items"][0]["net_quantity"], 100.0)
+        self.assertEqual(
+            detail["portfolio_change"]["items"][0]["trade_ids"],
+            [run_payload["orders"][0]["trade_id"]],
+        )
         self.assertIn("timeline", detail)
         self.assertTrue(any(item["stage"] == "trade_plans" for item in detail["timeline"]))
+        self.assertTrue(any(item["stage"] == "portfolio_change" for item in detail["timeline"]))
 
         self.assertEqual(performance_resp.status_code, 200)
         performance = performance_resp.json()

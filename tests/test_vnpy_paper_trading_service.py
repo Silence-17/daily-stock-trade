@@ -1074,6 +1074,10 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertEqual(audit_context["evaluator_version"], LLM_DYNAMIC_AGENT_PLAN_EVALUATOR_VERSION)
         self.assertIn("llm_dynamic_plan", plan["adaptive_controls"]["configured_layers"])
         self.assertEqual(audit["trade_plans"][0]["planned_cash_amount"], 1200.0)
+        self.assertEqual(audit["portfolio_change"]["status"], "planned")
+        self.assertEqual(audit["portfolio_change"]["booked_plan_count"], 0)
+        self.assertEqual(audit["portfolio_change"]["planned_plan_count"], 1)
+        self.assertEqual(audit["portfolio_change"]["items"], [])
 
         settings_after = self.service.get_settings()
         self.assertEqual(settings_after.auto_strategy, "dual_low")
@@ -1314,6 +1318,32 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertEqual(audit["decisions"][1]["reason"], "score_below_threshold")
         self.assertEqual(audit["trade_plans"][0]["status"], "filled")
         self.assertEqual(audit["trade_plans"][1]["status"], "skipped")
+        self.assertEqual(audit["portfolio_change"]["status"], "changed")
+        self.assertEqual(audit["portfolio_change"]["booked_plan_count"], 1)
+        self.assertEqual(audit["portfolio_change"]["pending_plan_count"], 0)
+        self.assertEqual(
+            audit["portfolio_change"]["items"],
+            [
+                {
+                    "symbol": "600519",
+                    "name": None,
+                    "market": "cn",
+                    "buy_quantity": 100.0,
+                    "sell_quantity": 0.0,
+                    "buy_notional": 1000.0,
+                    "sell_notional": 0.0,
+                    "plan_count": 1,
+                    "trade_ids": [audit["decisions"][0]["trade_id"]],
+                    "net_quantity": 100.0,
+                    "net_cash_flow": -1000.0,
+                }
+            ],
+        )
+        portfolio_event = next(
+            event for event in audit["timeline"] if event["stage"] == "portfolio_change"
+        )
+        self.assertEqual(portfolio_event["status"], "changed")
+        self.assertEqual(portfolio_event["details"], audit["portfolio_change"])
 
     def test_auto_trade_hk_fails_closed_without_current_fx_rate(self) -> None:
         self.service.update_settings(
@@ -4381,6 +4411,10 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertEqual(partial_audit["trade_plans"][0]["submitted_price"], 10.1)
         self.assertIsNone(partial_audit["trade_plans"][0]["trade_id"])
         self.assertEqual(partial_audit["decisions"][0]["status"], "part_filled")
+        self.assertEqual(partial_audit["portfolio_change"]["status"], "pending")
+        self.assertEqual(partial_audit["portfolio_change"]["booked_plan_count"], 0)
+        self.assertEqual(partial_audit["portfolio_change"]["pending_plan_count"], 1)
+        self.assertEqual(partial_audit["portfolio_change"]["items"], [])
         self.assertTrue(filled["accepted"])
         self.assertEqual(filled["status"], "filled")
         audit = self.service.agent_repo.get_run_detail(result["agent_run_uid"])
@@ -4389,6 +4423,9 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertEqual(audit["trade_plans"][0]["status"], "filled")
         self.assertEqual(audit["trade_plans"][0]["trade_id"], filled["trade_id"])
         self.assertEqual(audit["decisions"][0]["status"], "filled")
+        self.assertEqual(audit["portfolio_change"]["status"], "changed")
+        self.assertEqual(audit["portfolio_change"]["booked_plan_count"], 1)
+        self.assertEqual(audit["portfolio_change"]["items"][0]["net_quantity"], 100.0)
 
     def test_vnpy_order_callback_rejection_marks_submitted_plan_failed(self) -> None:
         installed = _install_fake_vnpy_modules()

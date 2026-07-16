@@ -414,6 +414,29 @@ const runDetail = {
     createdAt: '2026-07-01T09:30:01Z',
     updatedAt: '2026-07-01T09:30:01Z',
   }],
+  portfolioChange: {
+    schemaVersion: 1,
+    basis: 'persisted_portfolio_trade_ids',
+    status: 'changed',
+    bookedPlanCount: 1,
+    pendingPlanCount: 0,
+    plannedPlanCount: 0,
+    symbolCount: 1,
+    items: [{
+      symbol: '600519',
+      name: 'Kweichow Moutai',
+      market: 'cn',
+      buyQuantity: 100,
+      sellQuantity: 0,
+      netQuantity: 100,
+      buyNotional: 1000,
+      sellNotional: 0,
+      netCashFlow: -1000,
+      planCount: 1,
+      tradeIds: [2],
+    }],
+    updatedAt: '2026-07-01T09:30:01Z',
+  },
   timeline: [{
     stage: 'llm_ranking_health',
     status: 'skipped',
@@ -940,6 +963,10 @@ describe('AgentConsolePage', () => {
     expect(screen.getByTestId('agent-workflow')).toHaveTextContent('monitor_positions_and_events');
     expect(screen.getByText('Candidate review warning')).toBeInTheDocument();
     expect(screen.getByText('low valuation and improving momentum')).toBeInTheDocument();
+    expect(screen.getByTestId('portfolio-change-panel')).toHaveTextContent('本轮持仓变化');
+    expect(screen.getByTestId('portfolio-change-panel')).toHaveTextContent('已入账');
+    expect(screen.getByTestId('portfolio-change-panel')).toHaveTextContent('+100');
+    expect(screen.getByTestId('portfolio-change-panel')).toHaveTextContent('¥1,000.00');
     expect(screen.getByText('local_paper_execution')).toBeInTheDocument();
     expect(screen.getAllByText('guarded').length).toBeGreaterThan(0);
     expect(screen.getByText('LLM 动态计划')).toBeInTheDocument();

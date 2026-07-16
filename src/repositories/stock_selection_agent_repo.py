@@ -1382,6 +1382,7 @@ class StockSelectionAgentRepository:
             )
             payload["decisions"] = [self._decision_to_dict(row) for row in decisions]
             payload["trade_plans"] = [self._trade_plan_to_dict(row) for row in plans]
+            payload["portfolio_change"] = self._build_portfolio_change(payload["trade_plans"])
             diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), dict) else {}
             agent_summary = (
                 diagnostics.get("agent_summary")
@@ -1406,6 +1407,100 @@ class StockSelectionAgentRepository:
                 payload["diagnostics"] = diagnostics
             payload["timeline"] = self._build_timeline(payload, payload["decisions"], payload["trade_plans"])
             return payload
+
+    @classmethod
+    def _build_portfolio_change(
+        cls,
+        trade_plans: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        grouped: Dict[tuple[str, str], Dict[str, Any]] = {}
+        booked_plan_count = 0
+        pending_plan_count = 0
+        planned_plan_count = 0
+        updated_at: Any = None
+
+        for plan in trade_plans:
+            status = str(plan.get("status") or "").strip().lower()
+            if status in {"submitted", "part_filled", "cancel_requested"}:
+                pending_plan_count += 1
+            elif status == "planned":
+                planned_plan_count += 1
+
+            trade_id = cls._safe_non_negative_int(plan.get("trade_id"))
+            quantity = cls._safe_float(plan.get("submitted_quantity")) or 0.0
+            side = str(plan.get("side") or "").strip().lower()
+            symbol = str(plan.get("symbol") or "").strip()
+            if trade_id <= 0 or quantity <= 0 or side not in {"buy", "sell"} or not symbol:
+                continue
+
+            market = str(plan.get("market") or "").strip().lower()
+            key = (market, symbol)
+            item = grouped.setdefault(
+                key,
+                {
+                    "symbol": symbol,
+                    "name": plan.get("name"),
+                    "market": market,
+                    "buy_quantity": 0.0,
+                    "sell_quantity": 0.0,
+                    "buy_notional": 0.0,
+                    "sell_notional": 0.0,
+                    "plan_count": 0,
+                    "trade_ids": [],
+                },
+            )
+            price = cls._safe_float(plan.get("submitted_price")) or 0.0
+            item[f"{side}_quantity"] += quantity
+            item[f"{side}_notional"] += quantity * price
+            item["plan_count"] += 1
+            if trade_id not in item["trade_ids"]:
+                item["trade_ids"].append(trade_id)
+            booked_plan_count += 1
+            plan_updated_at = plan.get("updated_at") or plan.get("created_at")
+            if plan_updated_at is not None and (updated_at is None or plan_updated_at > updated_at):
+                updated_at = plan_updated_at
+
+        items: List[Dict[str, Any]] = []
+        for key in sorted(grouped):
+            item = grouped[key]
+            buy_quantity = float(item["buy_quantity"])
+            sell_quantity = float(item["sell_quantity"])
+            buy_notional = float(item["buy_notional"])
+            sell_notional = float(item["sell_notional"])
+            items.append(
+                {
+                    **item,
+                    "buy_quantity": round(buy_quantity, 8),
+                    "sell_quantity": round(sell_quantity, 8),
+                    "net_quantity": round(buy_quantity - sell_quantity, 8),
+                    "buy_notional": round(buy_notional, 6),
+                    "sell_notional": round(sell_notional, 6),
+                    "net_cash_flow": round(sell_notional - buy_notional, 6),
+                    "trade_ids": sorted(item["trade_ids"]),
+                }
+            )
+
+        if items and pending_plan_count:
+            status = "changed_pending"
+        elif items:
+            status = "changed"
+        elif pending_plan_count:
+            status = "pending"
+        elif planned_plan_count:
+            status = "planned"
+        else:
+            status = "unchanged"
+        return {
+            "schema_version": 1,
+            "basis": "persisted_portfolio_trade_ids",
+            "status": status,
+            "booked_plan_count": booked_plan_count,
+            "pending_plan_count": pending_plan_count,
+            "planned_plan_count": planned_plan_count,
+            "symbol_count": len(items),
+            "items": items,
+            "updated_at": updated_at,
+        }
 
     @classmethod
     def _build_timeline(
@@ -1620,6 +1715,26 @@ class StockSelectionAgentRepository:
                         "agent_review_counts": agent_summary.get("agent_review_counts") or {},
                         "llm_review_counts": agent_summary.get("llm_review_counts") or {},
                     },
+                }
+            )
+
+        portfolio_change = (
+            run.get("portfolio_change") if isinstance(run.get("portfolio_change"), dict) else None
+        )
+        if isinstance(portfolio_change, dict):
+            change_status = str(portfolio_change.get("status") or "unchanged")
+            timeline.append(
+                {
+                    "stage": "portfolio_change",
+                    "status": change_status,
+                    "message": (
+                        f"Portfolio change {change_status}: "
+                        f"symbols={portfolio_change.get('symbol_count', 0)}, "
+                        f"booked={portfolio_change.get('booked_plan_count', 0)}, "
+                        f"pending={portfolio_change.get('pending_plan_count', 0)}"
+                    ),
+                    "timestamp": portfolio_change.get("updated_at") or run.get("updated_at") or started_at,
+                    "details": dict(portfolio_change),
                 }
             )
 
