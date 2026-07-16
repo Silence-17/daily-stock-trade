@@ -1557,6 +1557,25 @@ class StockSelectionAgentRepository:
                 }
             )
 
+        stage_timings = diagnostics.get("stage_timings") if isinstance(diagnostics, dict) else None
+        if isinstance(stage_timings, dict) and stage_timings.get("total_seconds") is not None:
+            total_seconds = stage_timings.get("total_seconds")
+            screen_seconds = stage_timings.get("alphasift_screen_seconds")
+            screen_summary = (
+                f", AlphaSift={screen_seconds}s"
+                if screen_seconds is not None
+                else ""
+            )
+            timeline.append(
+                {
+                    "stage": "performance",
+                    "status": str(run.get("status") or "completed"),
+                    "message": f"Run timing: total={total_seconds}s{screen_summary}",
+                    "timestamp": run.get("completed_at") or run.get("updated_at") or started_at,
+                    "details": dict(stage_timings),
+                }
+            )
+
         completed_at = run.get("completed_at") or run.get("updated_at")
         if completed_at:
             status = str(run.get("status") or "unknown")

@@ -253,6 +253,38 @@ class TestFundamentalContext(unittest.TestCase):
         self.assertIn("capital_flow", ctx)
         self.assertIn("dragon_tiger", ctx)
 
+    def test_fundamental_context_reuses_supplied_realtime_quote(self) -> None:
+        manager = DataFetcherManager(fetchers=[])
+        cfg = SimpleNamespace(
+            enable_fundamental_pipeline=True,
+            fundamental_cache_ttl_seconds=0,
+            fundamental_stage_timeout_seconds=0,
+            fundamental_fetch_timeout_seconds=0.8,
+            fundamental_retry_max=1,
+        )
+        quote = {
+            "price": 50.0,
+            "pe_ratio": 12.3,
+            "pb_ratio": 2.1,
+            "total_mv": 1.0e11,
+            "circ_mv": 7.0e10,
+        }
+
+        with patch("src.config.get_config", return_value=cfg), patch.object(
+            manager,
+            "get_realtime_quote",
+        ) as quote_fetch:
+            ctx = manager.get_fundamental_context(
+                "600519",
+                budget_seconds=0,
+                realtime_quote=quote,
+            )
+
+        quote_fetch.assert_not_called()
+        self.assertEqual(ctx["valuation"]["data"]["pe_ratio"], 12.3)
+        self.assertEqual(ctx["valuation"]["data"]["pb_ratio"], 2.1)
+        self.assertEqual(ctx["valuation"]["source_chain"][0]["duration_ms"], 0)
+
     def test_fundamental_context_derives_ttm_dividend_yield_from_quote_price(self) -> None:
         manager = DataFetcherManager(fetchers=[])
         cfg = SimpleNamespace(

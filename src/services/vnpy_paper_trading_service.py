@@ -2181,6 +2181,27 @@ class VnpyPaperTradingService:
         execution_mode_override: Optional[str] = None,
         ignore_auto_trade_enabled: bool = False,
     ) -> Dict[str, Any]:
+        run_timing_started = time.monotonic()
+        stage_timing_started = run_timing_started
+        stage_timings: Dict[str, Any] = {
+            "schema_version": 1,
+            "started_at": _utc_now_iso(),
+        }
+
+        def finish_timing_stage(stage: str) -> None:
+            nonlocal stage_timing_started
+            now = time.monotonic()
+            stage_timings[f"{stage}_seconds"] = round(
+                max(0.0, now - stage_timing_started),
+                6,
+            )
+            stage_timings["total_seconds"] = round(
+                max(0.0, now - run_timing_started),
+                6,
+            )
+            stage_timings["completed_stage"] = stage
+            stage_timing_started = now
+
         settings = self.get_settings()
         override_mode = str(execution_mode_override or "").strip().lower()
         if override_mode:
@@ -2228,7 +2249,9 @@ class VnpyPaperTradingService:
             "market_objective": market_objective,
             "cross_run_quality": cross_run_quality,
             "alphasift_llm_policy": alphasift_llm_policy,
+            "stage_timings": stage_timings,
         }
+        finish_timing_stage("planning")
         run = self.agent_repo.create_run(
             run_uid=run_uid,
             trigger_source="vnpy_paper_auto",
@@ -2243,6 +2266,7 @@ class VnpyPaperTradingService:
         )
         run_id = int(run["id"])
         if not settings.auto_trade_enabled:
+            finish_timing_stage("preflight")
             result = {
                 "accepted": False,
                 "skipped": True,
@@ -2294,6 +2318,7 @@ class VnpyPaperTradingService:
                 },
             )
         if failure_fuse_reason:
+            finish_timing_stage("preflight")
             result = {
                 "accepted": False,
                 "skipped": True,
@@ -2343,6 +2368,7 @@ class VnpyPaperTradingService:
 
         time_gate_reason, time_gate_diagnostics = self._auto_trade_time_gate(settings)
         if time_gate_reason:
+            finish_timing_stage("preflight")
             result = {
                 "accepted": False,
                 "skipped": True,
@@ -2379,6 +2405,7 @@ class VnpyPaperTradingService:
         orders: List[Dict[str, Any]] = self._run_auto_sell_checks(settings, run_id=run_id)
 
         if cross_run_quality.get("gate_blocked"):
+            finish_timing_stage("preflight")
             reason = "cross_run_quality_gate_blocked"
             planned_count = sum(1 for item in orders if item.get("status") == "planned")
             submitted_count = sum(1 for item in orders if item.get("accepted"))
@@ -2439,6 +2466,7 @@ class VnpyPaperTradingService:
             source_health_trends = list(trend_summary.get("source_health_items") or [])
         except Exception as exc:  # noqa: BLE001 - routing trends must degrade to the base source order.
             logger.warning("Failed to load AlphaSift source-health trends: %s", exc)
+        finish_timing_stage("preflight")
         try:
             screen = AlphaSiftService(config=config).screen(
                 strategy=settings.auto_strategy,
@@ -2449,6 +2477,7 @@ class VnpyPaperTradingService:
                 llm_max_retries=int(alphasift_llm_policy["max_retries"]),
             )
         except Exception as exc:
+            finish_timing_stage("alphasift_screen")
             planned_count = sum(1 for item in orders if item.get("status") == "planned")
             submitted_count = sum(1 for item in orders if item.get("accepted"))
             skipped_count = sum(
@@ -2479,6 +2508,7 @@ class VnpyPaperTradingService:
                 },
             )
             raise
+        finish_timing_stage("alphasift_screen")
         candidates = list(screen.get("candidates") or [])
         data_quality = self._screen_data_quality(screen, candidates)
         data_quality.update(self._screen_data_quality_score(screen, candidates, data_quality))
@@ -2543,6 +2573,7 @@ class VnpyPaperTradingService:
                 "orders": orders,
                 "messages": messages or [reason],
             }
+            finish_timing_stage("candidate_decision_execution")
             self.agent_repo.complete_run(
                 run_id=run_id,
                 status="completed" if candidates else "skipped",
@@ -3203,6 +3234,7 @@ class VnpyPaperTradingService:
             "orders": orders,
             "messages": messages,
         }
+        finish_timing_stage("candidate_decision_execution")
         self.agent_repo.complete_run(
             run_id=run_id,
             status="completed",

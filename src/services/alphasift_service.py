@@ -15,6 +15,7 @@ import subprocess
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextvars import ContextVar
 from contextlib import contextmanager
 from dataclasses import asdict, is_dataclass
@@ -37,6 +38,7 @@ _ALPHASIFT_INSTALL_LOCK = threading.RLock()
 ALPHASIFT_MANAGED_LITELLM_PROVIDERS = frozenset({"gemini", "vertex_ai", "anthropic", "openai", "deepseek"})
 _ALPHASIFT_RUNTIME_ENV_LOCK = threading.RLock()
 DSA_ENRICHMENT_MAX_CANDIDATES = 3
+DSA_ENRICHMENT_MAX_WORKERS = 3
 DSA_PRE_RANK_CONTEXT_MAX_CANDIDATES = 3
 DSA_ALPHASIFT_LLM_CANDIDATE_MULTIPLIER = 2
 DSA_ALPHASIFT_LLM_MAX_CANDIDATES = 12
@@ -3214,6 +3216,21 @@ def _build_alphasift_context(
     # 参见 https://docs.litellm.ai/docs/proxy/configs#the-model_list-key
     channels = _normalize_dsa_llm_channels(config)
     litellm_model, fallback_models = _resolve_alphasift_llm_models(config)
+    candidate_context_lock = threading.Lock()
+    candidate_context_calls = 0
+
+    def get_bounded_candidate_context(
+        stock_code: str,
+        stock_name: str = "",
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        nonlocal candidate_context_calls
+        with candidate_context_lock:
+            if candidate_context_calls >= DSA_PRE_RANK_CONTEXT_MAX_CANDIDATES:
+                return {}
+            candidate_context_calls += 1
+        return get_dsa_candidate_context(stock_code, stock_name, **kwargs)
+
     return {
         "llm": {
             "model": litellm_model,
@@ -3249,7 +3266,7 @@ def _build_alphasift_context(
                 "realtime_quote",
                 "fundamental_context",
             ],
-            "get_candidate_context": get_dsa_candidate_context,
+            "get_candidate_context": get_bounded_candidate_context,
             "get_daily_history": get_dsa_daily_history,
             "get_realtime_quote": get_dsa_realtime_quote,
             "get_fundamental_context": get_dsa_fundamental_context,
@@ -3640,9 +3657,17 @@ def get_dsa_realtime_quote(stock_code: str) -> Dict[str, Any]:
     return _remove_non_finite_json_values(payload if isinstance(payload, dict) else {})
 
 
-def get_dsa_fundamental_context(stock_code: str) -> Dict[str, Any]:
+def get_dsa_fundamental_context(
+    stock_code: str,
+    *,
+    quote: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     manager = _get_dsa_fetcher_manager()
-    context = manager.get_fundamental_context(stock_code, budget_seconds=4.0)
+    context = manager.get_fundamental_context(
+        stock_code,
+        budget_seconds=4.0,
+        realtime_quote=quote or None,
+    )
     return _compact_fundamental_context(_remove_non_finite_json_values(_to_plain(context)))
 
 
@@ -3697,26 +3722,24 @@ def get_dsa_candidate_context(
 
 
 def _enrich_candidates_with_dsa(candidates: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    enriched_count = 0
-    warnings: List[str] = []
     limit = min(len(candidates), DSA_ENRICHMENT_MAX_CANDIDATES)
+    results: Dict[int, Tuple[bool, List[str]]] = {}
 
-    for index, candidate in enumerate(candidates):
-        if index >= limit:
-            continue
+    def enrich_one(index: int, candidate: Dict[str, Any]) -> Tuple[int, bool, List[str]]:
         existing_context = candidate.get("dsa_context")
         if (
             isinstance(existing_context, dict)
             and existing_context.get("enriched")
             and _candidate_has_dsa_news(candidate)
         ):
-            enriched_count += 1
             existing_warnings = existing_context.get("warnings") or []
             if isinstance(existing_warnings, list):
-                warnings.extend(str(item) for item in existing_warnings if item)
+                row_warnings = [str(item) for item in existing_warnings if item]
             elif existing_warnings:
-                warnings.append(str(existing_warnings))
-            continue
+                row_warnings = [str(existing_warnings)]
+            else:
+                row_warnings = []
+            return index, True, row_warnings
         try:
             enriched = _build_dsa_candidate_context(
                 candidate,
@@ -3725,18 +3748,41 @@ def _enrich_candidates_with_dsa(candidates: List[Dict[str, Any]]) -> Tuple[List[
                 profile="post_rank_full",
             )
             candidate.update(enriched)
-            if enriched.get("dsa_context", {}).get("enriched"):
-                enriched_count += 1
-            warnings.extend(enriched.get("dsa_context", {}).get("warnings") or [])
+            context = enriched.get("dsa_context", {})
+            return (
+                index,
+                bool(context.get("enriched")),
+                [str(item) for item in (context.get("warnings") or []) if item],
+            )
         except Exception as exc:  # noqa: BLE001 - DSA enrichment must not block screening.
             code = candidate.get("code") or f"rank-{candidate.get('rank', index + 1)}"
             message = f"{code}: {exc}"
-            warnings.append(message)
             logger.warning("DSA enrichment failed for AlphaSift candidate %s: %s", code, exc)
             candidate["dsa_context"] = {
                 "enriched": False,
                 "warnings": [message],
             }
+            return index, False, [message]
+
+    if limit:
+        with ThreadPoolExecutor(
+            max_workers=min(limit, DSA_ENRICHMENT_MAX_WORKERS),
+            thread_name_prefix="alphasift-dsa-enrich",
+        ) as executor:
+            futures = {
+                executor.submit(enrich_one, index, candidates[index]): index
+                for index in range(limit)
+            }
+            for future in as_completed(futures):
+                index, enriched, row_warnings = future.result()
+                results[index] = (enriched, row_warnings)
+
+    enriched_count = sum(1 for enriched, _ in results.values() if enriched)
+    warnings = [
+        warning
+        for index in range(limit)
+        for warning in results.get(index, (False, []))[1]
+    ]
 
     return candidates, {
         "enabled": True,
@@ -3956,7 +4002,7 @@ def _build_dsa_candidate_context(
 
     if include_fundamentals and not fundamentals:
         try:
-            fundamentals = get_dsa_fundamental_context(code)
+            fundamentals = get_dsa_fundamental_context(code, quote=quote)
         except Exception as exc:  # noqa: BLE001
             warnings.append(f"fundamental_context_failed: {exc}")
             fundamentals = {}

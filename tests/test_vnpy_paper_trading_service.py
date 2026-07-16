@@ -704,6 +704,22 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
             audit["diagnostics"]["alphasift_llm_policy"],
             {"timeout_seconds": 45, "max_retries": 0, "fallback": "screen_score"},
         )
+        timings = audit["diagnostics"]["stage_timings"]
+        self.assertEqual(timings["schema_version"], 1)
+        self.assertEqual(timings["completed_stage"], "candidate_decision_execution")
+        for key in (
+            "planning_seconds",
+            "preflight_seconds",
+            "alphasift_screen_seconds",
+            "candidate_decision_execution_seconds",
+            "total_seconds",
+        ):
+            self.assertGreaterEqual(timings[key], 0.0)
+        performance_event = next(
+            event for event in audit["timeline"] if event["stage"] == "performance"
+        )
+        self.assertEqual(performance_event["details"], timings)
+        self.assertIn("AlphaSift=", performance_event["message"])
         self.assertEqual(dynamic_plan["status"], "accepted")
         self.assertEqual(dynamic_plan["model"], "openai/test")
         self.assertEqual(dynamic_plan["prompt_version"], LLM_DYNAMIC_AGENT_PLAN_PROMPT_VERSION)
@@ -4034,6 +4050,10 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertIsNotNone(audit)
         assert audit is not None
         self.assertEqual(audit["diagnostics"]["data_quality"]["status"], "stale")
+        timings = audit["diagnostics"]["stage_timings"]
+        self.assertEqual(timings["completed_stage"], "candidate_decision_execution")
+        self.assertIn("alphasift_screen_seconds", timings)
+        self.assertGreaterEqual(timings["total_seconds"], timings["alphasift_screen_seconds"])
         self.assertEqual(audit["decisions"][0]["reason"], "data_quality_stale")
         self.assertEqual(audit["trade_plans"][0]["status"], "skipped")
         self.assertEqual(audit["trade_plans"][0]["skip_reason"], "data_quality_stale")
@@ -4068,6 +4088,15 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         detail = self.service.agent_repo.list_recent_runs(trigger_source="vnpy_paper_auto", limit=1)[0]
         self.assertEqual(detail["status"], "failed")
         self.assertEqual(detail["error"], "screen boom")
+        audit = self.service.agent_repo.get_run_detail(detail["run_uid"])
+        self.assertIsNotNone(audit)
+        assert audit is not None
+        timings = audit["diagnostics"]["stage_timings"]
+        self.assertEqual(timings["completed_stage"], "alphasift_screen")
+        self.assertIn("planning_seconds", timings)
+        self.assertIn("preflight_seconds", timings)
+        self.assertGreaterEqual(timings["alphasift_screen_seconds"], 0.0)
+        self.assertTrue(any(event["stage"] == "performance" for event in audit["timeline"]))
 
     def test_auto_trade_stop_loss_sells_existing_position_before_new_buys(self) -> None:
         self.service.submit_order(

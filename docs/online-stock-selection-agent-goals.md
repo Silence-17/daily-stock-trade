@@ -78,6 +78,9 @@
 - DSA 已有 Agent 策略 YAML，用于分析视角和风险判断。
 - AlphaSift 调用期可接入 LLM 重排。
 - 自动 Agent 的 AlphaSift LLM 重排已和手工选股拆分运行预算：自动运行默认单次最多等待 45 秒、不重试无效结构化结果，可通过专用环境变量覆盖；失败立即回退 `screen_score`，并把最终策略写入 `diagnostics.alphasift_llm_policy`。真实 gateway 长跑仍需继续验证端到端耗时分布。
+- 自动 Agent 已持久化计划、前置门禁、AlphaSift 筛选、候选决策/执行和总耗时，成功、数据质量阻断与筛选异常路径都能在 Agent 控制台 `performance` 时间线事件中定位耗时；后续生产样本可据此形成阶段耗时基线和长期告警阈值。
+- AlphaSift 预排序上下文已在请求级回调中强制执行声明的 3 候选上限，并复用同票实时行情构建基础面估值；最终 3 个候选的完整新闻/基础面增强改为有界并发并按排名稳定汇总，消除真实 dry-run 中确认的第三方默认 5 候选、重复行情和串行新闻等待。
+- Python 3.13.14 真实服务的三轮同条件 dry-run 均为 3 候选、0 订单：总耗时从 135.36 秒降至 91.91 秒，AlphaSift 从 127.91 秒降至 83.99 秒；最终日志在 snapshot 与 LLM marker 之间严格只有 3 次候选行情调用。当前主要剩余性能瓶颈是已被限制到 45 秒的 LLM 超时，可继续基于持久化耗时做健康熔断和恢复探测。
 - 自动模拟交易会写入 `stock_selection_agent_runs`，记录 run id、触发来源、策略、市场、参数、候选数、成交数、跳过数和诊断。
 - 自动模拟交易 run 诊断新增 `agent_plan`，记录策略、市场、候选数量、每票预算、执行模式、规则派生 `plan_profile`、`execution_policy`、`sizing_plan`、`adaptive_controls`、仓位计划模板、风控预算、候选过滤器、gate 和预期产物。
 - 自动模拟交易设置新增默认关闭的 `auto_llm_plan_enabled`：开启后会在调用 AlphaSift 前生成本轮 `llm_dynamic_plan`，允许 LLM 在已知策略白名单内选择策略，并只在已保存上限内收紧候选数、每票预算和最低分；失败时回退保存配置并落审计。

@@ -3255,7 +3255,8 @@ class DataFetcherManager:
     def get_fundamental_context(
         self,
         stock_code: str,
-        budget_seconds: Optional[float] = None
+        budget_seconds: Optional[float] = None,
+        realtime_quote: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """
         Aggregate fundamental blocks with fail-open semantics.
@@ -3320,7 +3321,9 @@ class DataFetcherManager:
             remaining_seconds = max(0.0, remaining_seconds - consumed_ms / 1000.0)
 
         valuation_timeout = min(fetch_timeout, remaining_seconds)
-        if valuation_timeout > 0:
+        if realtime_quote is not None:
+            quote_payload, valuation_err, valuation_ms = realtime_quote, None, 0
+        elif valuation_timeout > 0:
             quote_payload, valuation_err, valuation_ms = self._run_with_retry(
                 lambda: self.get_realtime_quote(stock_code),
                 valuation_timeout,
@@ -3330,11 +3333,16 @@ class DataFetcherManager:
         else:
             quote_payload, valuation_err, valuation_ms = None, "fundamental stage timeout", 0
 
+        def quote_value(field: str) -> Any:
+            if isinstance(quote_payload, dict):
+                return quote_payload.get(field)
+            return getattr(quote_payload, field, None) if quote_payload else None
+
         valuation_payload = {
-            "pe_ratio": getattr(quote_payload, "pe_ratio", None) if quote_payload else None,
-            "pb_ratio": getattr(quote_payload, "pb_ratio", None) if quote_payload else None,
-            "total_mv": getattr(quote_payload, "total_mv", None) if quote_payload else None,
-            "circ_mv": getattr(quote_payload, "circ_mv", None) if quote_payload else None,
+            "pe_ratio": quote_value("pe_ratio"),
+            "pb_ratio": quote_value("pb_ratio"),
+            "total_mv": quote_value("total_mv"),
+            "circ_mv": quote_value("circ_mv"),
         }
         valuation_status = self._infer_block_status(
             valuation_payload,
