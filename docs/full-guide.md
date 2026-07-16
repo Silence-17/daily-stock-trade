@@ -763,6 +763,8 @@ python main.py --schedule --no-run-immediately
 >
 > 自动 Agent 的 AlphaSift LLM 重排另有独立的跨 run 熔断。默认一次超时、无效结构化输出或明确重排失败后，后续自动 run 在 60 分钟冷却期内直接使用确定性 `screen_score`；冷却到期只允许一个 10 秒半开探测，已有探测执行时并发 run 不会重复调用 LLM。探测占用 5 分钟租约，异常退出后会在租约过期时按失败重新进入冷却。可通过 `VNPY_AUTO_ALPHASIFT_LLM_CIRCUIT_BREAKER_ENABLED`、`VNPY_AUTO_ALPHASIFT_LLM_FAILURE_THRESHOLD`、`VNPY_AUTO_ALPHASIFT_LLM_COOLDOWN_MINUTES` 和 `VNPY_AUTO_ALPHASIFT_LLM_PROBE_TIMEOUT_SEC` 调整。运行诊断与 Agent 时间线会保留熔断前后状态、失败原因和探测结果；该策略不影响手工选股。
 >
+> 模拟交易页可独立开启市场宽度和热点退潮门禁。宽度门禁检查最近持久化 `MarketLightSnapshot.dimensions.breadth.score`；热点退潮门禁比较最近两次快照的 `dimensions.limit.score`，将涨跌停强度回落作为确定性代理。命中或所需快照缺失时只阻断新增买入，原因和完整输入写入 `diagnostics.market_context_risk` 与 Agent 时间线；止损、止盈和其他卖出风险收缩不受影响。该能力基于盘后持久化快照，不代表盘中实时宽度。
+>
 > Agent 控制台通过 `GET /api/v1/vnpy-paper/agent-runs/data-quality-trends` 展示 7/30/90 天跨 run 数据质量趋势，包括 ok/partial/stale/unavailable/unknown 分布、降级率、警告、source error、逐日结果，以及具体 snapshot/daily 和候选上下文 `quote/fund_flow/news` 来源的健康观测。来源表展示观测数、降级次数/比例、最新状态和最新/最大失败计数；缺少整体质量或来源快照的旧 run 不会被推断为健康。
 >
 > Agent 控制台可调用 `POST /api/v1/vnpy-paper/agent-runs/backtest`，复用当前策略、市场和运行时间筛选，按已记录候选价格和严格晚于决策日期的本地日线计算 1/5/10/20 个交易日的覆盖率、胜率、平均/中位收益和平均最大有利/不利波动。默认不联网补行情，也不会重跑策略或触发交易；缺价和未来日线不足会降低覆盖率。它用于评价已记录候选，不等同于 point-in-time 全市场历史策略回放。

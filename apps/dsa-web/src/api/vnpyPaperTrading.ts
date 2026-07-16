@@ -59,6 +59,10 @@ export type VnpyPaperSettings = {
   autoConsecutiveLossCooldownMinutes: number;
   autoMarketLightGateEnabled: boolean;
   autoMarketLightBlockStatuses: string[];
+  autoMarketBreadthGateEnabled: boolean;
+  autoMarketBreadthMinScore: number;
+  autoHotspotRetreatGateEnabled: boolean;
+  autoHotspotRetreatMinDrop: number;
   autoFailureFuseEnabled: boolean;
   autoFailureFuseThreshold: number;
   autoFailureFuseAutoRecoveryEnabled: boolean;
@@ -1165,6 +1169,18 @@ function buildSettingsPayload(payload: VnpyPaperSettingsUpdate): Record<string, 
   }
   if (hasOwn(payload, 'autoMarketLightBlockStatuses')) {
     body.auto_market_light_block_statuses = payload.autoMarketLightBlockStatuses ?? ['red'];
+  }
+  if (hasOwn(payload, 'autoMarketBreadthGateEnabled')) {
+    body.auto_market_breadth_gate_enabled = payload.autoMarketBreadthGateEnabled;
+  }
+  if (hasOwn(payload, 'autoMarketBreadthMinScore')) {
+    body.auto_market_breadth_min_score = payload.autoMarketBreadthMinScore;
+  }
+  if (hasOwn(payload, 'autoHotspotRetreatGateEnabled')) {
+    body.auto_hotspot_retreat_gate_enabled = payload.autoHotspotRetreatGateEnabled;
+  }
+  if (hasOwn(payload, 'autoHotspotRetreatMinDrop')) {
+    body.auto_hotspot_retreat_min_drop = payload.autoHotspotRetreatMinDrop;
   }
   if (hasOwn(payload, 'autoFailureFuseEnabled')) body.auto_failure_fuse_enabled = payload.autoFailureFuseEnabled;
   if (hasOwn(payload, 'autoFailureFuseThreshold')) {

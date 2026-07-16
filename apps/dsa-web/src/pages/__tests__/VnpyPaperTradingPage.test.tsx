@@ -124,6 +124,10 @@ const statusResponse = {
     autoConsecutiveLossCooldownMinutes: 1440,
     autoMarketLightGateEnabled: false,
     autoMarketLightBlockStatuses: ['red'],
+    autoMarketBreadthGateEnabled: false,
+    autoMarketBreadthMinScore: 35,
+    autoHotspotRetreatGateEnabled: false,
+    autoHotspotRetreatMinDrop: 25,
     autoFailureFuseEnabled: false,
     autoFailureFuseThreshold: 3,
     autoFailureFuseAutoRecoveryEnabled: false,
@@ -1913,6 +1917,10 @@ describe('VnpyPaperTradingPage', () => {
     fireEvent.change(screen.getByLabelText('连续亏损冷却（分钟）'), { target: { value: '120' } });
     fireEvent.click(screen.getByLabelText('大盘红绿灯风控'));
     fireEvent.change(screen.getByLabelText('红绿灯拦截'), { target: { value: 'red_yellow' } });
+    fireEvent.click(screen.getByLabelText('市场宽度风控'));
+    fireEvent.change(screen.getByLabelText('最低市场宽度分'), { target: { value: '42' } });
+    fireEvent.click(screen.getByLabelText('热点退潮风控'));
+    fireEvent.change(screen.getByLabelText('热点强度最小回落分'), { target: { value: '30' } });
     fireEvent.click(screen.getByLabelText('连续失败熔断'));
     fireEvent.change(screen.getByLabelText('熔断阈值'), { target: { value: '2' } });
     fireEvent.click(screen.getByLabelText('熔断冷却后自动恢复'));
@@ -1977,6 +1985,10 @@ describe('VnpyPaperTradingPage', () => {
         autoConsecutiveLossCooldownMinutes: 120,
         autoMarketLightGateEnabled: true,
         autoMarketLightBlockStatuses: ['red', 'yellow'],
+        autoMarketBreadthGateEnabled: true,
+        autoMarketBreadthMinScore: 42,
+        autoHotspotRetreatGateEnabled: true,
+        autoHotspotRetreatMinDrop: 30,
         autoFailureFuseEnabled: true,
         autoFailureFuseThreshold: 2,
         autoFailureFuseAutoRecoveryEnabled: true,

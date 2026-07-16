@@ -1510,6 +1510,37 @@ class StockSelectionAgentRepository:
                 }
             )
 
+        market_context_risk = (
+            diagnostics.get("market_context_risk") if isinstance(diagnostics, dict) else None
+        )
+        if isinstance(market_context_risk, dict) and market_context_risk.get("enabled"):
+            risk_status = str(market_context_risk.get("status") or "unknown")
+            risk_reason = str(market_context_risk.get("reason") or "").strip()
+            breadth = (
+                market_context_risk.get("market_breadth")
+                if isinstance(market_context_risk.get("market_breadth"), dict)
+                else {}
+            )
+            retreat = (
+                market_context_risk.get("hotspot_retreat")
+                if isinstance(market_context_risk.get("hotspot_retreat"), dict)
+                else {}
+            )
+            timeline.append(
+                {
+                    "stage": "market_context_risk",
+                    "status": risk_status,
+                    "message": (
+                        f"Market context risk {risk_status}"
+                        + (f": {risk_reason}" if risk_reason else "")
+                        + f", breadth={breadth.get('score')}"
+                        + f", hotspot_drop={retreat.get('score_drop')}"
+                    ),
+                    "timestamp": started_at,
+                    "details": dict(market_context_risk),
+                }
+            )
+
         if decisions:
             reason_counts: Dict[str, int] = {}
             action_counts: Dict[str, int] = {}

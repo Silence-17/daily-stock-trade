@@ -57,6 +57,10 @@ class VnpyPaperSettings(BaseModel):
     auto_consecutive_loss_cooldown_minutes: int = Field(1440, ge=1, le=10080)
     auto_market_light_gate_enabled: bool = False
     auto_market_light_block_statuses: List[Literal["red", "yellow"]] = Field(default_factory=lambda: ["red"])
+    auto_market_breadth_gate_enabled: bool = False
+    auto_market_breadth_min_score: int = Field(35, ge=0, le=100)
+    auto_hotspot_retreat_gate_enabled: bool = False
+    auto_hotspot_retreat_min_drop: int = Field(25, ge=1, le=100)
     auto_failure_fuse_enabled: bool = False
     auto_failure_fuse_threshold: int = Field(3, ge=2, le=20)
     auto_failure_fuse_auto_recovery_enabled: bool = False
@@ -126,6 +130,10 @@ class VnpyPaperSettingsUpdate(BaseModel):
     auto_consecutive_loss_cooldown_minutes: Optional[int] = Field(None, ge=1, le=10080)
     auto_market_light_gate_enabled: Optional[bool] = None
     auto_market_light_block_statuses: Optional[List[Literal["red", "yellow"]]] = None
+    auto_market_breadth_gate_enabled: Optional[bool] = None
+    auto_market_breadth_min_score: Optional[int] = Field(None, ge=0, le=100)
+    auto_hotspot_retreat_gate_enabled: Optional[bool] = None
+    auto_hotspot_retreat_min_drop: Optional[int] = Field(None, ge=1, le=100)
     auto_failure_fuse_enabled: Optional[bool] = None
     auto_failure_fuse_threshold: Optional[int] = Field(None, ge=2, le=20)
     auto_failure_fuse_auto_recovery_enabled: Optional[bool] = None

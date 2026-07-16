@@ -2236,6 +2236,167 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertEqual(audit["decisions"][0]["reason"], "market_light_yellow")
         self.assertEqual(audit["trade_plans"][0]["skip_reason"], "market_light_yellow")
 
+    def test_auto_trade_respects_market_breadth_gate_and_audits_snapshot(self) -> None:
+        self.service.update_settings(
+            {
+                "auto_trade_enabled": True,
+                "auto_strategy": "dual_low",
+                "auto_max_results": 1,
+                "auto_cash_per_order": 1200,
+                "auto_trade_time_gate_enabled": False,
+                "auto_market_breadth_gate_enabled": True,
+                "auto_market_breadth_min_score": 40,
+            }
+        )
+        fake_alphasift = MagicMock()
+        fake_alphasift.screen.return_value = {
+            "candidates": [
+                {"code": "600519", "name": "贵州茅台", "score": 80, "price": 10.0},
+            ],
+            "warnings": [],
+        }
+        snapshot = {
+            "region": "cn",
+            "trade_date": "2026-07-02",
+            "status": "green",
+            "score": 65,
+            "dimensions": {
+                "breadth": {"score": 28, "available": True},
+                "index": {"score": 70, "available": True},
+                "limit": {"score": 80, "available": True},
+            },
+        }
+
+        with patch(
+            "src.services.vnpy_paper_trading_service.AlphaSiftService",
+            return_value=fake_alphasift,
+        ), patch(
+            "src.services.vnpy_paper_trading_service.load_previous_snapshot",
+            return_value=snapshot,
+        ):
+            result = self.service.run_auto_trade_once()
+
+        self.assertEqual(result["submitted_count"], 0)
+        self.assertEqual(result["orders"][0]["reason"], "market_breadth_below_threshold")
+        audit = self.service.agent_repo.get_run_detail(result["agent_run_uid"])
+        assert audit is not None
+        diagnostics = audit["diagnostics"]["market_context_risk"]
+        self.assertEqual(diagnostics["status"], "blocked")
+        self.assertEqual(diagnostics["market_breadth"]["score"], 28)
+        self.assertEqual(diagnostics["market_breadth"]["min_score"], 40)
+        self.assertEqual(audit["decisions"][0]["reason"], "market_breadth_below_threshold")
+        timeline = next(
+            item for item in audit["timeline"] if item["stage"] == "market_context_risk"
+        )
+        self.assertEqual(timeline["status"], "blocked")
+        self.assertIn("breadth=28", timeline["message"])
+
+    def test_auto_trade_respects_hotspot_retreat_gate(self) -> None:
+        self.service.update_settings(
+            {
+                "auto_trade_enabled": True,
+                "auto_strategy": "dual_low",
+                "auto_max_results": 1,
+                "auto_cash_per_order": 1200,
+                "auto_trade_time_gate_enabled": False,
+                "auto_hotspot_retreat_gate_enabled": True,
+                "auto_hotspot_retreat_min_drop": 25,
+            }
+        )
+        fake_alphasift = MagicMock()
+        fake_alphasift.screen.return_value = {
+            "candidates": [
+                {"code": "600519", "name": "贵州茅台", "score": 80, "price": 10.0},
+            ],
+            "warnings": [],
+        }
+        current = {
+            "region": "cn",
+            "trade_date": "2026-07-02",
+            "status": "green",
+            "score": 62,
+            "dimensions": {
+                "breadth": {"score": 58, "available": True},
+                "index": {"score": 65, "available": True},
+                "limit": {"score": 45, "available": True},
+            },
+        }
+        previous = {
+            "region": "cn",
+            "trade_date": "2026-07-01",
+            "status": "green",
+            "score": 78,
+            "dimensions": {
+                "breadth": {"score": 70, "available": True},
+                "index": {"score": 75, "available": True},
+                "limit": {"score": 80, "available": True},
+            },
+        }
+
+        with patch(
+            "src.services.vnpy_paper_trading_service.AlphaSiftService",
+            return_value=fake_alphasift,
+        ), patch(
+            "src.services.vnpy_paper_trading_service.load_previous_snapshot",
+            side_effect=[current, previous],
+        ):
+            result = self.service.run_auto_trade_once()
+
+        self.assertEqual(result["submitted_count"], 0)
+        self.assertEqual(result["orders"][0]["reason"], "hotspot_retreat_detected")
+        audit = self.service.agent_repo.get_run_detail(result["agent_run_uid"])
+        assert audit is not None
+        retreat = audit["diagnostics"]["market_context_risk"]["hotspot_retreat"]
+        self.assertEqual(retreat["current_score"], 45)
+        self.assertEqual(retreat["previous_score"], 80)
+        self.assertEqual(retreat["score_drop"], 35)
+        self.assertEqual(retreat["proxy"], "market_light_limit_dimension")
+
+    def test_hotspot_retreat_gate_fails_closed_without_previous_snapshot(self) -> None:
+        settings = replace(
+            self.service.get_settings(),
+            auto_hotspot_retreat_gate_enabled=True,
+            auto_hotspot_retreat_min_drop=25,
+        )
+        current = {
+            "region": "cn",
+            "trade_date": "2026-07-02",
+            "status": "green",
+            "score": 62,
+            "dimensions": {
+                "breadth": {"score": 58, "available": True},
+                "index": {"score": 65, "available": True},
+                "limit": {"score": 45, "available": True},
+            },
+        }
+
+        with patch(
+            "src.services.vnpy_paper_trading_service.load_previous_snapshot",
+            side_effect=[current, None],
+        ):
+            reason, diagnostics = self.service._market_context_pre_trade_risk(settings)
+
+        self.assertEqual(reason, "hotspot_retreat_unavailable")
+        self.assertEqual(diagnostics["status"], "blocked")
+        self.assertIsNone(diagnostics["hotspot_retreat"]["previous_score"])
+
+    def test_market_breadth_gate_fails_closed_without_latest_snapshot(self) -> None:
+        settings = replace(
+            self.service.get_settings(),
+            auto_market_breadth_gate_enabled=True,
+        )
+
+        with patch(
+            "src.services.vnpy_paper_trading_service.load_previous_snapshot",
+            return_value=None,
+        ):
+            reason, diagnostics = self.service._market_context_pre_trade_risk(settings)
+
+        self.assertEqual(reason, "market_breadth_unavailable")
+        self.assertEqual(diagnostics["status"], "unavailable")
+        self.assertEqual(diagnostics["reason"], "market_breadth_unavailable")
+        self.assertEqual(diagnostics["evidence_reason"], "market_context_missing")
+
     def test_auto_trade_failure_fuse_skips_after_consecutive_failed_runs(self) -> None:
         self.service.update_settings(
             {

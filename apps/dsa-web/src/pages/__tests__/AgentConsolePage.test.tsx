@@ -345,6 +345,12 @@ const runDetail = {
     timestamp: '2026-07-01T09:30:00Z',
     details: {},
   }, {
+    stage: 'market_context_risk',
+    status: 'blocked',
+    message: 'Market context risk blocked: market_breadth_below_threshold, breadth=28, hotspot_drop=null',
+    timestamp: '2026-07-01T09:30:00Z',
+    details: {},
+  }, {
     stage: 'candidate_decisions',
     status: 'completed',
     message: '2 candidate decisions: buy=1, skip=1',
@@ -831,6 +837,8 @@ describe('AgentConsolePage', () => {
     expect(screen.getByText('2 candidate decisions: buy=1, skip=1')).toBeInTheDocument();
     expect(screen.getByText('llm_ranking_health · skipped')).toBeInTheDocument();
     expect(screen.getByText(/decision=circuit_open, result=skipped, state=open/)).toBeInTheDocument();
+    expect(screen.getByText('market_context_risk · blocked')).toBeInTheDocument();
+    expect(screen.getByText(/market_breadth_below_threshold, breadth=28/)).toBeInTheDocument();
     expect(screen.getByTestId('agent-workflow')).toHaveTextContent('execution');
     expect(screen.getByTestId('agent-workflow')).toHaveTextContent('monitor_positions_and_events');
     expect(screen.getByText('Candidate review warning')).toBeInTheDocument();
