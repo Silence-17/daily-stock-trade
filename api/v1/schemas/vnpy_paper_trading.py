@@ -443,6 +443,16 @@ class VnpyPaperStatusResponse(BaseModel):
     diagnostics: Dict[str, Any] = Field(default_factory=dict)
 
 
+class VnpyPaperGatewayReconnectResponse(BaseModel):
+    attempted: bool = False
+    connected: bool = False
+    status: str = "unavailable"
+    result: str = "unavailable"
+    reason: Optional[str] = None
+    connect: Dict[str, Any] = Field(default_factory=dict)
+    reconnect: Dict[str, Any] = Field(default_factory=dict)
+
+
 class VnpyPaperPerformanceResponse(BaseModel):
     account: Optional[Dict[str, Any]] = None
     initial_cash: float = 0.0

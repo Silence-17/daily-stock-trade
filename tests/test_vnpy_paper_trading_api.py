@@ -460,6 +460,71 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
         self.assertEqual(component["auto_reconnect_last_result"], "failed")
         self.assertIn("自动重连监控运行中", component["detail"])
 
+    def test_manual_gateway_reconnect_returns_runtime_audit(self) -> None:
+        class RuntimeHandle:
+            def __init__(self) -> None:
+                self.diagnostics = {
+                    "auto_reconnect": {
+                        "attempt_count": 0,
+                        "success_count": 0,
+                    },
+                    "connect": {
+                        "status": "disconnected",
+                        "connected": False,
+                    },
+                }
+
+            def run_manual_reconnect(self):
+                reconnect = self.diagnostics["auto_reconnect"]
+                reconnect.update(
+                    {
+                        "attempt_count": 1,
+                        "success_count": 1,
+                        "last_check_result": "reconnect_attempted",
+                        "last_result": "reconnected",
+                        "last_trigger": "manual",
+                    }
+                )
+                self.diagnostics["connect"] = {
+                    "status": "connected",
+                    "connected": True,
+                    "reason": None,
+                    "confirmation_source": "get_state_snapshot",
+                }
+                return reconnect
+
+            def refresh_diagnostics(self):
+                return self.diagnostics
+
+        original = getattr(self.client.app.state, "vnpy_runtime_handle", None)
+        self.client.app.state.vnpy_runtime_handle = RuntimeHandle()
+        try:
+            response = self.client.post("/api/v1/vnpy-paper/gateway/reconnect")
+        finally:
+            self.client.app.state.vnpy_runtime_handle = original
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["attempted"])
+        self.assertTrue(payload["connected"])
+        self.assertEqual(payload["status"], "connected")
+        self.assertEqual(payload["result"], "reconnected")
+        self.assertEqual(payload["reconnect"]["last_trigger"], "manual")
+
+    def test_manual_gateway_reconnect_reports_unavailable_runtime(self) -> None:
+        original = getattr(self.client.app.state, "vnpy_runtime_handle", None)
+        self.client.app.state.vnpy_runtime_handle = None
+        try:
+            response = self.client.post("/api/v1/vnpy-paper/gateway/reconnect")
+        finally:
+            self.client.app.state.vnpy_runtime_handle = original
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(
+            response.json()["error"],
+            "vnpy_runtime_unavailable",
+        )
+
     def test_status_and_manual_order_use_local_paper_account(self) -> None:
         with patch(
             "api.v1.endpoints.vnpy_paper_trading.VnpyPaperTradingService",

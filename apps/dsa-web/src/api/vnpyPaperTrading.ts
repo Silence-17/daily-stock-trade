@@ -773,6 +773,16 @@ export type VnpyPaperAgentDataQualityTrends = {
   filters?: Record<string, unknown>;
 };
 
+export type VnpyPaperGatewayReconnectResponse = {
+  attempted: boolean;
+  connected: boolean;
+  status: string;
+  result: string;
+  reason?: string | null;
+  connect: Record<string, unknown>;
+  reconnect: Record<string, unknown>;
+};
+
 export type VnpyPaperAgentReturnRiskCalibrationDailyItem = {
   date: string;
   runSnapshotCount: number;
@@ -1358,6 +1368,13 @@ export const vnpyPaperTradingApi = {
       ? await apiClient.get<Record<string, unknown>>('/api/v1/vnpy-paper/status', { params })
       : await apiClient.get<Record<string, unknown>>('/api/v1/vnpy-paper/status');
     return toCamelCase<VnpyPaperStatusResponse>(response.data);
+  },
+
+  async reconnectGateway(): Promise<VnpyPaperGatewayReconnectResponse> {
+    const response = await apiClient.post<Record<string, unknown>>(
+      '/api/v1/vnpy-paper/gateway/reconnect',
+    );
+    return toCamelCase<VnpyPaperGatewayReconnectResponse>(response.data);
   },
 
   async getTaskHealth(): Promise<VnpyPaperTaskHealthResponse> {

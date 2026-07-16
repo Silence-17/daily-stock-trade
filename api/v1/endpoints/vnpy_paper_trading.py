@@ -34,6 +34,7 @@ from api.v1.schemas.vnpy_paper_trading import (
     VnpyPaperAgentRunListResponse,
     VnpyPaperAutoRunRequest,
     VnpyPaperAutoRunResponse,
+    VnpyPaperGatewayReconnectResponse,
     VnpyPaperOrderRequest,
     VnpyPaperOrderResult,
     VnpyPaperPerformanceResponse,
@@ -1737,6 +1738,70 @@ def get_vnpy_paper_status(
         )
     except Exception as exc:
         raise _internal_error("Get vn.py paper trading status failed", exc)
+
+
+@router.post(
+    "/gateway/reconnect",
+    response_model=VnpyPaperGatewayReconnectResponse,
+    responses={
+        503: {"model": ErrorResponse},
+        500: {"model": ErrorResponse},
+    },
+    summary="Request one safe vn.py gateway reconnect",
+)
+def reconnect_vnpy_gateway(request: Request) -> VnpyPaperGatewayReconnectResponse:
+    runtime_handle = getattr(request.app.state, "vnpy_runtime_handle", None)
+    reconnect = getattr(runtime_handle, "run_manual_reconnect", None)
+    if not callable(reconnect):
+        raise api_error(
+            503,
+            "vnpy_runtime_unavailable",
+            "vn.py runtime reconnect is not available in this process",
+        )
+    try:
+        before = getattr(runtime_handle, "diagnostics", {}).get(
+            "auto_reconnect",
+            {},
+        )
+        before_attempts = int(before.get("attempt_count") or 0)
+        reconnect_state = reconnect()
+        diagnostics = runtime_handle.refresh_diagnostics()
+        connect_state = diagnostics.get("connect")
+        if not isinstance(connect_state, dict):
+            connect_state = {}
+        reconnect_state = (
+            dict(reconnect_state)
+            if isinstance(reconnect_state, dict)
+            else {}
+        )
+        attempted = int(reconnect_state.get("attempt_count") or 0) > before_attempts
+        return VnpyPaperGatewayReconnectResponse.model_validate(
+            {
+                "attempted": attempted,
+                "connected": connect_state.get("connected") is True,
+                "status": str(connect_state.get("status") or "unavailable"),
+                "result": str(
+                    (
+                        reconnect_state.get("last_result")
+                        if attempted
+                        else reconnect_state.get("last_check_result")
+                    )
+                    or reconnect_state.get("last_result")
+                    or "unavailable"
+                ),
+                "reason": (
+                    connect_state.get("reason")
+                    if attempted
+                    else reconnect_state.get("last_check_reason")
+                ),
+                "connect": connect_state,
+                "reconnect": reconnect_state,
+            }
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _internal_error("Reconnect vn.py gateway failed", exc)
 
 
 @router.get(
