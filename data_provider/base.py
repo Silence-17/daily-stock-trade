@@ -27,7 +27,11 @@ import numpy as np
 from src.data.stock_index_loader import get_index_stock_name
 from src.data.stock_mapping import STOCK_NAME_MAP, is_meaningful_stock_name
 from src.services.market_symbol_utils import is_suffix_market_symbol
-from src.services.run_diagnostics import record_provider_run, record_provider_run_started
+from src.services.run_diagnostics import (
+    record_provider_run,
+    record_provider_run_started,
+    sanitize_diagnostic_text,
+)
 from .fundamental_adapter import AkshareFundamentalAdapter
 from .yfinance_fundamental_adapter import YfinanceFundamentalAdapter
 from .realtime_types import CircuitBreaker
@@ -625,6 +629,7 @@ class DataFetcherManager:
         "AlphaVantageFetcher": {"us"},
     }
     _daily_source_health = CircuitBreaker(failure_threshold=3, cooldown_seconds=300.0)
+    _realtime_source_health = CircuitBreaker(failure_threshold=3, cooldown_seconds=300.0)
     _CONCEPT_RANKINGS_CACHE_TTL_SECONDS = 300.0
     _CONCEPT_RANKINGS_EMPTY_CACHE_TTL_SECONDS = 30.0
     _concept_rankings_cache_lock = RLock()
@@ -829,6 +834,74 @@ class DataFetcherManager:
     def reset_daily_source_health(cls) -> None:
         """Reset daily source health state for tests/admin diagnostics."""
         cls._daily_source_health.reset()
+
+    @classmethod
+    def _realtime_health_key(cls, source: str, market: str) -> str:
+        return f"realtime_quote:{str(market or 'unknown').lower()}:{str(source or 'unknown').lower()}"
+
+    @classmethod
+    def _is_realtime_source_available(cls, source: str, market: str) -> bool:
+        key = cls._realtime_health_key(source, market)
+        if cls._realtime_source_health.is_available(key):
+            return True
+        logger.info(
+            "[数据源健康度] %s 实时行情跳过短期熔断的数据源: %s",
+            market,
+            source,
+        )
+        return False
+
+    @classmethod
+    def _record_realtime_source_success(cls, source: str, market: str) -> None:
+        cls._realtime_source_health.record_success(cls._realtime_health_key(source, market))
+
+    @classmethod
+    def _record_realtime_source_failure(
+        cls,
+        source: str,
+        market: str,
+        error: str,
+    ) -> None:
+        cls._realtime_source_health.record_failure(
+            cls._realtime_health_key(source, market),
+            error=error,
+        )
+
+    @classmethod
+    def _record_realtime_source_inconclusive(cls, source: str, market: str) -> None:
+        cls._realtime_source_health.record_inconclusive(
+            cls._realtime_health_key(source, market)
+        )
+
+    @classmethod
+    def realtime_source_health_snapshot(cls) -> Dict[str, Dict[str, Any]]:
+        """Return provider health without consuming a half-open probe slot."""
+        prefix = "realtime_quote:"
+        result: Dict[str, Dict[str, Any]] = {}
+        for key, value in cls._realtime_source_health.get_snapshot().items():
+            if not key.startswith(prefix):
+                continue
+            state = dict(value)
+            state["last_error"] = sanitize_diagnostic_text(
+                state.get("last_error"),
+                max_length=200,
+            ) or None
+            result[key[len(prefix):].replace(":", "/", 1)] = state
+        return result
+
+    @classmethod
+    def realtime_source_health_policy(cls) -> Dict[str, Any]:
+        return {
+            "mode": "circuit_breaker_failover",
+            "failure_threshold": int(cls._realtime_source_health.failure_threshold),
+            "cooldown_seconds": float(cls._realtime_source_health.cooldown_seconds),
+            "half_open_max_calls": int(cls._realtime_source_health.half_open_max_calls),
+        }
+
+    @classmethod
+    def reset_realtime_source_health(cls) -> None:
+        """Reset manager-level realtime provider health for tests/admin diagnostics."""
+        cls._realtime_source_health.reset()
 
     def _get_cached_stock_name(self, stock_code: str) -> Optional[str]:
         self._ensure_concurrency_guards()
@@ -1818,7 +1891,12 @@ class DataFetcherManager:
 
         if is_jp or is_kr or is_tw:
             market_label = "日股" if is_jp else "韩股" if is_kr else "台股"
-            quote = self._try_fetcher_quote(stock_code, "YfinanceFetcher")
+            health_market = "jp" if is_jp else "kr" if is_kr else "tw"
+            quote = self._try_fetcher_quote(
+                stock_code,
+                "YfinanceFetcher",
+                health_market=health_market,
+            )
             if quote is not None:
                 logger.info(f"[实时行情] {market_label} {stock_code} 成功获取 (来源: YfinanceFetcher)")
                 return self._enrich_realtime_quote(
@@ -1845,18 +1923,31 @@ class DataFetcherManager:
                 secondary_kw = {"source": "hk"} if secondary_src == "AkshareFetcher" else {}
 
             primary_token = self._realtime_fetcher_token(primary_src, **primary_kw)
-            primary_quote = self._try_fetcher_quote(stock_code, primary_src, **primary_kw)
+            health_market = "us" if is_us else "hk"
+            primary_quote = self._try_fetcher_quote(
+                stock_code,
+                primary_src,
+                health_market=health_market,
+                **primary_kw,
+            )
             fallback_from = primary_token if primary_quote is None else None
             if primary_quote is not None:
                 logger.info(f"[实时行情] {market_label} {stock_code} 成功获取 (来源: {primary_src})")
             primary_quote = self._supplement_quote(
-                stock_code, primary_quote, secondary_src, **secondary_kw,
+                stock_code,
+                primary_quote,
+                secondary_src,
+                health_market=health_market,
+                **secondary_kw,
             )
             # 美股个股（非指数）尝试从 Finnhub/AlphaVantage 补充缺失字段
             if is_us and not is_us_index and primary_quote is not None:
                 for extra_src in ["FinnhubFetcher", "AlphaVantageFetcher"]:
                     primary_quote = self._supplement_quote(
-                        stock_code, primary_quote, extra_src,
+                        stock_code,
+                        primary_quote,
+                        extra_src,
+                        health_market=health_market,
                     )
             if primary_quote is not None:
                 return self._enrich_realtime_quote(
@@ -1886,6 +1977,21 @@ class DataFetcherManager:
             attempt_start = time.time()
             fallback_to = source_priority[source_index + 1] if source_index + 1 < len(source_priority) else None
             fetcher = None
+            if not self._is_realtime_source_available(source, "cn"):
+                record_provider_run(
+                    data_type="realtime_quote",
+                    provider=source,
+                    operation="get_realtime_quote",
+                    success=False,
+                    latency_ms=0,
+                    error_type="CircuitOpen",
+                    error_message="realtime source cooling down",
+                    fallback_to=fallback_to,
+                    record_count=0,
+                )
+                if primary_quote is None:
+                    failed_sources.append(source)
+                continue
             try:
                 quote = None
                 
@@ -1952,6 +2058,7 @@ class DataFetcherManager:
                 provider_name = fetcher.name if fetcher is not None else source
                 
                 if quote is not None and quote.has_basic_data():
+                    self._record_realtime_source_success(source, "cn")
                     record_provider_run(
                         data_type="realtime_quote",
                         provider=provider_name,
@@ -1989,6 +2096,7 @@ class DataFetcherManager:
                         if not self._quote_needs_supplement(primary_quote):
                             break
                 else:
+                    self._record_realtime_source_inconclusive(source, "cn")
                     record_provider_run(
                         data_type="realtime_quote",
                         provider=provider_name,
@@ -2006,6 +2114,7 @@ class DataFetcherManager:
             except Exception as e:
                 error_msg = f"[{source}] 失败: {str(e)}"
                 error_type, error_reason = summarize_exception(e)
+                self._record_realtime_source_failure(source, "cn", error_reason)
                 record_provider_run(
                     data_type="realtime_quote",
                     provider=getattr(fetcher, "name", source),
@@ -2081,7 +2190,14 @@ class DataFetcherManager:
             capability=capability,
         ) is not None
 
-    def _try_fetcher_quote(self, stock_code: str, fetcher_name: str, **kw):
+    def _try_fetcher_quote(
+        self,
+        stock_code: str,
+        fetcher_name: str,
+        *,
+        health_market: str = "unknown",
+        **kw,
+    ):
         """Try to get a realtime quote from a named fetcher; returns quote or None."""
         fetcher = self._get_fetcher_by_name(fetcher_name, capability="realtime_quote")
         if fetcher is None or not hasattr(fetcher, 'get_realtime_quote'):
@@ -2094,6 +2210,19 @@ class DataFetcherManager:
                 error_message="fetcher unavailable",
             )
             return None
+        source_token = self._realtime_fetcher_token(fetcher_name, **kw)
+        if not self._is_realtime_source_available(source_token, health_market):
+            record_provider_run(
+                data_type="realtime_quote",
+                provider=fetcher.name,
+                operation="get_realtime_quote",
+                success=False,
+                latency_ms=0,
+                error_type="CircuitOpen",
+                error_message="realtime source cooling down",
+                record_count=0,
+            )
+            return None
         attempt_start = time.time()
         try:
             record_provider_run_started(
@@ -2103,6 +2232,7 @@ class DataFetcherManager:
             )
             q = self._call_fetcher_method(fetcher, 'get_realtime_quote', stock_code, **kw)
             if q is not None and q.has_basic_data():
+                self._record_realtime_source_success(source_token, health_market)
                 record_provider_run(
                     data_type="realtime_quote",
                     provider=fetcher.name,
@@ -2112,6 +2242,7 @@ class DataFetcherManager:
                     record_count=1,
                 )
                 return q
+            self._record_realtime_source_inconclusive(source_token, health_market)
             record_provider_run(
                 data_type="realtime_quote",
                 provider=fetcher.name,
@@ -2124,6 +2255,7 @@ class DataFetcherManager:
             )
         except Exception as e:
             error_type, error_reason = summarize_exception(e)
+            self._record_realtime_source_failure(source_token, health_market, error_reason)
             record_provider_run(
                 data_type="realtime_quote",
                 provider=fetcher.name,

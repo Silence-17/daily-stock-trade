@@ -1309,6 +1309,15 @@ class AlphaSiftService:
         candidates = _normalize_candidates(raw_data)
         selected = candidates[:max_results]
         selected, dsa_enrichment = _enrich_candidates_with_dsa(selected)
+        candidate_context_routing = (
+            dsa_enrichment.get("source_routing")
+            if isinstance(dsa_enrichment, dict)
+            and isinstance(dsa_enrichment.get("source_routing"), dict)
+            else None
+        )
+        if candidate_context_routing:
+            source_routing = dict(source_routing)
+            source_routing["candidate_context"] = candidate_context_routing
         source_health = _get_alphasift_source_health_snapshot(self.config)
         context_source_health = (
             dsa_enrichment.get("source_health")
@@ -3660,6 +3669,22 @@ def get_dsa_realtime_quote(stock_code: str) -> Dict[str, Any]:
     return _remove_non_finite_json_values(payload if isinstance(payload, dict) else {})
 
 
+def _get_dsa_realtime_source_routing() -> Dict[str, Any]:
+    try:
+        manager = _get_dsa_fetcher_manager()
+        snapshot_getter = getattr(manager, "realtime_source_health_snapshot", None)
+        policy_getter = getattr(manager, "realtime_source_health_policy", None)
+        snapshot = snapshot_getter() if callable(snapshot_getter) else {}
+        policy = policy_getter() if callable(policy_getter) else {}
+        routing = dict(policy) if isinstance(policy, dict) else {}
+        routing.setdefault("mode", "circuit_breaker_failover")
+        routing["sources"] = snapshot if isinstance(snapshot, dict) else {}
+        return _remove_non_finite_json_values(routing)
+    except Exception as exc:  # noqa: BLE001 - diagnostics must not block screening.
+        logger.debug("Failed to read DSA realtime source health: %s", exc)
+        return {"mode": "circuit_breaker_failover", "sources": {}}
+
+
 def get_dsa_fundamental_context(
     stock_code: str,
     *,
@@ -3794,6 +3819,9 @@ def _enrich_candidates_with_dsa(candidates: List[Dict[str, Any]]) -> Tuple[List[
         "enriched_count": enriched_count,
         "warnings": _dedupe_strings(warnings),
         "source_health": _summarize_dsa_candidate_context_source_health(candidates[:limit]),
+        "source_routing": {
+            "quote": _get_dsa_realtime_source_routing(),
+        },
     }
 
 

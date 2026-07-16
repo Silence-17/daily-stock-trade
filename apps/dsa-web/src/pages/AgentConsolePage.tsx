@@ -526,6 +526,15 @@ const AgentConsolePage: React.FC = () => {
     ?? asRecord(selectedDiagnostics?.source_routing)
   );
   const selectedSourceRoutingItems = asRecordList(selectedSourceRouting?.sources);
+  const selectedCandidateContextRouting = (
+    asRecord(selectedSourceRouting?.candidateContext)
+    ?? asRecord(selectedSourceRouting?.candidate_context)
+  );
+  const selectedQuoteRouting = asRecord(selectedCandidateContextRouting?.quote);
+  const selectedQuoteRoutingSources = asRecord(selectedQuoteRouting?.sources);
+  const selectedQuoteRoutingItems = Object.entries(selectedQuoteRoutingSources || {})
+    .map(([source, raw]) => ({ source, state: asRecord(raw) }))
+    .filter((item) => item.state);
   const selectedPortfolioOptimizer = asRecord(selectedPortfolioAllocation?.optimizer);
   const selectedPlanProfile = asRecord(selectedPlan?.planProfile) ?? asRecord(selectedPlan?.plan_profile);
   const selectedAdaptiveControls = (
@@ -2354,6 +2363,21 @@ const AgentConsolePage: React.FC = () => {
                                     .join(' / ')}`
                                   : ''}
                               </div>
+                              {selectedQuoteRoutingItems.length > 0 ? (
+                                <div className="text-xs font-normal text-secondary-text">
+                                  实时行情：
+                                  {selectedQuoteRoutingItems.map(({ source, state }) => {
+                                    const failures = Number(state?.failures || 0);
+                                    const cooldown = Number(
+                                      state?.cooldownRemainingSeconds
+                                      ?? state?.cooldown_remaining_seconds
+                                      ?? 0,
+                                    );
+                                    return `${source} ${String(state?.state || '-')}`
+                                      + `（失败 ${failures}${cooldown > 0 ? `，冷却 ${cooldown}s` : ''}）`;
+                                  }).join(' / ')}
+                                </div>
+                              ) : null}
                             </dd>
                           </div>
                         ) : null}
