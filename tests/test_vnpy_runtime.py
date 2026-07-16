@@ -491,6 +491,114 @@ class VnpyRuntimeTestCase(unittest.TestCase):
         self.assertEqual(second["current_interval_seconds"], 5)
         self.assertIsNotNone(second["backoff_reset_at"])
 
+    def test_reconnect_events_are_deduplicated_and_drained_on_close(self) -> None:
+        installed = _install_fake_vnpy_runtime_modules()
+        events = []
+        try:
+            handle = bootstrap_vnpy_runtime(
+                settings=VnpyRuntimeSettings(
+                    enabled=True,
+                    gateway_class="fake_vnpy_gateway:RecoveringGateway",
+                    gateway_name="RECOVERING",
+                    connect_on_start=True,
+                    auto_attach_events=False,
+                    auto_reconnect_enabled=True,
+                    auto_reconnect_interval_seconds=5,
+                    auto_reconnect_max_interval_seconds=300,
+                ),
+                event_sink=lambda **event: events.append(event),
+            )
+            handle.run_auto_reconnect_check()
+            handle.run_auto_reconnect_check()
+        finally:
+            handle.close()
+            _restore_modules(installed)
+
+        self.assertEqual(
+            [event["event_type"] for event in events],
+            [
+                "vnpy_gateway_reconnect_failed",
+                "vnpy_gateway_reconnected",
+            ],
+        )
+        self.assertEqual(events[0]["status"], "failed")
+        self.assertEqual(events[1]["status"], "resolved")
+        self.assertEqual(events[0]["diagnostics"]["gateway_name"], "RECOVERING")
+        self.assertNotIn("settings_path", events[0]["diagnostics"])
+
+    def test_repeated_reconnect_failures_emit_one_open_event(self) -> None:
+        installed = _install_fake_vnpy_runtime_modules()
+        events = []
+        try:
+            handle = bootstrap_vnpy_runtime(
+                settings=VnpyRuntimeSettings(
+                    enabled=True,
+                    gateway_class="fake_vnpy_gateway:FailingGateway",
+                    gateway_name="FAIL",
+                    connect_on_start=True,
+                    auto_attach_events=False,
+                    auto_reconnect_enabled=True,
+                    auto_reconnect_interval_seconds=5,
+                    auto_reconnect_max_interval_seconds=300,
+                ),
+                event_sink=lambda **event: events.append(event),
+            )
+            handle.run_auto_reconnect_check()
+            handle.run_auto_reconnect_check()
+        finally:
+            handle.close()
+            _restore_modules(installed)
+
+        self.assertEqual(
+            [event["event_type"] for event in events],
+            ["vnpy_gateway_reconnect_failed"],
+        )
+
+    def test_reconnect_backoff_cap_emits_degraded_event(self) -> None:
+        installed = _install_fake_vnpy_runtime_modules()
+        events = []
+        try:
+            handle = bootstrap_vnpy_runtime(
+                settings=VnpyRuntimeSettings(
+                    enabled=True,
+                    gateway_class="fake_vnpy_gateway:FailingGateway",
+                    gateway_name="FAIL",
+                    connect_on_start=True,
+                    auto_attach_events=False,
+                    auto_reconnect_enabled=True,
+                    auto_reconnect_interval_seconds=5,
+                    auto_reconnect_max_interval_seconds=8,
+                ),
+                event_sink=lambda **event: events.append(event),
+            )
+            handle.run_auto_reconnect_check()
+        finally:
+            handle.close()
+            _restore_modules(installed)
+
+        self.assertEqual(
+            [event["event_type"] for event in events],
+            [
+                "vnpy_gateway_reconnect_failed",
+                "vnpy_gateway_reconnect_backoff_capped",
+            ],
+        )
+        capped = events[1]
+        self.assertEqual(capped["status"], "degraded")
+        self.assertEqual(capped["observed_value"], 8)
+        self.assertEqual(capped["threshold"], 8)
+        persisted_diagnostics = {
+            "event_type": capped["event_type"],
+            "source": "vnpy_paper_auto",
+            **capped["diagnostics"],
+        }
+        encoded_diagnostics = json.dumps(
+            persisted_diagnostics,
+            ensure_ascii=False,
+        )
+        self.assertLessEqual(len(encoded_diagnostics), 300)
+        self.assertEqual(json.loads(encoded_diagnostics), persisted_diagnostics)
+
     def test_auto_reconnect_waits_for_async_connection_confirmation(self) -> None:
         installed = _install_fake_vnpy_runtime_modules()
         try:

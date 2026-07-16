@@ -1663,6 +1663,7 @@ const VnpyPaperTradingPage: React.FC = () => {
         setSuccess(`未执行重复重连：${result.reason || result.result}`);
       }
       await loadStatus();
+      await loadAutoAlertTriggers();
     } catch (err) {
       setError(toApiErrorMessage(err, 'vn.py gateway 重连失败'));
     } finally {

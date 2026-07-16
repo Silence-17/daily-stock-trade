@@ -14,8 +14,9 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from queue import Queue
 from threading import Event, RLock, Thread
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 from src.services.vnpy_paper_trading_service import VnpyPaperTradingService
 
@@ -47,6 +48,7 @@ class VnpyRuntimeHandle:
         main_engine: Optional[Any] = None,
         event_bridge: Optional[Any] = None,
         diagnostics: Optional[Dict[str, Any]] = None,
+        event_sink: Optional[Callable[..., None]] = None,
     ) -> None:
         self.settings = settings
         self.event_engine = event_engine
@@ -56,6 +58,9 @@ class VnpyRuntimeHandle:
         self._diagnostics_lock = RLock()
         self._auto_reconnect_stop = Event()
         self._auto_reconnect_thread: Optional[Thread] = None
+        self._event_sink = event_sink
+        self._event_queue: Queue[Optional[Dict[str, Any]]] = Queue()
+        self._event_thread: Optional[Thread] = None
 
     def refresh_diagnostics(self) -> Dict[str, Any]:
         """Refresh gateway state exposed by runtimes with a status hook."""
@@ -213,12 +218,28 @@ class VnpyRuntimeHandle:
                 isinstance(connect, dict) and connect.get("connected") is True
             )
             if connected:
+                recovered_after_failures = int(
+                    state.get("consecutive_failure_count") or 0
+                )
                 state["success_count"] = int(state.get("success_count") or 0) + 1
                 state["last_result"] = "reconnected"
                 state["last_reason"] = None
                 state["last_success_at"] = _utc_iso()
                 _reset_auto_reconnect_backoff(state, self.settings)
+                self._enqueue_reconnect_event(
+                    event_type="vnpy_gateway_reconnected",
+                    status="resolved",
+                    reason="vnpy_gateway_reconnected",
+                    observed_value=0,
+                    threshold=recovered_after_failures or None,
+                    reconnect_state=state,
+                    connect_state=connect,
+                )
             else:
+                previous_failures = int(
+                    state.get("consecutive_failure_count") or 0
+                )
+                previous_interval = state.get("current_interval_seconds")
                 state["failure_count"] = int(state.get("failure_count") or 0) + 1
                 state["last_result"] = "failed"
                 state["last_reason"] = (
@@ -227,7 +248,87 @@ class VnpyRuntimeHandle:
                     else "connect_status_unavailable"
                 )
                 _increase_auto_reconnect_backoff(state, self.settings)
+                if previous_failures == 0:
+                    self._enqueue_reconnect_event(
+                        event_type="vnpy_gateway_reconnect_failed",
+                        status="failed",
+                        reason=str(state.get("last_reason") or "reconnect_failed"),
+                        observed_value=state.get("consecutive_failure_count"),
+                        threshold=None,
+                        reconnect_state=state,
+                        connect_state=connect,
+                    )
+                if (
+                    state.get("current_interval_seconds")
+                    == state.get("max_interval_seconds")
+                    and previous_interval != state.get("max_interval_seconds")
+                ):
+                    self._enqueue_reconnect_event(
+                        event_type="vnpy_gateway_reconnect_backoff_capped",
+                        status="degraded",
+                        reason="vnpy_gateway_reconnect_backoff_capped",
+                        observed_value=state.get("current_interval_seconds"),
+                        threshold=state.get("max_interval_seconds"),
+                        reconnect_state=state,
+                        connect_state=connect,
+                    )
             return state
+
+    def _enqueue_reconnect_event(
+        self,
+        *,
+        event_type: str,
+        status: str,
+        reason: str,
+        observed_value: Optional[Any],
+        threshold: Optional[Any],
+        reconnect_state: Dict[str, Any],
+        connect_state: Any,
+    ) -> None:
+        if self._event_sink is None:
+            return
+        if self._event_thread is None or not self._event_thread.is_alive():
+            self._event_thread = Thread(
+                target=self._reconnect_event_loop,
+                name="vnpy-reconnect-events",
+                daemon=True,
+            )
+            self._event_thread.start()
+        connect = connect_state if isinstance(connect_state, dict) else {}
+        self._event_queue.put(
+            {
+                "event_type": event_type,
+                "status": status,
+                "reason": reason,
+                "observed_value": observed_value,
+                "threshold": threshold,
+                "diagnostics": {
+                    "gateway_name": self.settings.gateway_name,
+                    "trigger": reconnect_state.get("last_trigger"),
+                    "connect_status": connect.get("status"),
+                    "confirmation_source": connect.get("confirmation_source"),
+                    "consecutive_failure_count": reconnect_state.get(
+                        "consecutive_failure_count"
+                    ),
+                    "current_interval_seconds": reconnect_state.get(
+                        "current_interval_seconds"
+                    ),
+                },
+            }
+        )
+
+    def _reconnect_event_loop(self) -> None:
+        while True:
+            event = self._event_queue.get()
+            try:
+                if event is None:
+                    return
+                try:
+                    self._event_sink(**event)
+                except Exception as exc:  # noqa: BLE001 - event history cannot block reconnect.
+                    logger.warning("Failed to record vn.py reconnect event: %s", exc)
+            finally:
+                self._event_queue.task_done()
 
     def _auto_reconnect_loop(self) -> None:
         try:
@@ -255,6 +356,10 @@ class VnpyRuntimeHandle:
         thread = self._auto_reconnect_thread
         if thread is not None and thread.is_alive():
             thread.join(timeout=5)
+        event_thread = self._event_thread
+        if event_thread is not None and event_thread.is_alive():
+            self._event_queue.put(None)
+            event_thread.join(timeout=5)
 
         if callable(getattr(self.event_bridge, "unregister", None)):
             try:
@@ -309,6 +414,7 @@ def bootstrap_vnpy_runtime(
     *,
     settings: Optional[VnpyRuntimeSettings] = None,
     config_path: Optional[Path] = None,
+    event_sink: Optional[Callable[..., None]] = None,
 ) -> VnpyRuntimeHandle:
     """Create an optional vn.py MainEngine/EventEngine runtime."""
 
@@ -336,7 +442,11 @@ def bootstrap_vnpy_runtime(
         "reason": "disabled",
     }
     if not settings.enabled:
-        handle = VnpyRuntimeHandle(settings=settings, diagnostics=diagnostics)
+        handle = VnpyRuntimeHandle(
+            settings=settings,
+            diagnostics=diagnostics,
+            event_sink=event_sink,
+        )
         handle.start_auto_reconnect()
         return handle
 
@@ -370,7 +480,11 @@ def bootstrap_vnpy_runtime(
             }
         )
         logger.warning("vn.py runtime bootstrap failed: %s", exc)
-        handle = VnpyRuntimeHandle(settings=settings, diagnostics=diagnostics)
+        handle = VnpyRuntimeHandle(
+            settings=settings,
+            diagnostics=diagnostics,
+            event_sink=event_sink,
+        )
         handle.start_auto_reconnect()
         return handle
 
@@ -415,6 +529,7 @@ def bootstrap_vnpy_runtime(
         main_engine=main_engine,
         event_bridge=event_bridge,
         diagnostics=diagnostics,
+        event_sink=event_sink,
     )
     handle.start_auto_reconnect()
     return handle

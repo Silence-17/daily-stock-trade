@@ -350,6 +350,27 @@ class VnpyPaperTradingService:
             diagnostics=diagnostics,
         )
 
+    def record_runtime_connection_event(
+        self,
+        *,
+        event_type: str,
+        status: str,
+        reason: str,
+        observed_value: Optional[Any] = None,
+        threshold: Optional[Any] = None,
+        diagnostics: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Persist and route one sanitized vn.py runtime connection event."""
+
+        self._record_auto_trade_alert_event(
+            event_type,
+            status=status,
+            reason=reason,
+            observed_value=observed_value,
+            threshold=threshold,
+            diagnostics=diagnostics,
+        )
+
     def _notify_auto_trade_alert_event(
         self,
         *,
@@ -478,6 +499,11 @@ class VnpyPaperTradingService:
             "strategy",
             "market",
             "execution_mode",
+            "gateway_name",
+            "trigger",
+            "connect_status",
+            "consecutive_failure_count",
+            "current_interval_seconds",
         ):
             value = diagnostics.get(key)
             if value is not None and str(value).strip():

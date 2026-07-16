@@ -2661,6 +2661,28 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertTrue(repeated_status["open"])
         self.assertIn(result["agent_run_uid"], triggers[0]["diagnostics"])
 
+    def test_runtime_connection_event_reuses_alert_history_and_route(self) -> None:
+        with patch.object(
+            self.service,
+            "_record_auto_trade_alert_event",
+        ) as record_event:
+            self.service.record_runtime_connection_event(
+                event_type="vnpy_gateway_reconnect_failed",
+                status="failed",
+                reason="connect_failed",
+                observed_value=1,
+                diagnostics={"gateway_name": "SIM", "trigger": "monitor"},
+            )
+
+        record_event.assert_called_once_with(
+            "vnpy_gateway_reconnect_failed",
+            status="failed",
+            reason="connect_failed",
+            observed_value=1,
+            threshold=None,
+            diagnostics={"gateway_name": "SIM", "trigger": "monitor"},
+        )
+
     def test_auto_trade_alert_event_sends_alert_notification_and_records_attempt(self) -> None:
         dispatch = NotificationDispatchResult(
             dispatched=True,

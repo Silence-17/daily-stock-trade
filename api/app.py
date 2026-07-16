@@ -171,6 +171,7 @@ from src.services.runtime_scheduler import (
     RuntimeSchedulerService,
 )
 from src.services.vnpy_runtime import bootstrap_vnpy_runtime
+from src.services.vnpy_paper_trading_service import VnpyPaperTradingService
 from src.services.stock_index_remote_service import (
     get_remote_stock_index_cache_path,
     refresh_remote_stock_index_cache,
@@ -182,6 +183,10 @@ _STOCK_INDEX_FILENAME = "stocks.index.json"
 _STOCK_INDEX_HEADERS = {
     "Cache-Control": "no-cache",
 }
+
+
+def _record_vnpy_runtime_connection_event(**event: object) -> None:
+    VnpyPaperTradingService().record_runtime_connection_event(**event)
 
 
 def _bundled_stock_index_path() -> Path:
@@ -289,7 +294,9 @@ async def app_lifespan(app: FastAPI):
         task_event_repository=RuntimeSchedulerRepository(),
     )
     app.state.runtime_scheduler_service = runtime_scheduler_service
-    vnpy_runtime = bootstrap_vnpy_runtime()
+    vnpy_runtime = bootstrap_vnpy_runtime(
+        event_sink=_record_vnpy_runtime_connection_event,
+    )
     app.state.vnpy_runtime_handle = vnpy_runtime
     app.state.vnpy_runtime_diagnostics = vnpy_runtime.diagnostics
     if vnpy_runtime.main_engine is not None:
