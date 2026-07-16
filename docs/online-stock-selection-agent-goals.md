@@ -148,7 +148,7 @@
 - 自动交易支持可选连续失败熔断，能以 `failure_fuse_open` 在同策略/同市场连续失败达到阈值后跳过自动买入；状态接口和 Web 页面已展示熔断是否打开、阈值和连续失败数，并提供手动恢复熔断基线入口；熔断打开会写入告警中心 `target=vnpy_paper` 的系统触发历史，并复用 alert 路由外发通知、记录通知尝试。
 - 连续失败熔断保持锁存语义，并新增默认关闭的持久化冷却自动恢复：冷却到期只放行一轮恢复探测，再次失败会重新熔断；手动恢复入口继续保留，状态和告警审计会展示恢复时间与自动恢复事件。
 - 自动交易支持基础卖出风控，默认关闭；开启后在 `paper` 模式下按 `stop_loss_triggered`、`take_profit_triggered`、`trailing_stop_triggered`、`max_holding_days_reached`、`no_progress_timeout` 和 `strategy_invalidated` 写入本地模拟卖出和 Agent 审计，在 `vnpy_paper` 模式下会把卖出提交给 vn.py bridge 并等待成交回报入账；默认整仓退出，也可通过 `auto_sell_position_pct` 按持仓比例分批卖出，设置 `auto_no_progress_days` 后可按超时未走强退出，开启 `auto_signal_exit_enabled` 后会消费 active `sell/reduce/avoid` 决策信号触发策略失效卖出。
-- 持仓天数已按每页最多 100 条的服务契约读取完整成交历史，并 FIFO 重放当前未平仓批次；清仓后重新建仓会重置计时。数据质量、账户和市场买入门禁不会吞掉此前已执行的止损卖单，run 的提交/跳过计数与计划、决策终态保持一致。
+- 持仓天数已按每页最多 100 条的服务契约读取完整成交与拆股历史，并按公司行动先于同日成交的顺序 FIFO 重放当前未平仓批次；清仓重建仓会重置计时，公司行动历史不可用时不使用不完整证据触发期限卖出。数据质量、账户和市场买入门禁不会吞掉此前已执行的止损卖单，run 的提交/跳过计数与计划、决策终态保持一致。
 - 模拟交易页支持“立即 dry-run”一次性演练，可不保存配置、不开启后台自动交易，临时生成自动选股交易计划和审计记录。
 - 交易计划支持基础失败恢复，`manual_approval`、`paper`、`vnpy_paper` 计划若变为 `failed` 或可恢复的 `skipped`，可在页面重试提交并回写交易计划、候选决策和 run 计数。
 - vn.py 订单状态回写支持部分成交审计和多笔成交累计：`parttraded` / `partial_filled` 会标记 `part_filled`，成交回报按 `vt_tradeid` 幂等写入 Portfolio 并累计数量、加权均价和剩余数量，达到计划数量后才标记 `filled`。超时恢复会先查询 `MainEngine.get_order` / `get_all_trades` 补同步漏失回报；查询异常会保护活跃计划，所有订单/部分成交/撤单超时结果均禁止自动重下单。

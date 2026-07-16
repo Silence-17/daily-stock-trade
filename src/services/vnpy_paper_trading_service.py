@@ -9084,12 +9084,15 @@ class VnpyPaperTradingService:
 
     def _position_holding_days(self, *, account_id: int, symbol: str) -> Optional[int]:
         trades: List[Dict[str, Any]] = []
+        split_actions: List[Dict[str, Any]] = []
+        as_of_date = date.today()
         page = 1
         try:
             while True:
                 payload = self.portfolio.list_trade_events(
                     account_id=account_id,
                     symbol=symbol,
+                    date_to=as_of_date,
                     page=page,
                     page_size=100,
                 )
@@ -9101,11 +9104,30 @@ class VnpyPaperTradingService:
                 if not items or page * 100 >= total:
                     break
                 page += 1
+
+            page = 1
+            while True:
+                payload = self.portfolio.list_corporate_action_events(
+                    account_id=account_id,
+                    symbol=symbol,
+                    action_type="split_adjustment",
+                    date_to=as_of_date,
+                    page=page,
+                    page_size=100,
+                )
+                items = payload.get("items") if isinstance(payload, dict) else None
+                if not isinstance(items, list):
+                    raise ValueError("split history items are unavailable")
+                split_actions.extend(item for item in items if isinstance(item, dict))
+                total = _safe_int(payload.get("total")) or 0
+                if not items or page * 100 >= total:
+                    break
+                page += 1
         except Exception as exc:  # noqa: BLE001
             logger.warning("Failed to resolve holding days for %s: %s", symbol, exc)
             return None
 
-        dated_trades: List[Tuple[date, int, str, float]] = []
+        events: List[Tuple[date, int, int, str, float]] = []
         for item in trades:
             text = str(item.get("trade_date") or "").strip()
             if not text:
@@ -9118,14 +9140,33 @@ class VnpyPaperTradingService:
             quantity = _safe_float(item.get("quantity")) or 0.0
             if side not in {"buy", "sell"} or quantity <= PAPER_EPS:
                 continue
-            dated_trades.append((trade_date, _safe_int(item.get("id")) or 0, side, quantity))
+            events.append((trade_date, 1, _safe_int(item.get("id")) or 0, side, quantity))
+
+        for item in split_actions:
+            text = str(item.get("effective_date") or "").strip()
+            if not text:
+                continue
+            try:
+                effective_date = date.fromisoformat(text[:10])
+            except ValueError:
+                continue
+            split_ratio = _safe_float(item.get("split_ratio")) or 0.0
+            if split_ratio <= PAPER_EPS:
+                continue
+            events.append(
+                (effective_date, 0, _safe_int(item.get("id")) or 0, "split_adjustment", split_ratio)
+            )
 
         lots: List[List[Any]] = []
-        for trade_date, _trade_id, side, quantity in sorted(dated_trades):
-            if side == "buy":
-                lots.append([trade_date, quantity])
+        for event_date, _priority, _event_id, event_type, value in sorted(events):
+            if event_type == "split_adjustment":
+                for lot in lots:
+                    lot[1] = float(lot[1]) * value
                 continue
-            remaining = quantity
+            if event_type == "buy":
+                lots.append([event_date, value])
+                continue
+            remaining = value
             while lots and remaining > PAPER_EPS:
                 consumed = min(float(lots[0][1]), remaining)
                 lots[0][1] = float(lots[0][1]) - consumed
@@ -9135,7 +9176,7 @@ class VnpyPaperTradingService:
 
         if not lots:
             return None
-        return max(0, (date.today() - lots[0][0]).days)
+        return max(0, (as_of_date - lots[0][0]).days)
 
     @staticmethod
     def _auto_sell_reason(
