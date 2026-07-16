@@ -44,6 +44,62 @@ class UnifiedRealtimeQuoteMetadataTestCase(unittest.TestCase):
 
 
 class CircuitBreakerConcurrencyTestCase(unittest.TestCase):
+    def test_persisted_half_open_state_restores_without_probe_lease(self):
+        now = time.time()
+        breaker = CircuitBreaker(failure_threshold=1, cooldown_seconds=60.0)
+        breaker.record_failure("src", "timeout")
+        with breaker._lock:
+            breaker._states["src"]["state"] = CircuitBreaker.HALF_OPEN
+            breaker._states["src"]["half_open_calls"] = 1
+
+        payload = breaker.export_state(saved_at=now)
+        self.assertEqual(payload["states"]["src"]["state"], CircuitBreaker.OPEN)
+
+        restored = CircuitBreaker(failure_threshold=1, cooldown_seconds=60.0)
+        count = restored.restore_state(payload, max_age_seconds=3600, now=now + 1)
+
+        self.assertEqual(count, 1)
+        snapshot = restored.get_snapshot()["src"]
+        self.assertEqual(snapshot["state"], CircuitBreaker.OPEN)
+        self.assertEqual(snapshot["half_open_calls"], 0)
+        self.assertFalse(restored.is_available("src"))
+
+    def test_expired_restored_open_state_allows_one_probe(self):
+        now = time.time()
+        payload = {
+            "version": CircuitBreaker.STATE_SCHEMA_VERSION,
+            "saved_at": now,
+            "states": {
+                "src": {
+                    "state": CircuitBreaker.OPEN,
+                    "failures": 3,
+                    "last_failure_time": now - 120,
+                    "last_error": "timeout",
+                }
+            },
+        }
+        restored = CircuitBreaker(
+            failure_threshold=3,
+            cooldown_seconds=60.0,
+            half_open_max_calls=1,
+        )
+        restored.restore_state(payload, max_age_seconds=3600, now=now)
+
+        self.assertTrue(restored.is_available("src"))
+        self.assertFalse(restored.is_available("src"))
+
+    def test_stale_persisted_state_is_rejected(self):
+        now = time.time()
+        breaker = CircuitBreaker()
+        payload = {
+            "version": CircuitBreaker.STATE_SCHEMA_VERSION,
+            "saved_at": now - 7200,
+            "states": {},
+        }
+
+        with self.assertRaisesRegex(ValueError, "stale"):
+            breaker.restore_state(payload, max_age_seconds=3600, now=now)
+
     def test_half_open_allows_only_one_concurrent_probe(self):
         breaker = CircuitBreaker(
             failure_threshold=1,

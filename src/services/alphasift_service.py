@@ -983,10 +983,14 @@ class AlphaSiftService:
         source_health = _get_alphasift_source_health_snapshot(self.config)
         if source_health:
             payload["source_health"] = source_health
-        payload["source_routing"] = build_alphasift_snapshot_source_routing(
+        source_routing = build_alphasift_snapshot_source_routing(
             self.config,
             source_health=source_health,
         )
+        source_routing["candidate_context"] = {
+            "quote": _get_dsa_realtime_source_routing(),
+        }
+        payload["source_routing"] = source_routing
         if diagnostics:
             payload["diagnostics"] = diagnostics
         return payload
