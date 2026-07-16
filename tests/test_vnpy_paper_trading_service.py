@@ -1423,6 +1423,70 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
             ],
         )
 
+    def test_auto_trade_fails_closed_for_required_candidate_fields(self) -> None:
+        self.service.update_settings(
+            {
+                "auto_trade_enabled": True,
+                "auto_strategy": "dual_low",
+                "auto_max_results": 2,
+                "auto_cash_per_order": 1200,
+                "auto_trade_time_gate_enabled": False,
+                "auto_min_turnover": 100000000,
+            }
+        )
+        fake_alphasift = MagicMock()
+        fake_alphasift.screen.return_value = {
+            "candidates": [
+                {
+                    "code": "600519",
+                    "score": 80,
+                    "price": 10.0,
+                    "amount": 200000000,
+                    "data_quality": "partial",
+                    "missing_fields": ["trading_status"],
+                    "data_sources": ["snapshot"],
+                },
+                {
+                    "code": "000001",
+                    "score": 80,
+                    "price": 10.0,
+                    "is_st": False,
+                    "is_suspended": False,
+                    "is_limit_up": False,
+                    "data_quality": "partial",
+                    "missing_fields": ["amount"],
+                    "data_sources": ["snapshot"],
+                },
+            ],
+            "warnings": [],
+        }
+
+        with patch(
+            "src.services.vnpy_paper_trading_service.AlphaSiftService",
+            return_value=fake_alphasift,
+        ):
+            result = self.service.run_auto_trade_once()
+
+        self.assertEqual(result["submitted_count"], 0)
+        self.assertEqual(result["skipped_count"], 2)
+        self.assertEqual(
+            [order["reason"] for order in result["orders"]],
+            ["candidate_trading_status_unavailable", "liquidity_data_unavailable"],
+        )
+        audit = self.service.agent_repo.get_run_detail(result["agent_run_uid"])
+        self.assertIsNotNone(audit)
+        assert audit is not None
+        self.assertEqual(
+            [decision["reason"] for decision in audit["decisions"]],
+            ["candidate_trading_status_unavailable", "liquidity_data_unavailable"],
+        )
+        self.assertEqual(
+            audit["decisions"][0]["order_result"]["risk_review"]["candidate_data_quality"][
+                "missing_fields"
+            ],
+            ["trading_status"],
+        )
+
     def test_auto_trade_respects_account_cash_low_watermark(self) -> None:
         self.service.update_settings(
             {
@@ -2132,7 +2196,7 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
                     "score": 80,
                     "price": 10.0,
                     "data_quality": "partial",
-                    "missing_fields": ["amount", "trading_status"],
+                    "missing_fields": ["industry"],
                     "data_sources": ["em_datacenter"],
                 },
             ],
@@ -2198,13 +2262,13 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertEqual(decision_order["risk_review"]["status"], "passed")
         self.assertEqual(decision_order["risk_review"]["reason"], "dry_run")
         self.assertEqual(decision_order["risk_review"]["candidate_data_quality"]["status"], "partial")
-        self.assertEqual(decision_order["risk_review"]["candidate_data_quality"]["score"], 59.0)
+        self.assertEqual(decision_order["risk_review"]["candidate_data_quality"]["score"], 67.0)
         self.assertEqual(decision_order["agent_review"]["status"], "warning")
         self.assertEqual(decision_order["agent_review"]["reason"], "data_quality_missing_fields")
         self.assertEqual(decision_order["agent_review"]["reviewer"], "rule_agent_v1")
         self.assertEqual(
             decision_order["risk_review"]["candidate_data_quality"]["missing_fields"],
-            ["amount", "trading_status"],
+            ["industry"],
         )
         self.assertEqual(decision_order["risk_review"]["candidate_data_quality"]["data_sources"], ["em_datacenter"])
         self.assertEqual(plan_order["position_plan"]["symbol"], "600519")
