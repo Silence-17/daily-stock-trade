@@ -439,6 +439,7 @@ The readiness and system health status are `warning` because the current time is
 - Sell-first gate and holding-age validation on 2026-07-17
   - `python -m pytest tests/test_vnpy_paper_trading_service.py -q`: 150 passed and 4 optional tests skipped. Coverage includes complete 100-row trade-history pagination, FIFO holding-age reset after full exit/re-entry, stop-loss preservation across data-quality and account/market buy gates, and persisted run-count consistency.
   - Python compilation, full Flake8 on the changed service/test files, and `git diff --check` passed; no Web code changed in this increment.
+  - The restarted Python 3.13.14 service reports build `sell-first-risk-accounting-20260717` under listener PID `15228` (launcher PID `14768`), connected `DSA_SIM`, an available MainEngine bridge, four event callbacks, and a running reconnect monitor. Full paper status is available with eight current positions; `/paper-trading` and `/agent-console` returned HTTP 200. System health is warning outside the current trading window. The latest Agent run remained `ss-agent-20260716081103-27d104bb` with submitted count zero, so the read-only validation created no run or order.
 
 ## Unfinished Goals
 
