@@ -9975,9 +9975,25 @@ class VnpyPaperTradingService:
             return "suspended_stock"
         if settings.auto_exclude_price_limit and self._candidate_is_price_limit_reached(candidate):
             return "price_limit_reached"
+        missing_fields = {
+            item.strip().lower()
+            for item in self._candidate_quality_text_list(candidate.get("missing_fields"))
+            if item.strip()
+        }
+        if (
+            "trading_status" in missing_fields
+            and (
+                settings.auto_exclude_st
+                or settings.auto_exclude_suspended
+                or settings.auto_exclude_price_limit
+            )
+        ):
+            return "candidate_trading_status_unavailable"
         if settings.auto_min_turnover is not None:
             turnover = self._candidate_turnover(candidate)
-            if turnover is not None and turnover < settings.auto_min_turnover:
+            if turnover is None:
+                return "liquidity_data_unavailable"
+            if turnover < settings.auto_min_turnover:
                 return "liquidity_below_threshold"
         return None
 

@@ -784,6 +784,7 @@ python main.py --schedule --no-run-immediately
 >
 > 自动买入还支持默认关闭的 `auto_score_weighted_allocation_enabled`。开启后，`auto_allocation_budget`（留空则使用 `auto_cash_per_order`）作为每轮组合预算；`auto_allocation_method` 可选按评分、评分/20 日逆波动率、顺序两两相关性约束，或 `target_tracking_min_variance_20d` 协方差目标跟踪分配。最小方差方法使用运行日及之前的本地 trailing returns 构建协方差矩阵，在显式股票目标剩余缺口（没有缺口时使用候选评分目标）与 `auto_covariance_risk_penalty` 风险惩罚之间求解非负权重；历史不足时 fail-closed。整轮仍受现金保留、每日预算/订单槽位、最大持仓数、单票/总仓位/行业空间、显式目标缺口和整手执行约束；Agent run 与候选仓位计划会记录 `portfolio_allocation`、风险输入、目标向量、协方差矩阵、收敛状态、可执行预算和残差。
 > 自动选股运行还会按筛选完整性、候选覆盖，以及 snapshot/daily 与候选上下文 `quote/fund_flow/news` 来源健康生成确定性的 0~100 数据质量分。`auto_min_data_quality_score` 留空时只审计；配置后低于阈值会整轮 fail-closed，原因是 `data_quality_score_below_threshold`。来源健康未观测会明确降为 70 分而不是假定满分，原有 `stale/unavailable` 硬门禁不受阈值设置影响。候选上下文来源失败只作为独立遥测和评分输入，不会单独拖垮 AlphaSift 候选响应。
+> 候选级缺失字段还会按已启用风控分级处理：启用 ST/停牌/涨跌停过滤时，明确缺少 `trading_status` 的候选以 `candidate_trading_status_unavailable` 跳过；配置最低成交额后无法取得成交额的候选以 `liquidity_data_unavailable` 跳过。其他缺失字段继续进入候选质量分和规则 Agent 警告。
 
 > 自动选股还会基于同策略、同市场的持久化候选生成跨运行前瞻状态。默认只审计；开启 `auto_cross_run_quality_gate_enabled` 后，成熟样本胜率低于阈值或评价不可用会阻断新增买入，证据不足不会阻断，自动卖出风控仍会继续执行。评价只读取严格晚于决策日的本地日线，不联网补数或重跑历史策略。
 
