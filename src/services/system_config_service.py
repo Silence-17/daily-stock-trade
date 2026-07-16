@@ -2103,6 +2103,7 @@ class SystemConfigService:
             "VNPY_AUTO_ATTACH_EVENTS",
             "VNPY_AUTO_RECONNECT_ENABLED",
             "VNPY_AUTO_RECONNECT_INTERVAL_SECONDS",
+            "VNPY_AUTO_RECONNECT_MAX_INTERVAL_SECONDS",
             "VNPY_AUTO_RECONNECT_CONFIRMATION_GRACE_SECONDS",
         }
         if vnpy_runtime_keys:

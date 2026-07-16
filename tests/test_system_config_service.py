@@ -3799,6 +3799,7 @@ class SystemConfigServiceTestCase(unittest.TestCase):
                 {"key": "VNPY_CONNECT_ON_START", "value": "false"},
                 {"key": "VNPY_AUTO_RECONNECT_ENABLED", "value": "true"},
                 {"key": "VNPY_AUTO_RECONNECT_INTERVAL_SECONDS", "value": "60"},
+                {"key": "VNPY_AUTO_RECONNECT_MAX_INTERVAL_SECONDS", "value": "300"},
                 {"key": "VNPY_AUTO_RECONNECT_CONFIRMATION_GRACE_SECONDS", "value": "30"},
             ],
             reload_now=True,
@@ -3816,6 +3817,7 @@ class SystemConfigServiceTestCase(unittest.TestCase):
         self.assertIn("EventEngine", warning)
         self.assertIn("VNPY_AUTO_RECONNECT_ENABLED", warning)
         self.assertIn("VNPY_AUTO_RECONNECT_INTERVAL_SECONDS", warning)
+        self.assertIn("VNPY_AUTO_RECONNECT_MAX_INTERVAL_SECONDS", warning)
         self.assertIn("VNPY_AUTO_RECONNECT_CONFIRMATION_GRACE_SECONDS", warning)
         self.assertIn("重启当前进程后生效", warning)
 

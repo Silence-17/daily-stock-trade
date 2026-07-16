@@ -32,6 +32,7 @@ class VnpyRuntimeSettings:
     auto_attach_events: bool = True
     auto_reconnect_enabled: bool = False
     auto_reconnect_interval_seconds: int = 60
+    auto_reconnect_max_interval_seconds: int = 300
     auto_reconnect_confirmation_grace_seconds: int = 30
 
 
@@ -76,6 +77,9 @@ class VnpyRuntimeHandle:
                 {
                     "enabled": self.settings.auto_reconnect_enabled,
                     "interval_seconds": self.settings.auto_reconnect_interval_seconds,
+                    "max_interval_seconds": _auto_reconnect_max_interval(
+                        self.settings
+                    ),
                     "confirmation_grace_seconds": (
                         self.settings.auto_reconnect_confirmation_grace_seconds
                     ),
@@ -101,6 +105,11 @@ class VnpyRuntimeHandle:
             state.setdefault("attempt_count", 0)
             state.setdefault("success_count", 0)
             state.setdefault("failure_count", 0)
+            state.setdefault("consecutive_failure_count", 0)
+            state.setdefault(
+                "current_interval_seconds",
+                self.settings.auto_reconnect_interval_seconds,
+            )
             state["reason"] = None
             state["running"] = True
             state["next_check_at"] = _future_iso(
@@ -134,6 +143,8 @@ class VnpyRuntimeHandle:
             if status not in {"failed", "disconnected"}:
                 state["last_check_result"] = "not_required"
                 state["last_check_reason"] = status or "connect_status_unavailable"
+                if status == "connected":
+                    _reset_auto_reconnect_backoff(state, self.settings)
                 return state
             if (
                 status == "disconnected"
@@ -173,6 +184,7 @@ class VnpyRuntimeHandle:
                 state["last_result"] = "reconnected"
                 state["last_reason"] = None
                 state["last_success_at"] = _utc_iso()
+                _reset_auto_reconnect_backoff(state, self.settings)
             else:
                 state["failure_count"] = int(state.get("failure_count") or 0) + 1
                 state["last_result"] = "failed"
@@ -181,16 +193,22 @@ class VnpyRuntimeHandle:
                     if isinstance(connect, dict)
                     else "connect_status_unavailable"
                 )
+                _increase_auto_reconnect_backoff(state, self.settings)
             return state
 
     def _auto_reconnect_loop(self) -> None:
-        interval = self.settings.auto_reconnect_interval_seconds
         try:
-            while not self._auto_reconnect_stop.wait(interval):
-                self.run_auto_reconnect_check()
+            while True:
                 with self._diagnostics_lock:
                     state = self.diagnostics.setdefault("auto_reconnect", {})
+                    interval = state.get(
+                        "current_interval_seconds",
+                        self.settings.auto_reconnect_interval_seconds,
+                    )
                     state["next_check_at"] = _future_iso(interval)
+                if self._auto_reconnect_stop.wait(interval):
+                    break
+                self.run_auto_reconnect_check()
         finally:
             with self._diagnostics_lock:
                 state = self.diagnostics.setdefault("auto_reconnect", {})
@@ -239,6 +257,12 @@ def load_vnpy_runtime_settings() -> VnpyRuntimeSettings:
             minimum=5,
             maximum=3600,
         ),
+        auto_reconnect_max_interval_seconds=_env_int(
+            "VNPY_AUTO_RECONNECT_MAX_INTERVAL_SECONDS",
+            default=300,
+            minimum=5,
+            maximum=3600,
+        ),
         auto_reconnect_confirmation_grace_seconds=_env_int(
             "VNPY_AUTO_RECONNECT_CONFIRMATION_GRACE_SECONDS",
             default=30,
@@ -265,6 +289,9 @@ def bootstrap_vnpy_runtime(
         "auto_reconnect": {
             "enabled": settings.auto_reconnect_enabled,
             "interval_seconds": settings.auto_reconnect_interval_seconds,
+            "max_interval_seconds": _auto_reconnect_max_interval(settings),
+            "current_interval_seconds": settings.auto_reconnect_interval_seconds,
+            "consecutive_failure_count": 0,
             "confirmation_grace_seconds": (
                 settings.auto_reconnect_confirmation_grace_seconds
             ),
@@ -640,8 +667,40 @@ def _utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _future_iso(seconds: int) -> str:
+def _future_iso(seconds: float) -> str:
     return (datetime.now(timezone.utc) + timedelta(seconds=seconds)).isoformat()
+
+
+def _auto_reconnect_max_interval(settings: VnpyRuntimeSettings) -> float:
+    return max(
+        settings.auto_reconnect_interval_seconds,
+        settings.auto_reconnect_max_interval_seconds,
+    )
+
+
+def _reset_auto_reconnect_backoff(
+    state: Dict[str, Any],
+    settings: VnpyRuntimeSettings,
+) -> None:
+    previous_failures = int(state.get("consecutive_failure_count") or 0)
+    state["consecutive_failure_count"] = 0
+    state["current_interval_seconds"] = settings.auto_reconnect_interval_seconds
+    if previous_failures:
+        state["backoff_reset_at"] = _utc_iso()
+
+
+def _increase_auto_reconnect_backoff(
+    state: Dict[str, Any],
+    settings: VnpyRuntimeSettings,
+) -> None:
+    failures = int(state.get("consecutive_failure_count") or 0) + 1
+    maximum = _auto_reconnect_max_interval(settings)
+    multiplier = 2 ** min(failures, 30)
+    state["consecutive_failure_count"] = failures
+    state["current_interval_seconds"] = min(
+        maximum,
+        settings.auto_reconnect_interval_seconds * multiplier,
+    )
 
 
 def _within_confirmation_grace(value: Any, grace_seconds: int) -> bool:

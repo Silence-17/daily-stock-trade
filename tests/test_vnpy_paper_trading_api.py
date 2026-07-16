@@ -419,6 +419,9 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
                         "enabled": True,
                         "running": True,
                         "attempt_count": 2,
+                        "consecutive_failure_count": 2,
+                        "current_interval_seconds": 120,
+                        "max_interval_seconds": 300,
                         "confirmation_grace_seconds": 30,
                         "last_result": "failed",
                         "next_check_at": "2026-07-16T12:01:00+00:00",
@@ -441,6 +444,15 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
         self.assertTrue(component["auto_reconnect_enabled"])
         self.assertTrue(component["auto_reconnect_running"])
         self.assertEqual(component["auto_reconnect_attempt_count"], 2)
+        self.assertEqual(
+            component["auto_reconnect_consecutive_failure_count"],
+            2,
+        )
+        self.assertEqual(
+            component["auto_reconnect_current_interval_seconds"],
+            120,
+        )
+        self.assertEqual(component["auto_reconnect_max_interval_seconds"], 300)
         self.assertEqual(
             component["auto_reconnect_confirmation_grace_seconds"],
             30,
