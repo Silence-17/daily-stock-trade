@@ -773,6 +773,8 @@ python main.py --schedule --no-run-immediately
 >
 > 页面还可独立开启盘中指数/实时宽度和跨市场联动门禁。前者使用本市场方向性主指数的等权平均涨跌幅，A 股追加实时涨跌家数宽度；后者按映射 v1 检查关联市场指数（`cn -> hk,us`、`hk -> cn,us`、`us -> hk`、`jp/kr/tw -> us`），并排除美国 `VIX`。启用后证据为空或取数异常均 fail-closed，全部输入和 reason code 写入同一市场风险诊断。当前 provider 尚未统一提供 quote as-of，跨市场判断使用各源最新可用行情，不代表交易所级时间同步。
 >
+> 指数/宽度 fallback 会附带 provider、抓取时刻和可用的数据日期/粒度。盘中本市场门禁拒绝明确的收盘日线、过期 session 日期，以及非法、未来或超过 15 分钟的 provider 时间；因此 Tushare `index_daily` 不会再被当作盘中实时证据。efinance/AkShare 实时端点当前仍缺统一 provider as-of，这类证据在审计中标为时间不可验证，而不是用本地抓取时刻伪装 provider 时间。
+>
 > Agent 控制台通过 `GET /api/v1/vnpy-paper/agent-runs/data-quality-trends` 展示 7/30/90 天跨 run 数据质量趋势，包括 ok/partial/stale/unavailable/unknown 分布、降级率、警告、source error、逐日结果，以及具体 snapshot/daily 和候选上下文 `quote/fund_flow/news` 来源的健康观测。来源表展示观测数、降级次数/比例、最新状态和最新/最大失败计数；缺少整体质量或来源快照的旧 run 不会被推断为健康。
 >
 > 候选实时行情和资金流使用 provider 级恢复路由：行情沿用配置顺序；资金流在 Tushare 可用时按 `tushare_ths -> akshare` 尝试独立 THS/AkShare 来源，未配置 Token 或权限不足时透明回退。同一市场/provider 连续 3 次异常后冷却 5 分钟并切换到后续来源，冷却结束只放行一个半开探测，成功恢复、失败重新冷却；单股票空结果不累计整源失败。有效状态原子写入 `DATABASE_PATH` 同目录的 `provider_source_health.json`，API 重启会恢复 24 小时内的失败/熔断状态，但不延续半开探测名额；旧 `realtime_source_health.json` 自动迁移，损坏或过期文件不会阻断启动。Tushare THS 万元字段统一换算为 CNY，10 日净额由最近 10 个交易日单日净额求和。每轮 Agent run 会把两类 provider 状态保存在 `diagnostics.source_routing.candidate_context.quote/fund_flow`，控制台与 snapshot 动态路由一起展示。

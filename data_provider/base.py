@@ -3030,7 +3030,10 @@ class DataFetcherManager:
                     data = tickflow_fetcher.get_main_indices(region=region)
                     if data:
                         logger.info("[TickFlowFetcher] 获取指数行情成功")
-                        return data
+                        return self._enrich_market_indices(
+                            data,
+                            provider_name="TickFlowFetcher",
+                        )
                 except Exception as e:
                     logger.warning(f"[TickFlowFetcher] 获取指数行情失败: {e}")
 
@@ -3041,11 +3044,43 @@ class DataFetcherManager:
                 data = fetcher.get_main_indices(region=region)
                 if data:
                     logger.info(f"[{fetcher.name}] 获取指数行情成功")
-                    return data
+                    return self._enrich_market_indices(
+                        data,
+                        provider_name=fetcher.name,
+                    )
             except Exception as e:
                 logger.warning(f"[{fetcher.name}] 获取指数行情失败: {e}")
                 continue
         return []
+
+    def _enrich_market_indices(
+        self,
+        data: List[Dict[str, Any]],
+        *,
+        provider_name: str,
+    ) -> List[Dict[str, Any]]:
+        fetched_at = self._utc_now_iso()
+        provider = self._realtime_fetcher_token(provider_name)
+        enriched: List[Dict[str, Any]] = []
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            row = dict(item)
+            row.setdefault("provider", provider)
+            row.setdefault("fetched_at", fetched_at)
+            enriched.append(row)
+        return enriched
+
+    def _enrich_market_stats(
+        self,
+        data: Dict[str, Any],
+        *,
+        provider_name: str,
+    ) -> Dict[str, Any]:
+        enriched = dict(data)
+        enriched.setdefault("provider", self._realtime_fetcher_token(provider_name))
+        enriched.setdefault("fetched_at", self._utc_now_iso())
+        return enriched
 
     def get_market_stats(self, *, purpose: str = "unspecified") -> Dict[str, Any]:
         """获取市场涨跌统计（自动切换数据源）"""
@@ -3063,7 +3098,10 @@ class DataFetcherManager:
                         purpose,
                         elapsed,
                     )
-                    return data
+                    return self._enrich_market_stats(
+                        data,
+                        provider_name="TickFlowFetcher",
+                    )
                 logger.info(
                     "[MarketStats] component=market_stats action=provider_empty "
                     "purpose=%s provider=TickFlowFetcher elapsed=%.2fs",
@@ -3095,7 +3133,10 @@ class DataFetcherManager:
                         fetcher.name,
                         elapsed,
                     )
-                    return data
+                    return self._enrich_market_stats(
+                        data,
+                        provider_name=fetcher.name,
+                    )
                 logger.info(
                     "[MarketStats] component=market_stats action=provider_empty "
                     "purpose=%s provider=%s elapsed=%.2fs",

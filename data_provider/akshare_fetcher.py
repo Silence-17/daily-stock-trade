@@ -1742,6 +1742,7 @@ class AkshareFetcher(BaseFetcher):
                             'volume': safe_float(row.get('成交量', 0)),
                             'amount': safe_float(row.get('成交额', 0)),
                             'amplitude': amplitude,
+                            'data_granularity': 'realtime',
                         })
             return results
 

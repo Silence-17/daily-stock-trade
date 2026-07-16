@@ -909,6 +909,7 @@ class EfinanceFetcher(BaseFetcher):
                     'volume': safe_float(item.get(vol_col, 0)),
                     'amount': safe_float(item.get(amt_col, 0)),
                     'amplitude': safe_float(item.get(amp_col, 0)),
+                    'data_granularity': 'realtime',
                 })
 
             if results:

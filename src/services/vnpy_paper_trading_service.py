@@ -107,6 +107,7 @@ AUTO_CROSS_MARKET_LINKS = {
 NON_DIRECTIONAL_MARKET_INDEX_CODES = {"VIX"}
 AUTO_MARKET_EVIDENCE_TIMEOUT_SECONDS = 15.0
 AUTO_MARKET_EVIDENCE_MAX_WORKERS = 4
+AUTO_MARKET_PROVIDER_TIMESTAMP_MAX_AGE_SECONDS = 15 * 60
 LLM_DYNAMIC_AGENT_PLAN_PROMPT_VERSION = "vnpy_paper_dynamic_agent_plan_v2"
 LLM_DYNAMIC_AGENT_PLAN_EVALUATOR_VERSION = "dynamic_plan_guardrails_v1"
 LLM_PRE_TRADE_REVIEW_PROMPT_VERSION = "vnpy_paper_pre_trade_review_v1"
@@ -9962,7 +9963,12 @@ class VnpyPaperTradingService:
             return None, error["value"], duration_ms
         return result.get("value"), None, duration_ms
 
-    def _live_market_index_evidence(self, market: str) -> Dict[str, Any]:
+    def _live_market_index_evidence(
+        self,
+        market: str,
+        *,
+        require_intraday: bool = False,
+    ) -> Dict[str, Any]:
         raw_indices, error, duration_ms = self._run_market_evidence_call(
             lambda: self.data_fetcher_manager.get_main_indices(region=market),
             label=f"indices-{market}",
@@ -9983,6 +9989,8 @@ class VnpyPaperTradingService:
             }
 
         indices: List[Dict[str, Any]] = []
+        rejected_indices: List[Dict[str, Any]] = []
+        expected_data_date = trading_calendar.get_market_now(market).date().isoformat()
         for item in raw_indices if isinstance(raw_indices, list) else []:
             if not isinstance(item, dict):
                 continue
@@ -9992,12 +10000,64 @@ class VnpyPaperTradingService:
             change_pct = _safe_float(item.get("change_pct"))
             if change_pct is None:
                 continue
+            data_granularity = str(item.get("data_granularity") or "unknown").strip().lower()
+            data_date = str(item.get("data_date") or "").strip() or None
+            rejection_reason = None
+            if require_intraday and data_granularity == "end_of_day":
+                rejection_reason = "end_of_day_not_intraday"
+            elif require_intraday and data_date and data_date != expected_data_date:
+                rejection_reason = "session_date_not_current"
+
+            provider_timestamp = str(item.get("provider_timestamp") or "").strip() or None
+            provider_age_seconds = None
+            provider_timestamp_status = "unavailable"
+            if provider_timestamp:
+                try:
+                    normalized = (
+                        provider_timestamp[:-1] + "+00:00"
+                        if provider_timestamp.endswith("Z")
+                        else provider_timestamp
+                    )
+                    provider_dt = datetime.fromisoformat(normalized)
+                    if provider_dt.tzinfo is None:
+                        raise ValueError("provider timestamp has no timezone")
+                    provider_age_seconds = int(
+                        (datetime.now(timezone.utc) - provider_dt.astimezone(timezone.utc)).total_seconds()
+                    )
+                    if provider_age_seconds < -60:
+                        provider_timestamp_status = "future"
+                        if require_intraday:
+                            rejection_reason = rejection_reason or "provider_timestamp_future"
+                    elif provider_age_seconds > AUTO_MARKET_PROVIDER_TIMESTAMP_MAX_AGE_SECONDS:
+                        provider_timestamp_status = "stale"
+                        if require_intraday:
+                            rejection_reason = rejection_reason or "provider_timestamp_stale"
+                    else:
+                        provider_timestamp_status = "fresh"
+                except (TypeError, ValueError):
+                    provider_timestamp_status = "invalid"
+                    if require_intraday:
+                        rejection_reason = rejection_reason or "provider_timestamp_invalid"
+
+            normalized_item = {
+                "code": code or None,
+                "name": str(item.get("name") or "").strip() or None,
+                "change_pct": round(change_pct, 6),
+                "provider": str(item.get("provider") or "").strip() or None,
+                "fetched_at": str(item.get("fetched_at") or "").strip() or None,
+                "provider_timestamp": provider_timestamp,
+                "provider_timestamp_status": provider_timestamp_status,
+                "provider_age_seconds": provider_age_seconds,
+                "data_date": data_date,
+                "data_granularity": data_granularity,
+            }
+            if rejection_reason:
+                rejected_indices.append(
+                    {**normalized_item, "rejection_reason": rejection_reason}
+                )
+                continue
             indices.append(
-                {
-                    "code": code or None,
-                    "name": str(item.get("name") or "").strip() or None,
-                    "change_pct": round(change_pct, 6),
-                }
+                normalized_item
             )
         if not indices:
             return {
@@ -10006,7 +10066,14 @@ class VnpyPaperTradingService:
                 "duration_ms": duration_ms,
                 "index_count": 0,
                 "indices": [],
-                "evidence_reason": "index_quotes_empty",
+                "rejected_indices": rejected_indices,
+                "require_intraday": require_intraday,
+                "expected_data_date": expected_data_date,
+                "evidence_reason": (
+                    "index_evidence_not_intraday"
+                    if rejected_indices
+                    else "index_quotes_empty"
+                ),
             }
         aggregate = sum(float(item["change_pct"]) for item in indices) / len(indices)
         return {
@@ -10017,6 +10084,12 @@ class VnpyPaperTradingService:
             "aggregate_change_pct": round(aggregate, 6),
             "aggregation": "equal_weight_mean",
             "indices": indices,
+            "rejected_indices": rejected_indices,
+            "require_intraday": require_intraday,
+            "expected_data_date": expected_data_date,
+            "providers": sorted(
+                {str(item["provider"]) for item in indices if item.get("provider")}
+            ),
         }
 
     def _live_cn_breadth_evidence(self) -> Dict[str, Any]:
@@ -10068,6 +10141,8 @@ class VnpyPaperTradingService:
             "participants": participants,
             "score": round(up_count / participants * 100, 6),
             "calculation": "up_count / (up_count + down_count + flat_count) * 100",
+            "provider": str(stats.get("provider") or "").strip() or None,
+            "fetched_at": str(stats.get("fetched_at") or "").strip() or None,
         }
 
     def _market_context_pre_trade_risk(
@@ -10162,7 +10237,10 @@ class VnpyPaperTradingService:
             return reason, diagnostics
 
         if settings.auto_intraday_market_gate_enabled:
-            index_evidence = self._live_market_index_evidence(market)
+            index_evidence = self._live_market_index_evidence(
+                market,
+                require_intraday=True,
+            )
             diagnostics["intraday_market"]["index"] = index_evidence
             if not index_evidence.get("available"):
                 reason = "intraday_market_index_unavailable"

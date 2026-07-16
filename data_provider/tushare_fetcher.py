@@ -926,7 +926,11 @@ class TushareFetcher(BaseFetcher):
                             'prev_close': prev_close,
                             'volume': safe_float(row['vol']),
                             'amount': safe_float(row['amount']) * 1000, # 千元转元
-                            'amplitude': 0.0 # Tushare index_daily 不直接返回振幅
+                            'amplitude': 0.0, # Tushare index_daily 不直接返回振幅
+                            'data_date': datetime.strptime(
+                                str(row['trade_date']), '%Y%m%d'
+                            ).date().isoformat(),
+                            'data_granularity': 'end_of_day',
                         })
                 except Exception as e:
                     logger.debug(f"Tushare 获取指数 {name} 失败: {e}")

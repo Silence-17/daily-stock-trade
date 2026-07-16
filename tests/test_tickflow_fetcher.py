@@ -346,6 +346,8 @@ class TestTickFlowFetcher(unittest.TestCase):
         self.assertEqual(data[0]["code"], "000001")
         self.assertEqual(data[0]["name"], "\u4e0a\u8bc1\u6307\u6570")
         self.assertAlmostEqual(data[0]["change_pct"], 10.0)
+        self.assertEqual(data[0]["provider_timestamp"], "2024-01-02T00:00:00+00:00")
+        self.assertEqual(data[0]["data_granularity"], "realtime")
 
     def test_get_market_stats_permission_failure_is_negative_cached(self):
         fetcher = TickFlowFetcher(api_key="sk-test")

@@ -313,6 +313,12 @@ class YfinanceFetcher(BaseFetcher):
         if hist.empty:
             return None
         today_row = hist.iloc[-1]
+        latest_index = hist.index[-1]
+        data_date = (
+            latest_index.date().isoformat()
+            if hasattr(latest_index, 'date')
+            else None
+        )
         prev_row = hist.iloc[-2] if len(hist) > 1 else today_row
         price = float(today_row['Close'])
         prev_close = float(prev_row['Close'])
@@ -335,6 +341,8 @@ class YfinanceFetcher(BaseFetcher):
             'volume': float(today_row['Volume']),
             'amount': 0.0,  # Yahoo Finance 不提供准确成交额
             'amplitude': amplitude,
+            'data_date': data_date,
+            'data_granularity': 'session_bar',
         }
 
     def get_main_indices(self, region: str = "cn") -> Optional[List[Dict[str, Any]]]:

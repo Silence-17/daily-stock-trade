@@ -45,6 +45,7 @@ class TestEfinanceMainIndices(unittest.TestCase):
         self.assertEqual(data[0]["name"], "上证指数")
         self.assertAlmostEqual(data[0]["open"], 3188.0)
         self.assertAlmostEqual(data[0]["current"], 3200.0)
+        self.assertEqual(data[0]["data_granularity"], "realtime")
 
     def test_get_main_indices_falls_back_to_kaipan_when_jinkai_is_missing(self):
         fetcher = EfinanceFetcher()

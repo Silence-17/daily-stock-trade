@@ -2724,6 +2724,88 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
             "breadth_counts_missing",
         )
 
+    def test_intraday_market_gate_rejects_explicit_end_of_day_index_fallback(self) -> None:
+        manager = MagicMock()
+        manager.get_main_indices.return_value = [
+            {
+                "code": "000001",
+                "change_pct": 0.5,
+                "provider": "tushare",
+                "data_date": date.today().isoformat(),
+                "data_granularity": "end_of_day",
+            }
+        ]
+        self.service.data_fetcher_manager = manager
+        settings = replace(
+            self.service.get_settings(),
+            auto_intraday_market_gate_enabled=True,
+        )
+
+        reason, diagnostics = self.service._market_context_pre_trade_risk(settings)
+
+        self.assertEqual(reason, "intraday_market_index_unavailable")
+        index = diagnostics["intraday_market"]["index"]
+        self.assertEqual(index["evidence_reason"], "index_evidence_not_intraday")
+        self.assertEqual(
+            index["rejected_indices"][0]["rejection_reason"],
+            "end_of_day_not_intraday",
+        )
+        manager.get_market_stats.assert_not_called()
+
+    def test_intraday_market_gate_rejects_stale_provider_timestamp(self) -> None:
+        manager = MagicMock()
+        manager.get_main_indices.return_value = [
+            {
+                "code": "000001",
+                "change_pct": 0.5,
+                "provider": "tickflow",
+                "provider_timestamp": (
+                    datetime.now(timezone.utc) - timedelta(minutes=16)
+                ).isoformat(),
+                "data_granularity": "realtime",
+            }
+        ]
+        self.service.data_fetcher_manager = manager
+        settings = replace(
+            self.service.get_settings(),
+            auto_intraday_market_gate_enabled=True,
+        )
+
+        reason, diagnostics = self.service._market_context_pre_trade_risk(settings)
+
+        self.assertEqual(reason, "intraday_market_index_unavailable")
+        rejected = diagnostics["intraday_market"]["index"]["rejected_indices"][0]
+        self.assertEqual(rejected["provider_timestamp_status"], "stale")
+        self.assertEqual(rejected["rejection_reason"], "provider_timestamp_stale")
+
+    def test_cross_market_gate_accepts_latest_closed_session_bar(self) -> None:
+        manager = MagicMock()
+        manager.get_main_indices.side_effect = lambda region: [
+            {
+                "code": "HSI" if region == "hk" else "SPX",
+                "change_pct": -0.2,
+                "provider": "yfinance",
+                "data_date": (date.today() - timedelta(days=1)).isoformat(),
+                "data_granularity": "session_bar",
+            }
+        ]
+        self.service.data_fetcher_manager = manager
+        settings = replace(
+            self.service.get_settings(),
+            auto_cross_market_gate_enabled=True,
+            auto_cross_market_min_change_pct=-2.0,
+        )
+
+        reason, diagnostics = self.service._market_context_pre_trade_risk(settings)
+
+        self.assertIsNone(reason)
+        self.assertEqual(diagnostics["status"], "passed")
+        evidence = diagnostics["cross_market"]["evidence"]
+        self.assertTrue(all(item["require_intraday"] is False for item in evidence))
+        self.assertTrue(
+            all(item["indices"][0]["data_granularity"] == "session_bar" for item in evidence)
+        )
+
     def test_cross_market_gate_blocks_when_one_linked_market_breaks_threshold(self) -> None:
         manager = MagicMock()
         evidence = {
