@@ -1460,6 +1460,35 @@ class StockSelectionAgentRepository:
                 }
             )
 
+        llm_policy = diagnostics.get("alphasift_llm_policy") if isinstance(diagnostics, dict) else None
+        llm_result = diagnostics.get("alphasift_llm_result") if isinstance(diagnostics, dict) else None
+        if isinstance(llm_policy, dict):
+            result_status = (
+                str(llm_result.get("status") or "unknown")
+                if isinstance(llm_result, dict)
+                else "unknown"
+            )
+            decision = str(llm_policy.get("decision") or "normal")
+            timeline.append(
+                {
+                    "stage": "llm_ranking_health",
+                    "status": result_status,
+                    "message": (
+                        f"AlphaSift LLM ranking: decision={decision}, "
+                        f"result={result_status}, state={llm_policy.get('state') or 'closed'}"
+                    ),
+                    "timestamp": (
+                        llm_result.get("observed_at")
+                        if isinstance(llm_result, dict)
+                        else started_at
+                    ),
+                    "details": {
+                        "policy": dict(llm_policy),
+                        "result": dict(llm_result) if isinstance(llm_result, dict) else None,
+                    },
+                }
+            )
+
         data_quality = diagnostics.get("data_quality") if isinstance(diagnostics, dict) else None
         if isinstance(data_quality, dict):
             quality_status = str(data_quality.get("status") or "unknown")

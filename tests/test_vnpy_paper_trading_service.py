@@ -89,15 +89,271 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
             {
                 "VNPY_AUTO_ALPHASIFT_LLM_TIMEOUT_SEC": "12",
                 "VNPY_AUTO_ALPHASIFT_LLM_MAX_RETRIES": "3",
+                "VNPY_AUTO_ALPHASIFT_LLM_FAILURE_THRESHOLD": "2",
+                "VNPY_AUTO_ALPHASIFT_LLM_COOLDOWN_MINUTES": "15",
+                "VNPY_AUTO_ALPHASIFT_LLM_PROBE_TIMEOUT_SEC": "30",
             },
             clear=False,
         ):
             policy = _resolve_auto_alphasift_llm_policy()
 
-        self.assertEqual(
-            policy,
-            {"timeout_seconds": 12, "max_retries": 3, "fallback": "screen_score"},
+        self.assertEqual(policy["timeout_seconds"], 12)
+        self.assertEqual(policy["normal_timeout_seconds"], 12)
+        self.assertEqual(policy["max_retries"], 3)
+        self.assertEqual(policy["failure_threshold"], 2)
+        self.assertEqual(policy["cooldown_minutes"], 15)
+        self.assertEqual(policy["probe_timeout_seconds"], 12)
+        self.assertEqual(policy["probe_lease_seconds"], 300)
+        self.assertTrue(policy["circuit_breaker_enabled"])
+        self.assertTrue(policy["use_llm"])
+        self.assertEqual(policy["state"], "closed")
+        self.assertEqual(policy["fallback"], "screen_score")
+
+    def test_auto_alphasift_llm_circuit_skips_repeated_legacy_failure(self) -> None:
+        self.service.update_settings(
+            {
+                "auto_trade_enabled": True,
+                "auto_trade_time_gate_enabled": False,
+            },
+            include_snapshot=False,
+            include_recent_trades=False,
         )
+        previous = self.service.agent_repo.create_run(
+            run_uid="legacy-llm-ranking-failure",
+            trigger_source="vnpy_paper_auto",
+            strategy="dual_low",
+            market="cn",
+        )
+        self.service.agent_repo.complete_run(
+            run_id=int(previous["id"]),
+            status="completed",
+            candidate_count=1,
+            planned_count=0,
+            submitted_count=0,
+            skipped_count=1,
+            diagnostics={
+                "alphasift_llm_policy": {"timeout_seconds": 45},
+                "warnings": ["LLM ranking failed: fell back to screen_score"],
+            },
+        )
+        fake_alphasift = MagicMock()
+        fake_alphasift.screen.return_value = {
+            "quality_status": "ok",
+            "candidates": [],
+            "llm_ranked": False,
+            "warnings": [],
+            "source_errors": [],
+        }
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "VNPY_AUTO_ALPHASIFT_LLM_FAILURE_THRESHOLD": "1",
+                    "VNPY_AUTO_ALPHASIFT_LLM_COOLDOWN_MINUTES": "60",
+                },
+                clear=False,
+            ),
+            patch(
+                "src.services.vnpy_paper_trading_service.AlphaSiftService",
+                return_value=fake_alphasift,
+            ),
+        ):
+            result = self.service.run_auto_trade_once(execution_mode_override="dry_run")
+
+        self.assertFalse(fake_alphasift.screen.call_args.kwargs["use_llm"])
+        audit = self.service.agent_repo.get_run_detail(result["agent_run_uid"])
+        assert audit is not None
+        policy = audit["diagnostics"]["alphasift_llm_policy"]
+        outcome = audit["diagnostics"]["alphasift_llm_result"]
+        self.assertEqual(policy["state"], "open")
+        self.assertEqual(policy["decision"], "circuit_open")
+        self.assertEqual(policy["history_run_uids"], ["legacy-llm-ranking-failure"])
+        self.assertEqual(outcome["status"], "skipped")
+        self.assertEqual(outcome["reason"], "circuit_open")
+        health_event = next(
+            event for event in audit["timeline"] if event["stage"] == "llm_ranking_health"
+        )
+        self.assertEqual(health_event["status"], "skipped")
+        self.assertIn("decision=circuit_open", health_event["message"])
+
+    def test_auto_alphasift_llm_half_open_probe_success_closes_circuit(self) -> None:
+        self.service.update_settings(
+            {
+                "auto_trade_enabled": True,
+                "auto_trade_time_gate_enabled": False,
+            },
+            include_snapshot=False,
+            include_recent_trades=False,
+        )
+        previous = self.service.agent_repo.create_run(
+            run_uid="llm-ranking-failure-before-probe",
+            trigger_source="vnpy_paper_auto",
+            strategy="dual_low",
+            market="cn",
+        )
+        self.service.agent_repo.complete_run(
+            run_id=int(previous["id"]),
+            status="completed",
+            candidate_count=1,
+            planned_count=0,
+            submitted_count=0,
+            skipped_count=1,
+            diagnostics={
+                "alphasift_llm_result": {
+                    "status": "failure",
+                    "reason": "timeout",
+                }
+            },
+        )
+        fake_alphasift = MagicMock()
+        fake_alphasift.screen.return_value = {
+            "quality_status": "ok",
+            "candidates": [],
+            "llm_ranked": True,
+            "warnings": [],
+            "source_errors": [],
+        }
+        future = datetime.now(timezone.utc) + timedelta(minutes=61)
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "VNPY_AUTO_ALPHASIFT_LLM_FAILURE_THRESHOLD": "1",
+                    "VNPY_AUTO_ALPHASIFT_LLM_COOLDOWN_MINUTES": "60",
+                    "VNPY_AUTO_ALPHASIFT_LLM_PROBE_TIMEOUT_SEC": "7",
+                },
+                clear=False,
+            ),
+            patch.object(self.service, "_now_utc", return_value=future),
+            patch(
+                "src.services.vnpy_paper_trading_service.AlphaSiftService",
+                return_value=fake_alphasift,
+            ),
+        ):
+            result = self.service.run_auto_trade_once(execution_mode_override="dry_run")
+            closed_policy = self.service._auto_alphasift_llm_policy(
+                self.service.get_settings()
+            )
+
+        call = fake_alphasift.screen.call_args.kwargs
+        self.assertTrue(call["use_llm"])
+        self.assertEqual(call["llm_timeout_seconds"], 7)
+        audit = self.service.agent_repo.get_run_detail(result["agent_run_uid"])
+        assert audit is not None
+        self.assertEqual(audit["diagnostics"]["alphasift_llm_policy"]["state"], "half_open")
+        self.assertEqual(audit["diagnostics"]["alphasift_llm_result"]["status"], "success")
+        self.assertEqual(audit["diagnostics"]["alphasift_llm_result"]["state_after"], "closed")
+        self.assertEqual(closed_policy["state"], "closed")
+        self.assertEqual(closed_policy["consecutive_failures"], 0)
+
+    def test_auto_alphasift_llm_allows_only_one_half_open_probe(self) -> None:
+        settings = self.service.get_settings()
+        failure = self.service.agent_repo.create_run(
+            run_uid="llm-failure-before-active-probe",
+            trigger_source="vnpy_paper_auto",
+            strategy=settings.auto_strategy,
+            market=settings.auto_market,
+        )
+        self.service.agent_repo.complete_run(
+            run_id=int(failure["id"]),
+            status="completed",
+            candidate_count=0,
+            submitted_count=0,
+            skipped_count=0,
+            diagnostics={"alphasift_llm_result": {"status": "failure", "reason": "timeout"}},
+        )
+        active_probe = self.service.agent_repo.create_run(
+            run_uid="llm-active-recovery-probe",
+            trigger_source="vnpy_paper_auto",
+            strategy=settings.auto_strategy,
+            market=settings.auto_market,
+            diagnostics={
+                "alphasift_llm_policy": {
+                    "state": "half_open",
+                    "decision": "recovery_probe",
+                    "use_llm": True,
+                }
+            },
+        )
+
+        with patch.dict(
+            os.environ,
+            {
+                "VNPY_AUTO_ALPHASIFT_LLM_FAILURE_THRESHOLD": "1",
+                "VNPY_AUTO_ALPHASIFT_LLM_COOLDOWN_MINUTES": "1",
+            },
+            clear=False,
+        ):
+            policy = self.service._auto_alphasift_llm_policy(settings)
+
+        self.assertEqual(policy["state"], "open")
+        self.assertEqual(policy["decision"], "probe_in_progress")
+        self.assertFalse(policy["use_llm"])
+        self.assertEqual(policy["last_attempt_run_uid"], active_probe["run_uid"])
+        self.assertIsNotNone(policy["probe_lease_expires_at"])
+
+    def test_auto_alphasift_llm_expires_abandoned_half_open_probe(self) -> None:
+        settings = self.service.get_settings()
+        active_probe = self.service.agent_repo.create_run(
+            run_uid="llm-abandoned-recovery-probe",
+            trigger_source="vnpy_paper_auto",
+            strategy=settings.auto_strategy,
+            market=settings.auto_market,
+            diagnostics={
+                "alphasift_llm_policy": {
+                    "state": "half_open",
+                    "decision": "recovery_probe",
+                    "use_llm": True,
+                }
+            },
+        )
+        stale_at = datetime.now() - timedelta(minutes=10)
+        with DatabaseManager.get_instance().get_session() as session:
+            session.execute(
+                text(
+                    "UPDATE stock_selection_agent_runs "
+                    "SET created_at = :stale_at, updated_at = :stale_at "
+                    "WHERE id = :run_id"
+                ),
+                {"stale_at": stale_at, "run_id": int(active_probe["id"])},
+            )
+            session.commit()
+
+        with patch.dict(
+            os.environ,
+            {
+                "VNPY_AUTO_ALPHASIFT_LLM_FAILURE_THRESHOLD": "1",
+                "VNPY_AUTO_ALPHASIFT_LLM_COOLDOWN_MINUTES": "60",
+            },
+            clear=False,
+        ):
+            policy = self.service._auto_alphasift_llm_policy(settings)
+
+        self.assertEqual(policy["state"], "open")
+        self.assertEqual(policy["decision"], "circuit_open")
+        self.assertFalse(policy["use_llm"])
+        self.assertEqual(policy["consecutive_failures"], 1)
+        self.assertEqual(policy["last_attempt_run_uid"], active_probe["run_uid"])
+
+    def test_alphasift_llm_result_keeps_disabled_circuit_state(self) -> None:
+        result = self.service._build_alphasift_llm_result(
+            {"llm_ranked": False, "warnings": ["LLM ranking failed: timeout"]},
+            {
+                "use_llm": True,
+                "circuit_breaker_enabled": False,
+                "state": "disabled",
+                "decision": "normal",
+                "failure_threshold": 1,
+                "consecutive_failures": 0,
+                "timeout_seconds": 45,
+            },
+        )
+
+        self.assertEqual(result["status"], "failure")
+        self.assertEqual(result["reason"], "timeout")
+        self.assertEqual(result["state_after"], "disabled")
 
     @staticmethod
     def _age_trade_plan(plan_id: int, *, minutes: int = 45) -> None:
@@ -589,6 +845,7 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
             market="hk",
             max_results=2,
             source_health_trends=[],
+            use_llm=True,
             llm_timeout_seconds=45,
             llm_max_retries=0,
         )
@@ -679,6 +936,7 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
             market="cn",
             max_results=1,
             source_health_trends=trend_items,
+            use_llm=True,
             llm_timeout_seconds=45,
             llm_max_retries=0,
         )
@@ -700,10 +958,8 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         )
         self.assertTrue(plan["gates"]["llm_dynamic_plan_enabled"])
         self.assertTrue(plan["gates"]["llm_dynamic_plan_applied"])
-        self.assertEqual(
-            audit["diagnostics"]["alphasift_llm_policy"],
-            {"timeout_seconds": 45, "max_retries": 0, "fallback": "screen_score"},
-        )
+        self.assertEqual(audit["diagnostics"]["alphasift_llm_policy"]["timeout_seconds"], 45)
+        self.assertEqual(audit["diagnostics"]["alphasift_llm_policy"]["decision"], "normal")
         timings = audit["diagnostics"]["stage_timings"]
         self.assertEqual(timings["schema_version"], 1)
         self.assertEqual(timings["completed_stage"], "candidate_decision_execution")
