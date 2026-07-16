@@ -7,6 +7,7 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -607,6 +608,107 @@ class RuntimeSchedulerServiceTestCase(unittest.TestCase):
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["message"], "persisted failure")
         self.assertEqual(events[0]["details"]["error"], "boom")
+
+    def test_background_task_overlap_guard_survives_wrapper_replacement(self) -> None:
+        repo = _FakeTaskEventRepository()
+        service = RuntimeSchedulerService(
+            config_provider=lambda: SimpleNamespace(schedule_enabled=False),
+            task_event_repository=repo,
+        )
+        first_started = threading.Event()
+        release_first = threading.Event()
+        calls = []
+
+        def first_generation_task():
+            calls.append("first")
+            first_started.set()
+            self.assertTrue(release_first.wait(timeout=5))
+            return {"accepted": True, "submitted_count": 0}
+
+        def second_generation_task():
+            calls.append("second")
+            return {"accepted": True, "submitted_count": 0}
+
+        first_wrapper = service._instrument_background_task(
+            "vnpy_paper_auto_retry",
+            first_generation_task,
+        )
+        worker = threading.Thread(target=first_wrapper)
+        worker.start()
+        self.assertTrue(first_started.wait(timeout=5))
+
+        second_wrapper = service._instrument_background_task(
+            "vnpy_paper_auto_retry",
+            second_generation_task,
+        )
+        skipped = second_wrapper()
+
+        self.assertEqual(calls, ["first"])
+        self.assertEqual(skipped["reason"], "task_already_running")
+        self.assertTrue(skipped["skipped"])
+        self.assertEqual(skipped["overlap_guard"], "process_task_name")
+
+        fake_schedule = SimpleNamespace(get_jobs=lambda: [])
+        service._scheduler = SimpleNamespace(
+            schedule=fake_schedule,
+            schedule_times=[],
+            _background_tasks=[{
+                "name": "vnpy_paper_auto_retry",
+                "interval_seconds": 300,
+                "last_run": 1000.0,
+                "thread": None,
+                "running": False,
+            }],
+        )
+        guarded_status = service.status()["background_tasks"][0]
+        self.assertTrue(guarded_status["running"])
+        self.assertTrue(guarded_status["overlap_guarded"])
+        self.assertTrue(guarded_status["previous_generation_running"])
+
+        release_first.set()
+        worker.join(timeout=5)
+        self.assertFalse(worker.is_alive())
+        completed = second_wrapper()
+
+        self.assertTrue(completed["accepted"])
+        self.assertEqual(calls, ["first", "second"])
+        recovered_status = service.status()["background_tasks"][0]
+        self.assertFalse(recovered_status["running"])
+        self.assertTrue(recovered_status["overlap_guarded"])
+        self.assertFalse(recovered_status["previous_generation_running"])
+        self.assertEqual(
+            [event["status"] for event in repo.events],
+            ["started", "skipped", "completed", "started", "completed"],
+        )
+
+    def test_background_task_overlap_guard_releases_after_exception(self) -> None:
+        service = RuntimeSchedulerService(
+            config_provider=lambda: SimpleNamespace(schedule_enabled=False),
+        )
+
+        def failing_task():
+            raise RuntimeError("unit failure")
+
+        failing_wrapper = service._instrument_background_task(
+            "vnpy_paper_auto_trade",
+            failing_task,
+        )
+        with self.assertRaisesRegex(RuntimeError, "unit failure"):
+            failing_wrapper()
+
+        healthy_task = MagicMock(return_value={"accepted": True})
+        healthy_wrapper = service._instrument_background_task(
+            "vnpy_paper_auto_trade",
+            healthy_task,
+        )
+        result = healthy_wrapper()
+
+        self.assertTrue(result["accepted"])
+        healthy_task.assert_called_once_with()
+        self.assertEqual(
+            [event["status"] for event in service.task_events(limit=10)],
+            ["started", "failed", "started", "completed"],
+        )
 
     def test_background_task_event_persistence_triggers_retention_cleanup(self) -> None:
         repo = _FakeTaskEventRepository()

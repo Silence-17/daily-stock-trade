@@ -746,6 +746,7 @@ python main.py --schedule --no-run-immediately
 > 从 `python main.py --schedule` 或等价纯 CLI 调度模式启动后，WebUI 保存新的 `SCHEDULE_TIME` / `SCHEDULE_TIMES` 会在下一轮调度检查内自动重绑 daily jobs，无需重启进程；旧的执行时间不会继续保留。`python main.py --serve --schedule` 会由 Web/API runtime scheduler 接管定时任务，WebUI/API/Desktop 长运行进程保存 `SCHEDULE_ENABLED`、`SCHEDULE_TIME` 或 `SCHEDULE_TIMES` 后会按当前配置启停或重建 runtime scheduler。
 >
 > `python main.py --serve-only` / `--webui-only` 只禁用每日分析 daily job；事件监控、自动模拟交易等独立后台任务仍可由 Web/API runtime scheduler 按各自开关运行。
+> runtime scheduler 重建配置时会按任务名复用进程内互斥锁。若旧代同名任务仍在运行，新代任务会以 `task_already_running` 持久化审计跳过，避免自动买入或恢复扫描并发执行；任务状态中的 `overlap_guarded` 和 `previous_generation_running` 可区分保护是否启用及旧代任务是否仍在收尾，Web 模拟交易页会显示该状态。
 >
 > Web/API runtime scheduler 的立即执行入口只会在没有分析任务运行时接受请求；如果已有分析在执行，会返回忙碌状态而不是假装排队成功。
 > runtime scheduler 状态会返回最近 `task_events`，Web 模拟交易页据此展示“后台任务日志”，也可通过 `GET /api/v1/vnpy-paper/task-events` 按任务名和 started/completed/skipped/failed 状态筛选数据库持久化的最近事件，直接查看自动买入、自动重试和事件监控的执行结果；API 进程重启后仍可保留最近任务事件用于排障。

@@ -168,6 +168,7 @@ class RuntimeSchedulerService:
         }
         self._background_task_cache: Dict[str, Dict[str, Any]] = {}
         self._background_task_wrappers: Dict[str, Dict[str, Any]] = {}
+        self._background_task_locks: Dict[str, threading.Lock] = {}
         self._background_task_events: Deque[Dict[str, Any]] = deque(maxlen=100)
         self._task_event_repository = task_event_repository
         self._task_event_retention_days = (
@@ -492,47 +493,67 @@ class RuntimeSchedulerService:
         cached = self._background_task_wrappers.get(name)
         if cached is not None and cached.get("source") is task:
             return cached["wrapped"]
+        with self._lock:
+            task_lock = self._background_task_locks.setdefault(name, threading.Lock())
 
         def wrapped_task() -> Any:
-            started_at = datetime.now()
-            self._record_background_task_event(
-                name=name,
-                status="started",
-                message=f"Background task started: {name}",
-            )
-            try:
-                result = task()
-            except Exception as exc:
-                duration = (datetime.now() - started_at).total_seconds()
+            if not task_lock.acquire(blocking=False):
+                details = {
+                    "accepted": False,
+                    "skipped": True,
+                    "reason": "task_already_running",
+                    "overlap_guard": "process_task_name",
+                }
                 self._record_background_task_event(
                     name=name,
-                    status="failed",
-                    message=str(exc) or f"Background task failed: {name}",
-                    details={
-                        "error": str(exc),
-                        "error_type": exc.__class__.__name__,
-                    },
+                    status="skipped",
+                    message="Background task skipped: task_already_running",
+                    details=details,
+                    duration_seconds=0.0,
+                )
+                return details
+            started_at = datetime.now()
+            try:
+                self._record_background_task_event(
+                    name=name,
+                    status="started",
+                    message=f"Background task started: {name}",
+                )
+                try:
+                    result = task()
+                except Exception as exc:
+                    duration = (datetime.now() - started_at).total_seconds()
+                    self._record_background_task_event(
+                        name=name,
+                        status="failed",
+                        message=str(exc) or f"Background task failed: {name}",
+                        details={
+                            "error": str(exc),
+                            "error_type": exc.__class__.__name__,
+                        },
+                        duration_seconds=duration,
+                    )
+                    raise
+                duration = (datetime.now() - started_at).total_seconds()
+                details = self._summarize_background_task_result(result)
+                skipped = details.get("skipped") is True
+                reason = str(details.get("reason") or "").strip()
+                status = "skipped" if skipped else "completed"
+                message = (
+                    f"Background task skipped: {reason}"
+                    if skipped and reason
+                    else f"Background task {status}: {name}"
+                )
+                self._record_background_task_event(
+                    name=name,
+                    status=status,
+                    message=message,
+                    details=details,
                     duration_seconds=duration,
                 )
-                raise
-            duration = (datetime.now() - started_at).total_seconds()
-            details = self._summarize_background_task_result(result)
-            skipped = details.get("skipped") is True
-            reason = str(details.get("reason") or "").strip()
-            status = "skipped" if skipped else "completed"
-            message = (
-                f"Background task skipped: {reason}"
-                if skipped and reason
-                else f"Background task {status}: {name}"
-            )
-            self._record_background_task_event(
-                name=name,
-                status=status,
-                message=message,
-                details=details,
-                duration_seconds=duration,
-            )
-            return result
+                return result
+            finally:
+                task_lock.release()
 
         self._background_task_wrappers[name] = {
             "source": task,
@@ -664,6 +685,18 @@ class RuntimeSchedulerService:
             for entry in raw_tasks or []:
                 worker = entry.get("thread") if isinstance(entry, dict) else None
                 worker_running = bool(worker is not None and hasattr(worker, "is_alive") and worker.is_alive())
+                task_name = (
+                    str(entry.get("name") or "background_task")
+                    if isinstance(entry, dict)
+                    else "background_task"
+                )
+                entry_running = (
+                    bool(entry.get("running", False)) or worker_running
+                    if isinstance(entry, dict)
+                    else False
+                )
+                task_lock = self._background_task_locks.get(task_name)
+                guarded_running = bool(task_lock is not None and task_lock.locked())
                 next_run_at = None
                 if isinstance(entry, dict):
                     try:
@@ -676,10 +709,12 @@ class RuntimeSchedulerService:
                     except (TypeError, ValueError, OSError, OverflowError):
                         next_run_at = None
                 background_tasks.append({
-                    "name": str(entry.get("name") or "background_task") if isinstance(entry, dict) else "background_task",
+                    "name": task_name,
                     "interval_seconds": entry.get("interval_seconds") if isinstance(entry, dict) else None,
                     "initial_delay_seconds": entry.get("initial_delay_seconds") if isinstance(entry, dict) else None,
-                    "running": bool(entry.get("running", False)) or worker_running if isinstance(entry, dict) else False,
+                    "running": entry_running or guarded_running,
+                    "overlap_guarded": task_lock is not None,
+                    "previous_generation_running": guarded_running and not entry_running,
                     "last_run": entry.get("last_run") if isinstance(entry, dict) else None,
                     "next_run_at": next_run_at,
                 })

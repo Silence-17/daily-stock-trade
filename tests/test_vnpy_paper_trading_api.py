@@ -946,6 +946,8 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
                 "name": "vnpy_paper_auto_trade",
                 "interval_seconds": 300,
                 "running": False,
+                "overlap_guarded": True,
+                "previous_generation_running": False,
                 "last_run": None,
                 "next_run_at": "2026-07-02T09:35:00",
             }],
@@ -978,6 +980,8 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
         self.assertEqual(payload["scheduler"]["next_run_at"], "2026-07-02T09:30:00")
         self.assertEqual(payload["scheduler"]["background_tasks"][0]["name"], "vnpy_paper_auto_trade")
         self.assertEqual(payload["scheduler"]["background_tasks"][0]["next_run_at"], "2026-07-02T09:35:00")
+        self.assertTrue(payload["scheduler"]["background_tasks"][0]["overlap_guarded"])
+        self.assertFalse(payload["scheduler"]["background_tasks"][0]["previous_generation_running"])
         self.assertEqual(payload["scheduler"]["task_events"][0]["name"], "vnpy_paper_auto_trade")
         self.assertEqual(payload["scheduler"]["task_events"][0]["status"], "skipped")
         self.assertEqual(

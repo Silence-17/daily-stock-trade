@@ -216,6 +216,8 @@ export type VnpyPaperSchedulerTaskStatus = {
   intervalSeconds?: number | null;
   initialDelaySeconds?: number | null;
   running: boolean;
+  overlapGuarded?: boolean;
+  previousGenerationRunning?: boolean;
   lastRun?: number | string | null;
   nextRunAt?: string | null;
 };

@@ -9,6 +9,7 @@ Snapshot date: 2026-07-16
 - Automatic paper trading can run from AlphaSift candidates through risk checks into local paper orders, with dry-run, manual approval, `paper`, and optional `vnpy_paper` execution modes.
 - Agent run details now support persisted human acceptance feedback (`approved`, `needs_changes`, or `rejected`) with reviewer and notes. Feedback appears in the run list, detail timeline, and daily summary, and is carried into later same-strategy/market run context. A deterministic cross-market objective can use needs-changes/rejected feedback, consecutive failures, or degraded cross-run quality to tighten candidate count and per-order cash; it never widens saved limits or bypasses risk gates.
 - Runtime scheduler background tasks are registered independently from the daily analysis job, so `serve-only` / `webui-only` can still run paper auto-trading tasks.
+- Runtime scheduler reconcile now reuses process-local locks by task name. A replacement generation records a persisted `task_already_running` skip while the older generation finishes, status exposes `overlap_guarded` and `previous_generation_running`, and exception paths release the lock for the next run.
 - The API-owned vn.py MainEngine/EventEngine is now injected into Runtime scheduler paper-trading services; the recovery task runs once at registration and then every one to five minutes, so background execution no longer has a separate bridge capability from Web requests.
 - A complete isolated Python 3.13.14 environment now contains AlphaSift 0.2.0, LiteLLM 1.91.3, vn.py 4.4.0, and the project dependencies. Its smoke check constructs a real vn.py `OrderRequest`, starts and closes the real EventEngine/MainEngine, and uses the repository-local ignored `.vntrader/` runtime directory.
 - Active vn.py plans become eligible for `MainEngine.get_order` / `get_all_trades` reconciliation after a 60-second grace period. Pausing new automatic buys keeps order recovery scheduled, and missed, cancel-race, or post-timeout late fills are still accumulated idempotently into the Portfolio ledger.
@@ -65,6 +66,8 @@ Local API: `http://127.0.0.1:8000`
   - `settings.auto_execution_mode=paper`
   - `scheduler.enabled=true`
   - `scheduler.loop_running=true`
+  - both registered paper tasks report `overlap_guarded=true`
+  - both registered paper tasks report `previous_generation_running=false` after restart
   - `settings.auto_trade_enabled=true`
   - `diagnostics.alphasift.available=true`
   - `diagnostics.alphasift.strategy_count=8`
@@ -103,12 +106,16 @@ Local API: `http://127.0.0.1:8000`
 - `GET /paper-trading` returned HTTP 200.
 - `GET /api/v1/alphasift/status` reports `mode=circuit_breaker_failover` and `cross_process_persistence=true` for both candidate quote and fund-flow routing. The fund-flow priority is `tushare_ths,akshare`, and both routes report `restored_sources=0` for the clean current restart.
 
-The latest post-change runtime uses listener PID `22260` (parent PID `6960`) and build id `local-strategy-evidence-final`; Python 3.13.14, the vn.py runtime, built-in connected `DSA_SIM` gateway, MainEngine bridge, and all four EventEngine callbacks are available while the saved execution mode remains `paper`. Automatic trading remains enabled and its next buy run is aligned to `2026-07-17T09:30:00` Asia/Shanghai. Candidate quote and fund-flow health persistence remains enabled. The read-only compatibility smoke loaded the latest legacy Agent run, confirmed it has no `strategy_evidence`, and still returned its detail plus both Web pages without error. Market-light, market-breadth, and hotspot-retreat gates remain disabled with a seven-calendar-day snapshot-age limit, breadth floor 35, and retreat drop 25. Agent run count remains eight and the latest run remains `ss-agent-20260716081103-27d104bb`; the final restart and validation created no Agent run or order.
+The latest post-change runtime uses listener PID `25092` (parent PID `10760`) and build id `local-scheduler-overlap-guard-final`; Python 3.13.14, the vn.py runtime, built-in connected `DSA_SIM` gateway, MainEngine bridge, and all four EventEngine callbacks are available while the saved execution mode remains `paper`. Both paper background tasks expose `overlap_guarded=true` and `previous_generation_running=false` after restart. Automatic trading remains enabled and its next buy run is aligned to `2026-07-17T09:30:00` Asia/Shanghai. Candidate quote and fund-flow health persistence remains enabled. Both `/paper-trading` and `/agent-console` returned HTTP 200. Market-light, market-breadth, and hotspot-retreat gates remain disabled with a seven-calendar-day snapshot-age limit, breadth floor 35, and retreat drop 25. Agent run count remains eight and the latest run remains `ss-agent-20260716081103-27d104bb`; the final restart and validation created no Agent run or order.
 
 The readiness and system health status are `warning` because the current time is outside the A-share trading session and the next action is to wait for the next session. There are no required blockers; the scheduling alignment itself is ready.
 
 ## Recent Validation
 
+- `python -m pytest tests/test_runtime_scheduler_service.py tests/test_scheduler_background.py tests/test_vnpy_paper_trading_service.py tests/test_vnpy_paper_trading_api.py tests/test_runtime_scheduler_repo.py -q -p no:cacheprovider`
+  - 216 passed and 1 optional test skipped. Coverage includes cross-generation task overlap after reconcile, persisted `task_already_running` audit, replacement-generation running visibility, exception-path lock release, and the existing scheduler, paper-trading service/API, and task-event repository paths.
+- `npm.cmd run test -- --run src/pages/__tests__/VnpyPaperTradingPage.test.tsx src/api/__tests__/vnpyPaperTrading.test.ts`, `npm.cmd run lint`, and `npm.cmd run build`
+  - 59 focused Web tests passed; lint completed with zero errors and one pre-existing `SettingsPage.tsx` Hook dependency warning; the production build passed.
 - `python -m pytest tests/test_vnpy_paper_trading_service.py tests/test_vnpy_paper_trading_api.py tests/test_alphasift_api.py tests/test_runtime_scheduler_service.py -q -p no:cacheprovider`
   - 308 passed and 1 optional test skipped. The service-only rerun passed 143 tests with 1 optional skip. Coverage includes detailed and summary-only strategy evidence, bounded rule/factor normalization, non-finite factor removal, mirrored decision/trade-plan audits, legacy API behavior, and existing AlphaSift/scheduler/trading paths.
 - `npm.cmd run test -- --run src/pages/__tests__/AgentConsolePage.test.tsx`, `npm.cmd run lint`, and `npm.cmd run build`

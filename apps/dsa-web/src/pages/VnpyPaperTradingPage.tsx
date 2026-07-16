@@ -2298,12 +2298,22 @@ const VnpyPaperTradingPage: React.FC = () => {
             <p className="mt-2 text-sm font-semibold text-foreground">
               {autoTradeTask ? (autoTradeTask.running ? '自动任务运行中' : '自动任务已注册') : '自动任务未注册'}
             </p>
+            {autoTradeTask?.previousGenerationRunning ? (
+              <p className="mt-1 text-xs text-secondary-text" data-testid="auto-trade-previous-generation-running">
+                配置重载前任务仍在收尾
+              </p>
+            ) : null}
           </div>
           <div className="rounded-xl border border-border bg-card/95 px-4 py-3">
             <p className="text-xs text-secondary-text">自动重试</p>
             <p className="mt-2 text-sm font-semibold text-foreground">
               {autoRetryTask ? (autoRetryTask.running ? '重试任务运行中' : '重试任务已注册') : '重试任务未注册'}
             </p>
+            {autoRetryTask?.previousGenerationRunning ? (
+              <p className="mt-1 text-xs text-secondary-text" data-testid="auto-retry-previous-generation-running">
+                配置重载前任务仍在收尾
+              </p>
+            ) : null}
           </div>
           <div className="rounded-xl border border-border bg-card/95 px-4 py-3">
             <p className="text-xs text-secondary-text">下次运行</p>
