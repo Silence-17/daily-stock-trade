@@ -173,6 +173,10 @@ class VnpyPaperSettings:
     auto_consecutive_loss_cooldown_minutes: int = 1440
     auto_market_light_gate_enabled: bool = False
     auto_market_light_block_statuses: List[str] = field(default_factory=lambda: ["red"])
+    auto_market_breadth_gate_enabled: bool = False
+    auto_market_breadth_min_score: int = 35
+    auto_hotspot_retreat_gate_enabled: bool = False
+    auto_hotspot_retreat_min_drop: int = 25
     auto_failure_fuse_enabled: bool = False
     auto_failure_fuse_threshold: int = 3
     auto_failure_fuse_auto_recovery_enabled: bool = False
@@ -2703,7 +2707,10 @@ class VnpyPaperTradingService:
         }
         account_risk_reason, account_risk_diagnostics = self._account_pre_trade_risk(settings)
         run_diagnostics["account_risk"] = account_risk_diagnostics
-        market_risk_reason = self._market_light_pre_trade_risk_reason(settings)
+        market_risk_reason, market_risk_diagnostics = (
+            self._market_context_pre_trade_risk(settings)
+        )
+        run_diagnostics["market_context_risk"] = market_risk_diagnostics
         if account_risk_diagnostics.get("drawdown_guard_transition") == "recovered":
             self._record_auto_trade_alert_event(
                 "account_drawdown_recovered",
@@ -4543,6 +4550,12 @@ class VnpyPaperTradingService:
         auto_consecutive_loss_cooldown_minutes = _safe_int(
             raw.get("auto_consecutive_loss_cooldown_minutes")
         )
+        auto_market_breadth_min_score = _safe_int(
+            raw.get("auto_market_breadth_min_score")
+        )
+        auto_hotspot_retreat_min_drop = _safe_int(
+            raw.get("auto_hotspot_retreat_min_drop")
+        )
         auto_failure_fuse_threshold = _safe_int(raw.get("auto_failure_fuse_threshold"))
         auto_failure_fuse_cooldown_minutes = _safe_int(
             raw.get("auto_failure_fuse_cooldown_minutes")
@@ -4769,6 +4782,36 @@ class VnpyPaperTradingService:
                 raw.get("auto_market_light_gate_enabled", defaults.auto_market_light_gate_enabled)
             ),
             auto_market_light_block_statuses=auto_market_light_block_statuses,
+            auto_market_breadth_gate_enabled=bool(
+                raw.get(
+                    "auto_market_breadth_gate_enabled",
+                    defaults.auto_market_breadth_gate_enabled,
+                )
+            ),
+            auto_market_breadth_min_score=max(
+                0,
+                min(
+                    100,
+                    auto_market_breadth_min_score
+                    if auto_market_breadth_min_score is not None
+                    else defaults.auto_market_breadth_min_score,
+                ),
+            ),
+            auto_hotspot_retreat_gate_enabled=bool(
+                raw.get(
+                    "auto_hotspot_retreat_gate_enabled",
+                    defaults.auto_hotspot_retreat_gate_enabled,
+                )
+            ),
+            auto_hotspot_retreat_min_drop=max(
+                1,
+                min(
+                    100,
+                    auto_hotspot_retreat_min_drop
+                    if auto_hotspot_retreat_min_drop is not None
+                    else defaults.auto_hotspot_retreat_min_drop,
+                ),
+            ),
             auto_failure_fuse_enabled=bool(
                 raw.get("auto_failure_fuse_enabled", defaults.auto_failure_fuse_enabled)
             ),
@@ -5259,6 +5302,10 @@ class VnpyPaperTradingService:
                 ),
                 "market_light_gate_enabled": settings.auto_market_light_gate_enabled,
                 "market_light_block_statuses": list(settings.auto_market_light_block_statuses or []),
+                "market_breadth_gate_enabled": settings.auto_market_breadth_gate_enabled,
+                "market_breadth_min_score": settings.auto_market_breadth_min_score,
+                "hotspot_retreat_gate_enabled": settings.auto_hotspot_retreat_gate_enabled,
+                "hotspot_retreat_min_drop": settings.auto_hotspot_retreat_min_drop,
                 "failure_fuse_enabled": settings.auto_failure_fuse_enabled,
                 "failure_fuse_threshold": settings.auto_failure_fuse_threshold,
                 "llm_dynamic_plan_enabled": settings.auto_llm_plan_enabled,
@@ -5904,6 +5951,10 @@ class VnpyPaperTradingService:
             layers.append("account_risk")
         if settings.auto_market_light_gate_enabled:
             layers.append("market_light")
+        if settings.auto_market_breadth_gate_enabled:
+            layers.append("market_breadth")
+        if settings.auto_hotspot_retreat_gate_enabled:
+            layers.append("hotspot_retreat")
         if settings.auto_failure_fuse_enabled:
             layers.append("failure_fuse")
         if settings.auto_sell_enabled:
@@ -5973,6 +6024,24 @@ class VnpyPaperTradingService:
                     "reason": "market_light_blocked",
                     "action": "skip_buy",
                     "statuses": list(settings.auto_market_light_block_statuses or []),
+                    "alert": False,
+                }
+            )
+        if settings.auto_market_breadth_gate_enabled:
+            actions.append(
+                {
+                    "reason": "market_breadth_below_threshold",
+                    "action": "skip_buy",
+                    "min_score": settings.auto_market_breadth_min_score,
+                    "alert": False,
+                }
+            )
+        if settings.auto_hotspot_retreat_gate_enabled:
+            actions.append(
+                {
+                    "reason": "hotspot_retreat_detected",
+                    "action": "skip_buy",
+                    "min_drop": settings.auto_hotspot_retreat_min_drop,
                     "alert": False,
                 }
             )
@@ -9483,12 +9552,60 @@ class VnpyPaperTradingService:
             return peak
 
     @staticmethod
-    def _market_light_pre_trade_risk_reason(settings: VnpyPaperSettings) -> Optional[str]:
-        if not settings.auto_market_light_gate_enabled:
+    def _market_context_pre_trade_risk(
+        settings: VnpyPaperSettings,
+    ) -> Tuple[Optional[str], Dict[str, Any]]:
+        enabled = bool(
+            settings.auto_market_light_gate_enabled
+            or settings.auto_market_breadth_gate_enabled
+            or settings.auto_hotspot_retreat_gate_enabled
+        )
+        diagnostics: Dict[str, Any] = {
+            "schema_version": 1,
+            "enabled": enabled,
+            "market": str(settings.auto_market or "").strip().lower(),
+            "market_light": {
+                "enabled": settings.auto_market_light_gate_enabled,
+                "block_statuses": list(settings.auto_market_light_block_statuses or []),
+            },
+            "market_breadth": {
+                "enabled": settings.auto_market_breadth_gate_enabled,
+                "min_score": settings.auto_market_breadth_min_score,
+            },
+            "hotspot_retreat": {
+                "enabled": settings.auto_hotspot_retreat_gate_enabled,
+                "min_drop": settings.auto_hotspot_retreat_min_drop,
+                "proxy": "market_light_limit_dimension",
+            },
+            "status": "disabled" if not enabled else "checking",
+            "reason": None,
+        }
+
+        def unavailable_reason() -> Optional[str]:
+            if (
+                settings.auto_market_breadth_gate_enabled
+                and settings.auto_hotspot_retreat_gate_enabled
+            ):
+                return "market_context_unavailable"
+            if settings.auto_market_breadth_gate_enabled:
+                return "market_breadth_unavailable"
+            if settings.auto_hotspot_retreat_gate_enabled:
+                return "hotspot_retreat_unavailable"
             return None
+
+        if not enabled:
+            return None, diagnostics
         market = str(settings.auto_market or "").strip().lower()
         if market not in {"cn", "hk", "us", "jp", "kr"}:
-            return None
+            reason = unavailable_reason()
+            diagnostics.update(
+                {
+                    "status": "unavailable",
+                    "reason": reason,
+                    "evidence_reason": "market_context_unsupported",
+                }
+            )
+            return reason, diagnostics
         try:
             snapshot = load_previous_snapshot(
                 market,
@@ -9496,13 +9613,116 @@ class VnpyPaperTradingService:
             )
         except Exception as exc:  # noqa: BLE001 - missing market context should not break auto-trade runs.
             logger.warning("Failed to resolve market-light gate for vn.py paper auto trade: %s", exc)
-            return None
+            diagnostics.update(
+                {
+                    "status": "unavailable",
+                    "reason": unavailable_reason(),
+                    "evidence_reason": "market_context_load_failed",
+                    "error": str(exc)[:300],
+                }
+            )
+            return diagnostics["reason"], diagnostics
         if not isinstance(snapshot, dict):
-            return None
+            reason = unavailable_reason()
+            diagnostics.update(
+                {
+                    "status": "unavailable",
+                    "reason": reason,
+                    "evidence_reason": "market_context_missing",
+                }
+            )
+            return reason, diagnostics
+        diagnostics["snapshot"] = snapshot
         status = str(snapshot.get("status") or "").strip().lower()
-        if status in set(settings.auto_market_light_block_statuses or []):
-            return f"market_light_{status}"
-        return None
+        if (
+            settings.auto_market_light_gate_enabled
+            and status in set(settings.auto_market_light_block_statuses or [])
+        ):
+            reason = f"market_light_{status}"
+            diagnostics.update({"status": "blocked", "reason": reason})
+            return reason, diagnostics
+
+        dimensions = snapshot.get("dimensions") if isinstance(snapshot.get("dimensions"), dict) else {}
+        breadth = dimensions.get("breadth") if isinstance(dimensions.get("breadth"), dict) else {}
+        breadth_available = bool(breadth.get("available"))
+        breadth_score = _safe_int(breadth.get("score"))
+        diagnostics["market_breadth"].update(
+            {"available": breadth_available, "score": breadth_score}
+        )
+        if settings.auto_market_breadth_gate_enabled:
+            if not breadth_available or breadth_score is None:
+                reason = "market_breadth_unavailable"
+                diagnostics.update({"status": "blocked", "reason": reason})
+                return reason, diagnostics
+            if breadth_score < int(settings.auto_market_breadth_min_score):
+                reason = "market_breadth_below_threshold"
+                diagnostics.update({"status": "blocked", "reason": reason})
+                return reason, diagnostics
+
+        limit_dimension = (
+            dimensions.get("limit") if isinstance(dimensions.get("limit"), dict) else {}
+        )
+        current_limit_available = bool(limit_dimension.get("available"))
+        current_limit_score = _safe_int(limit_dimension.get("score"))
+        diagnostics["hotspot_retreat"].update(
+            {
+                "current_available": current_limit_available,
+                "current_score": current_limit_score,
+                "current_trade_date": snapshot.get("trade_date"),
+            }
+        )
+        if settings.auto_hotspot_retreat_gate_enabled:
+            if not current_limit_available or current_limit_score is None:
+                reason = "hotspot_retreat_unavailable"
+                diagnostics.update({"status": "blocked", "reason": reason})
+                return reason, diagnostics
+            current_trade_date = str(snapshot.get("trade_date") or "").strip()
+            try:
+                previous = (
+                    load_previous_snapshot(market, before_trade_date=current_trade_date)
+                    if current_trade_date
+                    else None
+                )
+            except Exception as exc:  # noqa: BLE001 - configured fail-closed market gate.
+                logger.warning("Failed to resolve previous hotspot snapshot: %s", exc)
+                diagnostics["hotspot_retreat"]["error"] = str(exc)[:300]
+                previous = None
+            previous_dimensions = (
+                previous.get("dimensions")
+                if isinstance(previous, dict) and isinstance(previous.get("dimensions"), dict)
+                else {}
+            )
+            previous_limit = (
+                previous_dimensions.get("limit")
+                if isinstance(previous_dimensions.get("limit"), dict)
+                else {}
+            )
+            previous_available = bool(previous_limit.get("available"))
+            previous_score = _safe_int(previous_limit.get("score"))
+            score_drop = (
+                previous_score - current_limit_score
+                if previous_score is not None
+                else None
+            )
+            diagnostics["hotspot_retreat"].update(
+                {
+                    "previous_available": previous_available,
+                    "previous_score": previous_score,
+                    "previous_trade_date": previous.get("trade_date") if isinstance(previous, dict) else None,
+                    "score_drop": score_drop,
+                }
+            )
+            if not previous_available or previous_score is None:
+                reason = "hotspot_retreat_unavailable"
+                diagnostics.update({"status": "blocked", "reason": reason})
+                return reason, diagnostics
+            if score_drop is not None and score_drop >= int(settings.auto_hotspot_retreat_min_drop):
+                reason = "hotspot_retreat_detected"
+                diagnostics.update({"status": "blocked", "reason": reason})
+                return reason, diagnostics
+
+        diagnostics.update({"status": "passed", "reason": None})
+        return None, diagnostics
 
     @staticmethod
     def _screen_data_quality(screen: Dict[str, Any], candidates: List[Any]) -> Dict[str, Any]:

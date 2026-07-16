@@ -118,6 +118,10 @@ type SettingsForm = {
   autoConsecutiveLossCooldownMinutes: string;
   autoMarketLightGateEnabled: boolean;
   autoMarketLightBlockMode: 'red' | 'red_yellow';
+  autoMarketBreadthGateEnabled: boolean;
+  autoMarketBreadthMinScore: string;
+  autoHotspotRetreatGateEnabled: boolean;
+  autoHotspotRetreatMinDrop: string;
   autoFailureFuseEnabled: boolean;
   autoFailureFuseThreshold: string;
   autoFailureFuseAutoRecoveryEnabled: boolean;
@@ -219,6 +223,10 @@ const defaultSettingsForm: SettingsForm = {
   autoConsecutiveLossCooldownMinutes: '1440',
   autoMarketLightGateEnabled: false,
   autoMarketLightBlockMode: 'red',
+  autoMarketBreadthGateEnabled: false,
+  autoMarketBreadthMinScore: '35',
+  autoHotspotRetreatGateEnabled: false,
+  autoHotspotRetreatMinDrop: '25',
   autoFailureFuseEnabled: false,
   autoFailureFuseThreshold: '3',
   autoFailureFuseAutoRecoveryEnabled: false,
@@ -563,6 +571,10 @@ function settingsToForm(status: VnpyPaperStatusResponse): SettingsForm {
     autoMarketLightBlockMode: (settings.autoMarketLightBlockStatuses || []).includes('yellow')
       ? 'red_yellow'
       : 'red',
+    autoMarketBreadthGateEnabled: Boolean(settings.autoMarketBreadthGateEnabled),
+    autoMarketBreadthMinScore: String(settings.autoMarketBreadthMinScore ?? 35),
+    autoHotspotRetreatGateEnabled: Boolean(settings.autoHotspotRetreatGateEnabled),
+    autoHotspotRetreatMinDrop: String(settings.autoHotspotRetreatMinDrop ?? 25),
     autoFailureFuseEnabled: Boolean(settings.autoFailureFuseEnabled),
     autoFailureFuseThreshold: String(settings.autoFailureFuseThreshold ?? 3),
     autoFailureFuseAutoRecoveryEnabled: Boolean(settings.autoFailureFuseAutoRecoveryEnabled),
@@ -665,6 +677,10 @@ function buildSettingsUpdate(settingsForm: SettingsForm): VnpyPaperSettingsUpdat
     autoMarketLightBlockStatuses: settingsForm.autoMarketLightBlockMode === 'red_yellow'
       ? ['red', 'yellow']
       : ['red'],
+    autoMarketBreadthGateEnabled: settingsForm.autoMarketBreadthGateEnabled,
+    autoMarketBreadthMinScore: parseNumber(settingsForm.autoMarketBreadthMinScore) ?? 35,
+    autoHotspotRetreatGateEnabled: settingsForm.autoHotspotRetreatGateEnabled,
+    autoHotspotRetreatMinDrop: parseNumber(settingsForm.autoHotspotRetreatMinDrop) ?? 25,
     autoFailureFuseEnabled: settingsForm.autoFailureFuseEnabled,
     autoFailureFuseThreshold: parseNumber(settingsForm.autoFailureFuseThreshold) ?? 3,
     autoFailureFuseAutoRecoveryEnabled: settingsForm.autoFailureFuseAutoRecoveryEnabled,
@@ -3519,6 +3535,30 @@ const VnpyPaperTradingPage: React.FC = () => {
               <input
                 type="checkbox"
                 className={CHECKBOX_CLASS}
+                checked={settingsForm.autoMarketBreadthGateEnabled}
+                onChange={(event) => setSettingsForm((prev) => ({
+                  ...prev,
+                  autoMarketBreadthGateEnabled: event.target.checked,
+                }))}
+              />
+              市场宽度风控
+            </label>
+            <label className="flex items-center gap-2 text-sm text-foreground">
+              <input
+                type="checkbox"
+                className={CHECKBOX_CLASS}
+                checked={settingsForm.autoHotspotRetreatGateEnabled}
+                onChange={(event) => setSettingsForm((prev) => ({
+                  ...prev,
+                  autoHotspotRetreatGateEnabled: event.target.checked,
+                }))}
+              />
+              热点退潮风控
+            </label>
+            <label className="flex items-center gap-2 text-sm text-foreground">
+              <input
+                type="checkbox"
+                className={CHECKBOX_CLASS}
                 checked={settingsForm.autoFailureFuseEnabled}
                 onChange={(event) => setSettingsForm((prev) => ({
                   ...prev,
@@ -4077,6 +4117,36 @@ const VnpyPaperTradingPage: React.FC = () => {
                 <option value="red">仅红灯</option>
                 <option value="red_yellow">红灯和黄灯</option>
               </select>
+            </label>
+            <label className="space-y-1 text-xs text-secondary-text">
+              最低市场宽度分
+              <input
+                className={INPUT_CLASS}
+                type="number"
+                min={0}
+                max={100}
+                disabled={!settingsForm.autoMarketBreadthGateEnabled}
+                value={settingsForm.autoMarketBreadthMinScore}
+                onChange={(event) => setSettingsForm((prev) => ({
+                  ...prev,
+                  autoMarketBreadthMinScore: event.target.value,
+                }))}
+              />
+            </label>
+            <label className="space-y-1 text-xs text-secondary-text">
+              热点强度最小回落分
+              <input
+                className={INPUT_CLASS}
+                type="number"
+                min={1}
+                max={100}
+                disabled={!settingsForm.autoHotspotRetreatGateEnabled}
+                value={settingsForm.autoHotspotRetreatMinDrop}
+                onChange={(event) => setSettingsForm((prev) => ({
+                  ...prev,
+                  autoHotspotRetreatMinDrop: event.target.value,
+                }))}
+              />
             </label>
             <label className="space-y-1 text-xs text-secondary-text">
               熔断阈值

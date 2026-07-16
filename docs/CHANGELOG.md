@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [新功能] 自动模拟交易新增默认关闭的市场宽度与热点退潮门禁，基于最近两次持久化 `MarketLightSnapshot` 的 breadth/limit 维度阻断新增买入，缺少已启用规则所需快照时 fail-closed，并把当前值、前值、阈值和原因写入 Agent 诊断与时间线
 - [改进] 自动 Agent 的 AlphaSift LLM 重排新增跨 run 熔断与冷却恢复，连续超时或无效输出后跳过 LLM 并使用确定性 `screen_score`，冷却到期只允许一个带租约的短超时半开探测，异常退出不会永久锁死，策略与结果写入运行诊断和时间线
 - [改进] AlphaSift 预排序上下文在 DSA 请求级回调中强制执行声明的 3 候选上限，并复用已获取的实时行情构建基础面估值，避免第三方默认 5 候选和同票重复行情请求；后排序完整增强对最多 3 个候选使用有界并发并按原排名汇总结果，降低新闻搜索降级时的串行等待
 - [改进] 自动选股 Agent run 新增持久化 `stage_timings` 性能诊断，记录计划、前置门禁、AlphaSift 筛选、候选决策/执行和总耗时；成功、数据质量阻断与筛选异常均保留耗时，Agent 控制台运行时间线新增 `performance` 事件
