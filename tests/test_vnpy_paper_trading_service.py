@@ -903,7 +903,25 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
                                 "cooldown_remaining_seconds": 240,
                             }
                         },
-                    }
+                    },
+                    "fund_flow": {
+                        "mode": "circuit_breaker_failover",
+                        "priority": ["tushare_ths", "akshare"],
+                        "sources": {
+                            "cn/tushare_ths": {
+                                "state": "open",
+                                "failures": 3,
+                                "disabled": True,
+                                "cooldown_remaining_seconds": 180,
+                            },
+                            "cn/akshare": {
+                                "state": "closed",
+                                "failures": 0,
+                                "disabled": False,
+                                "cooldown_remaining_seconds": 0,
+                            },
+                        },
+                    },
                 },
             },
         }
@@ -977,6 +995,18 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertEqual(
             quote_routing["sources"]["cn/efinance"]["cooldown_remaining_seconds"],
             240,
+        )
+        fund_flow_routing = audit["diagnostics"]["source_routing"]["candidate_context"][
+            "fund_flow"
+        ]
+        self.assertEqual(fund_flow_routing["priority"], ["tushare_ths", "akshare"])
+        self.assertEqual(
+            fund_flow_routing["sources"]["cn/tushare_ths"]["state"],
+            "open",
+        )
+        self.assertEqual(
+            fund_flow_routing["sources"]["cn/akshare"]["state"],
+            "closed",
         )
         self.assertTrue(plan["gates"]["llm_dynamic_plan_enabled"])
         self.assertTrue(plan["gates"]["llm_dynamic_plan_applied"])

@@ -126,6 +126,48 @@ class TestTushareFetcherFollowUps(unittest.TestCase):
         self.assertEqual(bottom, [{"name": "消费", "change_pct": -0.6}])
         self.assertEqual(rate_limit_mock.call_count, 2)
 
+    def test_get_capital_flow_normalizes_ths_amounts_to_cny(self) -> None:
+        fetcher = self._make_fetcher()
+        fetcher._api.moneyflow_ths.return_value = pd.DataFrame(
+            {
+                "trade_date": ["20260317", "20260314"],
+                "ts_code": ["600519.SH", "600519.SH"],
+                "net_amount": [120.5, -20.0],
+                "net_d5_amount": [350.0, 200.0],
+            }
+        )
+        fetcher._api.moneyflow_ind_ths.return_value = pd.DataFrame(
+            {
+                "trade_date": ["20260317", "20260317", "20260314"],
+                "industry": ["白酒", "银行", "旧行业"],
+                "net_amount": [500.0, -300.0, 9999.0],
+            }
+        )
+
+        with patch.object(
+            fetcher,
+            "_get_china_now",
+            return_value=datetime(2026, 3, 18, 10, 0),
+        ), patch.object(fetcher, "_check_rate_limit") as rate_limit_mock:
+            result = fetcher.get_capital_flow("600519", top_n=1)
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["provider"], "tushare_ths")
+        self.assertEqual(result["as_of"], "2026-03-17")
+        self.assertEqual(result["stock_flow"]["main_net_inflow"], 1_205_000.0)
+        self.assertEqual(result["stock_flow"]["inflow_5d"], 3_500_000.0)
+        self.assertEqual(result["stock_flow"]["inflow_10d"], 1_005_000.0)
+        self.assertEqual(result["stock_flow"]["amount_unit"], "CNY")
+        self.assertEqual(
+            result["sector_rankings"]["top"],
+            [{"name": "白酒", "net_inflow": 5_000_000.0, "amount_unit": "CNY"}],
+        )
+        self.assertEqual(
+            result["sector_rankings"]["bottom"],
+            [{"name": "银行", "net_inflow": -3_000_000.0, "amount_unit": "CNY"}],
+        )
+        self.assertEqual(rate_limit_mock.call_count, 2)
+
     def test_get_chip_distribution_rate_limits_all_tushare_calls(self) -> None:
         fetcher = self._make_fetcher()
         fetcher._api.trade_cal.return_value = pd.DataFrame(

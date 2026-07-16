@@ -276,7 +276,7 @@ async def app_lifespan(app: FastAPI):
     os.environ.pop(RUNTIME_SCHEDULER_ARGS_ENV, None)
     from src.config import get_config
 
-    source_health_recovery = DataFetcherManager.configure_realtime_source_health_persistence(
+    source_health_recovery = DataFetcherManager.configure_provider_source_health_persistence(
         getattr(get_config(), "database_path", "./data/stock_analysis.db")
     )
     app.state.realtime_source_health_recovery = source_health_recovery
@@ -342,7 +342,7 @@ async def app_lifespan(app: FastAPI):
         ):
             if hasattr(app.state, attr_name):
                 delattr(app.state, attr_name)
-        DataFetcherManager.disable_realtime_source_health_persistence()
+        DataFetcherManager.disable_provider_source_health_persistence()
         if hasattr(app.state, "realtime_source_health_recovery"):
             delattr(app.state, "realtime_source_health_recovery")
 

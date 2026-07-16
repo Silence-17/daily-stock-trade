@@ -1209,6 +1209,124 @@ class TushareFetcher(BaseFetcher):
         
         # 获取为空或者接口调用失败，返回 None
         return None
+
+    def get_capital_flow(self, stock_code: str, top_n: int = 5) -> Dict[str, Any]:
+        """Return THS stock and industry capital flow normalized to CNY."""
+        if self._api is None:
+            raise DataFetchError("Tushare API 未初始化，请检查 Token 配置")
+        if _is_hk_market(stock_code) or _is_us_code(stock_code) or _is_etf_code(stock_code):
+            return {
+                "status": "not_supported",
+                "stock_flow": {},
+                "sector_rankings": {"top": [], "bottom": []},
+                "source_chain": [],
+                "errors": [],
+            }
+
+        ts_code = self._convert_stock_code(stock_code)
+        china_now = self._get_china_now()
+        end_date = china_now.strftime("%Y%m%d")
+        start_date = (china_now - timedelta(days=30)).strftime("%Y%m%d")
+        result: Dict[str, Any] = {
+            "status": "not_supported",
+            "stock_flow": {},
+            "sector_rankings": {"top": [], "bottom": []},
+            "source_chain": [],
+            "errors": [],
+            "provider": "tushare_ths",
+            "as_of": None,
+        }
+
+        try:
+            stock_df = self._call_api_with_rate_limit(
+                "moneyflow_ths",
+                ts_code=ts_code,
+                start_date=start_date,
+                end_date=end_date,
+            )
+            if stock_df is not None and not stock_df.empty:
+                stock_df = stock_df.copy()
+                if "trade_date" in stock_df.columns:
+                    stock_df = stock_df.sort_values("trade_date", ascending=False)
+                latest = stock_df.iloc[0]
+
+                def amount_to_cny(value: Any) -> Optional[float]:
+                    numeric = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
+                    return None if pd.isna(numeric) else float(numeric) * 10000.0
+
+                inflow_10d = None
+                if "net_amount" in stock_df.columns:
+                    recent = pd.to_numeric(
+                        stock_df["net_amount"].head(10),
+                        errors="coerce",
+                    ).dropna()
+                    if not recent.empty:
+                        inflow_10d = float(recent.sum()) * 10000.0
+                result["stock_flow"] = {
+                    "main_net_inflow": amount_to_cny(latest.get("net_amount")),
+                    "inflow_5d": amount_to_cny(latest.get("net_d5_amount")),
+                    "inflow_10d": inflow_10d,
+                    "amount_unit": "CNY",
+                }
+                raw_date = str(latest.get("trade_date") or "").strip()
+                if len(raw_date) == 8 and raw_date.isdigit():
+                    result["as_of"] = f"{raw_date[:4]}-{raw_date[4:6]}-{raw_date[6:]}"
+                result["source_chain"].append("capital_stock:tushare_ths")
+        except Exception as exc:
+            result["errors"].append(f"tushare_ths_stock: {exc}")
+
+        try:
+            sector_df = self._call_api_with_rate_limit(
+                "moneyflow_ind_ths",
+                start_date=start_date,
+                end_date=end_date,
+            )
+            if sector_df is not None and not sector_df.empty:
+                sector_df = sector_df.copy()
+                if "trade_date" in sector_df.columns:
+                    latest_date = sector_df["trade_date"].astype(str).max()
+                    sector_df = sector_df[
+                        sector_df["trade_date"].astype(str) == latest_date
+                    ]
+                if {"industry", "net_amount"}.issubset(sector_df.columns):
+                    sector_df["net_amount"] = pd.to_numeric(
+                        sector_df["net_amount"],
+                        errors="coerce",
+                    )
+                    sector_df = sector_df.dropna(subset=["net_amount"])
+
+                    def sector_rows(frame: pd.DataFrame) -> List[Dict[str, Any]]:
+                        return [
+                            {
+                                "name": str(row["industry"]).strip(),
+                                "net_inflow": float(row["net_amount"]) * 10000.0,
+                                "amount_unit": "CNY",
+                            }
+                            for _, row in frame.iterrows()
+                            if str(row["industry"]).strip()
+                        ]
+
+                    result["sector_rankings"] = {
+                        "top": sector_rows(sector_df.nlargest(top_n, "net_amount")),
+                        "bottom": sector_rows(sector_df.nsmallest(top_n, "net_amount")),
+                    }
+                    result["source_chain"].append("capital_sector:tushare_ths")
+        except Exception as exc:
+            result["errors"].append(f"tushare_ths_sector: {exc}")
+
+        has_stock = any(
+            value is not None
+            for key, value in result["stock_flow"].items()
+            if key != "amount_unit"
+        )
+        has_sector = bool(result["sector_rankings"]["top"] or result["sector_rankings"]["bottom"])
+        if has_stock and has_sector:
+            result["status"] = "ok"
+        elif has_stock or has_sector:
+            result["status"] = "partial"
+        elif result["errors"]:
+            result["status"] = "failed"
+        return result
     
     
 

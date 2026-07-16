@@ -9,7 +9,7 @@ import time
 import unittest
 from threading import BoundedSemaphore, Event
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 
@@ -36,6 +36,17 @@ class _DummyBoardFetcher:
 
     def get_belong_board(self, _stock_code: str):
         return self._boards
+
+
+class _DummyCapitalFlowFetcher:
+    name = "TushareFetcher"
+    priority = -1
+
+    def __init__(self, side_effect):
+        self.get_capital_flow = MagicMock(side_effect=side_effect)
+
+    def is_available(self) -> bool:
+        return True
 
 
 class TestFundamentalContext(unittest.TestCase):
@@ -547,6 +558,76 @@ class TestFundamentalContext(unittest.TestCase):
                 ):
             ctx = manager.get_capital_flow_context("600519", budget_seconds=0.5)
         self.assertEqual(ctx["status"], "not_supported")
+
+    def test_capital_flow_fails_over_and_recovers_tushare_half_open(self) -> None:
+        tushare = _DummyCapitalFlowFetcher(RuntimeError("Tushare permission denied"))
+        manager = DataFetcherManager(fetchers=[tushare])
+        cfg = SimpleNamespace(
+            fundamental_fetch_timeout_seconds=1.0,
+            fundamental_retry_max=1,
+        )
+        akshare_payload = {
+            "status": "partial",
+            "stock_flow": {"main_net_inflow": 800_000.0},
+            "sector_rankings": {"top": [], "bottom": []},
+            "source_chain": ["capital_stock:akshare"],
+            "errors": [],
+        }
+        DataFetcherManager.reset_capital_flow_source_health()
+        try:
+            with patch("src.config.get_config", return_value=cfg), patch.object(
+                manager._fundamental_adapter,
+                "get_capital_flow",
+                return_value=akshare_payload,
+            ) as akshare_call:
+                for _ in range(3):
+                    context = manager.get_capital_flow_context("600519", budget_seconds=1.0)
+                    self.assertEqual(context["data"]["provider"], "akshare")
+                    self.assertEqual(context["data"]["fallback_from"], "tushare_ths")
+
+                context = manager.get_capital_flow_context("600519", budget_seconds=1.0)
+
+                self.assertEqual(context["data"]["provider"], "akshare")
+                self.assertEqual(tushare.get_capital_flow.call_count, 3)
+                self.assertEqual(akshare_call.call_count, 4)
+                opened = DataFetcherManager.capital_flow_source_health_snapshot()[
+                    "cn/tushare_ths"
+                ]
+                self.assertEqual(opened["state"], "open")
+                self.assertTrue(opened["disabled"])
+
+                health_key = DataFetcherManager._capital_flow_health_key("tushare_ths")
+                breaker = DataFetcherManager._realtime_source_health
+                with breaker._lock:
+                    breaker._states[health_key]["last_failure_time"] -= (
+                        breaker.cooldown_seconds + 1
+                    )
+                tushare.get_capital_flow.side_effect = None
+                tushare.get_capital_flow.return_value = {
+                    "status": "ok",
+                    "stock_flow": {
+                        "main_net_inflow": 1_200_000.0,
+                        "amount_unit": "CNY",
+                    },
+                    "sector_rankings": {"top": [], "bottom": []},
+                    "source_chain": ["capital_stock:tushare_ths"],
+                    "errors": [],
+                    "provider": "tushare_ths",
+                    "as_of": "2026-07-16",
+                }
+
+                recovered = manager.get_capital_flow_context("600519", budget_seconds=1.0)
+
+            self.assertEqual(recovered["data"]["provider"], "tushare_ths")
+            self.assertEqual(recovered["data"]["as_of"], "2026-07-16")
+            self.assertEqual(akshare_call.call_count, 4)
+            state = DataFetcherManager.capital_flow_source_health_snapshot()[
+                "cn/tushare_ths"
+            ]
+            self.assertEqual(state["state"], "closed")
+            self.assertEqual(state["failures"], 0)
+        finally:
+            DataFetcherManager.reset_capital_flow_source_health()
 
     def test_get_belong_boards_from_capability_probe(self) -> None:
         fetcher = _DummyBoardFetcher(

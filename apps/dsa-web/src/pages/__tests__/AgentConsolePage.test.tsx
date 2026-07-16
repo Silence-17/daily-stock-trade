@@ -125,6 +125,24 @@ const runSummary = {
             },
           },
         },
+        fundFlow: {
+          mode: 'circuit_breaker_failover',
+          priority: ['tushare_ths', 'akshare'],
+          sources: {
+            'cn/tushare_ths': {
+              state: 'open',
+              failures: 3,
+              disabled: true,
+              cooldownRemainingSeconds: 180,
+            },
+            'cn/akshare': {
+              state: 'closed',
+              failures: 0,
+              disabled: false,
+              cooldownRemainingSeconds: 0,
+            },
+          },
+        },
       },
     },
     crossRunQuality: {
@@ -882,6 +900,10 @@ describe('AgentConsolePage', () => {
     expect(screen.getByTestId('agent-source-routing')).toHaveTextContent('cn/efinance open');
     expect(screen.getByTestId('agent-source-routing')).toHaveTextContent('失败 3，冷却 240s');
     expect(screen.getByTestId('agent-source-routing')).toHaveTextContent('cn/akshare_em closed');
+    expect(screen.getByTestId('agent-source-routing')).toHaveTextContent('资金流');
+    expect(screen.getByTestId('agent-source-routing')).toHaveTextContent('cn/tushare_ths open');
+    expect(screen.getByTestId('agent-source-routing')).toHaveTextContent('失败 3，冷却 180s');
+    expect(screen.getByTestId('agent-source-routing')).toHaveTextContent('cn/akshare closed');
     expect(screen.getAllByText('score 85.0').length).toBeGreaterThan(0);
     expect(screen.getByText('建议人工确认')).toBeInTheDocument();
     expect(screen.getByText('100.0%')).toBeInTheDocument();

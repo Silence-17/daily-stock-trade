@@ -989,6 +989,7 @@ class AlphaSiftService:
         )
         source_routing["candidate_context"] = {
             "quote": _get_dsa_realtime_source_routing(),
+            "fund_flow": _get_dsa_capital_flow_source_routing(),
         }
         payload["source_routing"] = source_routing
         if diagnostics:
@@ -3689,6 +3690,27 @@ def _get_dsa_realtime_source_routing() -> Dict[str, Any]:
         return {"mode": "circuit_breaker_failover", "sources": {}}
 
 
+def _get_dsa_capital_flow_source_routing() -> Dict[str, Any]:
+    try:
+        manager = _get_dsa_fetcher_manager()
+        snapshot_getter = getattr(manager, "capital_flow_source_health_snapshot", None)
+        policy_getter = getattr(manager, "capital_flow_source_health_policy", None)
+        snapshot = snapshot_getter() if callable(snapshot_getter) else {}
+        policy = policy_getter() if callable(policy_getter) else {}
+        routing = dict(policy) if isinstance(policy, dict) else {}
+        routing.setdefault("mode", "circuit_breaker_failover")
+        routing.setdefault("priority", ["tushare_ths", "akshare"])
+        routing["sources"] = snapshot if isinstance(snapshot, dict) else {}
+        return _remove_non_finite_json_values(routing)
+    except Exception as exc:  # noqa: BLE001 - diagnostics must not block screening.
+        logger.debug("Failed to read DSA capital-flow source health: %s", exc)
+        return {
+            "mode": "circuit_breaker_failover",
+            "priority": ["tushare_ths", "akshare"],
+            "sources": {},
+        }
+
+
 def get_dsa_fundamental_context(
     stock_code: str,
     *,
@@ -3825,6 +3847,7 @@ def _enrich_candidates_with_dsa(candidates: List[Dict[str, Any]]) -> Tuple[List[
         "source_health": _summarize_dsa_candidate_context_source_health(candidates[:limit]),
         "source_routing": {
             "quote": _get_dsa_realtime_source_routing(),
+            "fund_flow": _get_dsa_capital_flow_source_routing(),
         },
     }
 
