@@ -2099,6 +2099,24 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
                             "successes": 1,
                             "last_rows": 1,
                         },
+                        "fund_flow/tushare_ths": {
+                            "status": "unavailable",
+                            "failures": 1,
+                            "successes": 0,
+                            "last_rows": 0,
+                        },
+                        "fund_flow/akshare": {
+                            "status": "ok",
+                            "failures": 0,
+                            "successes": 1,
+                            "last_rows": 1,
+                        },
+                        "news/bocha": {
+                            "status": "unavailable",
+                            "failures": 1,
+                            "successes": 0,
+                            "last_rows": 0,
+                        },
                     },
                 },
             },
@@ -2367,6 +2385,18 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
         self.assertEqual(
             source_health["candidate_context/fund_flow"]["latest_status"],
             "ok",
+        )
+        self.assertEqual(
+            source_health["candidate_context/fund_flow/tushare_ths"]["degraded_rate_pct"],
+            100.0,
+        )
+        self.assertEqual(
+            source_health["candidate_context/fund_flow/akshare"]["latest_status"],
+            "ok",
+        )
+        self.assertEqual(
+            source_health["candidate_context/news/bocha"]["latest_status"],
+            "unavailable",
         )
         self.assertEqual(quality_trends["daily"][0]["quality_counts"], {"ok": 1})
         all_quality_trends = all_quality_trends_resp.json()

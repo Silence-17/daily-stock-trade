@@ -105,7 +105,7 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
                 )
         with patch(
             "src.services.alphasift_service._enrich_candidates_with_dsa",
-            side_effect=lambda candidates: (
+            side_effect=lambda candidates, **_kwargs: (
                 candidates,
                 {
                     "enabled": True,
@@ -286,6 +286,161 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
         self.assertFalse(routing["adjusted"])
         self.assertEqual(routing["effective_priority"], "em_datacenter,sina")
         self.assertEqual(routing["reason"], "explicit_priority_preserved")
+
+    def test_candidate_context_routing_demotes_degraded_fund_flow_provider(self) -> None:
+        with patch(
+            "src.services.alphasift_service._get_dsa_realtime_source_routing",
+            return_value={"mode": "circuit_breaker_failover", "sources": {}},
+        ), patch(
+            "src.services.alphasift_service._get_dsa_capital_flow_source_routing",
+            return_value={
+                "mode": "circuit_breaker_failover",
+                "priority": ["tushare_ths", "akshare"],
+                "sources": {
+                    "cn/tushare_ths": {"failures": 0, "disabled": False},
+                    "cn/akshare": {"failures": 0, "disabled": False},
+                },
+            },
+        ):
+            routing = alphasift_service.build_alphasift_candidate_context_source_routing(
+                market="cn",
+                source_health_items=[
+                    {
+                        "group": "candidate_context",
+                        "source": "fund_flow/tushare_ths",
+                        "observation_count": 10,
+                        "degraded_observation_count": 9,
+                    },
+                    {
+                        "group": "candidate_context",
+                        "source": "fund_flow/akshare",
+                        "observation_count": 10,
+                        "degraded_observation_count": 0,
+                    },
+                ],
+            )
+
+        fund_flow = routing["fund_flow"]
+        self.assertEqual(fund_flow["base_priority"], ["tushare_ths", "akshare"])
+        self.assertEqual(fund_flow["effective_priority"], ["akshare", "tushare_ths"])
+        self.assertTrue(fund_flow["adjusted"])
+        weights = {item["source"]: item for item in fund_flow["trend_weights"]}
+        self.assertLess(weights["tushare_ths"]["weight"], weights["akshare"]["weight"])
+
+    def test_candidate_context_source_health_keeps_provider_level_evidence(self) -> None:
+        health = alphasift_service._summarize_dsa_candidate_context_source_health([
+            {
+                "dsa_context": {
+                    "quote": {"price": 10.0, "provider": "tencent"},
+                    "fundamentals": {
+                        "capital_flow": {
+                            "status": "partial",
+                            "data": {"provider": "akshare", "main_net_inflow": 123.0},
+                            "source_chain": [
+                                {"provider": "tushare_ths", "result": "failed"},
+                                {"provider": "akshare", "result": "ok"},
+                            ],
+                        }
+                    },
+                    "news": {
+                        "success": True,
+                        "provider": "bocha",
+                        "results": [{"title": "test"}],
+                    },
+                }
+            }
+        ])
+
+        self.assertEqual(health["quote/tencent"]["status"], "ok")
+        self.assertEqual(health["fund_flow/tushare_ths"]["status"], "unavailable")
+        self.assertEqual(health["fund_flow/akshare"]["status"], "ok")
+        self.assertEqual(health["news/bocha"]["status"], "ok")
+
+    def test_screen_passes_health_weighted_fund_flow_priority_to_enrichment(self) -> None:
+        config = self._config(enabled=True)
+        fake_module = _make_adapter_module(
+            screen=MagicMock(return_value={"candidates": [{"code": "600519", "score": 88.0}]})
+        )
+        enrichment = MagicMock(return_value=(
+            [{"code": "600519", "score": 88.0}],
+            {
+                "enabled": True,
+                "max_candidates": 3,
+                "requested_count": 1,
+                "enriched_count": 1,
+                "warnings": [],
+                "source_health": {},
+            },
+        ))
+        trend_items = [
+            {
+                "group": "candidate_context",
+                "source": "fund_flow/tushare_ths",
+                "observation_count": 10,
+                "degraded_observation_count": 9,
+            },
+            {
+                "group": "candidate_context",
+                "source": "fund_flow/akshare",
+                "observation_count": 10,
+                "degraded_observation_count": 0,
+            },
+        ]
+        with patch(
+            "src.services.alphasift_service._import_alphasift",
+            return_value=fake_module,
+        ), patch(
+            "src.services.alphasift_service._enrich_candidates_with_dsa",
+            enrichment,
+        ), patch(
+            "src.services.alphasift_service._get_dsa_realtime_source_routing",
+            return_value={"mode": "circuit_breaker_failover", "sources": {}},
+        ), patch(
+            "src.services.alphasift_service._get_dsa_capital_flow_source_routing",
+            side_effect=[
+                {
+                    "mode": "circuit_breaker_failover",
+                    "priority": ["tushare_ths", "akshare"],
+                    "sources": {},
+                },
+                {
+                    "mode": "circuit_breaker_failover",
+                    "priority": ["tushare_ths", "akshare"],
+                    "sources": {
+                        "cn/tushare_ths": {"failures": 0, "disabled": False},
+                        "cn/akshare": {"failures": 3, "disabled": True},
+                    },
+                },
+            ],
+        ), patch(
+            "src.services.alphasift_service._write_alphasift_screen_cache",
+        ):
+            payload = alphasift_service.AlphaSiftService(config).screen(
+                strategy="dual_low",
+                market="cn",
+                max_results=1,
+                source_health_trends=trend_items,
+                use_llm=False,
+            )
+
+        enrichment.assert_called_once()
+        self.assertEqual(enrichment.call_args.args[0][0]["code"], "600519")
+        self.assertEqual(
+            enrichment.call_args.kwargs["capital_flow_source_priority"],
+            ["akshare", "tushare_ths"],
+        )
+        self.assertEqual(
+            payload["source_routing"]["candidate_context"]["fund_flow"]["effective_priority"],
+            ["akshare", "tushare_ths"],
+        )
+        self.assertEqual(
+            payload["source_routing"]["candidate_context"]["fund_flow"]["next_recommended_priority"],
+            ["tushare_ths", "akshare"],
+        )
+        self.assertTrue(
+            payload["source_routing"]["candidate_context"]["fund_flow"]["post_run_sources"]
+            ["cn/akshare"]["disabled"]
+        )
 
     def test_status_preserves_adapter_available_false_without_diagnostics(self) -> None:
         config = self._config(enabled=False)
@@ -2387,7 +2542,9 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
         self.assertEqual(quote_routing["sources"]["cn/efinance"]["state"], "open")
         self.assertTrue(quote_routing["sources"]["cn/efinance"]["disabled"])
         fund_flow_routing = payload["source_routing"]["candidate_context"]["fund_flow"]
-        self.assertEqual(fund_flow_routing["priority"], ["tushare_ths", "akshare"])
+        self.assertEqual(fund_flow_routing["base_priority"], ["tushare_ths", "akshare"])
+        self.assertEqual(fund_flow_routing["priority"], ["akshare", "tushare_ths"])
+        self.assertTrue(fund_flow_routing["adjusted"])
         self.assertEqual(
             fund_flow_routing["sources"]["cn/tushare_ths"]["state"],
             "open",

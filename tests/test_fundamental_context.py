@@ -629,6 +629,42 @@ class TestFundamentalContext(unittest.TestCase):
         finally:
             DataFetcherManager.reset_capital_flow_source_health()
 
+    def test_capital_flow_respects_request_scoped_source_priority(self) -> None:
+        tushare = _DummyCapitalFlowFetcher({
+            "status": "ok",
+            "stock_flow": {"main_net_inflow": 1_200_000.0},
+            "sector_rankings": {"top": [], "bottom": []},
+            "source_chain": [],
+            "errors": [],
+        })
+        manager = DataFetcherManager(fetchers=[tushare])
+        cfg = SimpleNamespace(
+            fundamental_fetch_timeout_seconds=1.0,
+            fundamental_retry_max=1,
+        )
+        akshare_payload = {
+            "status": "ok",
+            "stock_flow": {"main_net_inflow": 800_000.0},
+            "sector_rankings": {"top": [], "bottom": []},
+            "source_chain": [],
+            "errors": [],
+        }
+
+        with patch("src.config.get_config", return_value=cfg), patch.object(
+            manager._fundamental_adapter,
+            "get_capital_flow",
+            return_value=akshare_payload,
+        ) as akshare_call:
+            context = manager.get_capital_flow_context(
+                "600519",
+                budget_seconds=1.0,
+                source_priority=["akshare", "tushare_ths"],
+            )
+
+        self.assertEqual(context["data"]["provider"], "akshare")
+        self.assertEqual(akshare_call.call_count, 1)
+        self.assertEqual(tushare.get_capital_flow.call_count, 0)
+
     def test_get_belong_boards_from_capability_probe(self) -> None:
         fetcher = _DummyBoardFetcher(
             "EfinanceFetcher",

@@ -10124,6 +10124,8 @@ class VnpyPaperTradingService:
                 return
             health_keys = {"failures", "disabled", "successes", "last_rows", "status"}
             if health_keys.intersection(value):
+                if bool(value.get("trend_only")):
+                    return
                 failures = max(0.0, _safe_float(value.get("failures")) or 0.0)
                 disabled = bool(value.get("disabled"))
                 explicit = str(value.get("status") or "").strip().lower()
