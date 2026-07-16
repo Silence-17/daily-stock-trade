@@ -990,6 +990,7 @@ class AlphaSiftService:
         source_routing["candidate_context"] = {
             "quote": _get_dsa_realtime_source_routing(),
             "fund_flow": _get_dsa_capital_flow_source_routing(),
+            "news": _get_dsa_news_source_routing(),
         }
         payload["source_routing"] = source_routing
         if diagnostics:

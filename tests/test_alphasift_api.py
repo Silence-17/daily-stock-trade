@@ -208,6 +208,13 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
             "restored_sources": 1,
             "sources": {"cn/tushare_ths": {"state": "open"}},
         }
+        news_routing = {
+            "mode": "circuit_breaker_failover",
+            "priority": ["anspire", "bocha"],
+            "cross_process_persistence": True,
+            "restored_sources": 1,
+            "sources": {"anspire": {"state": "open", "disabled": True}},
+        }
 
         with (
             patch(
@@ -222,6 +229,10 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
                 "src.services.alphasift_service._get_dsa_capital_flow_source_routing",
                 return_value=flow_routing,
             ),
+            patch(
+                "src.services.alphasift_service._get_dsa_news_source_routing",
+                return_value=news_routing,
+            ),
         ):
             payload = alphasift_endpoint.alphasift_status(config=config)
 
@@ -232,6 +243,10 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
         self.assertEqual(
             payload["source_routing"]["candidate_context"]["fund_flow"],
             flow_routing,
+        )
+        self.assertEqual(
+            payload["source_routing"]["candidate_context"]["news"],
+            news_routing,
         )
 
     def test_snapshot_source_routing_demotes_persistently_degraded_source(self) -> None:
