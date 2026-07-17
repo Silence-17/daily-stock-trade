@@ -712,6 +712,7 @@ describe('SettingsPage', () => {
   });
 
   it('allows brief setup smoke when only the Agent channel is incomplete', async () => {
+    useSystemConfigMock.mockReturnValue(buildSystemConfigState({ activeCategory: 'base' }));
     getSetupStatus.mockResolvedValue({
       isComplete: false,
       readyForSmoke: true,

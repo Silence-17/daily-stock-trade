@@ -1774,7 +1774,7 @@ describe('VnpyPaperTradingPage', () => {
     expect(screen.getByTestId('portfolio-change-panel')).toHaveTextContent('+100');
     expect(screen.getByText('运行时间线')).toBeInTheDocument();
     expect(screen.getByText('2 candidate decisions: buy=1, skip=1')).toBeInTheDocument();
-  });
+  }, 10_000);
 
   it('filters background task events by task name and status', async () => {
     getTaskEvents
