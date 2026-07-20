@@ -11,6 +11,8 @@ from __future__ import annotations
 import importlib
 import math
 import re
+from datetime import datetime, timezone
+from threading import Lock
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 
@@ -303,10 +305,10 @@ class VnpyEventSubscriptionBridge:
         self,
         *,
         event_engine: Any,
-        order_handler: Optional[Callable[[Any], None]] = None,
-        trade_handler: Optional[Callable[[Any], None]] = None,
-        account_handler: Optional[Callable[[Any], None]] = None,
-        position_handler: Optional[Callable[[Any], None]] = None,
+        order_handler: Optional[Callable[[Any], Any]] = None,
+        trade_handler: Optional[Callable[[Any], Any]] = None,
+        account_handler: Optional[Callable[[Any], Any]] = None,
+        position_handler: Optional[Callable[[Any], Any]] = None,
     ) -> None:
         self.event_engine = event_engine
         self.handlers = {
@@ -317,6 +319,16 @@ class VnpyEventSubscriptionBridge:
         }
         self.event_types = _resolve_vnpy_event_types(_try_import_module("vnpy.trader.event")[0])
         self._registered: List[Tuple[str, Callable[[Any], None]]] = []
+        self._observation_lock = Lock()
+        self._observations: Dict[str, Dict[str, Any]] = {
+            key: {
+                "count": 0,
+                "handled_count": 0,
+                "failure_count": 0,
+                "last_observed_at": None,
+            }
+            for key in self.handlers
+        }
         if not callable(getattr(event_engine, "register", None)):
             raise VnpyAdapterError("vn.py event_engine must provide register")
 
@@ -329,8 +341,9 @@ class VnpyEventSubscriptionBridge:
             event_type = self.event_types.get(key)
             if not event_type or handler is None:
                 continue
-            self.event_engine.register(event_type, handler)
-            self._registered.append((event_type, handler))
+            observed_handler = self._observed_handler(key, handler)
+            self.event_engine.register(event_type, observed_handler)
+            self._registered.append((event_type, observed_handler))
         return self.status()
 
     def unregister(self) -> Dict[str, Any]:
@@ -346,11 +359,52 @@ class VnpyEventSubscriptionBridge:
         return self.status()
 
     def status(self) -> Dict[str, Any]:
+        with self._observation_lock:
+            observations = {
+                key: dict(value)
+                for key, value in self._observations.items()
+            }
         return {
             "registered": bool(self._registered),
             "registered_count": len(self._registered),
             "event_types": [event_type for event_type, _handler in self._registered],
+            "observations": observations,
+            "observed_count": sum(
+                int(value.get("count") or 0) for value in observations.values()
+            ),
+            "handler_failure_count": sum(
+                int(value.get("failure_count") or 0) for value in observations.values()
+            ),
         }
+
+    def _observed_handler(
+        self,
+        key: str,
+        handler: Callable[[Any], Any],
+    ) -> Callable[[Any], None]:
+        def handle(event: Any) -> None:
+            with self._observation_lock:
+                observation = self._observations[key]
+                observation["count"] = int(observation.get("count") or 0) + 1
+                observation["last_observed_at"] = (
+                    datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+                )
+            try:
+                handled = handler(event)
+            except Exception:
+                with self._observation_lock:
+                    observation = self._observations[key]
+                    observation["failure_count"] = (
+                        int(observation.get("failure_count") or 0) + 1
+                    )
+                raise
+            else:
+                with self._observation_lock:
+                    observation = self._observations[key]
+                    result_key = "failure_count" if handled is False else "handled_count"
+                    observation[result_key] = int(observation.get(result_key) or 0) + 1
+
+        return handle
 
 
 def build_vnpy_order_request_payload(

@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [改进] vn.py EventEngine bridge 新增四类回调的去标识化观测计数、处理成功/失败数和最后观测时间，runtime 状态读取会动态刷新而非停留在启动快照
+- [测试] 部署态 runtime soak 升级为 schema v2，可强制匹配外部 gateway 身份、拒绝 DSA_SIM 充当生产证据，并按验收窗口内事件增量和 handler 失败执行非零退出门禁；真实 API 基础门禁 10/10 采样通过，生产参数对 DSA_SIM 按预期非零退出
 - [新功能] 港股兼容筛选复用 AlphaSift 原生 LLM ranker，支持请求级超时/重试、候选池扩展、结构化复排元数据和确定性评分降级，并继续受自动 Agent 跨轮 LLM 熔断保护
 - [测试] 港股真实 LLM 探针在 10 秒超时后保留 3 个腾讯行情候选并记录解析错误；后续 shadow `ss-agent-20260720174258-9947ae66` 命中跨轮熔断，生成 1 个 dry-run 计划且提交 0 个订单
 - [新功能] 新增 `hk_liquid_momentum` 港股兼容筛选管线与显式 `ALPHASIFT_HK_TICKERS` 股票池，复用 AlphaSift 策略解析、硬过滤和因子评分；新增腾讯港股单票直连实时行情，失败时保留 AkShare/Longbridge 降级

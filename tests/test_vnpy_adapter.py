@@ -255,6 +255,56 @@ class VnpyAdapterTestCase(unittest.TestCase):
         self.assertEqual(registered["registered_count"], 4)
         self.assertEqual(calls, [("order", {"vt_orderid": "SIM.1"})])
         self.assertFalse(unregistered["registered"])
+        self.assertEqual(unregistered["observed_count"], 1)
+        self.assertEqual(unregistered["handler_failure_count"], 0)
+        self.assertEqual(unregistered["observations"]["order"]["count"], 1)
+        self.assertEqual(unregistered["observations"]["order"]["handled_count"], 1)
+        self.assertIsNotNone(
+            unregistered["observations"]["order"]["last_observed_at"]
+        )
+
+    def test_event_subscription_bridge_audits_handler_failure_without_payload(self) -> None:
+        installed = _install_fake_vnpy_modules()
+        event_engine = _FakeEventEngine()
+
+        def fail(_event):
+            raise RuntimeError("callback failed")
+
+        try:
+            bridge = VnpyEventSubscriptionBridge(
+                event_engine=event_engine,
+                order_handler=fail,
+            )
+            bridge.register()
+            with self.assertRaisesRegex(RuntimeError, "callback failed"):
+                event_engine.emit("eOrder.", {"account_secret": "must-not-leak"})
+            status = bridge.status()
+        finally:
+            _restore_modules(installed)
+
+        self.assertEqual(status["observed_count"], 1)
+        self.assertEqual(status["handler_failure_count"], 1)
+        self.assertEqual(status["observations"]["order"]["count"], 1)
+        self.assertEqual(status["observations"]["order"]["handled_count"], 0)
+        self.assertNotIn("account_secret", str(status))
+
+    def test_event_subscription_bridge_counts_explicit_failed_result(self) -> None:
+        installed = _install_fake_vnpy_modules()
+        event_engine = _FakeEventEngine()
+        try:
+            bridge = VnpyEventSubscriptionBridge(
+                event_engine=event_engine,
+                account_handler=lambda _event: False,
+            )
+            bridge.register()
+            event_engine.emit("eAccount.", {"accountid": "SIM"})
+            status = bridge.status()
+        finally:
+            _restore_modules(installed)
+
+        self.assertEqual(status["observed_count"], 1)
+        self.assertEqual(status["handler_failure_count"], 1)
+        self.assertEqual(status["observations"]["account"]["handled_count"], 0)
 
 
 def _install_fake_vnpy_modules() -> dict[str, object]:

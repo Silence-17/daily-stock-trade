@@ -180,13 +180,19 @@ python scripts\check_vnpy_deployed_runtime_soak.py `
   --min-runtime-ready-ratio 0.995 `
   --min-connected-ratio 0.995 `
   --min-event-bridge-ratio 0.995 `
+  --require-external-gateway `
+  --expected-gateway-class vnpy_ctp:CtpGateway `
+  --expected-gateway-name CTP `
+  --require-observed-event account `
+  --min-observed-event-count 1 `
+  --max-event-handler-failures 0 `
   --max-process-changes 0 `
   --max-gateway-changes 0 `
   --max-reconnect-failure-count 0 `
   --output-json "$env:TEMP\vnpy-deployed-runtime-soak.json"
 ```
 
-该脚本只调用轻量 `/api/v1/vnpy-paper/status` GET 接口，不修改设置、不触发选股，也不提交或撤销订单。默认要求订单、成交、账户、持仓四类回调在每个成功样本中持续注册，并校验 runtime/MainEngine/EventEngine/gateway 就绪、连接确认、contract 版本、`process_started_at` 和 gateway 身份稳定性，以及重连计数器不回退。计划在窗口内由外部断网或 broker 模拟故障验证自动恢复时，可加 `--min-reconnect-success-count 1`；容许受控滚动重启或 gateway 切换时才提高相应变化上限。JSON 仅记录部署版本、gateway 类/名称和聚合指标，不包含连接文件路径或账户参数。
+该脚本只调用轻量 `/api/v1/vnpy-paper/status` GET 接口，不修改设置、不触发选股，也不提交或撤销订单。默认要求订单、成交、账户、持仓四类回调在每个成功样本中持续注册，并校验 runtime/MainEngine/EventEngine/gateway 就绪、连接确认、contract 版本、`process_started_at` 和 gateway 身份稳定性，以及重连计数器不回退。生产证据应显式使用 `--require-external-gateway`，并填写实际 gateway 类和名称；该门禁会拒绝 `DsaSimulatedGateway` / `DSA_SIM`，防止把内置模拟链路误报为真实通道。`--require-observed-event` 检查的是验收窗口内的新回调增量，而不是注册状态或启动前累计值；空仓账户可只要求 `account`，有持仓时再要求 `position`，外部确有委托活动时才要求 `order` / `trade`。事件桥只暴露分类计数、处理成功/失败数和最后观测时间，不保存事件载荷。计划在窗口内由外部断网或 broker 模拟故障验证自动恢复时，可加 `--min-reconnect-success-count 1`；容许受控滚动重启或 gateway 切换时才提高相应变化上限。schema v2 JSON 仅记录部署版本、gateway 类/名称和聚合指标，不包含连接文件路径、账户参数或回报内容。
 
 API 与自动任务需要联合长跑时，可另开终端执行只读 scheduler 验收：
 

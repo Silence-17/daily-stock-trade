@@ -154,6 +154,22 @@ class VnpyRuntimeTestCase(unittest.TestCase):
             self.assertEqual(handle.main_engine.connects[0][0], {"userid": "paper"})
             self.assertEqual(handle.main_engine.connects[0][1], "SIM")
 
+            account_handler = handle.event_engine.handlers["eAccount."][0]
+            account_handler({
+                "accountid": "SIM-ACCOUNT",
+                "balance": 100000.0,
+                "available": 90000.0,
+            })
+            refreshed = handle.refresh_diagnostics()
+            self.assertEqual(
+                refreshed["event_bridge"]["observations"]["account"]["count"],
+                1,
+            )
+            self.assertEqual(
+                refreshed["event_bridge"]["observations"]["account"]["handled_count"],
+                1,
+            )
+
             handle.close()
             self.assertTrue(handle.main_engine.closed)
             self.assertTrue(handle.event_engine.stopped)

@@ -4396,7 +4396,7 @@ class VnpyPaperTradingService:
         if run_id is not None:
             self.agent_repo.refresh_run_trade_counts(run_id)
 
-    def _handle_vnpy_order_event(self, event: Any) -> None:
+    def _handle_vnpy_order_event(self, event: Any) -> bool:
         try:
             data = self._event_data(event)
             self.sync_vnpy_order_callback(
@@ -4411,10 +4411,12 @@ class VnpyPaperTradingService:
                 rejected_reason=self._event_value(data, "rejected_reason", "rejectedReason", "status_msg", "statusMsg"),
                 raw=self._event_raw(event, data),
             )
+            return True
         except Exception as exc:  # noqa: BLE001 - event threads must not be interrupted by one bad callback.
             logger.warning("Failed to sync vn.py order event: %s", exc)
+            return False
 
-    def _handle_vnpy_trade_event(self, event: Any) -> None:
+    def _handle_vnpy_trade_event(self, event: Any) -> bool:
         try:
             data = self._event_data(event)
             self.sync_vnpy_trade_callback(
@@ -4428,10 +4430,12 @@ class VnpyPaperTradingService:
                 trade_date=self._event_value(data, "datetime", "trade_date", "tradeDate"),
                 raw=self._event_raw(event, data),
             )
+            return True
         except Exception as exc:  # noqa: BLE001
             logger.warning("Failed to sync vn.py trade event: %s", exc)
+            return False
 
-    def _handle_vnpy_account_event(self, event: Any) -> None:
+    def _handle_vnpy_account_event(self, event: Any) -> bool:
         try:
             data = self._event_data(event)
             self.sync_vnpy_account_callback(
@@ -4445,18 +4449,22 @@ class VnpyPaperTradingService:
                 currency=self._event_value(data, "currency"),
                 raw=self._event_raw(event, data),
             )
+            return True
         except Exception as exc:  # noqa: BLE001
             logger.warning("Failed to sync vn.py account event: %s", exc)
+            return False
 
-    def _handle_vnpy_position_event(self, event: Any) -> None:
+    def _handle_vnpy_position_event(self, event: Any) -> bool:
         try:
             data = self._event_data(event)
             self.sync_vnpy_positions_callback(
                 positions=[self._event_raw(event, data)],
                 raw={"event_type": self._event_value(event, "type")},
             )
+            return True
         except Exception as exc:  # noqa: BLE001
             logger.warning("Failed to sync vn.py position event: %s", exc)
+            return False
 
     @staticmethod
     def _event_data(event: Any) -> Any:

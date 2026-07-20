@@ -71,6 +71,8 @@ class VnpyRuntimeHandle:
                 gateway_name=self.settings.gateway_name,
                 diagnostics=self.diagnostics,
             )
+            if callable(getattr(self.event_bridge, "status", None)):
+                self.diagnostics["event_bridge"] = self.event_bridge.status()
             return self.diagnostics
 
     def start_auto_reconnect(self) -> None:

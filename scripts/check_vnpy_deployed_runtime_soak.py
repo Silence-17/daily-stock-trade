@@ -21,6 +21,10 @@ EVENT_TYPES = {
     "account": "eAccount.",
     "position": "ePosition.",
 }
+BUILTIN_SIMULATED_GATEWAY_CLASS = (
+    "src.services.vnpy_simulated_gateway:DsaSimulatedGateway"
+)
+BUILTIN_SIMULATED_GATEWAY_NAME = "DSA_SIM"
 
 
 def _utc_iso() -> str:
@@ -96,11 +100,19 @@ def evaluate_deployed_runtime_soak(
     process_change_count: int,
     gateway_identity_observation_count: int,
     gateway_change_count: int,
+    gateway_expectation_mismatch_count: int,
+    external_gateway_required: bool,
+    external_gateway_observation_count: int,
     incompatible_contract_count: int,
     reconnect_attempt_count: int,
     reconnect_success_count: int,
     reconnect_failure_count: int,
     reconnect_counter_regression_count: int,
+    observed_event_counts: Dict[str, int],
+    required_observed_events: Iterable[str],
+    min_observed_event_count: int,
+    event_observation_counter_regression_count: int,
+    event_handler_failure_count: int,
     min_api_success_ratio: float,
     min_runtime_ready_ratio: float,
     min_connected_ratio: float,
@@ -109,6 +121,7 @@ def evaluate_deployed_runtime_soak(
     max_gateway_changes: int,
     min_reconnect_success_count: int,
     max_reconnect_failure_count: int,
+    max_event_handler_failures: int,
 ) -> Dict[str, Any]:
     samples = max(0, int(sample_count or 0))
     successful = max(0, int(successful_sample_count or 0))
@@ -131,6 +144,18 @@ def evaluate_deployed_runtime_soak(
         for event_type in required
         if successful > 0
         and event_ratios[event_type] + 1e-12 < min_event_bridge_ratio
+    ]
+    required_observed = sorted(
+        {
+            str(event_name).strip()
+            for event_name in required_observed_events
+            if str(event_name).strip()
+        }
+    )
+    missing_observed_events = [
+        event_name
+        for event_name in required_observed
+        if int(observed_event_counts.get(event_name) or 0) < min_observed_event_count
     ]
 
     failures = []
@@ -165,6 +190,13 @@ def evaluate_deployed_runtime_soak(
             failures.append("backend_identity_missing")
         if gateway_identity_observation_count < successful:
             failures.append("gateway_identity_missing")
+        if gateway_expectation_mismatch_count > 0:
+            failures.append("gateway_identity_mismatch")
+        if (
+            external_gateway_required
+            and external_gateway_observation_count < successful
+        ):
+            failures.append("external_gateway_not_confirmed")
         if incompatible_contract_count > 0:
             failures.append("contract_incompatible")
     if process_change_count > max_process_changes:
@@ -173,6 +205,12 @@ def evaluate_deployed_runtime_soak(
         failures.append("gateway_changes_above_threshold")
     if reconnect_counter_regression_count > 0:
         failures.append("reconnect_counters_regressed")
+    if event_observation_counter_regression_count > 0:
+        failures.append("event_observation_counters_regressed")
+    if missing_observed_events:
+        failures.append("required_event_observations_below_threshold")
+    if event_handler_failure_count > max_event_handler_failures:
+        failures.append("event_handler_failures_above_threshold")
     if reconnect_success_count < min_reconnect_success_count:
         failures.append("reconnect_successes_below_threshold")
     if reconnect_failure_count > max_reconnect_failure_count:
@@ -201,6 +239,13 @@ def evaluate_deployed_runtime_soak(
         "gateway_identity_observation_count": gateway_identity_observation_count,
         "gateway_change_count": max(0, int(gateway_change_count or 0)),
         "max_gateway_changes": max_gateway_changes,
+        "gateway_expectation_mismatch_count": max(
+            0, int(gateway_expectation_mismatch_count or 0)
+        ),
+        "external_gateway_required": bool(external_gateway_required),
+        "external_gateway_observation_count": max(
+            0, int(external_gateway_observation_count or 0)
+        ),
         "incompatible_contract_count": max(0, int(incompatible_contract_count or 0)),
         "reconnect_attempt_count": max(0, int(reconnect_attempt_count or 0)),
         "reconnect_success_count": max(0, int(reconnect_success_count or 0)),
@@ -210,6 +255,18 @@ def evaluate_deployed_runtime_soak(
         "reconnect_counter_regression_count": max(
             0, int(reconnect_counter_regression_count or 0)
         ),
+        "observed_event_counts": {
+            event_name: max(0, int(observed_event_counts.get(event_name) or 0))
+            for event_name in sorted(observed_event_counts)
+        },
+        "required_observed_events": required_observed,
+        "min_observed_event_count": min_observed_event_count,
+        "missing_observed_events": missing_observed_events,
+        "event_observation_counter_regression_count": max(
+            0, int(event_observation_counter_regression_count or 0)
+        ),
+        "event_handler_failure_count": max(0, int(event_handler_failure_count or 0)),
+        "max_event_handler_failures": max_event_handler_failures,
     }
 
 
@@ -235,6 +292,36 @@ def _counter_values(runtime: Dict[str, Any]) -> Dict[str, int]:
     }
 
 
+def _event_observation_values(runtime: Dict[str, Any]) -> Dict[str, int]:
+    bridge = runtime.get("event_bridge")
+    bridge = bridge if isinstance(bridge, dict) else {}
+    observations = bridge.get("observations")
+    observations = observations if isinstance(observations, dict) else {}
+    values = {
+        event_name: max(
+            0,
+            int(
+                observation.get("count") or 0
+                if isinstance(observation, dict)
+                else 0
+            ),
+        )
+        for event_name, observation in observations.items()
+        if str(event_name).strip() in EVENT_TYPES
+    }
+    values["handler_failure"] = max(
+        0, int(bridge.get("handler_failure_count") or 0)
+    )
+    return values
+
+
+def _is_builtin_simulated_gateway(gateway_class: str, gateway_name: str) -> bool:
+    return (
+        str(gateway_class or "").strip() == BUILTIN_SIMULATED_GATEWAY_CLASS
+        or str(gateway_name or "").strip().upper() == BUILTIN_SIMULATED_GATEWAY_NAME
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-url", default="http://127.0.0.1:8000")
@@ -248,8 +335,24 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--min-contract-version", type=int, default=3)
     parser.add_argument("--max-process-changes", type=int, default=0)
     parser.add_argument("--max-gateway-changes", type=int, default=0)
+    parser.add_argument("--expected-gateway-class")
+    parser.add_argument("--expected-gateway-name")
+    parser.add_argument(
+        "--require-external-gateway",
+        action="store_true",
+        help="Reject DSA's built-in simulated gateway as production evidence.",
+    )
     parser.add_argument("--min-reconnect-success-count", type=int, default=0)
     parser.add_argument("--max-reconnect-failure-count", type=int, default=0)
+    parser.add_argument(
+        "--require-observed-event",
+        action="append",
+        choices=sorted(EVENT_TYPES),
+        default=[],
+        help="Require this callback to receive events during the observation window.",
+    )
+    parser.add_argument("--min-observed-event-count", type=int, default=1)
+    parser.add_argument("--max-event-handler-failures", type=int, default=0)
     parser.add_argument(
         "--require-event",
         action="append",
@@ -327,6 +430,8 @@ def main(argv: list[str] | None = None) -> int:
         minimum=0,
         maximum=100000,
     )
+    expected_gateway_class = str(args.expected_gateway_class or "").strip()
+    expected_gateway_name = str(args.expected_gateway_name or "").strip()
     min_reconnect_successes = _bounded_int(
         parser,
         "--min-reconnect-success-count",
@@ -341,9 +446,24 @@ def main(argv: list[str] | None = None) -> int:
         minimum=0,
         maximum=100000,
     )
+    min_observed_event_count = _bounded_int(
+        parser,
+        "--min-observed-event-count",
+        args.min_observed_event_count,
+        minimum=1,
+        maximum=1000000000,
+    )
+    max_event_handler_failures = _bounded_int(
+        parser,
+        "--max-event-handler-failures",
+        args.max_event_handler_failures,
+        minimum=0,
+        maximum=1000000000,
+    )
     required_event_types = sorted(
         {EVENT_TYPES[name] for name in (args.require_event or sorted(EVENT_TYPES))}
     )
+    required_observed_events = sorted(set(args.require_observed_event or []))
 
     started_at = _utc_iso()
     started_monotonic = time.monotonic()
@@ -357,13 +477,18 @@ def main(argv: list[str] | None = None) -> int:
     process_change_count = 0
     gateway_identity_count = 0
     gateway_change_count = 0
+    gateway_expectation_mismatch_count = 0
+    external_gateway_observation_count = 0
     incompatible_contract_count = 0
     reconnect_counter_regression_count = 0
     reconnect_deltas: Counter[str] = Counter()
+    event_observation_deltas: Counter[str] = Counter()
+    event_observation_counter_regression_count = 0
     error_counts: Counter[str] = Counter()
     last_identity = None
     last_gateway_identity = None
     last_counters: Dict[str, int] | None = None
+    last_event_observations: Dict[str, int] | None = None
     latest_backend: Dict[str, Any] = {}
     latest_gateway: Dict[str, Any] = {}
     interrupted = False
@@ -395,6 +520,10 @@ def main(argv: list[str] | None = None) -> int:
                     "class": runtime.get("gateway_class"),
                     "name": runtime.get("gateway_name"),
                     "added": bool(gateway.get("added")),
+                    "builtin_simulated": _is_builtin_simulated_gateway(
+                        str(runtime.get("gateway_class") or ""),
+                        str(runtime.get("gateway_name") or ""),
+                    ),
                 }
                 gateway_identity = (
                     str(runtime.get("gateway_class") or "").strip(),
@@ -402,6 +531,16 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 if all(gateway_identity):
                     gateway_identity_count += 1
+                    if (
+                        expected_gateway_class
+                        and gateway_identity[0] != expected_gateway_class
+                    ) or (
+                        expected_gateway_name
+                        and gateway_identity[1] != expected_gateway_name
+                    ):
+                        gateway_expectation_mismatch_count += 1
+                    if not _is_builtin_simulated_gateway(*gateway_identity):
+                        external_gateway_observation_count += 1
                     if (
                         last_gateway_identity is not None
                         and gateway_identity != last_gateway_identity
@@ -431,6 +570,7 @@ def main(argv: list[str] | None = None) -> int:
                 if last_identity is not None and identity != last_identity:
                     process_change_count += 1
                 current_counters = _counter_values(runtime)
+                current_event_observations = _event_observation_values(runtime)
                 if last_counters is not None and identity == last_identity:
                     if any(
                         value < last_counters.get(name, 0)
@@ -439,8 +579,19 @@ def main(argv: list[str] | None = None) -> int:
                         reconnect_counter_regression_count += 1
                     for name, value in current_counters.items():
                         reconnect_deltas[name] += max(0, value - last_counters.get(name, 0))
+                if last_event_observations is not None and identity == last_identity:
+                    if any(
+                        value < last_event_observations.get(name, 0)
+                        for name, value in current_event_observations.items()
+                    ):
+                        event_observation_counter_regression_count += 1
+                    for name, value in current_event_observations.items():
+                        event_observation_deltas[name] += max(
+                            0, value - last_event_observations.get(name, 0)
+                        )
                 last_identity = identity
                 last_counters = current_counters
+                last_event_observations = current_event_observations
                 try:
                     contract_version = int(backend.get("vnpy_paper_contract_version") or 0)
                 except (TypeError, ValueError):
@@ -475,11 +626,23 @@ def main(argv: list[str] | None = None) -> int:
         process_change_count=process_change_count,
         gateway_identity_observation_count=gateway_identity_count,
         gateway_change_count=gateway_change_count,
+        gateway_expectation_mismatch_count=gateway_expectation_mismatch_count,
+        external_gateway_required=bool(args.require_external_gateway),
+        external_gateway_observation_count=external_gateway_observation_count,
         incompatible_contract_count=incompatible_contract_count,
         reconnect_attempt_count=reconnect_deltas["attempt"],
         reconnect_success_count=reconnect_deltas["success"],
         reconnect_failure_count=reconnect_deltas["failure"],
         reconnect_counter_regression_count=reconnect_counter_regression_count,
+        observed_event_counts={
+            name: event_observation_deltas[name] for name in EVENT_TYPES
+        },
+        required_observed_events=required_observed_events,
+        min_observed_event_count=min_observed_event_count,
+        event_observation_counter_regression_count=(
+            event_observation_counter_regression_count
+        ),
+        event_handler_failure_count=event_observation_deltas["handler_failure"],
         min_api_success_ratio=min_api_ratio,
         min_runtime_ready_ratio=min_runtime_ratio,
         min_connected_ratio=min_connected_ratio,
@@ -488,9 +651,10 @@ def main(argv: list[str] | None = None) -> int:
         max_gateway_changes=max_gateway_changes,
         min_reconnect_success_count=min_reconnect_successes,
         max_reconnect_failure_count=max_reconnect_failures,
+        max_event_handler_failures=max_event_handler_failures,
     )
     result = {
-        "schema_version": 1,
+        "schema_version": 2,
         "started_at": started_at,
         "finished_at": _utc_iso(),
         "configured_duration_seconds": duration,
@@ -500,6 +664,9 @@ def main(argv: list[str] | None = None) -> int:
         "gateway": latest_gateway,
         "backend": latest_backend,
         "event_type_sample_counts": dict(sorted(event_type_counts.items())),
+        "observed_event_deltas": {
+            name: event_observation_deltas[name] for name in sorted(EVENT_TYPES)
+        },
         "error_counts": dict(sorted(error_counts.items())),
         "evaluation": evaluation,
     }
