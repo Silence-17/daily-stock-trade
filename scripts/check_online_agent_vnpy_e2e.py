@@ -132,6 +132,39 @@ def _account_ids(payload: Dict[str, Any]) -> set[int]:
     return result
 
 
+def _agent_run_uids(payload: Dict[str, Any]) -> set[str]:
+    return {
+        str(item.get("run_uid") or "").strip()
+        for item in payload.get("items") or []
+        if isinstance(item, dict) and str(item.get("run_uid") or "").strip()
+    }
+
+
+def _matching_scheduler_event(
+    payload: Dict[str, Any], run_uid: str
+) -> Dict[str, Any] | None:
+    for item in reversed(payload.get("items") or []):
+        if not isinstance(item, dict) or item.get("name") != "vnpy_paper_auto_trade":
+            continue
+        details = item.get("details") if isinstance(item.get("details"), dict) else {}
+        if (
+            str(details.get("agent_run_uid") or "").strip() == run_uid
+            and item.get("status") in {"completed", "skipped", "failed"}
+        ):
+            return item
+    return None
+
+
+def _scheduler_auto_trade_is_running(status: Dict[str, Any]) -> bool:
+    scheduler = status.get("scheduler")
+    scheduler = scheduler if isinstance(scheduler, dict) else {}
+    for item in scheduler.get("background_tasks") or []:
+        if not isinstance(item, dict) or item.get("name") != "vnpy_paper_auto_trade":
+            continue
+        return bool(item.get("running") or item.get("previous_generation_running"))
+    return False
+
+
 def _decision_is_traceable(decision: Dict[str, Any]) -> bool:
     if not str(decision.get("symbol") or "").strip():
         return False
@@ -365,6 +398,12 @@ def main(argv: Iterable[str] | None = None) -> int:
         "--execution-mode", choices=("dry_run", "vnpy_paper"), default="dry_run"
     )
     parser.add_argument(
+        "--trigger-mode",
+        choices=("direct", "scheduler"),
+        default="direct",
+        help="Trigger directly or wait for the runtime scheduler to create the run.",
+    )
+    parser.add_argument(
         "--allow-simulated-orders",
         action="store_true",
         help="Allow order submission only when DsaSimulatedGateway is active.",
@@ -429,6 +468,10 @@ def main(argv: Iterable[str] | None = None) -> int:
         parser.error("--isolated-account requires vnpy_paper mode")
     if args.keep_isolated_account_visible and not args.isolated_account:
         parser.error("--keep-isolated-account-visible requires --isolated-account")
+    if args.trigger_mode == "scheduler" and (
+        args.execution_mode != "vnpy_paper" or not args.isolated_account
+    ):
+        parser.error("scheduler mode requires vnpy_paper and --isolated-account")
 
     started_at = _utc_iso()
     original_status: Dict[str, Any] = {}
@@ -437,8 +480,11 @@ def main(argv: Iterable[str] | None = None) -> int:
     final_status: Dict[str, Any] = {}
     run_response: Dict[str, Any] = {}
     run_detail: Dict[str, Any] = {}
+    scheduler_event: Dict[str, Any] = {}
     changed_time_gate = False
     changed_auto_trade = False
+    changed_auto_interval = False
+    changed_execution_mode = False
     settings_restored = True
     account_environment_restored = not args.isolated_account
     isolated_account_cleanup_ok = not args.isolated_account
@@ -447,6 +493,8 @@ def main(argv: Iterable[str] | None = None) -> int:
     baseline_account_ids: set[int] = set()
     original_time_gate = True
     original_auto_trade = False
+    original_auto_interval = 1440
+    original_execution_mode = "paper"
     errors: list[str] = []
     try:
         original_status = _request_json(
@@ -463,6 +511,17 @@ def main(argv: Iterable[str] | None = None) -> int:
 
         settings = original_status.get("settings")
         settings = settings if isinstance(settings, dict) else {}
+        if args.trigger_mode == "scheduler" and _scheduler_auto_trade_is_running(
+            original_status
+        ):
+            raise ValueError("scheduler acceptance requires an idle auto-trade task")
+        if args.trigger_mode == "scheduler" and not {
+            "auto_trade_enabled",
+            "auto_trade_time_gate_enabled",
+            "auto_interval_minutes",
+            "auto_execution_mode",
+        } <= set(settings):
+            raise ValueError("status is missing scheduler settings required for restore")
         if (
             args.temporarily_disable_time_gate
             and "auto_trade_time_gate_enabled" not in settings
@@ -470,6 +529,8 @@ def main(argv: Iterable[str] | None = None) -> int:
             raise ValueError("status is missing auto_trade_time_gate_enabled")
         original_time_gate = bool(settings.get("auto_trade_time_gate_enabled", True))
         original_auto_trade = bool(settings.get("auto_trade_enabled", False))
+        original_auto_interval = int(settings.get("auto_interval_minutes", 1440))
+        original_execution_mode = str(settings.get("auto_execution_mode") or "paper")
         original_account_id = _snapshot_view(original_status).get("account_id")
 
         if args.isolated_account:
@@ -508,7 +569,11 @@ def main(argv: Iterable[str] | None = None) -> int:
                 raise ValueError("account reset did not create an isolated paper account")
             isolated_account_ids.add(int(isolated_id))
 
-        if args.temporarily_disable_time_gate and original_time_gate:
+        if (
+            args.temporarily_disable_time_gate
+            and args.trigger_mode == "direct"
+            and original_time_gate
+        ):
             # Treat an uncertain PUT response as potentially applied and restore in finally.
             changed_time_gate = True
             _request_json(
@@ -519,26 +584,88 @@ def main(argv: Iterable[str] | None = None) -> int:
                 timeout_seconds=request_timeout,
             )
 
-        run_response = _request_json(
-            base_url,
-            "/api/v1/vnpy-paper/auto/run",
-            method="POST",
-            payload={
-                "execution_mode": args.execution_mode,
-                "ignore_auto_trade_enabled": True,
-            },
-            timeout_seconds=request_timeout,
-        )
+        deadline = time.monotonic() + timeout
+        if args.trigger_mode == "direct":
+            run_response = _request_json(
+                base_url,
+                "/api/v1/vnpy-paper/auto/run",
+                method="POST",
+                payload={
+                    "execution_mode": args.execution_mode,
+                    "ignore_auto_trade_enabled": True,
+                },
+                timeout_seconds=request_timeout,
+            )
+        else:
+            baseline_runs = _request_json(
+                base_url,
+                "/api/v1/vnpy-paper/agent-runs?limit=100&trigger_source=vnpy_paper_auto",
+                timeout_seconds=request_timeout,
+            )
+            baseline_run_uids = _agent_run_uids(baseline_runs)
+            changed_auto_trade = True
+            changed_time_gate = original_time_gate
+            changed_auto_interval = original_auto_interval != 1
+            changed_execution_mode = original_execution_mode != "vnpy_paper"
+            _request_json(
+                base_url,
+                "/api/v1/vnpy-paper/settings",
+                method="PUT",
+                payload={
+                    "auto_trade_enabled": True,
+                    "auto_trade_time_gate_enabled": False,
+                    "auto_interval_minutes": 1,
+                    "auto_execution_mode": "vnpy_paper",
+                },
+                timeout_seconds=request_timeout,
+            )
+            while time.monotonic() < deadline:
+                runs = _request_json(
+                    base_url,
+                    "/api/v1/vnpy-paper/agent-runs?limit=100&trigger_source=vnpy_paper_auto",
+                    timeout_seconds=request_timeout,
+                )
+                new_uids = _agent_run_uids(runs) - baseline_run_uids
+                if new_uids:
+                    run_uid = next(
+                        (
+                            str(item.get("run_uid") or "").strip()
+                            for item in runs.get("items") or []
+                            if isinstance(item, dict)
+                            and str(item.get("run_uid") or "").strip() in new_uids
+                        ),
+                        sorted(new_uids)[0],
+                    )
+                    run_response = {"accepted": True, "agent_run_uid": run_uid}
+                    # Stop future intervals while allowing the in-flight worker to finish.
+                    _request_json(
+                        base_url,
+                        "/api/v1/vnpy-paper/settings",
+                        method="PUT",
+                        payload={"auto_trade_enabled": False},
+                        timeout_seconds=request_timeout,
+                    )
+                    break
+                time.sleep(poll_interval)
+
         run_uid = str(run_response.get("agent_run_uid") or "").strip()
         if run_uid:
-            deadline = time.monotonic() + timeout
             while True:
                 run_detail = _request_json(
                     base_url,
                     f"/api/v1/vnpy-paper/agent-runs/{run_uid}",
                     timeout_seconds=request_timeout,
                 )
-                if _run_is_terminal_and_coherent(args.execution_mode, run_detail):
+                run_ready = _run_is_terminal_and_coherent(args.execution_mode, run_detail)
+                if args.trigger_mode == "scheduler":
+                    events = _request_json(
+                        base_url,
+                        "/api/v1/vnpy-paper/task-events?name=vnpy_paper_auto_trade&limit=100",
+                        timeout_seconds=request_timeout,
+                    )
+                    scheduler_event = _matching_scheduler_event(events, run_uid) or {}
+                    run_ready = run_ready and bool(scheduler_event)
+                if run_ready:
                     break
                 if time.monotonic() >= deadline:
                     break
@@ -616,6 +743,10 @@ def main(argv: Iterable[str] | None = None) -> int:
         restore_payload: Dict[str, Any] = {}
         if changed_time_gate:
             restore_payload["auto_trade_time_gate_enabled"] = original_time_gate
+        if changed_auto_interval:
+            restore_payload["auto_interval_minutes"] = original_auto_interval
+        if changed_execution_mode:
+            restore_payload["auto_execution_mode"] = original_execution_mode
         if changed_auto_trade:
             if account_environment_restored or not original_auto_trade:
                 restore_payload["auto_trade_enabled"] = original_auto_trade
@@ -653,6 +784,16 @@ def main(argv: Iterable[str] | None = None) -> int:
                     bool(restored_settings.get("auto_trade_enabled"))
                     == original_auto_trade
                 )
+            if changed_auto_interval:
+                settings_restored = settings_restored and (
+                    int(restored_settings.get("auto_interval_minutes") or 0)
+                    == original_auto_interval
+                )
+            if changed_execution_mode:
+                settings_restored = settings_restored and (
+                    str(restored_settings.get("auto_execution_mode") or "")
+                    == original_execution_mode
+                )
             if args.isolated_account:
                 account_environment_restored = account_environment_restored and (
                     _snapshot_view(final_status).get("account_id")
@@ -680,13 +821,20 @@ def main(argv: Iterable[str] | None = None) -> int:
     if error is not None:
         evaluation["ok"] = False
         evaluation["failures"] = ["acceptance_runtime_error", *evaluation["failures"]]
+    if args.trigger_mode == "scheduler" and not scheduler_event:
+        evaluation["ok"] = False
+        evaluation["failures"].append("scheduler_task_event_not_correlated")
+    elif args.trigger_mode == "scheduler" and scheduler_event.get("status") != "completed":
+        evaluation["ok"] = False
+        evaluation["failures"].append("scheduler_task_not_completed")
     result = {
-        "schema_version": 1,
+        "schema_version": 2,
         "ok": evaluation["ok"],
         "started_at": started_at,
         "finished_at": _utc_iso(),
         "base_url": base_url,
         "execution_mode": args.execution_mode,
+        "trigger_mode": args.trigger_mode,
         "time_gate_temporarily_disabled": changed_time_gate,
         "isolated_account": {
             "enabled": bool(args.isolated_account),
@@ -705,6 +853,7 @@ def main(argv: Iterable[str] | None = None) -> int:
             "skipped_count": run_detail.get("skipped_count"),
             "status": run_detail.get("status"),
         },
+        "scheduler_event": scheduler_event,
         "evaluation": evaluation,
     }
     output = json.dumps(result, ensure_ascii=False, indent=2)

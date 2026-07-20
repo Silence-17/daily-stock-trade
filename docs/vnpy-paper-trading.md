@@ -208,7 +208,19 @@ python scripts\check_vnpy_scheduler_soak.py `
   --output-json "$env:TEMP\online-agent-vnpy-fill.json"
 ```
 
-脚本默认要求至少一笔计划经 EventEngine 到达 `filled`，并等待关联决策达到相同终态，再核对决策/计划/Portfolio trade id、run 级持仓变化、账户现金和持仓数量。`--isolated-account` 会先暂停自动买入并记录现有账户集合，通过 `/account/reset` 创建干净账本；完成或失败后恢复原账户及原自动交易/时段门禁设置，并默认把新归档测试账户从历史列表隐藏。即使 reset 已生效但响应丢失，也会通过账户 ID 差分寻找临时账本；任一恢复/清理状态不确定时保持自动买入关闭并非零退出。调试时可加 `--keep-isolated-account-visible` 保留历史入口。
+要验证用户配置的“定时自动选股并直接模拟交易”而不是手动 `/auto/run`，使用隔离调度模式：
+
+```powershell
+.\.venv-vnpy\Scripts\python.exe scripts\check_online_agent_vnpy_e2e.py `
+  --execution-mode vnpy_paper `
+  --trigger-mode scheduler `
+  --allow-simulated-orders `
+  --isolated-account `
+  --timeout-seconds 900 `
+  --output-json "$env:TEMP\online-agent-vnpy-scheduler.json"
+```
+
+脚本默认要求至少一笔计划经 EventEngine 到达 `filled`，并等待关联决策达到相同终态，再核对决策/计划/Portfolio trade id、run 级持仓变化、账户现金和持仓数量。`scheduler` 模式不会调用手动触发接口；它以启用前 run 集合作为基线，捕获首个新 run 后立即关闭后续周期，并要求持久化后台任务终态事件引用同一 `agent_run_uid`。`--isolated-account` 会先暂停自动买入并记录现有账户集合，通过 `/account/reset` 创建干净账本；完成或失败后恢复原账户及原自动交易/时段门禁/执行模式/间隔设置，并默认把新归档测试账户从历史列表隐藏。即使 reset 已生效但响应丢失，也会通过账户 ID 差分寻找临时账本；任一恢复/清理状态不确定时保持自动买入关闭并非零退出。调试时可加 `--keep-isolated-account-visible` 保留历史入口。
 
 已有持仓导致所有候选按规则跳过时，可显式增加 `--allow-no-fill`，但该结果只证明安全跳过和设置恢复，不能替代成交验收。`vnpy_paper` 模式必须传 `--allow-simulated-orders`，且脚本只允许内置 `DsaSimulatedGateway`；不会对真实券商 gateway 放行订单。`--temporarily-disable-time-gate` 和 `--isolated-account` 只在该模式可用。JSON 证据只保留运行摘要、聚合变化和 runtime 状态，不输出账户连接参数。
 
