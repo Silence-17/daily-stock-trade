@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [测试] Runtime scheduler 测试改为只替换目标 `sys.modules` 键，避免 `patch.dict` 回滚整个模块表后触发 LiteLLM/Pydantic/tokenizers 原生扩展二次初始化；完整 27 项现已在 Python 3.13 与 3.14 同进程通过，并完成真实 Python 3.13 API + DSA_SIM 的 75 秒 scheduler soak，74 次采样全部可达且 loop/恢复任务注册率均为 100%，新增 1 次恢复终态、0 失败、0 重叠跳过
 - [新功能] 新增只读 `scripts/check_vnpy_scheduler_soak.py`，可对运行中的 API 采样可达率、scheduler loop 存活率、必需任务持续注册率及启动后新增终态事件，并以失败数和 `task_already_running` 重叠跳过上限作非零退出门禁；首次事件读取仅作为历史基线，不触发选股、计划或订单
 - [修复] Runtime scheduler 将后台任务的 `run_immediately` 收敛为任务名级连续注册生命周期内只执行一次，避免配置重载反复触发 vn.py 自动恢复扫描；任务禁用后重新启用仍会执行一次启动恢复，且不同任务的注册状态互不影响
 - [改进] vn.py gateway 无下单长跑验收新增 `--require-reconnect`，可强制要求观测到重连尝试、成功及最终恢复 connected；模拟断线注入会自动启用该门禁并校验注入实际发生，JSON schema 升至 v2，最终 runtime 摘要在资源关闭前冻结以避免把正常清理误报为 monitor 未运行

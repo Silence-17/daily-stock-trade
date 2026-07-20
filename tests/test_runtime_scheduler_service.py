@@ -9,6 +9,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -26,6 +27,24 @@ from src.services.runtime_scheduler import (
     RUNTIME_SCHEDULER_SUPPRESS_START_ENV,
     RuntimeSchedulerService,
 )
+
+
+_MISSING_MODULE = object()
+
+
+@contextmanager
+def _patched_sys_module(name: str, module):
+    """Replace one module key without rolling back unrelated lazy imports."""
+
+    previous = sys.modules.get(name, _MISSING_MODULE)
+    sys.modules[name] = module
+    try:
+        yield
+    finally:
+        if previous is _MISSING_MODULE:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = previous
 
 
 class _FakeJob:
@@ -145,9 +164,9 @@ class RuntimeSchedulerServiceTestCase(unittest.TestCase):
         fake_module = ModuleType("src.services.vnpy_paper_trading_service")
         fake_module.build_vnpy_paper_trading_background_tasks = build_tasks
 
-        with patch.dict(
-            sys.modules,
-            {"src.services.vnpy_paper_trading_service": fake_module},
+        with _patched_sys_module(
+            "src.services.vnpy_paper_trading_service",
+            fake_module,
         ):
             tasks = service._current_vnpy_paper_trading_background_tasks(config)
 
@@ -349,7 +368,7 @@ class RuntimeSchedulerServiceTestCase(unittest.TestCase):
         )
         service._reload_config = lambda: config
 
-        with patch.dict(sys.modules, {"schedule": fake_schedule}), patch(
+        with _patched_sys_module("schedule", fake_schedule), patch(
             "src.services.runtime_scheduler.threading.Thread",
             _NoopThread,
         ):
@@ -385,7 +404,7 @@ class RuntimeSchedulerServiceTestCase(unittest.TestCase):
         )
         service._reload_config = lambda: config
 
-        with patch.dict(sys.modules, {"schedule": fake_schedule}), patch(
+        with _patched_sys_module("schedule", fake_schedule), patch(
             "src.services.runtime_scheduler.threading.Thread",
             _NoopThread,
         ):
@@ -983,7 +1002,7 @@ class RuntimeSchedulerServiceTestCase(unittest.TestCase):
             background_tasks_provider=lambda _config: [],
         )
 
-        with patch.dict(sys.modules, {"schedule": fake_schedule}), patch(
+        with _patched_sys_module("schedule", fake_schedule), patch(
             "src.services.runtime_scheduler.threading.Thread",
             _NoopThread,
         ):
