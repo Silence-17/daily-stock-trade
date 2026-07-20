@@ -963,6 +963,98 @@ class AlertService:
         )
         return result
 
+    def get_latest_system_event_delivery(
+        self,
+        *,
+        target: str,
+        data_source: str,
+        event_type: str,
+    ) -> Dict[str, Any]:
+        trigger = self.get_latest_system_event(
+            target=target,
+            data_source=data_source,
+            event_type=event_type,
+        )
+        if trigger is None:
+            return {
+                "status": "not_recorded",
+                "trigger": None,
+                "attempt_count": 0,
+                "successful_count": 0,
+                "failed_count": 0,
+                "retryable_failure_count": 0,
+                "attempts": [],
+            }
+
+        raw_trigger_id = trigger.get("id")
+        try:
+            trigger_id = int(raw_trigger_id) if raw_trigger_id is not None else None
+        except (TypeError, ValueError):
+            trigger_id = None
+        if trigger_id is not None and trigger_id <= 0:
+            trigger_id = None
+        notifications = self.list_notifications(
+            trigger_id=trigger_id,
+            page_size=100,
+        ) if trigger_id is not None else {"items": []}
+        attempts = list(notifications.get("items") or [])
+        successful_count = sum(1 for item in attempts if bool(item.get("success")))
+        failed_count = len(attempts) - successful_count
+        retryable_failure_count = sum(
+            1
+            for item in attempts
+            if not bool(item.get("success")) and bool(item.get("retryable"))
+        )
+        channels = {str(item.get("channel") or "") for item in attempts}
+        if successful_count:
+            status = "delivered"
+        elif not attempts:
+            status = "not_attempted"
+        elif channels and channels.issubset({"__no_channel__"}):
+            status = "not_configured"
+        elif channels and channels.issubset({
+            "__cooldown__",
+            "__cooldown_read_failed__",
+            "__noise_suppressed__",
+        }):
+            status = "suppressed"
+        else:
+            status = "failed"
+
+        public_trigger = {
+            key: trigger.get(key)
+            for key in (
+                "id",
+                "status",
+                "reason",
+                "triggered_at",
+                "observed_value",
+                "threshold",
+            )
+        }
+        return {
+            "status": status,
+            "trigger": public_trigger,
+            "attempt_count": len(attempts),
+            "successful_count": successful_count,
+            "failed_count": failed_count,
+            "retryable_failure_count": retryable_failure_count,
+            "attempts": [
+                {
+                    key: item.get(key)
+                    for key in (
+                        "channel",
+                        "success",
+                        "error_code",
+                        "retryable",
+                        "latency_ms",
+                        "created_at",
+                    )
+                }
+                for item in attempts
+            ],
+        }
+
     def _normalize_rule_payload(self, payload: Dict[str, Any], *, source: str = "api") -> Dict[str, Any]:
         target_scope = str(payload.get("target_scope") or "single_symbol").strip()
         if target_scope not in SUPPORTED_TARGET_SCOPES:

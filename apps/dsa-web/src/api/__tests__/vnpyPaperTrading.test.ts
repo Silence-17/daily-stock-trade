@@ -1108,6 +1108,25 @@ describe('vnpyPaperTradingApi', () => {
           creates_agent_runs: false,
           places_orders: false,
         },
+        alert_delivery: {
+          status: 'failed',
+          trigger: {
+            id: 28,
+            status: 'degraded',
+            reason: 'calibration_evidence_pending',
+            triggered_at: '2026-07-21T04:52:11Z',
+          },
+          attempt_count: 1,
+          successful_count: 0,
+          failed_count: 1,
+          retryable_failure_count: 1,
+          attempts: [{
+            channel: 'feishu',
+            success: false,
+            error_code: 'send_failed',
+            retryable: true,
+          }],
+        },
       },
     });
 
@@ -1119,6 +1138,8 @@ describe('vnpyPaperTradingApi', () => {
     expect(result.evaluation.requiredMarkets).toEqual(['cn', 'hk', 'us']);
     expect(result.evaluation.markets.cn.totalRuns).toBe(9);
     expect(result.methodology.createsAgentRuns).toBe(false);
+    expect(result.alertDelivery?.status).toBe('failed');
+    expect(result.alertDelivery?.attempts[0].channel).toBe('feishu');
   });
 
   it('generates an Agent run LLM recap', async () => {

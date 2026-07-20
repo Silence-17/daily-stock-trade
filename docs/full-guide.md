@@ -824,6 +824,7 @@ python main.py --schedule --no-run-immediately
 >
 > 可用 `python scripts/check_agent_calibration_evidence.py --base-url http://127.0.0.1:8000 --required-version candidate-return-risk-v1 --output-json calibration-evidence.json` 对生产校准证据执行只读门禁。默认只统计 `trigger_source=agent_calibration_shadow` 的无下单采样，并分别检查 A 股、港股和美股最近 90 天至少 20 个 completed run、10 个目标快照、80% 观测率、最新 20 个成熟前瞻样本、5 个观测日及 72 小时内的新鲜证据；也可重复传 `--market` 或调整显式阈值。摘要截断、市场过滤不一致、版本缺失、未来/陈旧时间和最新 blocked/unavailable 状态都会非零退出。输出明确标记滚动窗口有重叠且不声称独立样本，脚本不会创建 Agent run、计划或订单。`agent_calibration_shadow` 的 completed 调度事件还会保留每个市场/策略的受限摘要、运行 UID、候选/计划/提交数和 `submits_orders=false`，便于逐组核验零下单不变量。
 > 启用 shadow 后，`agent_calibration_evidence` 后台任务还会把首次证据状态及 ready/pending 变化持久化为 `vnpy_paper` 告警，并复用 alert 通知路由。pending 记为 `degraded`，ready 记为 `resolved`；连续相同状态跨轮询、跨重启保持静默。告警链路异常不会改变只读证据任务的完成状态，也不会触发选股或下单。
+> 同一只读证据 API 和 Agent 控制台还展示最近状态告警的渠道投递摘要：告警时间、尝试/成功/失败/可重试数量，以及逐渠道成功或错误码。告警历史不可用时只把投递状态标为 `unavailable`，不会让证据接口或页面主体失败。该视图能暴露通知渠道配置问题，但不会把失败渠道误报为已修复。
 
 > 需要无人值守积累生产形态的校准样本时，可显式设置 `DSA_AGENT_CALIBRATION_SHADOW_ENABLED=true` 和 `DSA_AGENT_CALIBRATION_SHADOW_PAIRS=cn:dual_low,us:us_large_cap_momentum,hk:hk_liquid_momentum`，并通过 `DSA_AGENT_CALIBRATION_SHADOW_INTERVAL_MINUTES`、`DSA_AGENT_CALIBRATION_SHADOW_MAX_RESULTS` 控制周期和候选数。任务首次注册延迟 300 秒，只生成独立 `agent_calibration_shadow` dry-run 记录，绝不提交订单或修改保存的自动交易配置；每个 `市场:策略` 必须匹配 `market_scope`。DSA 在不修改安装包的前提下叠加美股策略，并为港股提供复用 AlphaSift 硬过滤、因子评分和原生 LLM ranker 的兼容管线；港股股票池可用 `ALPHASIFT_HK_TICKERS` 显式限制。港股 LLM 复排遵守自动 Agent 的请求级超时、确定性评分降级和跨轮熔断策略。
 

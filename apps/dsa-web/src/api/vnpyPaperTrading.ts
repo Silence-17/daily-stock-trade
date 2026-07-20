@@ -918,6 +918,30 @@ export type VnpyPaperAgentCalibrationEvidence = {
     overlappingRollingSamples: boolean;
     independentSampleCountClaimed: boolean;
   };
+  alertDelivery?: {
+    status: 'not_recorded' | 'not_attempted' | 'not_configured' | 'suppressed' | 'delivered' | 'failed' | 'unavailable';
+    reason?: string | null;
+    trigger?: {
+      id?: number | null;
+      status?: string | null;
+      reason?: string | null;
+      triggeredAt?: string | null;
+      observedValue?: number | null;
+      threshold?: number | null;
+    } | null;
+    attemptCount: number;
+    successfulCount: number;
+    failedCount: number;
+    retryableFailureCount: number;
+    attempts: Array<{
+      channel?: string | null;
+      success: boolean;
+      errorCode?: string | null;
+      retryable: boolean;
+      latencyMs?: number | null;
+      createdAt?: string | null;
+    }>;
+  };
 };
 
 export type VnpyPaperAgentRunFilters = {

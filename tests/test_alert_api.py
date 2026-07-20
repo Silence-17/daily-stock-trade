@@ -248,6 +248,103 @@ class AlertApiTestCase(unittest.TestCase):
             "failure_fuse_auto_recovered",
         )
 
+    def test_latest_system_event_delivery_summarizes_failed_channel(self) -> None:
+        service = AlertService()
+        event = service.record_system_event(
+            target="vnpy_paper",
+            event_type="agent_calibration_evidence",
+            status="degraded",
+            reason="calibration_evidence_pending",
+            data_source="vnpy_paper_auto",
+        )
+        service.repo.record_notification_attempt({
+            "trigger_id": event["id"],
+            "channel": "feishu",
+            "attempt": 1,
+            "success": False,
+            "error_code": "send_failed",
+            "retryable": True,
+            "latency_ms": 270,
+        })
+
+        delivery = service.get_latest_system_event_delivery(
+            target="vnpy_paper",
+            data_source="vnpy_paper_auto",
+            event_type="agent_calibration_evidence",
+        )
+
+        self.assertEqual(delivery["status"], "failed")
+        self.assertEqual(delivery["attempt_count"], 1)
+        self.assertEqual(delivery["failed_count"], 1)
+        self.assertEqual(delivery["retryable_failure_count"], 1)
+        self.assertEqual(delivery["trigger"]["status"], "degraded")
+        self.assertEqual(delivery["attempts"][0]["channel"], "feishu")
+        self.assertNotIn("diagnostics", delivery["attempts"][0])
+
+    def test_latest_system_event_delivery_reports_missing_event(self) -> None:
+        delivery = AlertService().get_latest_system_event_delivery(
+            target="vnpy_paper",
+            data_source="vnpy_paper_auto",
+            event_type="agent_calibration_evidence",
+        )
+
+        self.assertEqual(delivery["status"], "not_recorded")
+        self.assertIsNone(delivery["trigger"])
+        self.assertEqual(delivery["attempts"], [])
+
+    def test_latest_system_event_delivery_classifies_success_and_no_channel(self) -> None:
+        service = AlertService()
+        delivered_event = service.record_system_event(
+            target="vnpy_paper",
+            event_type="delivery_success",
+            data_source="vnpy_paper_auto",
+        )
+        service.repo.record_notification_attempt({
+            "trigger_id": delivered_event["id"],
+            "channel": "feishu",
+            "attempt": 1,
+            "success": False,
+            "error_code": "send_failed",
+            "retryable": True,
+        })
+        service.repo.record_notification_attempt({
+            "trigger_id": delivered_event["id"],
+            "channel": "email",
+            "attempt": 1,
+            "success": True,
+            "retryable": False,
+        })
+        no_channel_event = service.record_system_event(
+            target="vnpy_paper",
+            event_type="delivery_not_configured",
+            data_source="vnpy_paper_auto",
+        )
+        service.repo.record_notification_attempt({
+            "trigger_id": no_channel_event["id"],
+            "channel": "__no_channel__",
+            "attempt": 1,
+            "success": False,
+            "error_code": "no_channel",
+            "retryable": False,
+        })
+
+        delivered = service.get_latest_system_event_delivery(
+            target="vnpy_paper",
+            data_source="vnpy_paper_auto",
+            event_type="delivery_success",
+        )
+        not_configured = service.get_latest_system_event_delivery(
+            target="vnpy_paper",
+            data_source="vnpy_paper_auto",
+            event_type="delivery_not_configured",
+        )
+
+        self.assertEqual(delivered["status"], "delivered")
+        self.assertEqual(delivered["successful_count"], 1)
+        self.assertEqual(delivered["failed_count"], 1)
+        self.assertEqual(not_configured["status"], "not_configured")
+        self.assertEqual(not_configured["retryable_failure_count"], 0)
+
     def test_rule_update_allows_null_for_reserved_policy_fields(self) -> None:
         rule = self._create_rule(
             {

@@ -2855,10 +2855,35 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
             },
         }
 
+        alert_delivery = {
+            "status": "failed",
+            "trigger": {
+                "id": 28,
+                "status": "degraded",
+                "reason": "calibration_evidence_pending",
+                "triggered_at": "2026-07-21T04:52:11",
+            },
+            "attempt_count": 1,
+            "successful_count": 0,
+            "failed_count": 1,
+            "retryable_failure_count": 1,
+            "attempts": [{
+                "channel": "feishu",
+                "success": False,
+                "error_code": "send_failed",
+                "retryable": True,
+            }],
+        }
+
         with patch(
             "api.v1.endpoints.vnpy_paper_trading.collect_persisted_calibration_evidence",
             return_value=payload,
-        ) as collect:
+        ) as collect, patch(
+            "api.v1.endpoints.vnpy_paper_trading.AlertService",
+        ) as alert_service:
+            alert_service.return_value.get_latest_system_event_delivery.return_value = (
+                alert_delivery
+            )
             response = self.client.get(
                 "/api/v1/vnpy-paper/agent-runs/calibration-evidence"
             )
@@ -2866,10 +2891,33 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertFalse(response.json()["evaluation"]["ok"])
         self.assertTrue(response.json()["methodology"]["read_only"])
+        self.assertEqual(response.json()["alert_delivery"], alert_delivery)
         self.assertEqual(
             collect.call_args.kwargs["markets"],
             ["cn", "hk", "us"],
         )
+
+    def test_calibration_evidence_endpoint_isolates_alert_history_failure(self) -> None:
+        payload = {
+            "schema_version": 1,
+            "window_days": 90,
+            "evaluation": {"ok": False},
+            "methodology": {"read_only": True},
+        }
+        with patch(
+            "api.v1.endpoints.vnpy_paper_trading.collect_persisted_calibration_evidence",
+            return_value=payload,
+        ), patch(
+            "api.v1.endpoints.vnpy_paper_trading.AlertService",
+            side_effect=RuntimeError("alert database unavailable"),
+        ):
+            response = self.client.get(
+                "/api/v1/vnpy-paper/agent-runs/calibration-evidence"
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.json()["evaluation"]["ok"])
+        self.assertEqual(response.json()["alert_delivery"]["status"], "unavailable")
 
     def test_agent_backtest_endpoint_forwards_filters_and_returns_matrix(self) -> None:
         service = MagicMock()
