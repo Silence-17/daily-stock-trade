@@ -62,8 +62,10 @@ class StockSelectionFactorIngestionService:
 
         daily_fetcher, valuation_fetcher = self._fetchers()
         corporate_action_fetcher = self._resolve_corporate_action_fetcher()
+        custom_corporate_action_fetcher = self.corporate_action_fetcher is not None
         rows_by_date: Dict[date, List[Dict[str, Any]]] = {item: [] for item in dates}
         corporate_action_rows: List[Dict[str, Any]] = []
+        used_corporate_action_sources = set()
         errors: List[Dict[str, str]] = []
         used_daily_sources = set()
         for item in symbols:
@@ -92,11 +94,15 @@ class StockSelectionFactorIngestionService:
 
             if corporate_action_fetcher is not None:
                 try:
-                    corporate_action_rows.extend(corporate_action_fetcher(
+                    actions = corporate_action_fetcher(
                         stock_code=symbol,
                         start_date=dates[0] - timedelta(days=7),
                         end_date=dates[-1] + timedelta(days=400),
-                    ))
+                    )
+                    corporate_action_rows.extend(actions)
+                    used_corporate_action_sources.update(
+                        str(action.get("source") or "unknown") for action in actions
+                    )
                 except Exception as exc:
                     errors.append({"symbol": symbol, "stage": "corporate_actions", "error": str(exc)})
 
@@ -180,7 +186,26 @@ class StockSelectionFactorIngestionService:
                 "daily_sources_used": sorted(used_daily_sources),
                 "valuation_source": "akshare.stock_zh_valuation_baidu",
                 "corporate_action_source": (
-                    "tushare.dividend" if corporate_action_fetcher is not None else "unavailable"
+                    "custom.corporate_action_fetcher"
+                    if custom_corporate_action_fetcher
+                    else (
+                        "provider_fallback_route"
+                        if corporate_action_fetcher is not None
+                        else "unavailable"
+                    )
+                ),
+                "corporate_action_source_route": (
+                    ["custom.corporate_action_fetcher"]
+                    if custom_corporate_action_fetcher
+                    else [
+                        "tushare.dividend",
+                        "akshare.stock_fhps_detail_em",
+                        "akshare.stock_dividend_cninfo",
+                    ] if corporate_action_fetcher is not None else []
+                ),
+                "corporate_action_sources_used": sorted(used_corporate_action_sources),
+                "corporate_action_free_coverage_exchanges": (
+                    [] if custom_corporate_action_fetcher else ["SSE", "SZSE"]
                 ),
                 "corporate_action_horizon_days": 400,
                 "valuation_asof_rule": "latest_value_on_or_before_snapshot_date",
@@ -435,11 +460,31 @@ class StockSelectionFactorIngestionService:
             return self.corporate_action_fetcher
         if self.daily_fetcher is not None or self.valuation_fetcher is not None:
             return None
+        from data_provider.akshare_corporate_action_fetcher import (
+            AkshareCorporateActionFetcher,
+        )
         from src.config import get_config
 
-        if not get_config().tushare_token:
-            return None
-        from data_provider.tushare_fetcher import TushareFetcher
+        free_fetcher = AkshareCorporateActionFetcher().get_stock_corporate_actions
+        tushare_fetcher = None
+        if get_config().tushare_token:
+            from data_provider.tushare_fetcher import TushareFetcher
 
-        fetcher = TushareFetcher()
-        return fetcher.get_stock_corporate_actions if fetcher.is_available() else None
+            fetcher = TushareFetcher()
+            if fetcher.is_available():
+                tushare_fetcher = fetcher.get_stock_corporate_actions
+
+        def fetch(**kwargs: Any) -> List[Dict[str, Any]]:
+            errors = []
+            if tushare_fetcher is not None:
+                try:
+                    return tushare_fetcher(**kwargs)
+                except Exception as exc:
+                    errors.append(f"tushare.dividend failed: {exc}")
+            try:
+                return free_fetcher(**kwargs)
+            except Exception as exc:
+                errors.append(f"akshare corporate-action fallback failed: {exc}")
+            raise RuntimeError("; ".join(errors))
+
+        return fetch
