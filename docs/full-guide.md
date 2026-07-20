@@ -1874,3 +1874,7 @@ worker 会把 `triggered`、`skipped`、`degraded`、`failed` 写入 `alert_trig
 - Agent 可通过 `get_portfolio_snapshot` 获取面向账户的紧凑持仓摘要，默认包含精简风险块，适合控制 Token 开销。
 - 可选参数包括 `account_id`、`cost_method`、`as_of`、`include_positions`、`include_risk`。
 - 若风险块生成失败，快照仍会返回；若当前环境未启用持仓模块，工具会返回结构化 `not_supported`。
+
+### vn.py Gateway 连接前预检
+
+运行 `python scripts/check_vnpy_gateway_preflight.py` 可在零连接状态下检查 gateway 加载、注册名称和连接 JSON 的键名。真实通道应增加 `--require-external-gateway --require-all-default-keys`，并把 `--settings-path` 指向仓库外文件；输出不会包含路径或配置值。预检不连接、不订阅、不下单，通过结果不能替代真实 gateway 的连接和长跑验收。完整参数见 [vn.py 模拟交易说明](vnpy-paper-trading.md)。

@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [新功能] 新增零连接 `scripts/check_vnpy_gateway_preflight.py`，可在不连接网络、订阅行情或创建订单的前提下校验 vn.py gateway 加载、名称解析和连接配置键；生产门禁拒绝内置 `DSA_SIM`，并要求外部配置文件不位于仓库内
+
 - [改进] `vnpy_paper_auto_retry` 新增校准状态告警的持久化有限重试：可重试失败每 5 分钟重发、逐渠道尝试号跨重启递增且最多 3 轮投递；生产校准 API 和 Agent 控制台展示等待、到期、送达、不可重试与次数耗尽状态，重试不会运行 Agent 或创建订单，告警历史异常也不会阻断订单恢复
 
 - [改进] 生产校准证据 API 和 Agent 控制台新增最近状态告警投递摘要，展示尝试/成功/失败/可重试计数及脱敏渠道错误；告警历史异常独立降级，不再让通知失败对用户不可见
