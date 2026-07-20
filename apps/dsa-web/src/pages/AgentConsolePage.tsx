@@ -1064,6 +1064,7 @@ const AgentConsolePage: React.FC = () => {
     failedCount: 0,
     retryableFailureCount: 0,
     attempts: [],
+    retryPolicy: undefined,
   };
 
   const renderStatusBadge = (status: string, label?: string) => (
@@ -1286,10 +1287,30 @@ const AgentConsolePage: React.FC = () => {
                   ? ` · 可重试 ${calibrationAlertDelivery.retryableFailureCount}`
                   : ''}
               </p>
+              {calibrationAlertDelivery.retryPolicy ? (
+                <p className="mt-1 break-words" data-testid="agent-calibration-alert-retry">
+                  自动重试：{({
+                    succeeded: '已送达，无需重试',
+                    waiting: '等待重试窗口',
+                    due: '等待后台重试任务',
+                    exhausted: '次数已耗尽',
+                    not_retryable: '当前失败不可重试',
+                    not_applicable: '不适用',
+                  } as Record<string, string>)[calibrationAlertDelivery.retryPolicy.status]
+                    || calibrationAlertDelivery.retryPolicy.status}
+                  {calibrationAlertDelivery.retryPolicy.attempt > 0
+                    ? ` · ${calibrationAlertDelivery.retryPolicy.attempt}/${calibrationAlertDelivery.retryPolicy.maxAttempts}`
+                    : ''}
+                  {calibrationAlertDelivery.retryPolicy.nextRetryAt
+                    && calibrationAlertDelivery.retryPolicy.status === 'waiting'
+                    ? ` · ${formatDateTime(calibrationAlertDelivery.retryPolicy.nextRetryAt)}`
+                    : ''}
+                </p>
+              ) : null}
               {calibrationAlertDelivery.attempts.length > 0 ? (
                 <p className="mt-1 break-all">
                   {calibrationAlertDelivery.attempts.map((attempt) => (
-                    `${attempt.channel || 'unknown'}: ${attempt.success ? '成功' : `失败${attempt.errorCode ? ` (${attempt.errorCode})` : ''}`}`
+                    `${attempt.channel || 'unknown'}${attempt.attempt ? ` #${attempt.attempt}` : ''}: ${attempt.success ? '成功' : `失败${attempt.errorCode ? ` (${attempt.errorCode})` : ''}`}`
                   )).join(' · ')}
                 </p>
               ) : null}

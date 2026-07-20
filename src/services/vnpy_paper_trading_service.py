@@ -78,6 +78,9 @@ TRADE_PLAN_RETRY_COOLDOWN_SECONDS = 60
 TRADE_PLAN_AUTO_RETRY_MAX_PLANS = 3
 TRADE_PLAN_AUTO_RETRY_SCAN_LIMIT = 50
 TRADE_PLAN_AUTO_RETRY_INTERVAL_SECONDS = 300
+CALIBRATION_ALERT_RETRY_MAX_ATTEMPTS = 3
+CALIBRATION_ALERT_RETRY_INTERVAL_SECONDS = 300
+CALIBRATION_ALERT_RETRY_DUE_TOLERANCE_SECONDS = 5
 TRADE_PLAN_ORDER_TIMEOUT_SECONDS = 30 * 60
 TRADE_PLAN_RECONCILIATION_GRACE_SECONDS = 60
 STATUS_SNAPSHOT_CACHE_TTL_SECONDS = 10
@@ -522,6 +525,184 @@ class VnpyPaperTradingService:
             "previous_evidence_ready": previous_ready,
         }
 
+    def get_calibration_alert_delivery(
+        self,
+        *,
+        alert_service: Optional[Any] = None,
+        now: Optional[datetime] = None,
+    ) -> Dict[str, Any]:
+        """Return latest calibration alert delivery with bounded retry state."""
+
+        if alert_service is None:
+            from src.services.alert_service import AlertService
+
+            alert_service = AlertService()
+        delivery = alert_service.get_latest_system_event_delivery(
+            target=VNPY_PAPER_ALERT_TARGET,
+            data_source=VNPY_PAPER_ALERT_SOURCE,
+            event_type=VNPY_PAPER_CALIBRATION_EVIDENCE_EVENT,
+        )
+        result = dict(delivery or {})
+        result["retry_policy"] = self._calibration_alert_retry_policy(
+            result,
+            now=now,
+        )
+        return result
+
+    def retry_latest_calibration_alert_notification(
+        self,
+        *,
+        now: Optional[datetime] = None,
+    ) -> Dict[str, Any]:
+        """Retry the latest retryable calibration alert without running the Agent."""
+
+        from src.services.alert_service import AlertService
+
+        alert_service = AlertService()
+        delivery = self.get_calibration_alert_delivery(
+            alert_service=alert_service,
+            now=now,
+        )
+        policy = dict(delivery.get("retry_policy") or {})
+        if policy.get("status") != "due":
+            return {
+                "accepted": True,
+                "skipped": True,
+                "reason": f"calibration_alert_retry_{policy.get('status') or 'not_applicable'}",
+                "delivery": delivery,
+                "read_only": True,
+                "creates_agent_runs": False,
+                "places_orders": False,
+                "submits_orders": False,
+            }
+
+        trigger = alert_service.get_latest_system_event(
+            target=VNPY_PAPER_ALERT_TARGET,
+            data_source=VNPY_PAPER_ALERT_SOURCE,
+            event_type=VNPY_PAPER_CALIBRATION_EVIDENCE_EVENT,
+        )
+        if not isinstance(trigger, dict):
+            return {
+                "accepted": True,
+                "skipped": True,
+                "reason": "calibration_alert_retry_not_recorded",
+                "delivery": delivery,
+                "read_only": True,
+                "creates_agent_runs": False,
+                "places_orders": False,
+                "submits_orders": False,
+            }
+
+        diagnostics = trigger.get("diagnostics_payload")
+        if not isinstance(diagnostics, dict):
+            diagnostics = {}
+        dispatch = self._send_auto_trade_alert_notification_safely(
+            alert_service=alert_service,
+            event_type=VNPY_PAPER_CALIBRATION_EVIDENCE_EVENT,
+            status=str(trigger.get("status") or "degraded"),
+            reason=str(trigger.get("reason") or "calibration_evidence_pending"),
+            observed_value=trigger.get("observed_value"),
+            threshold=trigger.get("threshold"),
+            diagnostics=diagnostics,
+        )
+        recorded_count = self._record_auto_trade_notification_attempts_safely(
+            alert_service=alert_service,
+            trigger_id=_safe_int(trigger.get("id")),
+            dispatch=dispatch,
+        )
+        refreshed = self.get_calibration_alert_delivery(
+            alert_service=alert_service,
+            now=now,
+        )
+        delivered = refreshed.get("status") == "delivered"
+        return {
+            "accepted": True,
+            "skipped": False,
+            "reason": (
+                "calibration_alert_retry_delivered"
+                if delivered
+                else "calibration_alert_retry_failed"
+            ),
+            "recorded_attempt_count": recorded_count,
+            "delivery": refreshed,
+            "read_only": True,
+            "creates_agent_runs": False,
+            "places_orders": False,
+            "submits_orders": False,
+        }
+
+    def _calibration_alert_retry_policy(
+        self,
+        delivery: Dict[str, Any],
+        *,
+        now: Optional[datetime] = None,
+    ) -> Dict[str, Any]:
+        attempts = list(delivery.get("attempts") or [])
+        latest_by_channel: Dict[str, Dict[str, Any]] = {}
+        for item in attempts:
+            if not isinstance(item, dict):
+                continue
+            channel = str(item.get("channel") or "__dispatch__")
+            if channel not in latest_by_channel:
+                latest_by_channel[channel] = item
+
+        attempt_number = max(
+            (_safe_int(item.get("attempt")) or 1 for item in latest_by_channel.values()),
+            default=0,
+        )
+        retryable_latest = [
+            item
+            for item in latest_by_channel.values()
+            if not bool(item.get("success")) and bool(item.get("retryable"))
+        ]
+        delivery_status = str(delivery.get("status") or "not_recorded")
+        retry_status = "not_applicable"
+        next_retry_at: Optional[str] = None
+        if delivery_status == "delivered":
+            retry_status = "succeeded"
+        elif delivery_status == "failed" and retryable_latest:
+            if attempt_number >= CALIBRATION_ALERT_RETRY_MAX_ATTEMPTS:
+                retry_status = "exhausted"
+            else:
+                latest_at = max(
+                    (
+                        parsed
+                        for parsed in (
+                            self._parse_db_datetime(item.get("created_at"))
+                            for item in retryable_latest
+                        )
+                        if parsed is not None
+                    ),
+                    default=None,
+                )
+                if latest_at is None:
+                    retry_status = "due"
+                else:
+                    next_retry = latest_at + timedelta(
+                        seconds=CALIBRATION_ALERT_RETRY_INTERVAL_SECONDS
+                    )
+                    next_retry_at = self._format_utc_datetime(next_retry)
+                    current = now or self._now_utc()
+                    if current.tzinfo is None:
+                        current = current.replace(tzinfo=timezone.utc)
+                    retry_status = (
+                        "due"
+                        if current + timedelta(
+                            seconds=CALIBRATION_ALERT_RETRY_DUE_TOLERANCE_SECONDS
+                        ) >= next_retry
+                        else "waiting"
+                    )
+        elif delivery_status == "failed":
+            retry_status = "not_retryable"
+
+        return {
+            "status": retry_status,
+            "attempt": attempt_number,
+            "max_attempts": CALIBRATION_ALERT_RETRY_MAX_ATTEMPTS,
+            "interval_seconds": CALIBRATION_ALERT_RETRY_INTERVAL_SECONDS,
+            "next_retry_at": next_retry_at,
+        }
+
     def _notify_auto_trade_alert_event(
         self,
         *,
@@ -705,12 +886,26 @@ class VnpyPaperTradingService:
         if not channel_results:
             channel_results = [self._synthetic_auto_trade_notification_attempt(dispatch)]
 
+        previous_attempts: Dict[str, int] = {}
+        if trigger_id is not None:
+            notifications = alert_service.list_notifications(
+                trigger_id=trigger_id,
+                page_size=100,
+            )
+            for item in list(notifications.get("items") or []):
+                channel = str(item.get("channel") or "__dispatch__")[:32]
+                previous_attempts[channel] = max(
+                    previous_attempts.get(channel, 0),
+                    _safe_int(item.get("attempt")) or 0,
+                )
+
         recorded = 0
-        for attempt_index, item in enumerate(channel_results, start=1):
+        for item in channel_results:
+            channel = str(getattr(item, "channel", None) or "__dispatch__")[:32]
             fields = {
                 "trigger_id": trigger_id,
-                "channel": str(getattr(item, "channel", None) or "__dispatch__")[:32],
-                "attempt": attempt_index,
+                "channel": channel,
+                "attempt": previous_attempts.get(channel, 0) + 1,
                 "success": bool(getattr(item, "success", False)),
                 "error_code": getattr(item, "error_code", None),
                 "retryable": bool(getattr(item, "retryable", False)),
@@ -720,6 +915,7 @@ class VnpyPaperTradingService:
                 ),
             }
             alert_service.repo.record_notification_attempt(fields)
+            previous_attempts[channel] = fields["attempt"]
             recorded += 1
         return recorded
 
@@ -12971,12 +13167,31 @@ def build_vnpy_paper_trading_background_tasks(
 
     def run_auto_retry() -> Dict[str, Any]:
         result = service.retry_due_trade_plans()
+        try:
+            calibration_alert_retry = service.retry_latest_calibration_alert_notification()
+        except Exception as exc:  # noqa: BLE001 - notification recovery must not block order recovery.
+            logger.warning(
+                "Calibration alert retry unavailable during order recovery: %s",
+                type(exc).__name__,
+            )
+            calibration_alert_retry = {
+                "accepted": False,
+                "skipped": True,
+                "reason": "calibration_alert_retry_unavailable",
+                "error_type": type(exc).__name__,
+                "read_only": True,
+                "creates_agent_runs": False,
+                "places_orders": False,
+                "submits_orders": False,
+            }
+        result["calibration_alert_retry"] = calibration_alert_retry
         logger.info(
-            "vn.py paper auto retry finished: attempted=%s submitted=%s skipped=%s failed=%s",
+            "vn.py paper auto retry finished: attempted=%s submitted=%s skipped=%s failed=%s calibration_alert=%s",
             result.get("attempted_count"),
             result.get("submitted_count"),
             result.get("skipped_count"),
             result.get("failed_count"),
+            calibration_alert_retry.get("reason"),
         )
         return result
 
