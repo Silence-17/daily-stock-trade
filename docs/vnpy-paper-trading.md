@@ -188,6 +188,27 @@ python scripts\check_vnpy_scheduler_soak.py `
 
 脚本只调用 `/status` 和 `/task-events` 两个 GET 接口。首次成功读取的事件列表仅作为历史基线，终态、失败和重叠跳过只统计随后新增事件；`--require-task` 同时要求任务在配置比例的成功样本中持续注册，并在本次窗口至少产生一个 `completed`、`skipped` 或 `failed` 终态。验收时长应覆盖自动买入和恢复任务各自至少一个执行周期；若自动买入被关闭，只要求 `vnpy_paper_auto_retry`。连接失败、接口错误、循环退出、任务消失、缺少终态、失败或重叠跳过超过上限均返回非零退出码。该脚本不调用写接口，也不触发选股、计划或订单。
 
+需要验证完整“在线选股 Agent -> 决策/计划 -> vn.py 模拟回报 -> Portfolio”链路时，先运行默认零下单门禁：
+
+```powershell
+.\.venv-vnpy\Scripts\python.exe scripts\check_online_agent_vnpy_e2e.py `
+  --execution-mode dry_run `
+  --min-candidates 1 `
+  --output-json "$env:TEMP\online-agent-vnpy-dry-run.json"
+```
+
+确认当前 API 使用内置 `DsaSimulatedGateway` 后，才可显式执行模拟委托验收：
+
+```powershell
+.\.venv-vnpy\Scripts\python.exe scripts\check_online_agent_vnpy_e2e.py `
+  --execution-mode vnpy_paper `
+  --allow-simulated-orders `
+  --temporarily-disable-time-gate `
+  --output-json "$env:TEMP\online-agent-vnpy-fill.json"
+```
+
+脚本默认要求至少一笔计划经 EventEngine 到达 `filled`，并核对决策/计划/Portfolio trade id、run 级持仓变化、账户现金和持仓数量。已有持仓导致所有候选按规则跳过时，可显式增加 `--allow-no-fill`，但该结果只证明安全跳过和设置恢复，不能替代成交验收。`vnpy_paper` 模式必须传 `--allow-simulated-orders`，且脚本只允许内置 `DsaSimulatedGateway`；不会对真实券商 gateway 放行订单。`--temporarily-disable-time-gate` 只在该模式可用，原开关会在 `finally` 中恢复，恢复失败会令门禁返回非零。JSON 证据只保留运行摘要、聚合变化和 runtime 状态，不输出账户连接参数。
+
 runtime 启动前会创建部署工作目录下已忽略的 `.vntrader/`，供 vn.py 保存本地运行状态，避免受限服务账户回退写入用户主目录。需要由 DSA 托管 vn.py EventEngine/MainEngine 时，显式设置：
 
 - `VNPY_RUNTIME_ENABLED=true`：启动时尝试创建 `vnpy.event.EventEngine` 与 `vnpy.trader.engine.MainEngine`。
