@@ -1311,6 +1311,8 @@ class AlphaSiftService:
                     max_results=max_results,
                     config=self.config,
                     use_llm=bool(use_llm),
+                    llm_timeout_seconds=llm_timeout_seconds,
+                    llm_max_retries=llm_max_retries,
                 )
                 source_routing = {
                     "configured_priority": ["tencent", "akshare", "longbridge"],
@@ -2412,15 +2414,21 @@ def _call_dsa_hk_screen(
     max_results: int,
     config: Config,
     use_llm: bool,
+    llm_timeout_seconds: Optional[int] = None,
+    llm_max_retries: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """Run HK screening with AlphaSift's strategy, filters, and factor scorer."""
+    """Run HK screening with AlphaSift's filters, scorer, and optional LLM ranker."""
     if strategy != DSA_ALPHASIFT_HK_STRATEGY_ID:
         raise ValueError(f"Unsupported DSA HK strategy: {strategy}")
     strategy_path = DSA_ALPHASIFT_STRATEGY_OVERLAY_DIR / f"{strategy}.yaml"
     if not strategy_path.is_file():
         raise RuntimeError(f"DSA HK strategy file is unavailable: {strategy_path.name}")
 
+    from alphasift.context import build_llm_context
+    from alphasift.config import Config as AlphaSiftConfig
     from alphasift.filter import apply_hard_filters
+    from alphasift.models import Pick
+    from alphasift.ranker import rank_candidates_with_metadata
     from alphasift.scorer import compute_screen_scores, factor_score_columns
     from alphasift.strategy import load_strategy
 
@@ -2436,55 +2444,139 @@ def _call_dsa_hk_screen(
         kind="mergesort",
     )
 
-    factor_columns = factor_score_columns()
+    source_errors = [str(item) for item in snapshot.attrs.get("source_errors", [])]
+    warnings: List[str] = []
+    llm_ranked = False
+    llm_market_view = ""
+    llm_selection_logic = ""
+    llm_portfolio_risk = ""
+    llm_coverage: Optional[float] = None
+    llm_parse_errors: List[str] = []
+
+    with (
+        _alphasift_runtime_env(
+            config,
+            max_results=max_results,
+            llm_timeout_seconds=llm_timeout_seconds,
+            llm_max_retries=llm_max_retries,
+        ),
+        _alphasift_litellm_headers(config),
+    ):
+        alpha_config = AlphaSiftConfig.from_env()
+        output_count = max(1, int(max_results))
+        pool_count = output_count
+        if use_llm and alpha_config.has_llm_config():
+            pool_count = min(
+                max(output_count * alpha_config.llm_candidate_multiplier, output_count),
+                alpha_config.llm_max_candidates,
+                len(scored),
+            )
+        candidate_frame = scored.head(pool_count)
+        picks: List[Any] = []
+        factor_columns = factor_score_columns()
+        quote_payloads: Dict[str, Dict[str, Any]] = {}
+        for rank, (_, row) in enumerate(candidate_frame.iterrows(), 1):
+            code = _env_text(row.get("code"))
+            screen_score = _safe_float(row.get("screen_score")) or 0.0
+            factor_scores = {
+                factor: round(value, 4)
+                for factor, column in factor_columns.items()
+                if (value := _safe_float(row.get(column))) is not None
+            }
+            quote_payloads[code] = (
+                row.get("quote_payload") if isinstance(row.get("quote_payload"), dict) else {}
+            )
+            picks.append(Pick(
+                rank=rank,
+                code=code,
+                name=_env_text(row.get("name")),
+                final_score=screen_score,
+                screen_score=screen_score,
+                price=_safe_float(row.get("price")) or 0.0,
+                change_pct=_safe_float(row.get("change_pct")) or 0.0,
+                amount=_safe_float(row.get("amount")) or 0.0,
+                total_mv=_safe_float(row.get("total_mv")),
+                turnover_rate=_safe_float(row.get("turnover_rate")),
+                volume_ratio=_safe_float(row.get("volume_ratio")),
+                pe_ratio=_safe_float(row.get("pe_ratio")),
+                pb_ratio=_safe_float(row.get("pb_ratio")),
+                industry=_env_text(row.get("industry")),
+                factor_scores=factor_scores,
+            ))
+
+        if use_llm and alpha_config.has_llm_config() and picks:
+            context_degradation: List[str] = []
+            effective_context = build_llm_context(
+                base_context=alpha_config.llm_context,
+                snapshot_df=snapshot,
+                candidate_df=candidate_frame,
+                event_profile=strategy_model.screening.event_profile,
+                max_chars=alpha_config.llm_context_max_chars,
+                degradation=context_degradation,
+            )
+            warnings.extend(context_degradation)
+            prompt_degradation: List[str] = []
+            llm_result = rank_candidates_with_metadata(
+                picks,
+                strategy_model.screening.ranking_hints,
+                alpha_config.llm_api_key,
+                alpha_config.llm_model,
+                alpha_config.llm_base_url,
+                context=effective_context,
+                rank_weight=alpha_config.llm_rank_weight,
+                max_retries=alpha_config.llm_max_retries,
+                min_coverage=alpha_config.llm_min_coverage,
+                fallback_models=alpha_config.llm_fallback_models,
+                temperature=alpha_config.llm_temperature,
+                json_mode=alpha_config.llm_json_mode,
+                silent=alpha_config.llm_silent,
+                channels=alpha_config.llm_channels,
+                config_path=str(alpha_config.llm_config_path or ""),
+                timeout_sec=alpha_config.llm_timeout_sec,
+                max_tokens=alpha_config.llm_max_tokens,
+                degradation=prompt_degradation,
+            )
+            warnings.extend(prompt_degradation)
+            picks = llm_result.picks
+            llm_ranked = bool(llm_result.ranked)
+            llm_market_view = llm_result.market_view
+            llm_selection_logic = llm_result.selection_logic
+            llm_portfolio_risk = llm_result.portfolio_risk
+            llm_coverage = llm_result.coverage
+            llm_parse_errors = list(llm_result.errors or [])
+            if not llm_ranked:
+                warnings.append("LLM ranking failed: fell back to screen_score")
+                picks.sort(key=lambda item: (-item.screen_score, item.code))
+        elif use_llm and not alpha_config.has_llm_config():
+            warnings.append("LLM ranking skipped: no LLM config")
+
     candidates: List[Dict[str, Any]] = []
-    for rank, (_, row) in enumerate(scored.head(max_results).iterrows(), 1):
-        screen_score = _safe_float(row.get("screen_score")) or 0.0
-        change_pct = _safe_float(row.get("change_pct")) or 0.0
-        risk_flags: List[str] = []
-        if change_pct >= 7.0:
+    for rank, pick in enumerate(picks[:max_results], 1):
+        pick.rank = rank
+        change_pct = _safe_float(pick.change_pct) or 0.0
+        risk_flags = list(pick.risk_flags or [])
+        if change_pct >= 7.0 and "hk_intraday_chase_risk" not in risk_flags:
             risk_flags.append("hk_intraday_chase_risk")
-        elif change_pct <= -7.0:
+        elif change_pct <= -7.0 and "hk_intraday_breakdown_risk" not in risk_flags:
             risk_flags.append("hk_intraday_breakdown_risk")
-        risk_level = "high" if risk_flags else "low"
-        factor_scores = {
-            factor: round(value, 4)
-            for factor, column in factor_columns.items()
-            if (value := _safe_float(row.get(column))) is not None
-        }
-        candidates.append({
+        candidate = asdict(pick)
+        candidate.update({
             "rank": rank,
-            "code": _env_text(row.get("code")),
-            "name": _env_text(row.get("name")),
-            "final_score": round(screen_score, 4),
-            "screen_score": round(screen_score, 4),
-            "ranking_reason": "DSA港股兼容管线：流动性、动量、估值与稳定性因子综合排序",
-            "risk_level": risk_level,
+            "final_score": round(float(pick.final_score), 4),
+            "screen_score": round(float(pick.screen_score), 4),
+            "ranking_reason": pick.ranking_reason or (
+                "DSA港股兼容管线：流动性、动量、估值与稳定性因子综合排序"
+            ),
+            "risk_level": "high" if risk_flags else (pick.risk_level or "low"),
             "risk_flags": risk_flags,
-            "price": _safe_float(row.get("price")),
-            "change_pct": change_pct,
-            "amount": _safe_float(row.get("amount")),
-            "total_mv": _safe_float(row.get("total_mv")),
-            "turnover_rate": _safe_float(row.get("turnover_rate")),
-            "volume_ratio": _safe_float(row.get("volume_ratio")),
-            "pe_ratio": _safe_float(row.get("pe_ratio")),
-            "pb_ratio": _safe_float(row.get("pb_ratio")),
-            "industry": _env_text(row.get("industry")),
-            "factor_scores": factor_scores,
             "dsa_context": {
                 "enriched": False,
-                "quote": row.get("quote_payload") or {},
+                "quote": quote_payloads.get(pick.code, {}),
                 "warnings": [],
             },
         })
+        candidates.append(candidate)
 
-    source_errors = [str(item) for item in snapshot.attrs.get("source_errors", [])]
-    warnings: List[str] = []
-    if use_llm:
-        warnings.append(
-            "DSA HK compatibility screening uses deterministic AlphaSift factor ranking; "
-            "AlphaSift 0.2.0 does not expose an HK LLM pipeline"
-        )
     return {
         "strategy": strategy,
         "market": "hk",
@@ -2499,7 +2591,12 @@ def _call_dsa_hk_screen(
             _env_text(row.get("snapshot_provider")) != "tencent"
             for _, row in snapshot.iterrows()
         ),
-        "llm_ranked": False,
+        "llm_ranked": llm_ranked,
+        "llm_market_view": llm_market_view,
+        "llm_selection_logic": llm_selection_logic,
+        "llm_portfolio_risk": llm_portfolio_risk,
+        "llm_coverage": llm_coverage,
+        "llm_parse_errors": llm_parse_errors,
         "daily_enriched": False,
         "risk_enabled": True,
         "portfolio_diversity_enabled": False,

@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [新功能] 港股兼容筛选复用 AlphaSift 原生 LLM ranker，支持请求级超时/重试、候选池扩展、结构化复排元数据和确定性评分降级，并继续受自动 Agent 跨轮 LLM 熔断保护
+- [测试] 港股真实 LLM 探针在 10 秒超时后保留 3 个腾讯行情候选并记录解析错误；后续 shadow `ss-agent-20260720174258-9947ae66` 命中跨轮熔断，生成 1 个 dry-run 计划且提交 0 个订单
 - [新功能] 新增 `hk_liquid_momentum` 港股兼容筛选管线与显式 `ALPHASIFT_HK_TICKERS` 股票池，复用 AlphaSift 策略解析、硬过滤和因子评分；新增腾讯港股单票直连实时行情，失败时保留 AkShare/Longbridge 降级
 - [测试] 真实港股校准 shadow `ss-agent-20260720171834-1109843a` 在 25.85 秒内从 15 只快照筛出 3 个候选，生成 1 个 HKD dry-run 计划且提交 0 个订单；单票腾讯行情耗时 0.055 秒
 

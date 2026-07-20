@@ -297,7 +297,7 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
                 strategy="hk_liquid_momentum",
                 max_results=3,
                 config=self._config(enabled=True),
-                use_llm=True,
+                use_llm=False,
             )
 
         self.assertEqual(result["market"], "hk")
@@ -306,7 +306,127 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
         self.assertFalse(result["llm_ranked"])
         self.assertEqual(result["candidates"][0]["code"], "HK00700")
         self.assertIn("momentum", result["candidates"][0]["factor_scores"])
-        self.assertTrue(result["warnings"])
+        self.assertFalse(result["warnings"])
+
+    def test_dsa_hk_screen_reuses_alphasift_llm_ranker_and_metadata(self) -> None:
+        snapshot = pd.DataFrame([
+            {
+                "code": "HK00700", "name": "Tencent", "price": 477.8,
+                "change_pct": 3.5, "amount": 14600000000.0, "total_mv": 4.3e12,
+                "circ_mv": 4.3e12, "pe_ratio": 17.4, "pb_ratio": 3.4,
+                "volume_ratio": None, "turnover_rate": 0.34, "industry": "Internet",
+                "snapshot_provider": "tencent", "quote_payload": {"source": "tencent"},
+            },
+            {
+                "code": "HK09988", "name": "Alibaba", "price": 110.0,
+                "change_pct": 2.0, "amount": 1000000000.0, "total_mv": 2.0e12,
+                "circ_mv": 2.0e12, "pe_ratio": 20.0, "pb_ratio": 2.5,
+                "volume_ratio": None, "turnover_rate": 0.5, "industry": "Internet Retail",
+                "snapshot_provider": "tencent", "quote_payload": {"source": "tencent"},
+            },
+        ])
+        snapshot.attrs["source_errors"] = []
+        alpha_config = SimpleNamespace(
+            has_llm_config=lambda: True,
+            llm_candidate_multiplier=2,
+            llm_max_candidates=12,
+            llm_context="",
+            llm_context_max_chars=4000,
+            llm_api_key="test-key",
+            llm_model="openai/test-model",
+            llm_base_url="https://example.invalid",
+            llm_rank_weight=0.4,
+            llm_max_retries=0,
+            llm_min_coverage=0.6,
+            llm_fallback_models=[],
+            llm_temperature=0.2,
+            llm_json_mode=True,
+            llm_silent=True,
+            llm_channels=[],
+            llm_config_path=None,
+            llm_timeout_sec=17.0,
+            llm_max_tokens=1024,
+        )
+
+        def rank_candidates(picks, *_args, **_kwargs):
+            picks.reverse()
+            picks[0].llm_score = 95.0
+            picks[0].final_score = 88.0
+            picks[0].ranking_reason = "LLM relative ranking"
+            return SimpleNamespace(
+                picks=picks,
+                ranked=True,
+                market_view="HK market view",
+                selection_logic="relative strength",
+                portfolio_risk="sector concentration",
+                coverage=1.0,
+                errors=[],
+            )
+
+        with (
+            patch("src.services.alphasift_service._fetch_dsa_hk_snapshot", return_value=snapshot),
+            patch("alphasift.config.Config.from_env", return_value=alpha_config),
+            patch("alphasift.ranker.rank_candidates_with_metadata", side_effect=rank_candidates) as ranker,
+        ):
+            result = alphasift_service._call_dsa_hk_screen(
+                strategy="hk_liquid_momentum",
+                max_results=2,
+                config=self._config(enabled=True),
+                use_llm=True,
+                llm_timeout_seconds=17,
+                llm_max_retries=0,
+            )
+
+        self.assertTrue(result["llm_ranked"])
+        self.assertEqual(result["llm_coverage"], 1.0)
+        self.assertEqual(result["llm_market_view"], "HK market view")
+        self.assertEqual(result["candidates"][0]["code"], "HK09988")
+        self.assertEqual(result["candidates"][0]["ranking_reason"], "LLM relative ranking")
+        self.assertEqual(ranker.call_args.kwargs["timeout_sec"], 17.0)
+        self.assertEqual(ranker.call_args.kwargs["max_retries"], 0)
+
+    def test_dsa_hk_screen_audits_llm_failure_and_falls_back(self) -> None:
+        snapshot = pd.DataFrame([{
+            "code": "HK00700", "name": "Tencent", "price": 477.8,
+            "change_pct": 3.5, "amount": 14600000000.0, "total_mv": 4.3e12,
+            "circ_mv": 4.3e12, "pe_ratio": 17.4, "pb_ratio": 3.4,
+            "volume_ratio": None, "turnover_rate": 0.34, "industry": "Internet",
+            "snapshot_provider": "tencent", "quote_payload": {"source": "tencent"},
+        }])
+        snapshot.attrs["source_errors"] = []
+        alpha_config = SimpleNamespace(
+            has_llm_config=lambda: True,
+            llm_candidate_multiplier=2, llm_max_candidates=12, llm_context="",
+            llm_context_max_chars=4000, llm_api_key="test-key",
+            llm_model="openai/test-model", llm_base_url="https://example.invalid",
+            llm_rank_weight=0.4, llm_max_retries=0, llm_min_coverage=0.6,
+            llm_fallback_models=[], llm_temperature=0.2, llm_json_mode=True,
+            llm_silent=True, llm_channels=[], llm_config_path=None,
+            llm_timeout_sec=9.0, llm_max_tokens=1024,
+        )
+
+        def failed_ranking(picks, *_args, **_kwargs):
+            return SimpleNamespace(
+                picks=picks, ranked=False, market_view="", selection_logic="",
+                portfolio_risk="", coverage=0.0, errors=["request timed out"],
+            )
+
+        with (
+            patch("src.services.alphasift_service._fetch_dsa_hk_snapshot", return_value=snapshot),
+            patch("alphasift.config.Config.from_env", return_value=alpha_config),
+            patch("alphasift.ranker.rank_candidates_with_metadata", side_effect=failed_ranking),
+        ):
+            result = alphasift_service._call_dsa_hk_screen(
+                strategy="hk_liquid_momentum",
+                max_results=1,
+                config=self._config(enabled=True),
+                use_llm=True,
+            )
+
+        self.assertFalse(result["llm_ranked"])
+        self.assertEqual(result["llm_parse_errors"], ["request timed out"])
+        self.assertIn("LLM ranking failed: fell back to screen_score", result["warnings"])
+        self.assertEqual(result["candidates"][0]["code"], "HK00700")
 
     def test_service_routes_hk_extension_without_calling_unsupported_adapter_screen(self) -> None:
         adapter_screen = MagicMock(side_effect=AssertionError("adapter HK screen must not run"))
