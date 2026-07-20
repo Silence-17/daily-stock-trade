@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [新功能] 新增只读 `scripts/check_vnpy_scheduler_soak.py`，可对运行中的 API 采样可达率、scheduler loop 存活率、必需任务持续注册率及启动后新增终态事件，并以失败数和 `task_already_running` 重叠跳过上限作非零退出门禁；首次事件读取仅作为历史基线，不触发选股、计划或订单
 - [修复] Runtime scheduler 将后台任务的 `run_immediately` 收敛为任务名级连续注册生命周期内只执行一次，避免配置重载反复触发 vn.py 自动恢复扫描；任务禁用后重新启用仍会执行一次启动恢复，且不同任务的注册状态互不影响
 - [改进] vn.py gateway 无下单长跑验收新增 `--require-reconnect`，可强制要求观测到重连尝试、成功及最终恢复 connected；模拟断线注入会自动启用该门禁并校验注入实际发生，JSON schema 升至 v2，最终 runtime 摘要在资源关闭前冻结以避免把正常清理误报为 monitor 未运行
 - [测试] 自动模拟交易 API 新增同轮风控拒单端到端矩阵，覆盖黑名单、ST/退市风险、停牌、涨停和流动性不足，验证零成交并将每个拒绝原因一致写入 Agent 决策与交易计划审计；同时修正 Web 全量测试中的过期市场选项断言、首次设置页测试状态和复杂页面测试时限

@@ -169,6 +169,25 @@
 
 该命令读取现有 `VNPY_*` 环境配置，禁用 DSA 业务事件桥，只注册只读事件计数器，不创建 Agent run、交易计划或订单。连接率、从未确认连接、运行时不可用、时长未完成及任一 `--require-event` 缺失都会返回非零退出码。`--require-reconnect` 只适合预期验收窗口内会发生重连的场景，会强制要求至少一次重连尝试、至少一次重连成功且结束时保持 connected；未计划故障注入的稳定性长跑可省略。对内置 `DsaSimulatedGateway` 使用 `--simulated-disconnect-at-seconds <秒数>` 时会自动启用相同门禁，并额外要求断线确实已注入。空仓账户不一定产生 position 事件，因此只在明确有持仓时要求 `--require-event position`；order/trade 也只应在独立模拟账户已有外部活动时要求。schema v2 JSON 仅包含 gateway 类/名称、聚合连接状态、事件计数和重连统计，不包含连接文件路径或参数内容。
 
+API 与自动任务需要联合长跑时，可另开终端执行只读 scheduler 验收：
+
+```powershell
+python scripts\check_vnpy_scheduler_soak.py `
+  --base-url http://127.0.0.1:8000 `
+  --duration-seconds 21600 `
+  --sample-interval-seconds 5 `
+  --min-api-success-ratio 0.995 `
+  --min-loop-running-ratio 0.995 `
+  --min-task-registration-ratio 0.995 `
+  --require-task vnpy_paper_auto_trade `
+  --require-task vnpy_paper_auto_retry `
+  --max-failed-count 0 `
+  --max-overlap-skip-count 0 `
+  --output-json "$env:TEMP\vnpy-scheduler-soak.json"
+```
+
+脚本只调用 `/status` 和 `/task-events` 两个 GET 接口。首次成功读取的事件列表仅作为历史基线，终态、失败和重叠跳过只统计随后新增事件；`--require-task` 同时要求任务在配置比例的成功样本中持续注册，并在本次窗口至少产生一个 `completed`、`skipped` 或 `failed` 终态。验收时长应覆盖自动买入和恢复任务各自至少一个执行周期；若自动买入被关闭，只要求 `vnpy_paper_auto_retry`。连接失败、接口错误、循环退出、任务消失、缺少终态、失败或重叠跳过超过上限均返回非零退出码。该脚本不调用写接口，也不触发选股、计划或订单。
+
 runtime 启动前会创建部署工作目录下已忽略的 `.vntrader/`，供 vn.py 保存本地运行状态，避免受限服务账户回退写入用户主目录。需要由 DSA 托管 vn.py EventEngine/MainEngine 时，显式设置：
 
 - `VNPY_RUNTIME_ENABLED=true`：启动时尝试创建 `vnpy.event.EventEngine` 与 `vnpy.trader.engine.MainEngine`。
