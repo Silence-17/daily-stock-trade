@@ -942,6 +942,27 @@ class AlertService:
         )
         return self._serialize_trigger(row)
 
+    def get_latest_system_event(
+        self,
+        *,
+        target: str,
+        data_source: str,
+        event_type: str,
+    ) -> Optional[Dict[str, Any]]:
+        row = self.repo.get_latest_system_event(
+            target=target,
+            data_source=data_source,
+            event_type=event_type,
+        )
+        if row is None:
+            return None
+        result = self._serialize_trigger(row)
+        result["diagnostics_payload"] = self._load_json(
+            row.diagnostics,
+            default={},
+        )
+        return result
+
     def _normalize_rule_payload(self, payload: Dict[str, Any], *, source: str = "api") -> Dict[str, Any]:
         target_scope = str(payload.get("target_scope") or "single_symbol").strip()
         if target_scope not in SUPPORTED_TARGET_SCOPES:

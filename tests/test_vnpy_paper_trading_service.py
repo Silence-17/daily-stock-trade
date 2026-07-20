@@ -3241,6 +3241,52 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertTrue(notifications[0]["success"])
         self.assertEqual(notifications[0]["latency_ms"], 12)
 
+    def test_calibration_evidence_alert_records_only_readiness_transitions(self) -> None:
+        pending = {
+            "evidence_ready": False,
+            "failure_count": 2,
+            "required_markets": ["cn", "us"],
+            "market_evidence": [{"market": "cn", "total_runs": 9}],
+            "thresholds": {"min_runs_per_market": 20},
+        }
+        ready = {
+            **pending,
+            "evidence_ready": True,
+            "failure_count": 0,
+        }
+
+        with patch.object(self.service, "_notify_auto_trade_alert_event") as notify:
+            first = self.service.record_calibration_evidence_transition(pending)
+            repeated = self.service.record_calibration_evidence_transition(pending)
+            resolved = self.service.record_calibration_evidence_transition(ready)
+
+        self.assertTrue(first["recorded"])
+        self.assertEqual(first["status"], "degraded")
+        self.assertFalse(repeated["recorded"])
+        self.assertEqual(repeated["reason"], "state_unchanged")
+        self.assertTrue(resolved["recorded"])
+        self.assertEqual(resolved["status"], "resolved")
+        self.assertFalse(resolved["previous_evidence_ready"])
+        self.assertEqual(notify.call_count, 2)
+        triggers = AlertService().list_triggers(target="vnpy_paper", page_size=10)["items"]
+        self.assertEqual([item["status"] for item in triggers], ["resolved", "degraded"])
+        saved = json.loads(triggers[0]["diagnostics"])
+        self.assertTrue(saved["evidence_ready"])
+        self.assertTrue(saved["read_only"])
+        self.assertEqual(saved["market_counts"], ["cn:9:0:0:0"])
+
+    def test_calibration_evidence_alert_failure_does_not_fail_monitoring(self) -> None:
+        with patch(
+            "src.services.alert_service.AlertService.get_latest_system_event",
+            side_effect=RuntimeError("history unavailable"),
+        ):
+            result = self.service.record_calibration_evidence_transition({
+                "evidence_ready": False,
+            })
+
+        self.assertFalse(result["recorded"])
+        self.assertEqual(result["reason"], "alert_state_unavailable")
+
     def test_failure_fuse_auto_recovers_after_persisted_cooldown(self) -> None:
         self.service.update_settings(
             {
@@ -8375,6 +8421,10 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertTrue(ready_result["evidence_ready"])
         self.assertEqual(ready_result["reason"], "calibration_evidence_ready")
         self.assertEqual(ready_result["failure_count"], 0)
+        self.assertEqual(
+            fake_service.record_calibration_evidence_transition.call_count,
+            2,
+        )
         fake_service.run_auto_trade_once.assert_not_called()
 
     def test_calibration_shadow_honors_persisted_pair_cadence_across_restarts(self) -> None:

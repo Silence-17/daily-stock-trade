@@ -292,6 +292,30 @@ class AlertRepository:
             ).scalars().all()
             return list(rows), int(total)
 
+    def get_latest_system_event(
+        self,
+        *,
+        target: str,
+        data_source: str,
+        event_type: str,
+    ) -> Optional[AlertTriggerRecord]:
+        event_fragment = f'"event_type": "{str(event_type).strip().lower()}"'
+        with self.db.get_session() as session:
+            return session.execute(
+                select(AlertTriggerRecord)
+                .where(
+                    AlertTriggerRecord.rule_id.is_(None),
+                    AlertTriggerRecord.target == str(target),
+                    AlertTriggerRecord.data_source == str(data_source),
+                    AlertTriggerRecord.diagnostics.contains(event_fragment),
+                )
+                .order_by(
+                    desc(AlertTriggerRecord.triggered_at),
+                    desc(AlertTriggerRecord.id),
+                )
+                .limit(1)
+            ).scalar_one_or_none()
+
     def list_notifications(
         self,
         *,
