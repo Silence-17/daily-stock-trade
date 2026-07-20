@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [改进] 生产校准证据 API 和 Agent 控制台新增最近状态告警投递摘要，展示尝试/成功/失败/可重试计数及脱敏渠道错误；告警历史异常独立降级，不再让通知失败对用户不可见
+
 - [新功能] 生产校准证据监控新增跨重启去重的状态变更告警，首次状态及 ready/pending 转换进入 `vnpy_paper` 告警历史并复用通知路由；告警异常不影响只读监控且不会触发选股或订单
 
 - [新功能] 新增三市场生产校准证据只读 API 和响应式 Agent 控制台视图，统一显示 shadow 样本的 ready/pending、阈值与逐市场缺口；真实 scheduler 首次监控在 0.028 秒内完成且未创建 run、计划或订单

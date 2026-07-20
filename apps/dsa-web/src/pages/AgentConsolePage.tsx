@@ -8,6 +8,7 @@ import {
   Clock3,
   Download,
   ListChecks,
+  Send,
   MessageSquareWarning,
   RefreshCw,
   Search,
@@ -1055,6 +1056,15 @@ const AgentConsolePage: React.FC = () => {
   const portfolioEffectiveCosts = asRecord(portfolioBacktest?.methodology.effectiveCostAssumptions);
   const portfolioResultCostProfile = String(portfolioBacktest?.methodology.costProfile || 'custom');
   const portfolioCostProfileVersion = String(portfolioBacktest?.methodology.costProfileVersion || '');
+  const calibrationAlertDelivery = calibrationEvidence?.alertDelivery ?? {
+    status: 'not_recorded' as const,
+    trigger: null,
+    attemptCount: 0,
+    successfulCount: 0,
+    failedCount: 0,
+    retryableFailureCount: 0,
+    attempts: [],
+  };
 
   const renderStatusBadge = (status: string, label?: string) => (
     <span className={`inline-flex items-center rounded-full border px-2 py-1 text-xs ${statusTone(status)}`}>
@@ -1234,6 +1244,56 @@ const AgentConsolePage: React.FC = () => {
                 })}
               </tbody>
             </table>
+          </div>
+          <div
+            className="mt-4 flex flex-col gap-3 border-t border-border pt-3 text-xs sm:flex-row sm:items-start sm:justify-between"
+            data-testid="agent-calibration-alert-delivery"
+          >
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <Send className="h-4 w-4 text-cyan" />
+                <span className="font-semibold text-foreground">状态告警投递</span>
+                {renderStatusBadge(
+                  calibrationAlertDelivery.status === 'delivered'
+                    ? 'passed'
+                    : calibrationAlertDelivery.status === 'failed'
+                      ? 'failed'
+                      : 'warning',
+                  ({
+                    delivered: '通知已送达',
+                    failed: '通知失败',
+                    not_configured: '未配置通知渠道',
+                    suppressed: '通知已抑制',
+                    not_attempted: '尚未尝试通知',
+                    not_recorded: '尚无状态告警',
+                    unavailable: '告警历史不可用',
+                  } as Record<string, string>)[calibrationAlertDelivery.status]
+                    || calibrationAlertDelivery.status,
+                )}
+              </div>
+              <p className="mt-2 break-words text-secondary-text">
+                {calibrationAlertDelivery.trigger
+                  ? `${calibrationAlertDelivery.trigger.reason || 'agent_calibration_evidence'} · ${formatDateTime(calibrationAlertDelivery.trigger.triggeredAt)}`
+                  : calibrationAlertDelivery.reason || '等待首次校准证据监控'}
+              </p>
+            </div>
+            <div className="min-w-0 text-secondary-text sm:text-right">
+              <p>
+                尝试 {calibrationAlertDelivery.attemptCount}
+                {' · 成功 '}{calibrationAlertDelivery.successfulCount}
+                {' · 失败 '}{calibrationAlertDelivery.failedCount}
+                {calibrationAlertDelivery.retryableFailureCount > 0
+                  ? ` · 可重试 ${calibrationAlertDelivery.retryableFailureCount}`
+                  : ''}
+              </p>
+              {calibrationAlertDelivery.attempts.length > 0 ? (
+                <p className="mt-1 break-all">
+                  {calibrationAlertDelivery.attempts.map((attempt) => (
+                    `${attempt.channel || 'unknown'}: ${attempt.success ? '成功' : `失败${attempt.errorCode ? ` (${attempt.errorCode})` : ''}`}`
+                  )).join(' · ')}
+                </p>
+              ) : null}
+            </div>
           </div>
         </section>
       ) : null}

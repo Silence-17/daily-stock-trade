@@ -617,6 +617,25 @@ const calibrationEvidence = {
     overlappingRollingSamples: true,
     independentSampleCountClaimed: false,
   },
+  alertDelivery: {
+    status: 'failed' as const,
+    trigger: {
+      id: 28,
+      status: 'degraded',
+      reason: 'calibration_evidence_pending',
+      triggeredAt: '2026-07-21T04:52:11Z',
+    },
+    attemptCount: 1,
+    successfulCount: 0,
+    failedCount: 1,
+    retryableFailureCount: 1,
+    attempts: [{
+      channel: 'feishu',
+      success: false,
+      errorCode: 'send_failed',
+      retryable: true,
+    }],
+  },
 };
 
 describe('AgentConsolePage', () => {
@@ -1001,6 +1020,9 @@ describe('AgentConsolePage', () => {
     expect(screen.getByTestId('agent-calibration-evidence')).toHaveTextContent('8 / 8');
     expect(screen.getByTestId('agent-calibration-evidence')).toHaveTextContent('10 / 10');
     expect(screen.getByTestId('agent-calibration-evidence')).toHaveTextContent('成熟前瞻样本不足');
+    expect(screen.getByTestId('agent-calibration-alert-delivery')).toHaveTextContent('通知失败');
+    expect(screen.getByTestId('agent-calibration-alert-delivery')).toHaveTextContent('feishu: 失败 (send_failed)');
+    expect(screen.getByTestId('agent-calibration-alert-delivery')).toHaveTextContent('可重试 1');
     expect(screen.getByTestId('agent-current-cross-run-quality')).toHaveTextContent('insufficient_evidence');
     expect(screen.getByTestId('agent-current-cross-run-quality')).toHaveTextContent('0/3');
     expect(screen.getByTestId('agent-current-cross-run-quality')).toHaveTextContent('仅审计');

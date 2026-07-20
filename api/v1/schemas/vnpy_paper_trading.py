@@ -900,6 +900,7 @@ class VnpyPaperAgentCalibrationEvidenceResponse(BaseModel):
     filters: Dict[str, Any] = Field(default_factory=dict)
     evaluation: Dict[str, Any] = Field(default_factory=dict)
     methodology: Dict[str, Any] = Field(default_factory=dict)
+    alert_delivery: Dict[str, Any] = Field(default_factory=dict)
 
 
 class VnpyPaperAgentRunExportResponse(BaseModel):

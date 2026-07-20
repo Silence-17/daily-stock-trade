@@ -60,10 +60,16 @@ from src.repositories.portfolio_valuation_health_repo import (
 from src.services.agent_calibration_evidence_service import (
     collect_persisted_calibration_evidence,
 )
+from src.services.alert_service import AlertService
 from src.services.portfolio_service import PortfolioBusyError
 from src.services.runtime_scheduler import RuntimeSchedulerService
 from src.services.stock_selection_agent_backtest_service import StockSelectionAgentBacktestService
-from src.services.vnpy_paper_trading_service import VnpyPaperTradingService
+from src.services.vnpy_paper_trading_service import (
+    VNPY_PAPER_ALERT_SOURCE,
+    VNPY_PAPER_ALERT_TARGET,
+    VNPY_PAPER_CALIBRATION_EVIDENCE_EVENT,
+    VnpyPaperTradingService,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -2627,11 +2633,30 @@ def get_vnpy_paper_agent_return_risk_calibration_trends(
 def get_vnpy_paper_agent_calibration_evidence(
 ) -> VnpyPaperAgentCalibrationEvidenceResponse:
     try:
-        return VnpyPaperAgentCalibrationEvidenceResponse.model_validate(
-            collect_persisted_calibration_evidence(
-                _agent_repo(),
-                markets=["cn", "hk", "us"],
+        payload = collect_persisted_calibration_evidence(
+            _agent_repo(),
+            markets=["cn", "hk", "us"],
+        )
+        try:
+            payload["alert_delivery"] = AlertService().get_latest_system_event_delivery(
+                target=VNPY_PAPER_ALERT_TARGET,
+                data_source=VNPY_PAPER_ALERT_SOURCE,
+                event_type=VNPY_PAPER_CALIBRATION_EVIDENCE_EVENT,
             )
+        except Exception as exc:  # noqa: BLE001 - alert visibility must not hide evidence.
+            logger.warning("Load Agent calibration alert delivery failed: %s", exc)
+            payload["alert_delivery"] = {
+                "status": "unavailable",
+                "reason": "alert_history_unavailable",
+                "trigger": None,
+                "attempt_count": 0,
+                "successful_count": 0,
+                "failed_count": 0,
+                "retryable_failure_count": 0,
+                "attempts": [],
+            }
+        return VnpyPaperAgentCalibrationEvidenceResponse.model_validate(
+            payload
         )
     except Exception as exc:
         raise _internal_error("Evaluate Agent calibration evidence failed", exc)
