@@ -188,6 +188,45 @@ class RuntimeSchedulerServiceTestCase(unittest.TestCase):
         self.assertNotIn("private_payload", details["runs"][0])
         self.assertNotIn("unbounded_payload", details)
 
+    def test_background_task_failure_keeps_sanitized_exception_evidence(self) -> None:
+        class PartialFailure(RuntimeError):
+            def __init__(self) -> None:
+                super().__init__("one pair failed")
+                self.details = {
+                    "configured_count": 2,
+                    "completed_count": 1,
+                    "failed_count": 1,
+                    "submitted_count": 0,
+                    "submits_orders": False,
+                    "runs": [{"market": "cn", "strategy": "dual_low"}],
+                    "failures": [{
+                        "market": "us",
+                        "strategy": "us_large_cap_momentum",
+                        "error": "provider unavailable",
+                        "secret": "excluded",
+                    }],
+                }
+
+        service = RuntimeSchedulerService(
+            config_provider=lambda: SimpleNamespace(schedule_enabled=False),
+        )
+        wrapped = service._instrument_background_task(
+            "agent_calibration_shadow",
+            lambda: (_ for _ in ()).throw(PartialFailure()),
+        )
+
+        with self.assertRaisesRegex(PartialFailure, "one pair failed"):
+            wrapped()
+
+        event = service.task_events(name="agent_calibration_shadow", limit=1)[0]
+        self.assertEqual(event["status"], "failed")
+        self.assertEqual(event["details"]["completed_count"], 1)
+        self.assertEqual(event["details"]["failed_count"], 1)
+        self.assertEqual(event["details"]["submitted_count"], 0)
+        self.assertFalse(event["details"]["submits_orders"])
+        self.assertEqual(event["details"]["failures"][0]["market"], "us")
+        self.assertNotIn("secret", event["details"]["failures"][0])
+
     def test_vnpy_background_tasks_receive_runtime_engine_dependencies(self) -> None:
         config = SimpleNamespace(schedule_enabled=False)
         main_engine = object()

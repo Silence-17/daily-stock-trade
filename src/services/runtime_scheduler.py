@@ -586,14 +586,20 @@ class RuntimeSchedulerService:
                     result = task()
                 except Exception as exc:
                     duration = (datetime.now() - started_at).total_seconds()
+                    details = {
+                        "error": str(exc),
+                        "error_type": exc.__class__.__name__,
+                    }
+                    exception_details = getattr(exc, "details", None)
+                    if isinstance(exception_details, dict):
+                        details.update(
+                            self._summarize_background_task_result(exception_details)
+                        )
                     self._record_background_task_event(
                         name=name,
                         status="failed",
                         message=str(exc) or f"Background task failed: {name}",
-                        details={
-                            "error": str(exc),
-                            "error_type": exc.__class__.__name__,
-                        },
+                        details=details,
                         duration_seconds=duration,
                     )
                     raise

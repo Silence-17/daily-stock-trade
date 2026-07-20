@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-- [修复] 生产校准证据门禁默认仅统计 `agent_calibration_shadow` 无下单样本，避免普通 Agent 运行误充校准证据；调度事件新增逐市场/策略的有界零下单摘要
+- [修复] 生产校准证据门禁默认仅统计 `agent_calibration_shadow` 无下单样本，避免普通 Agent 运行误充校准证据；调度事件在成功和部分失败时均保留逐市场/策略的有界零下单摘要
 
 - [改进] vn.py EventEngine bridge 新增四类回调的去标识化观测计数、处理成功/失败数和最后观测时间，runtime 状态读取会动态刷新而非停留在启动快照
 - [测试] 部署态 runtime soak 升级为 schema v2，可强制匹配外部 gateway 身份、拒绝 DSA_SIM 充当生产证据，并按验收窗口内事件增量和 handler 失败执行非零退出门禁；真实 API 基础门禁 10/10 采样通过，生产参数对 DSA_SIM 按预期非零退出

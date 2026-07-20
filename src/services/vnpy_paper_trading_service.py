@@ -104,6 +104,14 @@ CALIBRATION_SHADOW_INTERVAL_MINUTES_ENV = "DSA_AGENT_CALIBRATION_SHADOW_INTERVAL
 CALIBRATION_SHADOW_MAX_RESULTS_ENV = "DSA_AGENT_CALIBRATION_SHADOW_MAX_RESULTS"
 DEFAULT_CALIBRATION_SHADOW_INTERVAL_MINUTES = 1440
 DEFAULT_CALIBRATION_SHADOW_MAX_RESULTS = 3
+
+
+class CalibrationShadowPartialFailureError(RuntimeError):
+    """Keep bounded per-pair evidence when a calibration task partially fails."""
+
+    def __init__(self, message: str, *, details: Dict[str, Any]) -> None:
+        super().__init__(message)
+        self.details = details
 _AUTO_AGENT_RUN_LOCK = threading.Lock()
 AUTO_CROSS_MARKET_LINKS = {
     "cn": ("hk", "us"),
@@ -12727,9 +12735,10 @@ def build_vnpy_paper_trading_background_tasks(
             failed_pairs = ",".join(
                 f"{item['market']}/{item['strategy']}" for item in failures
             )
-            raise RuntimeError(
+            raise CalibrationShadowPartialFailureError(
                 "agent_calibration_shadow_partial_failure: "
-                f"completed={len(runs)} failed={len(failures)} pairs={failed_pairs}"
+                f"completed={len(runs)} failed={len(failures)} pairs={failed_pairs}",
+                details=result,
             )
         return result
 

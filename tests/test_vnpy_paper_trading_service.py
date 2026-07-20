@@ -8264,9 +8264,13 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         with self.assertRaisesRegex(
             RuntimeError,
             "completed=1 failed=1 pairs=cn/dual_low",
-        ):
+        ) as raised:
             shadow["task"]()
         self.assertEqual(fake_service.run_auto_trade_once.call_count, 2)
+        self.assertEqual(raised.exception.details["completed_count"], 1)
+        self.assertEqual(raised.exception.details["failed_count"], 1)
+        self.assertEqual(raised.exception.details["submitted_count"], 0)
+        self.assertFalse(raised.exception.details["submits_orders"])
 
     def test_background_task_builder_injects_runtime_engines_into_service(self) -> None:
         main_engine = object()
