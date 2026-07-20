@@ -2100,6 +2100,7 @@ class SystemConfigService:
             "VNPY_GATEWAY_NAME",
             "VNPY_CONNECT_SETTINGS_PATH",
             "VNPY_CONNECT_ON_START",
+            "VNPY_PRODUCTION_PREFLIGHT_ENABLED",
             "VNPY_AUTO_ATTACH_EVENTS",
             "VNPY_AUTO_RECONNECT_ENABLED",
             "VNPY_AUTO_RECONNECT_INTERVAL_SECONDS",

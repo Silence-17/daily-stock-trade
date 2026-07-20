@@ -380,6 +380,14 @@ const settingsHelpZhCN: SettingsHelpMap = {
     impact: ['影响后端启动后是否自动尝试连接 vn.py gateway。'],
     notes: ['自动连接失败不会拖垮 DSA 启动，但会在 diagnostics.vnpy_runtime 中暴露失败原因。'],
   },
+  'settings.data_source.VNPY_PRODUCTION_PREFLIGHT_ENABLED': {
+    title: 'vn.py 生产连接预检',
+    summary: '在启动连接和后续重连前强制校验真实 gateway 与外部配置契约。',
+    usage: '真实通道部署时开启；内置 DSA_SIM、本仓库内连接文件、无效 JSON 或缺失 gateway 默认键都会在 connect 调用前失败。',
+    valueNotes: ['默认关闭，因此内置模拟交易不受影响；保存后需要重启进程。'],
+    impact: ['失败时 API 继续启动并展示脱敏诊断，但不会连接 gateway，自动重连也不会反复尝试静态错误。'],
+    notes: ['该门禁不验证账号是否有效，也不能替代真实 gateway 的连接和长跑验收。'],
+  },
   'settings.data_source.VNPY_AUTO_ATTACH_EVENTS': {
     title: '自动订阅 vn.py 事件',
     summary: '控制启动期是否把模拟交易同步桥接到 vn.py 订单、成交、账户和持仓事件。',
@@ -1613,6 +1621,14 @@ const settingsHelpEnUS: SettingsHelpMap = {
     valueNotes: ['Restart the process after saving before the next startup connection attempt can run.'],
     impact: ['Affects whether backend startup automatically tries to connect the vn.py gateway.'],
     notes: ['Connection failures do not block DSA startup, but diagnostics.vnpy_runtime reports the failure reason.'],
+  },
+  'settings.data_source.VNPY_PRODUCTION_PREFLIGHT_ENABLED': {
+    title: 'vn.py Production Connection Preflight',
+    summary: 'Enforces the real-gateway and external-settings contract before startup connect and later reconnects.',
+    usage: 'Enable for real-channel deployments. Built-in DSA_SIM, repository-local settings, invalid JSON, or missing gateway default keys fail before connect is called.',
+    valueNotes: ['Disabled by default, so built-in simulation is unaffected. Restart the process after saving.'],
+    impact: ['The API still starts with sanitized diagnostics, but the gateway is not connected and auto reconnect does not retry static failures.'],
+    notes: ['This gate does not validate broker credentials and does not replace real-gateway connection and soak acceptance.'],
   },
   'settings.data_source.VNPY_AUTO_ATTACH_EVENTS': {
     title: 'Auto Attach vn.py Events',

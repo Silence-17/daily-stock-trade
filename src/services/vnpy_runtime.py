@@ -21,6 +21,11 @@ from typing import Any, Callable, Dict, Optional, Tuple
 from src.services.vnpy_paper_trading_service import VnpyPaperTradingService
 
 logger = logging.getLogger(__name__)
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+BUILTIN_SIMULATED_GATEWAY_CLASS = (
+    "src.services.vnpy_simulated_gateway:DsaSimulatedGateway"
+)
+BUILTIN_SIMULATED_GATEWAY_NAME = "DSA_SIM"
 
 
 @dataclass(frozen=True)
@@ -30,6 +35,7 @@ class VnpyRuntimeSettings:
     gateway_name: Optional[str] = None
     connect_settings_path: Optional[str] = None
     connect_on_start: bool = False
+    production_preflight_enabled: bool = False
     auto_attach_events: bool = True
     auto_reconnect_enabled: bool = False
     auto_reconnect_interval_seconds: int = 60
@@ -111,6 +117,13 @@ class VnpyRuntimeHandle:
                 or not self.settings.gateway_name
             ):
                 state["reason"] = "runtime_connect_not_configured"
+                return
+            connect = self.diagnostics.get("connect")
+            if (
+                isinstance(connect, dict)
+                and connect.get("reason") == "production_preflight_failed"
+            ):
+                state["reason"] = "production_preflight_failed"
                 return
             if self._auto_reconnect_thread is not None and self._auto_reconnect_thread.is_alive():
                 state["running"] = True
@@ -208,6 +221,10 @@ class VnpyRuntimeHandle:
                 main_engine=self.main_engine,
                 gateway_name=self.settings.gateway_name,
                 settings_path=self.settings.connect_settings_path,
+                gateway_class_path=self.settings.gateway_class,
+                production_preflight_enabled=(
+                    self.settings.production_preflight_enabled
+                ),
                 diagnostics=self.diagnostics,
             )
             _refresh_gateway_connection(
@@ -389,6 +406,10 @@ def load_vnpy_runtime_settings() -> VnpyRuntimeSettings:
         gateway_name=_env_text("VNPY_GATEWAY_NAME"),
         connect_settings_path=_env_text("VNPY_CONNECT_SETTINGS_PATH"),
         connect_on_start=_env_bool("VNPY_CONNECT_ON_START", default=False),
+        production_preflight_enabled=_env_bool(
+            "VNPY_PRODUCTION_PREFLIGHT_ENABLED",
+            default=False,
+        ),
         auto_attach_events=_env_bool("VNPY_AUTO_ATTACH_EVENTS", default=True),
         auto_reconnect_enabled=_env_bool("VNPY_AUTO_RECONNECT_ENABLED", default=False),
         auto_reconnect_interval_seconds=_env_int(
@@ -426,6 +447,11 @@ def bootstrap_vnpy_runtime(
         "gateway_class": settings.gateway_class,
         "gateway_name": settings.gateway_name,
         "connect_on_start": settings.connect_on_start,
+        "production_preflight": {
+            "enabled": settings.production_preflight_enabled,
+            "ok": None,
+            "reason": "connect_not_requested",
+        },
         "auto_attach_events": settings.auto_attach_events,
         "auto_reconnect": {
             "enabled": settings.auto_reconnect_enabled,
@@ -503,6 +529,8 @@ def bootstrap_vnpy_runtime(
             main_engine=main_engine,
             gateway_name=settings.gateway_name,
             settings_path=settings.connect_settings_path,
+            gateway_class_path=settings.gateway_class,
+            production_preflight_enabled=settings.production_preflight_enabled,
             diagnostics=diagnostics,
         )
 
@@ -600,6 +628,8 @@ def _connect_gateway(
     main_engine: Any,
     gateway_name: Optional[str],
     settings_path: Optional[str],
+    gateway_class_path: Optional[str],
+    production_preflight_enabled: bool,
     diagnostics: Dict[str, Any],
 ) -> None:
     connect = getattr(main_engine, "connect", None)
@@ -613,12 +643,26 @@ def _connect_gateway(
         }
         return
     if not gateway_name:
+        _record_production_preflight_failure(
+            diagnostics=diagnostics,
+            enabled=production_preflight_enabled,
+            failure="gateway_name_unresolved",
+        )
         diagnostics["connect"] = {
-            "attempted": True,
+            "attempted": not production_preflight_enabled,
             "request_accepted": False,
             "connected": False,
             "status": "failed",
-            "reason": "gateway_name_required",
+            "reason": (
+                "production_preflight_failed"
+                if production_preflight_enabled
+                else "gateway_name_required"
+            ),
+            "preflight_failures": (
+                ["gateway_name_unresolved"]
+                if production_preflight_enabled
+                else []
+            ),
         }
         return
     path: Optional[Path] = None
@@ -627,45 +671,125 @@ def _connect_gateway(
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except Exception as exc:  # noqa: BLE001
+            _record_production_preflight_failure(
+                diagnostics=diagnostics,
+                enabled=production_preflight_enabled,
+                failure="connect_settings_invalid",
+                error_type=type(exc).__name__,
+            )
             diagnostics["connect"] = {
-                "attempted": True,
+                "attempted": not production_preflight_enabled,
                 "request_accepted": False,
                 "connected": False,
                 "status": "failed",
-                "reason": "connect_settings_read_failed",
+                "reason": (
+                    "production_preflight_failed"
+                    if production_preflight_enabled
+                    else "connect_settings_read_failed"
+                ),
                 "error_type": type(exc).__name__,
-                "message": str(exc),
+                "preflight_failures": (
+                    ["connect_settings_invalid"]
+                    if production_preflight_enabled
+                    else []
+                ),
             }
+            if not production_preflight_enabled:
+                diagnostics["connect"]["message"] = str(exc)
             return
     else:
         get_gateway = getattr(main_engine, "get_gateway", None)
         gateway = get_gateway(gateway_name) if callable(get_gateway) else None
-        if not bool(getattr(gateway, "connect_without_settings", False)):
+        if production_preflight_enabled and gateway is None:
+            _record_production_preflight_failure(
+                diagnostics=diagnostics,
+                enabled=True,
+                failure="gateway_not_registered",
+            )
             diagnostics["connect"] = {
-                "attempted": True,
+                "attempted": False,
                 "request_accepted": False,
                 "connected": False,
                 "status": "failed",
-                "reason": "connect_settings_path_required",
+                "reason": "production_preflight_failed",
+                "preflight_failures": ["gateway_not_registered"],
+            }
+            return
+        if not bool(getattr(gateway, "connect_without_settings", False)):
+            _record_production_preflight_failure(
+                diagnostics=diagnostics,
+                enabled=production_preflight_enabled,
+                failure="connect_settings_required",
+            )
+            diagnostics["connect"] = {
+                "attempted": not production_preflight_enabled,
+                "request_accepted": False,
+                "connected": False,
+                "status": "failed",
+                "reason": (
+                    "production_preflight_failed"
+                    if production_preflight_enabled
+                    else "connect_settings_path_required"
+                ),
+                "preflight_failures": (
+                    ["connect_settings_required"]
+                    if production_preflight_enabled
+                    else []
+                ),
             }
             return
         payload = {}
     if not isinstance(payload, dict):
+        _record_production_preflight_failure(
+            diagnostics=diagnostics,
+            enabled=production_preflight_enabled,
+            failure="connect_settings_invalid",
+            error_type="SettingsMustBeObject",
+        )
         diagnostics["connect"] = {
-            "attempted": True,
+            "attempted": not production_preflight_enabled,
             "request_accepted": False,
             "connected": False,
             "status": "failed",
-            "reason": "connect_settings_must_be_object",
+            "reason": (
+                "production_preflight_failed"
+                if production_preflight_enabled
+                else "connect_settings_must_be_object"
+            ),
+            "preflight_failures": (
+                ["connect_settings_invalid"]
+                if production_preflight_enabled
+                else []
+            ),
         }
         return
+    if production_preflight_enabled:
+        preflight = _evaluate_production_connect_preflight(
+            main_engine=main_engine,
+            gateway_name=gateway_name,
+            gateway_class_path=gateway_class_path,
+            settings_path=path,
+            payload=payload,
+        )
+        diagnostics["production_preflight"] = preflight
+        if not preflight["ok"]:
+            diagnostics["connect"] = {
+                "attempted": False,
+                "request_accepted": False,
+                "connected": False,
+                "status": "failed",
+                "reason": "production_preflight_failed",
+                "preflight_failures": list(preflight["failures"]),
+                "gateway_name": gateway_name,
+            }
+            return
     diagnostics["connect"] = {
         "attempted": True,
         "request_accepted": False,
         "connected": False,
         "status": "connect_requested",
         "reason": "connection_unconfirmed",
-        "settings_path": str(path) if path is not None else None,
+        "settings_path": None,
         "settings_source": "file" if path is not None else "gateway_defaults",
         "gateway_name": gateway_name,
     }
@@ -691,6 +815,93 @@ def _connect_gateway(
         gateway_name=gateway_name,
         diagnostics=diagnostics,
     )
+
+
+def _evaluate_production_connect_preflight(
+    *,
+    main_engine: Any,
+    gateway_name: str,
+    gateway_class_path: Optional[str],
+    settings_path: Optional[Path],
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    get_gateway = getattr(main_engine, "get_gateway", None)
+    gateway = get_gateway(gateway_name) if callable(get_gateway) else None
+    default_setting = getattr(gateway, "default_setting", {}) if gateway else {}
+    default_setting = default_setting if isinstance(default_setting, dict) else {}
+    expected_keys = sorted(str(key) for key in default_setting)
+    provided_keys = sorted(str(key) for key in payload)
+    missing_keys = sorted(set(expected_keys) - set(provided_keys))
+    settings_inside_repository = bool(
+        settings_path is not None and _is_within_repository(settings_path)
+    )
+    failures = []
+    if gateway is None:
+        failures.append("gateway_not_registered")
+    if _is_builtin_simulated_gateway(gateway_class_path, gateway_name):
+        failures.append("builtin_gateway_not_external")
+    if settings_path is not None and settings_inside_repository:
+        failures.append("connect_settings_inside_repository")
+    if missing_keys:
+        failures.append("default_setting_keys_missing")
+    return {
+        "enabled": True,
+        "ok": not failures,
+        "failures": failures,
+        "gateway_registered": gateway is not None,
+        "external_gateway": not _is_builtin_simulated_gateway(
+            gateway_class_path,
+            gateway_name,
+        ),
+        "settings_provided": settings_path is not None,
+        "settings_inside_repository": settings_inside_repository,
+        "default_setting_key_count": len(expected_keys),
+        "provided_key_count": len(provided_keys),
+        "missing_default_keys": missing_keys,
+        "settings_path_exposed": False,
+        "settings_values_exposed": False,
+    }
+
+
+def _record_production_preflight_failure(
+    *,
+    diagnostics: Dict[str, Any],
+    enabled: bool,
+    failure: str,
+    error_type: Optional[str] = None,
+) -> None:
+    if not enabled:
+        return
+    diagnostics["production_preflight"] = {
+        "enabled": True,
+        "ok": False,
+        "failures": [failure],
+        "error_type": error_type,
+        "settings_path_exposed": False,
+        "settings_values_exposed": False,
+    }
+
+
+def _is_builtin_simulated_gateway(
+    gateway_class_path: Optional[str],
+    gateway_name: Optional[str],
+) -> bool:
+    clean_class = str(gateway_class_path or "").strip()
+    clean_name = str(gateway_name or "").strip().upper()
+    return (
+        clean_class == BUILTIN_SIMULATED_GATEWAY_CLASS
+        or clean_class.endswith(":DsaSimulatedGateway")
+        or clean_class.endswith(".DsaSimulatedGateway")
+        or clean_name == BUILTIN_SIMULATED_GATEWAY_NAME
+    )
+
+
+def _is_within_repository(path: Path) -> bool:
+    try:
+        path.resolve(strict=False).relative_to(REPOSITORY_ROOT.resolve())
+    except ValueError:
+        return False
+    return True
 
 
 def _refresh_gateway_connection(

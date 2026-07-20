@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
@@ -538,6 +539,55 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
         self.assertEqual(component["status"], "blocked")
         self.assertEqual(component["reason"], "connect_failed")
         self.assertIn("connect_failed", health["required_blockers"])
+
+    def test_system_health_explains_sanitized_production_preflight_failure(self) -> None:
+        health = _system_health_payload({
+            "enabled": True,
+            "available": True,
+            "settings": {
+                "enabled": True,
+                "auto_trade_enabled": True,
+                "auto_execution_mode": "vnpy_paper",
+            },
+            "diagnostics": {
+                "vnpy_bridge": {"available": True},
+                "vnpy_runtime": {
+                    "enabled": True,
+                    "connect_on_start": True,
+                    "production_preflight": {
+                        "enabled": True,
+                        "ok": False,
+                        "failures": [
+                            "builtin_gateway_not_external",
+                            "default_setting_keys_missing",
+                        ],
+                    },
+                    "connect": {
+                        "attempted": False,
+                        "request_accepted": False,
+                        "connected": False,
+                        "status": "failed",
+                        "reason": "production_preflight_failed",
+                    },
+                },
+            },
+        })
+
+        component = {
+            item["key"]: item for item in health["components"]
+        }["vnpy_bridge"]
+        encoded = json.dumps(component, ensure_ascii=False)
+        self.assertEqual(component["status"], "blocked")
+        self.assertEqual(component["reason"], "production_preflight_failed")
+        self.assertIn("builtin_gateway_not_external", component["detail"])
+        self.assertEqual(
+            component["production_preflight_failures"],
+            [
+                "builtin_gateway_not_external",
+                "default_setting_keys_missing",
+            ],
+        )
+        self.assertNotIn("settings_path", encoded)
 
     def test_system_health_blocks_injected_bridge_reporting_disconnected(self) -> None:
         health = _system_health_payload({

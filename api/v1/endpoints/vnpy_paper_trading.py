@@ -821,6 +821,16 @@ def _system_health_payload(status_payload: Dict[str, Any]) -> Dict[str, Any]:
         if isinstance(vnpy_runtime.get("auto_reconnect"), dict)
         else {}
     )
+    runtime_production_preflight = (
+        vnpy_runtime.get("production_preflight")
+        if isinstance(vnpy_runtime.get("production_preflight"), dict)
+        else {}
+    )
+    runtime_preflight_failures = [
+        str(item)
+        for item in runtime_production_preflight.get("failures", [])
+        if str(item)
+    ]
     runtime_connect_required = bool(
         vnpy_required
         and vnpy_runtime.get("enabled")
@@ -903,7 +913,12 @@ def _system_health_payload(status_payload: Dict[str, Any]) -> Dict[str, Any]:
                 else "网关明确报告未连接"
             )
             if bridge_connection_failed
-            else str(runtime_connect.get("message") or runtime_connect.get("reason"))
+            else (
+                "生产预检阻止连接：" + ", ".join(runtime_preflight_failures)
+                if runtime_connect.get("reason") == "production_preflight_failed"
+                and runtime_preflight_failures
+                else str(runtime_connect.get("message") or runtime_connect.get("reason"))
+            )
             if runtime_connect_failed
             else "MainEngine 已发起连接，等待网关确认"
             if runtime_connect_unconfirmed
@@ -913,6 +928,11 @@ def _system_health_payload(status_payload: Dict[str, Any]) -> Dict[str, Any]:
         extra={
             "runtime_mode": vnpy_runtime.get("mode"),
             "runtime_available": vnpy_runtime.get("available"),
+            "production_preflight_enabled": bool(
+                runtime_production_preflight.get("enabled")
+            ),
+            "production_preflight_ok": runtime_production_preflight.get("ok"),
+            "production_preflight_failures": runtime_preflight_failures,
             "connection_status": effective_connection_status,
             "connection_confirmed": effective_connection_confirmed,
             "connection_confirmation_source": effective_confirmation_source,
