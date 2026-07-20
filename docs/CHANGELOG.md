@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [修复] Desktop 的 macOS PATH helper 固定按目标平台冒号拆分和拼接，不再受 Windows runner 的宿主分隔符影响，并恢复 Homebrew PATH 跨平台回归
+
 - [新功能] Docker 新增默认关闭的 vn.py 构建档位与 Compose 参数转发，显式启用后安装独立依赖并以镜像层真实导入 vn.py 核心模块和内置 DSA_SIM gateway
 
 - [测试] 新增手动 Linux vn.py Docker 验收工作流，真实构建默认/可选镜像、启动 API，并门禁 runtime、DSA_SIM 连接、四类事件桥、handler 失败和调度循环且不发布镜像；首次双镜像验收记录标准 vn.py 依赖净增 769,702,434 字节
