@@ -61,6 +61,7 @@ logger = logging.getLogger(__name__)
 VNPY_PAPER_BROKER = "vnpy_paper"
 VNPY_PAPER_ALERT_TARGET = "vnpy_paper"
 VNPY_PAPER_ALERT_SOURCE = "vnpy_paper_auto"
+VNPY_PAPER_CALIBRATION_EVIDENCE_EVENT = "agent_calibration_evidence"
 VNPY_PAPER_ACCOUNT_NAME = "vn.py 模拟交易"
 VNPY_PAPER_CONFIG_PATH = Path("data") / "vnpy_paper_trading.json"
 MARKET_CURRENCIES = {
@@ -414,6 +415,113 @@ class VnpyPaperTradingService:
             diagnostics=diagnostics,
         )
 
+    def record_calibration_evidence_transition(
+        self,
+        evidence_result: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Record and notify only when calibration readiness changes."""
+
+        ready = bool(evidence_result.get("evidence_ready"))
+        previous_ready: Optional[bool] = None
+        alert_service: Any = None
+        try:
+            from src.services.alert_service import AlertService
+
+            alert_service = AlertService()
+            trigger = alert_service.get_latest_system_event(
+                target=VNPY_PAPER_ALERT_TARGET,
+                data_source=VNPY_PAPER_ALERT_SOURCE,
+                event_type=VNPY_PAPER_CALIBRATION_EVIDENCE_EVENT,
+            )
+            if isinstance(trigger, dict):
+                saved = trigger.get("diagnostics_payload")
+                if not isinstance(saved, dict):
+                    saved = {}
+                saved_ready = saved.get("evidence_ready")
+                if isinstance(saved_ready, bool):
+                    previous_ready = saved_ready
+                else:
+                    previous_ready = str(trigger.get("status") or "") == "resolved"
+        except Exception as exc:  # noqa: BLE001 - evidence monitoring must remain read-only and available.
+            logger.warning("Failed to load calibration evidence alert state: %s", exc)
+            return {
+                "recorded": False,
+                "reason": "alert_state_unavailable",
+                "evidence_ready": ready,
+                "previous_evidence_ready": None,
+            }
+
+        if previous_ready is ready:
+            return {
+                "recorded": False,
+                "reason": "state_unchanged",
+                "evidence_ready": ready,
+                "previous_evidence_ready": previous_ready,
+            }
+
+        reason = (
+            "calibration_evidence_ready"
+            if ready
+            else "calibration_evidence_pending"
+        )
+        status = "resolved" if ready else "degraded"
+        market_counts = []
+        for item in list(evidence_result.get("market_evidence") or [])[:10]:
+            if not isinstance(item, dict):
+                continue
+            market_counts.append(
+                ":".join(str(value) for value in (
+                    item.get("market") or "unknown",
+                    int(item.get("total_runs") or 0),
+                    int(item.get("observed_runs") or 0),
+                    int(item.get("latest_mature_sample_count") or 0),
+                    int(item.get("observation_days") or 0),
+                ))
+            )
+        diagnostics = {
+            "evidence_ready": ready,
+            "previous_evidence_ready": previous_ready,
+            "failure_count": int(evidence_result.get("failure_count") or 0),
+            "market_counts": market_counts,
+            "read_only": True,
+        }
+        try:
+            trigger = alert_service.record_system_event(
+                target=VNPY_PAPER_ALERT_TARGET,
+                event_type=VNPY_PAPER_CALIBRATION_EVIDENCE_EVENT,
+                status=status,
+                reason=reason,
+                data_source=VNPY_PAPER_ALERT_SOURCE,
+                observed_value=1 if ready else 0,
+                threshold=1,
+                diagnostics=diagnostics,
+            )
+            self._notify_auto_trade_alert_event(
+                alert_service=alert_service,
+                trigger_id=_safe_int(trigger.get("id") if isinstance(trigger, dict) else None),
+                event_type=VNPY_PAPER_CALIBRATION_EVIDENCE_EVENT,
+                status=status,
+                reason=reason,
+                observed_value=1 if ready else 0,
+                threshold=1,
+                diagnostics=diagnostics,
+            )
+        except Exception as exc:  # noqa: BLE001 - alerts must not fail the evidence monitor.
+            logger.warning("Failed to record calibration evidence transition: %s", exc)
+            return {
+                "recorded": False,
+                "reason": "alert_record_failed",
+                "evidence_ready": ready,
+                "previous_evidence_ready": previous_ready,
+            }
+        return {
+            "recorded": True,
+            "reason": reason,
+            "status": status,
+            "evidence_ready": ready,
+            "previous_evidence_ready": previous_ready,
+        }
+
     def _notify_auto_trade_alert_event(
         self,
         *,
@@ -547,6 +655,10 @@ class VnpyPaperTradingService:
             "connect_status",
             "consecutive_failure_count",
             "current_interval_seconds",
+            "evidence_ready",
+            "failure_count",
+            "required_markets",
+            "market_counts",
         ):
             value = diagnostics.get(key)
             if value is not None and str(value).strip():
@@ -12913,6 +13025,13 @@ def build_vnpy_paper_trading_background_tasks(
             "places_orders": False,
             "submits_orders": False,
         }
+        transition = service.record_calibration_evidence_transition(result)
+        if isinstance(transition, dict):
+            result.update({
+                "alert_transition_recorded": bool(transition.get("recorded")),
+                "alert_transition_reason": transition.get("reason"),
+                "previous_evidence_ready": transition.get("previous_evidence_ready"),
+            })
         logger.info(
             "Agent calibration evidence monitor finished: ready=%s failures=%s",
             ready,

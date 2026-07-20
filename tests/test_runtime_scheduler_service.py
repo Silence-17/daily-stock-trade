@@ -257,6 +257,9 @@ class RuntimeSchedulerServiceTestCase(unittest.TestCase):
             "creates_agent_runs": False,
             "places_orders": False,
             "window_days": 90,
+            "alert_transition_recorded": True,
+            "alert_transition_reason": "calibration_evidence_pending",
+            "previous_evidence_ready": None,
             "evidence_failures": [f"cn:failure-{index}" for index in range(45)],
             "market_evidence": [{
                 "market": "cn",
@@ -282,6 +285,12 @@ class RuntimeSchedulerServiceTestCase(unittest.TestCase):
         self.assertTrue(details["read_only"])
         self.assertFalse(details["creates_agent_runs"])
         self.assertFalse(details["places_orders"])
+        self.assertTrue(details["alert_transition_recorded"])
+        self.assertEqual(
+            details["alert_transition_reason"],
+            "calibration_evidence_pending",
+        )
+        self.assertIsNone(details["previous_evidence_ready"])
         self.assertEqual(details["failure_count"], 45)
         self.assertEqual(len(details["evidence_failures"]), 40)
         self.assertEqual(details["market_count"], 1)
