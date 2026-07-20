@@ -8260,7 +8260,11 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
 
         self.assertEqual(
             [task["name"] for task in tasks],
-            ["vnpy_paper_auto_retry", "agent_calibration_shadow"],
+            [
+                "vnpy_paper_auto_retry",
+                "agent_calibration_shadow",
+                "agent_calibration_evidence",
+            ],
         )
         shadow = tasks[1]
         self.assertEqual(shadow["interval_seconds"], 720 * 60)
@@ -8286,6 +8290,92 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
             call.kwargs["trigger_source_override"] == "agent_calibration_shadow"
             for call in calls
         ))
+        evidence = tasks[2]
+        self.assertEqual(evidence["interval_seconds"], 720 * 60)
+        self.assertEqual(evidence["initial_delay_seconds"], 600)
+
+    def test_calibration_evidence_monitor_is_read_only_and_reports_evidence_state(self) -> None:
+        fake_service = MagicMock()
+        fake_service.get_settings.return_value = SimpleNamespace(
+            enabled=True,
+            auto_trade_enabled=False,
+            auto_interval_minutes=5,
+            auto_strategy="dual_low",
+        )
+        env = {
+            "DSA_AGENT_CALIBRATION_SHADOW_ENABLED": "true",
+            "DSA_AGENT_CALIBRATION_SHADOW_PAIRS": "cn:dual_low,us:us_large_cap_momentum",
+        }
+        evidence_payload = {
+            "window_days": 90,
+            "evaluation": {
+                "ok": False,
+                "failures": [
+                    "cn:mature_samples_below_threshold",
+                    "us:observation_days_below_threshold",
+                ],
+                "required_markets": ["cn", "us"],
+                "thresholds": {"min_mature_samples": 20},
+                "markets": {
+                    "cn": {
+                        "ok": False,
+                        "failures": ["mature_samples_below_threshold"],
+                        "total_runs": 9,
+                        "observed_runs": 9,
+                        "observation_rate_pct": 100.0,
+                        "latest_mature_sample_count": 0,
+                        "observation_days": 2,
+                        "latest_age_hours": 1.0,
+                        "latest_state": "insufficient_evidence",
+                    },
+                    "us": {
+                        "ok": False,
+                        "failures": ["observation_days_below_threshold"],
+                        "total_runs": 10,
+                        "observed_runs": 10,
+                        "observation_rate_pct": 100.0,
+                        "latest_mature_sample_count": 0,
+                        "observation_days": 1,
+                        "latest_age_hours": 1.0,
+                        "latest_state": "insufficient_evidence",
+                    },
+                },
+            },
+        }
+        ready_payload = json.loads(json.dumps(evidence_payload))
+        ready_payload["evaluation"]["ok"] = True
+        ready_payload["evaluation"]["failures"] = []
+        for market in ready_payload["evaluation"]["markets"].values():
+            market["ok"] = True
+            market["failures"] = []
+
+        with patch.dict(os.environ, env, clear=False), patch(
+            "src.services.vnpy_paper_trading_service.VnpyPaperTradingService",
+            return_value=fake_service,
+        ), patch(
+            "src.services.vnpy_paper_trading_service.collect_persisted_calibration_evidence",
+            side_effect=[evidence_payload, ready_payload],
+        ) as collect:
+            tasks = build_vnpy_paper_trading_background_tasks()
+            monitor = next(task for task in tasks if task["name"] == "agent_calibration_evidence")
+            result = monitor["task"]()
+            ready_result = monitor["task"]()
+
+        self.assertEqual(collect.call_count, 2)
+        collect.assert_called_with(fake_service.agent_repo, markets=["cn", "us"])
+        self.assertTrue(result["accepted"])
+        self.assertFalse(result["evidence_ready"])
+        self.assertEqual(result["reason"], "calibration_evidence_pending")
+        self.assertEqual(result["failure_count"], 2)
+        self.assertEqual(result["market_evidence"][0]["total_runs"], 9)
+        self.assertTrue(result["read_only"])
+        self.assertFalse(result["creates_agent_runs"])
+        self.assertFalse(result["places_orders"])
+        self.assertFalse(result["submits_orders"])
+        self.assertTrue(ready_result["evidence_ready"])
+        self.assertEqual(ready_result["reason"], "calibration_evidence_ready")
+        self.assertEqual(ready_result["failure_count"], 0)
+        fake_service.run_auto_trade_once.assert_not_called()
 
     def test_calibration_shadow_honors_persisted_pair_cadence_across_restarts(self) -> None:
         fake_service = MagicMock()

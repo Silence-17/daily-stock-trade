@@ -6,15 +6,33 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
+import subprocess
+import sys
 from unittest.mock import patch
 
 from scripts.check_agent_calibration_evidence import (
     evaluate_calibration_evidence,
     main,
 )
+from src.services.agent_calibration_evidence_service import (
+    collect_persisted_calibration_evidence,
+)
 
 
 NOW = datetime(2026, 7, 20, 12, 0, tzinfo=timezone.utc)
+
+
+def test_calibration_evidence_cli_can_run_directly() -> None:
+    result = subprocess.run(
+        [sys.executable, "scripts/check_agent_calibration_evidence.py", "--help"],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert "Gate persisted Agent return/risk calibration evidence" in result.stdout
 
 
 def _summary(market: str, *, state: str = "healthy") -> dict:
@@ -135,3 +153,36 @@ def test_cli_reads_each_market_and_writes_machine_readable_evidence(tmp_path: Pa
     assert payload["filters"]["trigger_source"] == "agent_calibration_shadow"
     assert payload["methodology"]["creates_agent_runs"] is False
     assert payload["methodology"]["places_orders"] is False
+
+
+def test_shared_collector_reads_each_market_without_write_side_effects() -> None:
+    class ReadOnlyRepository:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def summarize_return_risk_calibration_trends(self, **kwargs) -> dict:
+            self.calls.append(kwargs)
+            current = datetime.now(timezone.utc)
+            payload = _summary(kwargs["market"])
+            payload["generated_at"] = current.isoformat()
+            payload["latest"]["created_at"] = (current - timedelta(hours=2)).isoformat()
+            payload["filters"].update({
+                "trigger_source": kwargs["trigger_source"],
+                "status": kwargs["status"],
+            })
+            return payload
+
+    repository = ReadOnlyRepository()
+    result = collect_persisted_calibration_evidence(
+        repository,
+        markets=["us", "cn", "cn", "hk"],
+    )
+
+    assert result["evaluation"]["ok"] is True
+    assert result["evaluation"]["required_markets"] == ["cn", "hk", "us"]
+    assert [call["market"] for call in repository.calls] == ["cn", "hk", "us"]
+    assert all(call["days"] == 90 for call in repository.calls)
+    assert all(call["trigger_source"] == "agent_calibration_shadow" for call in repository.calls)
+    assert result["methodology"]["read_only"] is True
+    assert result["methodology"]["creates_agent_runs"] is False
+    assert result["methodology"]["places_orders"] is False

@@ -248,6 +248,51 @@ class RuntimeSchedulerServiceTestCase(unittest.TestCase):
         self.assertEqual(event["details"]["failures"][0]["market"], "us")
         self.assertNotIn("secret", event["details"]["failures"][0])
 
+    def test_background_task_result_summary_keeps_bounded_calibration_evidence(self) -> None:
+        details = RuntimeSchedulerService._summarize_background_task_result({
+            "accepted": True,
+            "reason": "calibration_evidence_pending",
+            "evidence_ready": False,
+            "read_only": True,
+            "creates_agent_runs": False,
+            "places_orders": False,
+            "window_days": 90,
+            "evidence_failures": [f"cn:failure-{index}" for index in range(45)],
+            "market_evidence": [{
+                "market": "cn",
+                "ok": False,
+                "failures": [f"failure-{index}-{'x' * 140}" for index in range(15)],
+                "total_runs": 9,
+                "observed_runs": 9,
+                "observation_rate_pct": 100.0,
+                "latest_mature_sample_count": 0,
+                "observation_days": 2,
+                "latest_age_hours": 1.0,
+                "latest_state": "insufficient_evidence",
+                "private_payload": "excluded",
+            }],
+            "thresholds": {
+                "min_runs_per_market": 20,
+                "min_mature_samples": 20,
+                "secret": "excluded",
+            },
+        })
+
+        self.assertFalse(details["evidence_ready"])
+        self.assertTrue(details["read_only"])
+        self.assertFalse(details["creates_agent_runs"])
+        self.assertFalse(details["places_orders"])
+        self.assertEqual(details["failure_count"], 45)
+        self.assertEqual(len(details["evidence_failures"]), 40)
+        self.assertEqual(details["market_count"], 1)
+        self.assertEqual(len(details["market_evidence"][0]["failures"]), 12)
+        self.assertTrue(all(
+            len(item) <= 120
+            for item in details["market_evidence"][0]["failures"]
+        ))
+        self.assertNotIn("private_payload", details["market_evidence"][0])
+        self.assertNotIn("secret", details["thresholds"])
+
     def test_vnpy_background_tasks_receive_runtime_engine_dependencies(self) -> None:
         config = SimpleNamespace(schedule_enabled=False)
         main_engine = object()

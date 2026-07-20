@@ -32,6 +32,9 @@ from src.core import trading_calendar
 from src.repositories.stock_selection_agent_repo import StockSelectionAgentRepository
 from src.repositories.stock_repo import StockRepository
 from src.services.alphasift_service import AlphaSiftService
+from src.services.agent_calibration_evidence_service import (
+    collect_persisted_calibration_evidence,
+)
 from src.services.backtest_service import BacktestService
 from src.services.market_light_service import load_previous_snapshot
 from src.services.portfolio_service import (
@@ -12865,6 +12868,58 @@ def build_vnpy_paper_trading_background_tasks(
         )
         return result
 
+    def run_calibration_evidence_monitor() -> Dict[str, Any]:
+        markets = sorted({market for market, _strategy in shadow_config["pairs"]})
+        evidence = collect_persisted_calibration_evidence(
+            service.agent_repo,
+            markets=markets,
+        )
+        evaluation = evidence["evaluation"]
+        market_evidence = []
+        for market in evaluation["required_markets"]:
+            item = evaluation["markets"].get(market) or {}
+            market_evidence.append({
+                "market": market,
+                "ok": bool(item.get("ok")),
+                "failures": list(item.get("failures") or [])[:12],
+                "total_runs": int(item.get("total_runs") or 0),
+                "observed_runs": int(item.get("observed_runs") or 0),
+                "observation_rate_pct": float(item.get("observation_rate_pct") or 0.0),
+                "latest_mature_sample_count": int(
+                    item.get("latest_mature_sample_count") or 0
+                ),
+                "observation_days": int(item.get("observation_days") or 0),
+                "latest_age_hours": item.get("latest_age_hours"),
+                "latest_state": item.get("latest_state"),
+            })
+        ready = bool(evaluation["ok"])
+        result = {
+            "accepted": True,
+            "skipped": False,
+            "reason": (
+                "calibration_evidence_ready"
+                if ready
+                else "calibration_evidence_pending"
+            ),
+            "evidence_ready": ready,
+            "required_markets": list(evaluation["required_markets"]),
+            "evidence_failures": list(evaluation["failures"])[:40],
+            "failure_count": len(evaluation["failures"]),
+            "market_evidence": market_evidence,
+            "thresholds": dict(evaluation["thresholds"]),
+            "window_days": int(evidence["window_days"]),
+            "read_only": True,
+            "creates_agent_runs": False,
+            "places_orders": False,
+            "submits_orders": False,
+        }
+        logger.info(
+            "Agent calibration evidence monitor finished: ready=%s failures=%s",
+            ready,
+            len(evaluation["failures"]),
+        )
+        return result
+
     retry_interval = max(
         TRADE_PLAN_RETRY_COOLDOWN_SECONDS,
         min(int(settings.auto_interval_minutes) * 60, TRADE_PLAN_AUTO_RETRY_INTERVAL_SECONDS),
@@ -12895,6 +12950,13 @@ def build_vnpy_paper_trading_background_tasks(
             "run_immediately": False,
             "name": "agent_calibration_shadow",
             "initial_delay_seconds": 300,
+        })
+        tasks.append({
+            "task": run_calibration_evidence_monitor,
+            "interval_seconds": int(shadow_config["interval_minutes"]) * 60,
+            "run_immediately": False,
+            "name": "agent_calibration_evidence",
+            "initial_delay_seconds": 600,
         })
     return tasks
 

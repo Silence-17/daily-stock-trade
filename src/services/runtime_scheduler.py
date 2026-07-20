@@ -397,6 +397,11 @@ class RuntimeSchedulerService:
             "completed_count",
             "completedCount",
             "cadence_skipped_count",
+            "evidence_ready",
+            "read_only",
+            "creates_agent_runs",
+            "places_orders",
+            "window_days",
             "execution_mode",
             "executionMode",
             "submits_orders",
@@ -470,6 +475,54 @@ class RuntimeSchedulerService:
                 if isinstance(item, dict)
             ]
             details["cadence_skipped_count"] = len(cadence_skips)
+        evidence_failures = result.get("evidence_failures")
+        if isinstance(evidence_failures, list):
+            details["evidence_failures"] = [
+                str(item)[:120] for item in evidence_failures[:40]
+            ]
+            details["failure_count"] = len(evidence_failures)
+        market_evidence = result.get("market_evidence")
+        if isinstance(market_evidence, list):
+            bounded_market_evidence = [
+                {
+                    key: item.get(key)
+                    for key in (
+                        "market",
+                        "ok",
+                        "failures",
+                        "total_runs",
+                        "observed_runs",
+                        "observation_rate_pct",
+                        "latest_mature_sample_count",
+                        "observation_days",
+                        "latest_age_hours",
+                        "latest_state",
+                    )
+                    if key in item
+                }
+                for item in market_evidence[:10]
+                if isinstance(item, dict)
+            ]
+            for item in bounded_market_evidence:
+                failures = item.get("failures")
+                if isinstance(failures, list):
+                    item["failures"] = [str(value)[:120] for value in failures[:12]]
+            details["market_evidence"] = bounded_market_evidence
+            details["market_count"] = len(market_evidence)
+        thresholds = result.get("thresholds")
+        if isinstance(thresholds, dict):
+            details["thresholds"] = {
+                key: thresholds.get(key)
+                for key in (
+                    "min_runs_per_market",
+                    "min_observed_per_market",
+                    "min_observation_rate_pct",
+                    "min_mature_samples",
+                    "min_observation_days",
+                    "max_latest_age_hours",
+                )
+                if key in thresholds
+            }
         return details
 
     def _record_background_task_event(

@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [新功能] 新增 `agent_calibration_evidence` 只读后台监控，按 shadow 周期自动评估三市场生产校准门禁并持久化有界 pending/ready 诊断，不创建 Agent run、交易计划或订单
+
 - [修复] `agent_calibration_shadow` 新增基于持久化同市场/策略最近完成 run 的跨进程采样节流，避免服务重启后 5 分钟重复灌样本，并以有界任务事件审计跳过原因、剩余时间和下一采样时间
 
 - [修复] Desktop 的 macOS PATH helper 固定按目标平台冒号拆分和拼接，不再受 Windows runner 的宿主分隔符影响，并恢复 Homebrew PATH 跨平台回归
