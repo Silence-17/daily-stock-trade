@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
+import subprocess
 import sys
 import time
 from collections import Counter
@@ -25,6 +26,7 @@ from src.services.vnpy_runtime import (  # noqa: E402
 )
 
 EVENT_NAMES = ("order", "trade", "account", "position")
+PREFLIGHT_SCRIPT = ROOT / "scripts" / "check_vnpy_gateway_preflight.py"
 
 
 def _utc_iso() -> str:
@@ -186,6 +188,65 @@ def _bounded_float(
     return value
 
 
+def _run_gateway_preflight(
+    *,
+    require_external_gateway: bool,
+    require_all_default_keys: bool,
+    timeout_seconds: float,
+) -> Dict[str, Any]:
+    command = [sys.executable, str(PREFLIGHT_SCRIPT)]
+    if require_external_gateway:
+        command.append("--require-external-gateway")
+    if require_all_default_keys:
+        command.append("--require-all-default-keys")
+    try:
+        completed = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout_seconds,
+        )
+    except Exception as exc:  # noqa: BLE001 - report only the error type.
+        return {
+            "ok": False,
+            "error_type": type(exc).__name__,
+            "failures": ["preflight_process_failed"],
+        }
+    try:
+        payload = json.loads(completed.stdout)
+    except (TypeError, json.JSONDecodeError):
+        return {
+            "ok": False,
+            "error_type": "PreflightOutputInvalid",
+            "exit_code": int(completed.returncode),
+            "failures": ["preflight_output_invalid"],
+        }
+    if not isinstance(payload, dict):
+        return {
+            "ok": False,
+            "error_type": "PreflightOutputMustBeObject",
+            "exit_code": int(completed.returncode),
+            "failures": ["preflight_output_invalid"],
+        }
+    evaluation = payload.get("evaluation")
+    evaluation = evaluation if isinstance(evaluation, dict) else {}
+    payload["exit_code"] = int(completed.returncode)
+    payload["ok"] = bool(payload.get("ok")) and completed.returncode == 0
+    if not payload["ok"] and not isinstance(evaluation.get("failures"), list):
+        payload["failures"] = ["preflight_failed"]
+    return payload
+
+
+def _write_result(result: Dict[str, Any], output_path: Path | None) -> None:
+    output = json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True)
+    if output_path is not None:
+        output_path.expanduser().write_text(output + "\n", encoding="utf-8")
+    print(output)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--duration-seconds", type=float, default=300.0)
@@ -210,6 +271,17 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Require an observed reconnect attempt, success, and connected final state.",
     )
+    parser.add_argument(
+        "--require-external-gateway",
+        action="store_true",
+        help="Reject the built-in DSA_SIM gateway before any connection is attempted.",
+    )
+    parser.add_argument(
+        "--require-all-default-keys",
+        action="store_true",
+        help="Require every gateway default_setting key in the external settings JSON.",
+    )
+    parser.add_argument("--preflight-timeout-seconds", type=float, default=120.0)
     parser.add_argument("--output-json", type=Path)
     args = parser.parse_args(argv)
     duration = _bounded_float(
@@ -239,6 +311,13 @@ def main(argv: list[str] | None = None) -> int:
         minimum=0.0,
         maximum=86400.0,
     )
+    preflight_timeout = _bounded_float(
+        parser,
+        "--preflight-timeout-seconds",
+        args.preflight_timeout_seconds,
+        minimum=5.0,
+        maximum=600.0,
+    )
 
     loaded_settings = load_vnpy_runtime_settings()
     settings = replace(loaded_settings, auto_attach_events=False)
@@ -250,8 +329,42 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     started_at = _utc_iso()
+    preflight = _run_gateway_preflight(
+        require_external_gateway=bool(args.require_external_gateway),
+        require_all_default_keys=bool(args.require_all_default_keys),
+        timeout_seconds=preflight_timeout,
+    )
+    if not preflight.get("ok"):
+        preflight_evaluation = preflight.get("evaluation")
+        if not isinstance(preflight_evaluation, dict):
+            preflight_evaluation = {}
+        result = {
+            "schema_version": 3,
+            "ok": False,
+            "started_at": started_at,
+            "ended_at": _utc_iso(),
+            "gateway": {
+                "class": settings.gateway_class,
+                "name": settings.gateway_name,
+            },
+            "preflight": preflight,
+            "connection_attempted": False,
+            "evaluation": {
+                "ok": False,
+                "failures": ["preflight_failed"],
+                "preflight_failures": list(
+                    preflight_evaluation.get("failures")
+                    or preflight.get("failures")
+                    or []
+                ),
+            },
+        }
+        _write_result(result, args.output_json)
+        return 1
+
     started_monotonic = time.monotonic()
     measurement_started = started_monotonic
+    measurement_ended = started_monotonic
     sample_counts: Counter[str] = Counter()
     transitions = []
     event_counts: Counter[str] = Counter()
@@ -316,14 +429,14 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         interrupted = True
     finally:
+        measurement_ended = time.monotonic()
         if runtime_handle.event_engine is not None:
             _unregister_event_counters(runtime_handle.event_engine, registrations)
         final_diagnostics = runtime_handle.refresh_diagnostics()
         runtime_summary = _safe_runtime_summary(final_diagnostics)
         runtime_handle.close()
 
-    ended_monotonic = time.monotonic()
-    observed_duration = max(0.0, ended_monotonic - measurement_started)
+    observed_duration = max(0.0, measurement_ended - measurement_started)
     reconnect_summary = runtime_summary["auto_reconnect"]
     evaluation = evaluate_soak(
         runtime_available=bool(final_diagnostics.get("available")),
@@ -341,7 +454,7 @@ def main(argv: list[str] | None = None) -> int:
         final_connection_status=str(runtime_summary["connection_status"]),
     )
     result = {
-        "schema_version": 2,
+        "schema_version": 3,
         "ok": evaluation["ok"],
         "started_at": started_at,
         "ended_at": _utc_iso(),
@@ -349,6 +462,8 @@ def main(argv: list[str] | None = None) -> int:
             "class": settings.gateway_class,
             "name": settings.gateway_name,
         },
+        "preflight": preflight,
+        "connection_attempted": True,
         "requested_duration_seconds": duration,
         "observed_duration_seconds": round(observed_duration, 3),
         "sample_interval_seconds": interval,
@@ -362,10 +477,7 @@ def main(argv: list[str] | None = None) -> int:
         "runtime": runtime_summary,
         "evaluation": evaluation,
     }
-    output = json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True)
-    if args.output_json is not None:
-        args.output_json.expanduser().write_text(output + "\n", encoding="utf-8")
-    print(output)
+    _write_result(result, args.output_json)
     if interrupted:
         return 130
     return 0 if result["ok"] else 1

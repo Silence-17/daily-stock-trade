@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [改进] `check_vnpy_gateway_soak.py` 升级为 schema v3 并默认在独立子进程执行零连接预检；生产门禁可在创建 MainEngine 前拒绝内置 gateway、缺失默认配置键或仓库内连接文件，长跑观测时长不再包含 runtime 关闭耗时
+
 - [新功能] 新增零连接 `scripts/check_vnpy_gateway_preflight.py`，可在不连接网络、订阅行情或创建订单的前提下校验 vn.py gateway 加载、名称解析和连接配置键；生产门禁拒绝内置 `DSA_SIM`，并要求外部配置文件不位于仓库内
 
 - [改进] `vnpy_paper_auto_retry` 新增校准状态告警的持久化有限重试：可重试失败每 5 分钟重发、逐渠道尝试号跨重启递增且最多 3 轮投递；生产校准 API 和 Agent 控制台展示等待、到期、送达、不可重试与次数耗尽状态，重试不会运行 Agent 或创建订单，告警历史异常也不会阻断订单恢复
