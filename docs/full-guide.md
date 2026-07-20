@@ -636,6 +636,15 @@ docker run -d \
   python main.py --serve-only --host 0.0.0.0 --port 8000
 ```
 
+默认镜像只包含本地 paper 能力。需要在自行构建的 Web/API 镜像中使用 vn.py runtime 或内置 `DSA_SIM` 时，显式启用可选构建档位：
+
+```bash
+docker build --build-arg INCLUDE_VNPY=true -f docker/Dockerfile -t stock-analysis:vnpy .
+docker run --rm stock-analysis:vnpy python -c "import vnpy; from src.services.vnpy_simulated_gateway import DsaSimulatedGateway; print(DsaSimulatedGateway.default_name)"
+```
+
+Compose 可使用 `DSA_INCLUDE_VNPY_DOCKER=true docker compose -f docker/docker-compose.yml build`。构建会安装独立的 `requirements-vnpy.txt`，并在镜像层内真实导入 vn.py 事件/交易模块和内置 gateway；导入失败会中止构建。具体券商 gateway 插件仍需另行安装和配置，且生产验收必须使用外部 gateway 长跑门禁，不能把 `DSA_SIM` 当作真实账户证据。
+
 ---
 
 ## 本地运行详细配置

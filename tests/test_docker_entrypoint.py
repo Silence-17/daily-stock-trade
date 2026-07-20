@@ -37,6 +37,21 @@ def test_dockerfile_bundles_default_alphasift_adapter() -> None:
     assert "import alphasift.dsa_adapter" in dockerfile
 
 
+def test_dockerfile_has_explicit_optional_vnpy_build_profile() -> None:
+    dockerfile = (REPO_ROOT / "docker" / "Dockerfile").read_text(encoding="utf-8")
+    compose = yaml.safe_load(
+        (REPO_ROOT / "docker" / "docker-compose.yml").read_text(encoding="utf-8")
+    )
+
+    assert "ARG INCLUDE_VNPY=false" in dockerfile
+    assert "COPY requirements.txt requirements-vnpy.txt ./" in dockerfile
+    assert "INCLUDE_VNPY must be true or false" in dockerfile
+    assert "pip install --prefer-binary --extra-index-url https://pypi.vnpy.com -r requirements-vnpy.txt" in dockerfile
+    assert "import vnpy, vnpy.event, vnpy.trader.engine" in dockerfile
+    assert "from src.services.vnpy_simulated_gateway import DsaSimulatedGateway" in dockerfile
+    assert compose["x-common"]["build"]["args"]["INCLUDE_VNPY"] == "${DSA_INCLUDE_VNPY_DOCKER:-false}"
+
+
 def test_docker_entrypoint_repairs_ownership_and_user_permissions() -> None:
     entrypoint = (REPO_ROOT / "docker" / "entrypoint.sh").read_text(encoding="utf-8")
 

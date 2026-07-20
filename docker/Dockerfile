@@ -18,6 +18,8 @@ RUN npm run build
 # Pin to bookworm: wkhtmltopdf was removed from Debian testing (2025)
 FROM python:3.11-slim-bookworm
 
+ARG INCLUDE_VNPY=false
+
 # 设置工作目录
 WORKDIR /app
 
@@ -43,10 +45,19 @@ RUN groupadd -g 1000 dsa && \
     useradd -u 1000 -g dsa -m dsa
 
 # 复制依赖文件
-COPY requirements.txt .
+COPY requirements.txt requirements-vnpy.txt ./
 
 # 安装 Python 依赖
 RUN --mount=type=cache,target=/root/.cache/pip pip install -r requirements.txt
+
+# Keep the published/default image lightweight. The optional build profile
+# installs vn.py only when the operator explicitly requests it.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    case "$INCLUDE_VNPY" in \
+      true) pip install --prefer-binary --extra-index-url https://pypi.vnpy.com -r requirements-vnpy.txt ;; \
+      false) ;; \
+      *) echo "INCLUDE_VNPY must be true or false" >&2; exit 2 ;; \
+    esac
 
 # 复制应用代码
 COPY *.py ./
@@ -60,6 +71,12 @@ COPY docker/entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
 # Verify the bundled AlphaSift adapter from requirements.
 RUN python -c "import alphasift.dsa_adapter"
+
+# Validate the optional runtime after application modules are present. This is
+# an import-only gate and does not create accounts, plans, or orders.
+RUN if [ "$INCLUDE_VNPY" = "true" ]; then \
+      python -c "import vnpy, vnpy.event, vnpy.trader.engine, vnpy.trader.event, vnpy.trader.object; from src.services.vnpy_simulated_gateway import DsaSimulatedGateway; print(DsaSimulatedGateway.default_name)"; \
+    fi
 
 # 确保数据目录存在并授权给 non-root 用户
 RUN mkdir -p /app/data /app/logs /app/reports && \

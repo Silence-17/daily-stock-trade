@@ -292,7 +292,7 @@
 - 已有 opt-in Gateway add/connect bootstrap、连接确认和冷却自动重连，但尚未安装和配置具体 gateway 插件/账户，真实 gateway 运行态、连接参数、回报和长期事件订阅稳定性未验证。
 - 已能调用注入或启动期创建的 `MainEngine.send_order`，并支持订单状态、成交、账户和持仓回报通过 API 手动/外部同步；注入或启动期创建的 EventEngine 可自动 attach 回调，但真实 gateway 连接仍未验收。
 - `vnpy_paper` 当前覆盖买入委托提交、自动按比例卖出提交、主动撤单请求、订单/成交状态回写、多笔成交累计、MainEngine 漏回报对账、对账异常保护、提交态/部分成交/撤单请求超时安全归档和活跃委托防重复；内置模拟 gateway 的重连、缓存保留和延迟成交去重已完成，真实 gateway 的长运行、重连和迟到回报验收仍未完成。
-- 安装脚本已处理 Python 版本、GUI/数值依赖、LiteLLM wheel 和受限 pip 缓存；Docker、Desktop 安装体积与打包影响仍未验收。
+- 安装脚本已处理 Python 版本、GUI/数值依赖、LiteLLM wheel 和受限 pip 缓存；Windows Desktop 已完成 opt-in vn.py 冻结后端、NSIS 体积和真实启动验收，Docker 已提供默认关闭的 vn.py 构建参数、Compose 转发和镜像层导入门禁。当前 Windows 环境没有 Docker CLI，容器实物构建与体积仍需在 CI/Linux Docker 环境验证。
 
 需要做：
 

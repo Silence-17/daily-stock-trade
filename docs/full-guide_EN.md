@@ -573,6 +573,15 @@ docker run -d \
   python main.py --serve-only --host 0.0.0.0 --port 8000
 ```
 
+The default image keeps only the lightweight local-paper capability. To include the vn.py runtime or built-in `DSA_SIM` in a self-built Web/API image, enable the optional build profile explicitly:
+
+```bash
+docker build --build-arg INCLUDE_VNPY=true -f docker/Dockerfile -t stock-analysis:vnpy .
+docker run --rm stock-analysis:vnpy python -c "import vnpy; from src.services.vnpy_simulated_gateway import DsaSimulatedGateway; print(DsaSimulatedGateway.default_name)"
+```
+
+For Compose, run `DSA_INCLUDE_VNPY_DOCKER=true docker compose -f docker/docker-compose.yml build`. The optional build installs `requirements-vnpy.txt` and imports the vn.py event/trading modules plus the built-in gateway inside the image; an import failure aborts the build. Broker-specific gateway plugins still require separate installation and configuration, and production acceptance must use the external-gateway soak gate rather than treating `DSA_SIM` as real-account evidence.
+
 ---
 
 ## Local Deployment

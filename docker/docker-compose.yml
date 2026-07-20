@@ -14,6 +14,8 @@ x-common: &common
   build:
     context: ..
     dockerfile: docker/Dockerfile
+    args:
+      INCLUDE_VNPY: ${DSA_INCLUDE_VNPY_DOCKER:-false}
   restart: unless-stopped
 
   # 环境变量（从 .env 文件加载）。不要将 ../.env 作为单文件 volume 挂载到 /app/.env，
