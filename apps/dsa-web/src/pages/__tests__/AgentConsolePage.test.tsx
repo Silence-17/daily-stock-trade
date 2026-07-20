@@ -630,11 +630,19 @@ const calibrationEvidence = {
     failedCount: 1,
     retryableFailureCount: 1,
     attempts: [{
+      attempt: 1,
       channel: 'feishu',
       success: false,
       errorCode: 'send_failed',
       retryable: true,
     }],
+    retryPolicy: {
+      status: 'waiting' as const,
+      attempt: 1,
+      maxAttempts: 3,
+      intervalSeconds: 300,
+      nextRetryAt: '2026-07-21T04:57:11Z',
+    },
   },
 };
 
@@ -1021,8 +1029,10 @@ describe('AgentConsolePage', () => {
     expect(screen.getByTestId('agent-calibration-evidence')).toHaveTextContent('10 / 10');
     expect(screen.getByTestId('agent-calibration-evidence')).toHaveTextContent('成熟前瞻样本不足');
     expect(screen.getByTestId('agent-calibration-alert-delivery')).toHaveTextContent('通知失败');
-    expect(screen.getByTestId('agent-calibration-alert-delivery')).toHaveTextContent('feishu: 失败 (send_failed)');
+    expect(screen.getByTestId('agent-calibration-alert-delivery')).toHaveTextContent('feishu #1: 失败 (send_failed)');
     expect(screen.getByTestId('agent-calibration-alert-delivery')).toHaveTextContent('可重试 1');
+    expect(screen.getByTestId('agent-calibration-alert-retry')).toHaveTextContent('等待重试窗口');
+    expect(screen.getByTestId('agent-calibration-alert-retry')).toHaveTextContent('1/3');
     expect(screen.getByTestId('agent-current-cross-run-quality')).toHaveTextContent('insufficient_evidence');
     expect(screen.getByTestId('agent-current-cross-run-quality')).toHaveTextContent('0/3');
     expect(screen.getByTestId('agent-current-cross-run-quality')).toHaveTextContent('仅审计');

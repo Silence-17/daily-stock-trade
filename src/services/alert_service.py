@@ -1043,6 +1043,7 @@ class AlertService:
                 {
                     key: item.get(key)
                     for key in (
+                        "attempt",
                         "channel",
                         "success",
                         "error_code",

@@ -3287,6 +3287,130 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertFalse(result["recorded"])
         self.assertEqual(result["reason"], "alert_state_unavailable")
 
+    def test_calibration_alert_retry_delivers_and_increments_persisted_attempt(self) -> None:
+        alert_service = AlertService()
+        trigger = alert_service.record_system_event(
+            target="vnpy_paper",
+            event_type="agent_calibration_evidence",
+            status="degraded",
+            reason="calibration_evidence_pending",
+            data_source="vnpy_paper_auto",
+            observed_value=0,
+            threshold=1,
+            diagnostics={"evidence_ready": False, "read_only": True},
+        )
+        alert_service.repo.record_notification_attempt({
+            "trigger_id": trigger["id"],
+            "channel": "feishu",
+            "attempt": 1,
+            "success": False,
+            "error_code": "send_failed",
+            "retryable": True,
+        })
+        dispatch = NotificationDispatchResult(
+            dispatched=True,
+            success=True,
+            status="sent",
+            channel_results=[
+                ChannelAttemptResult(channel="feishu", success=True, latency_ms=15),
+            ],
+        )
+
+        with patch("src.notification.NotificationService") as notification_cls:
+            notification_cls.return_value.send_with_results.return_value = dispatch
+            result = self.service.retry_latest_calibration_alert_notification(
+                now=datetime.now(timezone.utc) + timedelta(minutes=6),
+            )
+
+        self.assertFalse(result["skipped"], result)
+        self.assertEqual(result["reason"], "calibration_alert_retry_delivered")
+        self.assertFalse(result["creates_agent_runs"])
+        self.assertFalse(result["places_orders"])
+        self.assertFalse(result["submits_orders"])
+        self.assertEqual(result["delivery"]["status"], "delivered")
+        self.assertEqual(result["delivery"]["retry_policy"]["status"], "succeeded")
+        notifications = alert_service.list_notifications(
+            trigger_id=trigger["id"],
+            page_size=10,
+        )["items"]
+        self.assertEqual([item["attempt"] for item in notifications], [2, 1])
+        self.assertTrue(notifications[0]["success"])
+
+    def test_calibration_alert_retry_waits_and_stops_at_persisted_limit(self) -> None:
+        alert_service = AlertService()
+        trigger = alert_service.record_system_event(
+            target="vnpy_paper",
+            event_type="agent_calibration_evidence",
+            status="degraded",
+            reason="calibration_evidence_pending",
+            data_source="vnpy_paper_auto",
+            diagnostics={"evidence_ready": False},
+        )
+        alert_service.repo.record_notification_attempt({
+            "trigger_id": trigger["id"],
+            "channel": "feishu",
+            "attempt": 1,
+            "success": False,
+            "error_code": "send_failed",
+            "retryable": True,
+        })
+
+        with patch.object(
+            self.service,
+            "_send_auto_trade_alert_notification_safely",
+            side_effect=AssertionError("retry window must be respected"),
+        ):
+            waiting = self.service.retry_latest_calibration_alert_notification()
+
+        self.assertTrue(waiting["skipped"])
+        self.assertEqual(waiting["reason"], "calibration_alert_retry_waiting")
+        for attempt in (2, 3):
+            alert_service.repo.record_notification_attempt({
+                "trigger_id": trigger["id"],
+                "channel": "feishu",
+                "attempt": attempt,
+                "success": False,
+                "error_code": "send_failed",
+                "retryable": True,
+            })
+
+        with patch.object(
+            self.service,
+            "_send_auto_trade_alert_notification_safely",
+            side_effect=AssertionError("exhausted alert must not be sent"),
+        ):
+            exhausted = self.service.retry_latest_calibration_alert_notification(
+                now=datetime.now(timezone.utc) + timedelta(days=1),
+            )
+
+        self.assertTrue(exhausted["skipped"])
+        self.assertEqual(exhausted["reason"], "calibration_alert_retry_exhausted")
+        self.assertEqual(exhausted["delivery"]["retry_policy"]["attempt"], 3)
+        self.assertIsNone(exhausted["delivery"]["retry_policy"]["next_retry_at"])
+
+    def test_calibration_alert_retry_absorbs_scheduler_boundary_jitter(self) -> None:
+        recorded_at = datetime.now(timezone.utc).replace(microsecond=0)
+        policy = self.service._calibration_alert_retry_policy(
+            {
+                "status": "failed",
+                "attempts": [{
+                    "attempt": 2,
+                    "channel": "feishu",
+                    "success": False,
+                    "retryable": True,
+                    "created_at": recorded_at.isoformat(),
+                }],
+            },
+            now=recorded_at + timedelta(seconds=296),
+        )
+
+        self.assertEqual(policy["status"], "due")
+        self.assertEqual(policy["attempt"], 2)
+        self.assertEqual(
+            policy["next_retry_at"],
+            self.service._format_utc_datetime(recorded_at + timedelta(seconds=300)),
+        )
+
     def test_failure_fuse_auto_recovers_after_persisted_cooldown(self) -> None:
         self.service.update_settings(
             {
@@ -8596,6 +8720,41 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertEqual([task["name"] for task in tasks], ["vnpy_paper_auto_retry"])
         tasks[0]["task"]()
         fake_service.retry_due_trade_plans.assert_called_once_with()
+        fake_service.retry_latest_calibration_alert_notification.assert_called_once_with()
+
+    def test_background_order_recovery_isolates_calibration_alert_history_failure(self) -> None:
+        fake_service = MagicMock()
+        fake_service.get_settings.return_value = SimpleNamespace(
+            enabled=True,
+            auto_trade_enabled=False,
+            auto_interval_minutes=5,
+        )
+        fake_service.retry_due_trade_plans.return_value = {
+            "accepted": True,
+            "skipped": False,
+            "attempted_count": 1,
+            "submitted_count": 1,
+            "skipped_count": 0,
+            "failed_count": 0,
+        }
+        fake_service.retry_latest_calibration_alert_notification.side_effect = RuntimeError(
+            "alert database unavailable"
+        )
+
+        with patch(
+            "src.services.vnpy_paper_trading_service.VnpyPaperTradingService",
+            return_value=fake_service,
+        ):
+            task = build_vnpy_paper_trading_background_tasks()[0]
+            result = task["task"]()
+
+        self.assertEqual(result["submitted_count"], 1)
+        self.assertEqual(
+            result["calibration_alert_retry"]["reason"],
+            "calibration_alert_retry_unavailable",
+        )
+        self.assertEqual(result["calibration_alert_retry"]["error_type"], "RuntimeError")
+        self.assertFalse(result["calibration_alert_retry"]["submits_orders"])
 
     def test_retry_scan_recovers_orders_without_resubmitting_when_auto_trade_is_paused(self) -> None:
         self.service.update_settings({"enabled": True, "auto_trade_enabled": False})

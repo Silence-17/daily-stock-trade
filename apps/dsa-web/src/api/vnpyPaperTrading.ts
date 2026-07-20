@@ -934,6 +934,7 @@ export type VnpyPaperAgentCalibrationEvidence = {
     failedCount: number;
     retryableFailureCount: number;
     attempts: Array<{
+      attempt?: number | null;
       channel?: string | null;
       success: boolean;
       errorCode?: string | null;
@@ -941,6 +942,13 @@ export type VnpyPaperAgentCalibrationEvidence = {
       latencyMs?: number | null;
       createdAt?: string | null;
     }>;
+    retryPolicy?: {
+      status: 'not_applicable' | 'succeeded' | 'not_retryable' | 'waiting' | 'due' | 'exhausted';
+      attempt: number;
+      maxAttempts: number;
+      intervalSeconds: number;
+      nextRetryAt?: string | null;
+    };
   };
 };
 

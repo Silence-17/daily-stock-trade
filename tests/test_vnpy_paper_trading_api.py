@@ -2868,11 +2868,19 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
             "failed_count": 1,
             "retryable_failure_count": 1,
             "attempts": [{
+                "attempt": 1,
                 "channel": "feishu",
                 "success": False,
                 "error_code": "send_failed",
                 "retryable": True,
             }],
+            "retry_policy": {
+                "status": "due",
+                "attempt": 1,
+                "max_attempts": 3,
+                "interval_seconds": 300,
+                "next_retry_at": None,
+            },
         }
 
         with patch(
@@ -2881,9 +2889,7 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
         ) as collect, patch(
             "api.v1.endpoints.vnpy_paper_trading.AlertService",
         ) as alert_service:
-            alert_service.return_value.get_latest_system_event_delivery.return_value = (
-                alert_delivery
-            )
+            alert_service.return_value.get_latest_system_event_delivery.return_value = alert_delivery
             response = self.client.get(
                 "/api/v1/vnpy-paper/agent-runs/calibration-evidence"
             )
