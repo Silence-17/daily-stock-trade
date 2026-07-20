@@ -369,6 +369,7 @@
 - 2026-07-20 已在 Python 3.13 真实 API 进程中启用 MainEngine/EventEngine、DSA_SIM、四类事件回写和自动重连：75 秒 scheduler soak 共 74 次成功采样，API/loop/恢复任务注册率均为 100%，新增恢复终态 1 次、失败 0、跨代重叠跳过 0；临时 1 分钟任务间隔已恢复为原 1440 分钟。该证据验证内置模拟运行链路，不替代真实券商 gateway 长窗口验收。
 - scheduler 完整测试文件已修复全局 `sys.modules` 回滚造成的测试污染，Python 3.13.14 与 3.14.6 均为 27/27 通过。
 - AlphaSift 最终候选的实时行情交易状态映射已补齐：仅在非 ST 名称、正成交量/成交额和 A 股绝对涨跌幅低于 4.5% 的保守证据下派生对应否定状态，记录 provider、观测时间和字段依据；接近最低 5% 限幅或证据不全仍 fail-closed。2026-07-20 Python 3.13 真实 dry-run 从修复前 3 个候选全部 `candidate_trading_status_unavailable`，改善为 1 个有效 dry-run 计划、2 个 `position_exists` 跳过、0 提交和 0 新成交。
+- 2026-07-20 已完成真实 Python 3.13 API 的在线选股 Agent -> DSA_SIM 模拟成交：3 个候选生成 1 笔 vn.py 提交、2 个 `position_exists` 跳过，`DSA_SIM.1` 经 EventEngine 回写 `filled`，Portfolio 新增 `600015` 1400 股 @ 6.98，成交总数 12->13、现金 27474->17702；临时时间门禁在 `finally` 路径恢复为开启，gateway connected 且订单/成交/账户/持仓四类回调保持注册。该证据完成内置 vn.py 模拟交易主路径，不替代真实券商 gateway 长窗口验收。
 
 未完成：
 
