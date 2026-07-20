@@ -363,11 +363,13 @@
 - 行情缺价已有候选级 fail-closed 与真实 MainEngine/EventEngine 三候选隔离矩阵；缺价候选保留价格解析审计并跳过，前后候选继续成交，未知价格不会进入 vn.py。
 - 自动交易 dry-run、任务历史和详情 Web 路径已有回归覆盖；Web 全量测试门禁已恢复稳定通过。
 - gateway 无下单 soak 验收已支持强制重连矩阵：要求观测到重连尝试、成功和最终 connected；DSA_SIM 断线注入会自动启用并校验该门禁，真实 gateway 仍需部署环境提供长时间证据。
+- 新增部署态 runtime 只读长跑验收器：它直接观察承载 Web/API 的进程，不再用旁路 MainEngine 代替主系统证据；可门禁 API/runtime/连接/四类回调持续可用率、contract、进程/gateway 身份变化及自动重连计数增量与单调性，且不调用任何写接口。
 - scheduler 后台任务的启动立即执行语义已按任务名跨重载保留：`vnpy_paper_auto_retry` 在连续注册生命周期只启动扫描一次，普通配置 reconcile 不重复扫描，禁用后重新启用会再次执行；自动交易、自动恢复和事件监控的注册状态彼此隔离。
 - 新增 `scripts/check_online_agent_vnpy_e2e.py`，默认以 dry-run 验证真实在线候选、可追溯决策/计划和账本零变化；显式授权后仅允许内置 DSA_SIM 委托，可校验 run/计划终态、EventEngine 四类回调、成交 ID、Portfolio 资金/持仓变化和临时时段门禁恢复。2026-07-20 真实 API 的 dry-run 与全已有持仓安全跳过各通过一轮，正向成交证据由同日 `600015` 1400 股 @ 6.98 的真实 EventEngine 回写提供。
 - 验收门禁已支持隔离账户正向成交：暂停自动买入、创建干净账本、校验成交后恢复原账户/设置并隐藏测试账本，reset 响应丢失也按账户 ID 差分恢复。真实 run `ss-agent-20260720101013-dd345609` 在临时账户完成 3/3 成交及精确资金/持仓对账，随后恢复原账户 2 和全部运行设置。
 - 新增 scheduler 只读长跑验收器，可门禁 API 可达率、调度循环存活率、必需任务持续注册率、本次窗口新增终态事件、失败数和跨代重叠跳过数；首次事件读取只建立历史基线，脚本不触发选股、计划或订单。真实长窗口证据仍需在部署环境执行并留存 JSON。
 - 2026-07-20 已在 Python 3.13 真实 API 进程中启用 MainEngine/EventEngine、DSA_SIM、四类事件回写和自动重连：75 秒 scheduler soak 共 74 次成功采样，API/loop/恢复任务注册率均为 100%，新增恢复终态 1 次、失败 0、跨代重叠跳过 0；临时 1 分钟任务间隔已恢复为原 1440 分钟。该证据验证内置模拟运行链路，不替代真实券商 gateway 长窗口验收。
+- 同一部署进程通过新增的 75 秒 runtime soak：75/75 样本的 API、runtime、confirmed connection、事件桥和订单/成交/账户/持仓四类回调注册率均为 100%，contract v3，进程变化、响应错误和新增重连失败均为 0；全程未创建 run、计划或订单。该证据关闭了“旁路进程不能证明实际 API runtime”的验收缺口，但仍不替代真实券商 gateway。
 - scheduler 完整测试文件已修复全局 `sys.modules` 回滚造成的测试污染，Python 3.13.14 与 3.14.6 均为 27/27 通过。
 - AlphaSift 最终候选的实时行情交易状态映射已补齐：仅在非 ST 名称、正成交量/成交额和 A 股绝对涨跌幅低于 4.5% 的保守证据下派生对应否定状态，记录 provider、观测时间和字段依据；接近最低 5% 限幅或证据不全仍 fail-closed。2026-07-20 Python 3.13 真实 dry-run 从修复前 3 个候选全部 `candidate_trading_status_unavailable`，改善为 1 个有效 dry-run 计划、2 个 `position_exists` 跳过、0 提交和 0 新成交。
 - 2026-07-20 已完成真实 Python 3.13 API 的在线选股 Agent -> DSA_SIM 模拟成交：3 个候选生成 1 笔 vn.py 提交、2 个 `position_exists` 跳过，`DSA_SIM.1` 经 EventEngine 回写 `filled`，Portfolio 新增 `600015` 1400 股 @ 6.98，成交总数 12->13、现金 27474->17702；临时时间门禁在 `finally` 路径恢复为开启，gateway connected 且订单/成交/账户/持仓四类回调保持注册。该证据完成内置 vn.py 模拟交易主路径，不替代真实券商 gateway 长窗口验收。
