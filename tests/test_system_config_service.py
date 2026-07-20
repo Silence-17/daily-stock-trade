@@ -3797,6 +3797,7 @@ class SystemConfigServiceTestCase(unittest.TestCase):
                 {"key": "VNPY_RUNTIME_ENABLED", "value": "true"},
                 {"key": "VNPY_GATEWAY_CLASS", "value": "vnpy_ctp:CtpGateway"},
                 {"key": "VNPY_CONNECT_ON_START", "value": "false"},
+                {"key": "VNPY_PRODUCTION_PREFLIGHT_ENABLED", "value": "true"},
                 {"key": "VNPY_AUTO_RECONNECT_ENABLED", "value": "true"},
                 {"key": "VNPY_AUTO_RECONNECT_INTERVAL_SECONDS", "value": "60"},
                 {"key": "VNPY_AUTO_RECONNECT_MAX_INTERVAL_SECONDS", "value": "300"},
@@ -3816,6 +3817,7 @@ class SystemConfigServiceTestCase(unittest.TestCase):
         self.assertIn("MainEngine", warning)
         self.assertIn("EventEngine", warning)
         self.assertIn("VNPY_AUTO_RECONNECT_ENABLED", warning)
+        self.assertIn("VNPY_PRODUCTION_PREFLIGHT_ENABLED", warning)
         self.assertIn("VNPY_AUTO_RECONNECT_INTERVAL_SECONDS", warning)
         self.assertIn("VNPY_AUTO_RECONNECT_MAX_INTERVAL_SECONDS", warning)
         self.assertIn("VNPY_AUTO_RECONNECT_CONFIRMATION_GRACE_SECONDS", warning)

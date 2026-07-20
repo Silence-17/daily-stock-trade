@@ -41,6 +41,7 @@ class VnpyRuntimeTestCase(unittest.TestCase):
                 "VNPY_GATEWAY_NAME": "",
                 "VNPY_CONNECT_SETTINGS_PATH": "",
                 "VNPY_CONNECT_ON_START": "",
+                "VNPY_PRODUCTION_PREFLIGHT_ENABLED": "",
                 "VNPY_AUTO_ATTACH_EVENTS": "",
                 "VNPY_AUTO_RECONNECT_ENABLED": "",
                 "VNPY_AUTO_RECONNECT_INTERVAL_SECONDS": "",
@@ -55,6 +56,7 @@ class VnpyRuntimeTestCase(unittest.TestCase):
         self.assertIsNone(settings.gateway_class)
         self.assertIsNone(settings.gateway_name)
         self.assertFalse(settings.connect_on_start)
+        self.assertFalse(settings.production_preflight_enabled)
         self.assertTrue(settings.auto_attach_events)
         self.assertFalse(settings.auto_reconnect_enabled)
         self.assertEqual(settings.auto_reconnect_interval_seconds, 60)
@@ -173,7 +175,172 @@ class VnpyRuntimeTestCase(unittest.TestCase):
             handle.close()
             self.assertTrue(handle.main_engine.closed)
             self.assertTrue(handle.event_engine.stopped)
-            self.assertTrue(all(not handlers for handlers in handle.event_engine.handlers.values()))
+            self.assertTrue(
+                all(not handlers for handlers in handle.event_engine.handlers.values())
+            )
+
+    def test_production_preflight_blocks_builtin_before_connect_and_reconnect(self) -> None:
+        installed = _install_fake_vnpy_runtime_modules()
+        try:
+            handle = bootstrap_vnpy_runtime(
+                settings=VnpyRuntimeSettings(
+                    enabled=True,
+                    gateway_class="fake_vnpy_gateway:SimGateway",
+                    gateway_name="DSA_SIM",
+                    connect_on_start=True,
+                    production_preflight_enabled=True,
+                    auto_attach_events=False,
+                    auto_reconnect_enabled=True,
+                )
+            )
+        finally:
+            _restore_modules(installed)
+
+        manual_result = handle.run_manual_reconnect()
+        self.assertEqual(handle.main_engine.connects, [])
+        self.assertFalse(handle.diagnostics["connect"]["attempted"])
+        self.assertEqual(
+            handle.diagnostics["connect"]["reason"],
+            "production_preflight_failed",
+        )
+        self.assertEqual(
+            handle.diagnostics["production_preflight"]["failures"],
+            ["builtin_gateway_not_external"],
+        )
+        self.assertFalse(handle.diagnostics["auto_reconnect"]["running"])
+        self.assertEqual(
+            handle.diagnostics["auto_reconnect"]["reason"],
+            "production_preflight_failed",
+        )
+        self.assertEqual(manual_result["last_result"], "failed")
+        self.assertEqual(
+            handle.diagnostics["connect"]["preflight_failures"],
+            ["builtin_gateway_not_external"],
+        )
+        self.assertEqual(handle.main_engine.connects, [])
+        handle.close()
+
+    def test_production_preflight_rejects_repository_settings_and_missing_keys(self) -> None:
+        installed = _install_fake_vnpy_runtime_modules()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            settings_path = root / "broker.json"
+            settings_path.write_text(json.dumps({"userid": "paper"}), encoding="utf-8")
+            try:
+                with patch("src.services.vnpy_runtime.REPOSITORY_ROOT", root):
+                    handle = bootstrap_vnpy_runtime(
+                        settings=VnpyRuntimeSettings(
+                            enabled=True,
+                            gateway_class="fake_vnpy_gateway:StrictGateway",
+                            gateway_name="STRICT",
+                            connect_settings_path=str(settings_path),
+                            connect_on_start=True,
+                            production_preflight_enabled=True,
+                            auto_attach_events=False,
+                        )
+                    )
+            finally:
+                _restore_modules(installed)
+
+        self.assertEqual(handle.main_engine.connects, [])
+        self.assertEqual(
+            handle.diagnostics["production_preflight"]["failures"],
+            [
+                "connect_settings_inside_repository",
+                "default_setting_keys_missing",
+            ],
+        )
+        self.assertEqual(
+            handle.diagnostics["production_preflight"]["missing_default_keys"],
+            ["password"],
+        )
+        self.assertNotIn(str(settings_path), json.dumps(handle.diagnostics))
+        handle.close()
+
+    def test_production_preflight_reports_unregistered_gateway_before_settings(self) -> None:
+        installed = _install_fake_vnpy_runtime_modules()
+        try:
+            handle = bootstrap_vnpy_runtime(
+                settings=VnpyRuntimeSettings(
+                    enabled=True,
+                    gateway_class="missing_gateway:Gateway",
+                    gateway_name="MISSING",
+                    connect_on_start=True,
+                    production_preflight_enabled=True,
+                    auto_attach_events=False,
+                )
+            )
+        finally:
+            _restore_modules(installed)
+
+        self.assertEqual(handle.main_engine.connects, [])
+        self.assertEqual(
+            handle.diagnostics["production_preflight"]["failures"],
+            ["gateway_not_registered"],
+        )
+        self.assertEqual(
+            handle.diagnostics["connect"]["preflight_failures"],
+            ["gateway_not_registered"],
+        )
+        handle.close()
+
+    def test_production_preflight_allows_complete_external_gateway_settings(self) -> None:
+        installed = _install_fake_vnpy_runtime_modules()
+        with tempfile.TemporaryDirectory() as tmp:
+            settings_path = Path(tmp) / "broker.json"
+            settings_path.write_text(
+                json.dumps({"userid": "paper", "password": "secret"}),
+                encoding="utf-8",
+            )
+            try:
+                handle = bootstrap_vnpy_runtime(
+                    settings=VnpyRuntimeSettings(
+                        enabled=True,
+                        gateway_class="fake_vnpy_gateway:StrictGateway",
+                        gateway_name="STRICT",
+                        connect_settings_path=str(settings_path),
+                        connect_on_start=True,
+                        production_preflight_enabled=True,
+                        auto_attach_events=False,
+                    )
+                )
+            finally:
+                _restore_modules(installed)
+
+        self.assertTrue(handle.diagnostics["production_preflight"]["ok"])
+        self.assertEqual(len(handle.main_engine.connects), 1)
+        self.assertNotIn("secret", json.dumps(handle.diagnostics))
+        self.assertNotIn(str(settings_path), json.dumps(handle.diagnostics))
+        handle.close()
+
+    def test_production_preflight_sanitizes_settings_read_failure(self) -> None:
+        installed = _install_fake_vnpy_runtime_modules()
+        with tempfile.TemporaryDirectory() as tmp:
+            secret_path = Path(tmp) / "secret-broker-account.json"
+            try:
+                handle = bootstrap_vnpy_runtime(
+                    settings=VnpyRuntimeSettings(
+                        enabled=True,
+                        gateway_class="fake_vnpy_gateway:StrictGateway",
+                        gateway_name="STRICT",
+                        connect_settings_path=str(secret_path),
+                        connect_on_start=True,
+                        production_preflight_enabled=True,
+                        auto_attach_events=False,
+                    )
+                )
+            finally:
+                _restore_modules(installed)
+
+            encoded = json.dumps(handle.diagnostics)
+            self.assertEqual(handle.main_engine.connects, [])
+            self.assertEqual(
+                handle.diagnostics["connect"]["reason"],
+                "production_preflight_failed",
+            )
+            self.assertNotIn(str(secret_path), encoded)
+            self.assertNotIn("secret-broker-account", encoded)
+            handle.close()
 
     def test_bootstrap_connects_opt_in_gateway_without_settings_file(self) -> None:
         installed = _install_fake_vnpy_runtime_modules()
@@ -744,6 +911,7 @@ def _install_fake_vnpy_runtime_modules() -> dict[str, object]:
 
     class StrictGateway:
         connect_without_settings = False
+        default_setting = {"userid": "", "password": ""}
 
         def connect(self, setting):
             return None

@@ -264,6 +264,7 @@ runtime 启动前会创建部署工作目录下已忽略的 `.vntrader/`，供 v
 - `VNPY_GATEWAY_NAME`：可选 gateway 名称；若启用 `VNPY_CONNECT_ON_START` 则必填。
 - `VNPY_CONNECT_SETTINGS_PATH`：可选连接参数 JSON 文件路径；账号、密码、token 等敏感字段只放在该外部文件中，不写入仓库。
 - `VNPY_CONNECT_ON_START=false`：显式改为 `true` 后才会调用 `MainEngine.connect(settings, gateway_name)`。
+- `VNPY_PRODUCTION_PREFLIGHT_ENABLED=false`：真实通道部署时显式开启；启动连接和后续自动/手动重连会在调用 `connect()` 前拒绝内置 DSA_SIM、仓库内连接文件、无效 JSON 或缺失 gateway `default_setting` 键。失败不会拖垮 API 启动，`diagnostics.vnpy_runtime.production_preflight` 和 `connect.reason=production_preflight_failed` 提供脱敏原因，自动重连不会反复重试静态错误。
 - `VNPY_AUTO_ATTACH_EVENTS=true`：runtime 创建成功后自动注册订单、成交、账户和持仓事件 handler。
 - `DSA_RUNTIME_SCHEDULER_TASK_EVENT_RETENTION_DAYS=30`：后台任务事件持久化保留天数；设为 `0` 时不自动清理。
 - `DSA_RUNTIME_SCHEDULER_TASK_EVENT_CLEANUP_INTERVAL_SECONDS=3600`：写入后台任务事件后最多每隔多少秒触发一次旧事件清理；设为 `0` 时每次写入后都检查。
@@ -275,6 +276,7 @@ VNPY_RUNTIME_ENABLED=true
 VNPY_GATEWAY_CLASS=src.services.vnpy_simulated_gateway:DsaSimulatedGateway
 VNPY_GATEWAY_NAME=DSA_SIM
 VNPY_CONNECT_ON_START=true
+VNPY_PRODUCTION_PREFLIGHT_ENABLED=false
 VNPY_AUTO_RECONNECT_ENABLED=true
 VNPY_AUTO_RECONNECT_INTERVAL_SECONDS=60
 VNPY_AUTO_RECONNECT_MAX_INTERVAL_SECONDS=300
@@ -282,7 +284,7 @@ VNPY_AUTO_RECONNECT_CONFIRMATION_GRACE_SECONDS=30
 VNPY_AUTO_ATTACH_EVENTS=true
 ```
 
-内置网关无需 `VNPY_CONNECT_SETTINGS_PATH`。API 重启后，模拟交易设置会在未保存 gateway 名称时继承 `VNPY_GATEWAY_NAME`；把执行模式设为 `vnpy_paper` 后即可开启定时自动买入或执行手动委托。合法限价单默认延迟 500 毫秒全量成交，订单、成交、账户和持仓均通过真实 vn.py EventEngine 回到 DSA；DSA Portfolio 仍是跨进程持久化账本。
+内置网关无需 `VNPY_CONNECT_SETTINGS_PATH`，并且必须保持 `VNPY_PRODUCTION_PREFLIGHT_ENABLED=false`。API 重启后，模拟交易设置会在未保存 gateway 名称时继承 `VNPY_GATEWAY_NAME`；把执行模式设为 `vnpy_paper` 后即可开启定时自动买入或执行手动委托。合法限价单默认延迟 500 毫秒全量成交，订单、成交、账户和持仓均通过真实 vn.py EventEngine 回到 DSA；DSA Portfolio 仍是跨进程持久化账本。
 
 内置网关只用于功能验收和本地模拟，不提供真实行情撮合、手续费、滑点、部分成交概率或网关状态持久化；进程重启会重置网关内存账户，但不会删除 DSA Portfolio 流水。接真实通道时仍需安装具体 gateway 插件，把敏感连接参数放入外部 JSON，并显式配置 `VNPY_CONNECT_SETTINGS_PATH`。未配置 gateway 时，runtime 和事件引擎可以为可用状态，但 `diagnostics.vnpy_bridge.available=false` 且 reason 为 `gateway_name_not_configured`，这是预期的安全状态。
 

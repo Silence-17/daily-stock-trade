@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [新功能] 新增默认关闭的 `VNPY_PRODUCTION_PREFLIGHT_ENABLED` runtime 生产连接门禁；启用后启动连接、自动重连和手动重连统一在 `connect()` 前拒绝内置 DSA_SIM、仓库内连接文件、无效 JSON 和缺失 gateway 默认键，API 保持启动并仅暴露脱敏诊断
+
 - [改进] `check_vnpy_gateway_soak.py` 升级为 schema v3 并默认在独立子进程执行零连接预检；生产门禁可在创建 MainEngine 前拒绝内置 gateway、缺失默认配置键或仓库内连接文件，长跑观测时长不再包含 runtime 关闭耗时
 
 - [新功能] 新增零连接 `scripts/check_vnpy_gateway_preflight.py`，可在不连接网络、订阅行情或创建订单的前提下校验 vn.py gateway 加载、名称解析和连接配置键；生产门禁拒绝内置 `DSA_SIM`，并要求外部配置文件不位于仓库内
