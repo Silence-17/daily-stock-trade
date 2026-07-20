@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - [新功能] Docker 新增默认关闭的 vn.py 构建档位与 Compose 参数转发，显式启用后安装独立依赖并以镜像层真实导入 vn.py 核心模块和内置 DSA_SIM gateway
 
+- [测试] 新增手动 Linux vn.py Docker 验收工作流，真实构建可选镜像、启动 API，并门禁 runtime、DSA_SIM 连接、四类事件桥和调度循环且不发布镜像
+
 - [新功能] Desktop 后端新增显式 vn.py 打包档位，安装并收集 vn.py/TA-Lib 后由冻结可执行文件导入核心事件/交易模块和内置 DSA_SIM gateway；Windows 冻结后端与 NSIS 安装包已通过真实启动、连接、事件桥和产物哈希验收，默认轻量包保持不变
 
 - [改进] 手动 LLM 复盘以有界不可信历史进入显式启用的动态计划 v3，上下文严格隔离触发来源/策略/市场，现有 evaluator 继续禁止放宽候选数、单票预算和最低分

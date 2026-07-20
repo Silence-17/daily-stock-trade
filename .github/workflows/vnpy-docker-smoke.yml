@@ -1,0 +1,117 @@
+name: Optional vn.py Docker Acceptance
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: vnpy-docker-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build optional vn.py image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          build-args: |
+            INCLUDE_VNPY=true
+          tags: stock-analysis:vnpy-smoke
+          load: true
+          cache-from: type=gha,scope=stock-analysis-vnpy-smoke
+          cache-to: type=gha,mode=max,scope=stock-analysis-vnpy-smoke,ignore-error=true
+
+      - name: Start vn.py API container
+        run: |
+          docker run -d --name dsa-vnpy-smoke \
+            -p 127.0.0.1:18080:8000 \
+            -e VNPY_RUNTIME_ENABLED=true \
+            -e VNPY_GATEWAY_CLASS=src.services.vnpy_simulated_gateway:DsaSimulatedGateway \
+            -e VNPY_GATEWAY_NAME=DSA_SIM \
+            -e VNPY_CONNECT_ON_START=true \
+            -e VNPY_AUTO_ATTACH_EVENTS=true \
+            stock-analysis:vnpy-smoke \
+            python main.py --serve-only --host 0.0.0.0 --port 8000
+
+      - name: Validate container runtime
+        run: |
+          python - <<'PY'
+          import json
+          import time
+          import urllib.request
+
+          base_url = "http://127.0.0.1:18080"
+          deadline = time.monotonic() + 180
+          last_error = None
+          status = None
+          while time.monotonic() < deadline:
+              try:
+                  with urllib.request.urlopen(f"{base_url}/health", timeout=5) as response:
+                      health = json.load(response)
+                  with urllib.request.urlopen(
+                      f"{base_url}/api/v1/vnpy-paper/status"
+                      "?include_snapshot=false&include_recent_trades=false",
+                      timeout=10,
+                  ) as response:
+                      status = json.load(response)
+                  runtime = status["diagnostics"]["vnpy_runtime"]
+                  if runtime.get("available") and runtime.get("connect", {}).get("connected"):
+                      break
+              except Exception as exc:
+                  last_error = repr(exc)
+              time.sleep(3)
+          else:
+              raise SystemExit(f"vn.py container readiness timed out: {last_error}")
+
+          runtime = status["diagnostics"]["vnpy_runtime"]
+          scheduler = status["scheduler"]
+          assert health["status"] == "ok", health
+          assert runtime["mode"] == "vnpy_runtime", runtime
+          assert runtime["available"] is True, runtime
+          assert runtime["gateway"]["added"] is True, runtime
+          assert runtime["gateway"]["gateway_name"] == "DSA_SIM", runtime
+          assert runtime["connect"]["connected"] is True, runtime
+          assert runtime["event_bridge"]["registered"] is True, runtime
+          assert runtime["event_bridge"]["registered_count"] == 4, runtime
+          assert runtime["event_bridge"]["handler_failure_count"] == 0, runtime
+          assert scheduler["loop_running"] is True, scheduler
+          print(
+              json.dumps(
+                  {
+                      "health": health["status"],
+                      "runtime_mode": runtime["mode"],
+                      "gateway": runtime["gateway"]["gateway_name"],
+                      "connected": runtime["connect"]["connected"],
+                      "registered_events": runtime["event_bridge"]["registered_count"],
+                      "scheduler_loop": scheduler["loop_running"],
+                  },
+                  sort_keys=True,
+              )
+          )
+          PY
+
+      - name: Record image size
+        run: |
+          IMAGE_BYTES="$(docker image inspect stock-analysis:vnpy-smoke --format '{{.Size}}')"
+          echo "Optional vn.py image bytes: ${IMAGE_BYTES}"
+          echo "- Optional vn.py image bytes: \`${IMAGE_BYTES}\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Show container logs on failure
+        if: failure()
+        run: docker logs dsa-vnpy-smoke || true
+
+      - name: Stop smoke container
+        if: always()
+        run: docker rm -f dsa-vnpy-smoke 2>/dev/null || true
