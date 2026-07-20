@@ -175,6 +175,23 @@ class RuntimeSchedulerServiceTestCase(unittest.TestCase):
                 },
             ],
             "failures": [],
+            "cadence_skips": [
+                {
+                    "market": "hk",
+                    "strategy": "hk_liquid_momentum",
+                    "reason": "calibration_interval_not_elapsed",
+                    "latest_run_uid": f"shadow-{index}",
+                    "latest_created_at": "2026-07-21T02:56:15",
+                    "age_seconds": 3600.0,
+                    "required_interval_seconds": 86400,
+                    "scheduler_grace_seconds": 300,
+                    "required_elapsed_seconds": 86100,
+                    "remaining_seconds": 82500.0,
+                    "next_eligible_at": "2026-07-22T02:51:15",
+                    "private_payload": "excluded",
+                }
+                for index in range(12)
+            ],
             "unbounded_payload": "excluded",
         })
 
@@ -185,6 +202,10 @@ class RuntimeSchedulerServiceTestCase(unittest.TestCase):
         self.assertFalse(details["submits_orders"])
         self.assertEqual(details["run_count"], 2)
         self.assertEqual(details["failure_count"], 0)
+        self.assertEqual(details["cadence_skipped_count"], 12)
+        self.assertEqual(len(details["cadence_skips"]), 10)
+        self.assertEqual(details["cadence_skips"][0]["latest_run_uid"], "shadow-0")
+        self.assertNotIn("private_payload", details["cadence_skips"][0])
         self.assertNotIn("private_payload", details["runs"][0])
         self.assertNotIn("unbounded_payload", details)
 

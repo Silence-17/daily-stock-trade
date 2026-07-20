@@ -396,6 +396,7 @@ class RuntimeSchedulerService:
             "configuredCount",
             "completed_count",
             "completedCount",
+            "cadence_skipped_count",
             "execution_mode",
             "executionMode",
             "submits_orders",
@@ -445,6 +446,30 @@ class RuntimeSchedulerService:
                 if isinstance(item, dict)
             ]
             details["failure_count"] = len(failures)
+        cadence_skips = result.get("cadence_skips")
+        if isinstance(cadence_skips, list):
+            details["cadence_skips"] = [
+                {
+                    key: item.get(key)
+                    for key in (
+                        "market",
+                        "strategy",
+                        "reason",
+                        "latest_run_uid",
+                        "latest_created_at",
+                        "age_seconds",
+                        "required_interval_seconds",
+                        "scheduler_grace_seconds",
+                        "required_elapsed_seconds",
+                        "remaining_seconds",
+                        "next_eligible_at",
+                    )
+                    if key in item
+                }
+                for item in cadence_skips[:10]
+                if isinstance(item, dict)
+            ]
+            details["cadence_skipped_count"] = len(cadence_skips)
         return details
 
     def _record_background_task_event(
