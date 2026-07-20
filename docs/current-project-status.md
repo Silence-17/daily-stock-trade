@@ -1,6 +1,6 @@
 # Current Project Status
 
-Snapshot date: 2026-07-17
+Snapshot date: 2026-07-20
 
 ## Current State
 
@@ -10,6 +10,7 @@ Snapshot date: 2026-07-17
 - Agent run details now support persisted human acceptance feedback (`approved`, `needs_changes`, or `rejected`) with reviewer and notes. Feedback appears in the run list, detail timeline, and daily summary, and is carried into later same-strategy/market run context. A deterministic cross-market objective can use needs-changes/rejected feedback, consecutive failures, or degraded cross-run quality to tighten candidate count and per-order cash; it never widens saved limits or bypasses risk gates.
 - Runtime scheduler background tasks are registered independently from the daily analysis job, so `serve-only` / `webui-only` can still run paper auto-trading tasks.
 - Runtime scheduler reconcile now reuses process-local locks by task name. A replacement generation records a persisted `task_already_running` skip while the older generation finishes, status exposes `overlap_guarded` and `previous_generation_running`, and exception paths release the lock for the next run.
+- Background-task startup execution is now tracked by task name across scheduler generations. `vnpy_paper_auto_retry` runs immediately on initial registration, does not rerun merely because an unrelated configuration update rebuilds the scheduler, and runs once again after the task is disabled and re-enabled. Registration state remains independent between automatic trading, recovery, and event-monitor tasks.
 - The API-owned vn.py MainEngine/EventEngine is now injected into Runtime scheduler paper-trading services; the recovery task runs once at registration and then every one to five minutes, so background execution no longer has a separate bridge capability from Web requests.
 - vn.py runtime connection diagnostics now distinguish a returned `MainEngine.connect()` request from a gateway-confirmed connection. Connect exceptions degrade to `connect_failed` without aborting API startup, supported gateway hooks refresh on status reads, and an explicitly disconnected gateway blocks new submissions as `vnpy_gateway_disconnected`.
 - vn.py runtime now has an opt-in unattended reconnect monitor. It retries only explicit failed/disconnected states at a configurable 5-to-3600-second base interval, rereads the external settings file for each attempt, exponentially backs off consecutive failures to a configurable maximum, and resets after confirmed recovery. A configurable 5-to-600-second confirmation grace period protects accepted asynchronous connections. Diagnostics expose thread state, grace, base/current/maximum intervals, consecutive failures, attempt/success/failure counts, timestamps, last result, and next check without exposing credentials.
