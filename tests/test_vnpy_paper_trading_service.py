@@ -8239,6 +8239,7 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
             auto_strategy="dual_low",
         )
         fake_service.retry_due_trade_plans.return_value = {}
+        fake_service.agent_repo.list_recent_runs.return_value = []
         fake_service.run_auto_trade_once.side_effect = [
             {"accepted": True, "agent_run_uid": f"run-{index}", "candidate_count": 2,
              "planned_count": 2, "submitted_count": 0}
@@ -8286,6 +8287,99 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
             for call in calls
         ))
 
+    def test_calibration_shadow_honors_persisted_pair_cadence_across_restarts(self) -> None:
+        fake_service = MagicMock()
+        fake_service.get_settings.return_value = SimpleNamespace(
+            enabled=True,
+            auto_trade_enabled=False,
+            auto_interval_minutes=5,
+            auto_strategy="dual_low",
+        )
+        fake_service.agent_repo.list_recent_runs.return_value = [{
+            "run_uid": "recent-shadow-run",
+            "status": "completed",
+            "created_at": datetime.now().isoformat(),
+        }]
+        env = {
+            "DSA_AGENT_CALIBRATION_SHADOW_ENABLED": "true",
+            "DSA_AGENT_CALIBRATION_SHADOW_PAIRS": "cn:dual_low",
+            "DSA_AGENT_CALIBRATION_SHADOW_INTERVAL_MINUTES": "1440",
+        }
+
+        with patch.dict(os.environ, env, clear=False), patch(
+            "src.services.vnpy_paper_trading_service.VnpyPaperTradingService",
+            return_value=fake_service,
+        ):
+            tasks = build_vnpy_paper_trading_background_tasks()
+
+        shadow = next(task for task in tasks if task["name"] == "agent_calibration_shadow")
+        result = shadow["task"]()
+
+        self.assertTrue(result["accepted"])
+        self.assertTrue(result["skipped"])
+        self.assertEqual(result["reason"], "calibration_interval_not_elapsed")
+        self.assertEqual(result["attempted_count"], 0)
+        self.assertEqual(result["completed_count"], 0)
+        self.assertEqual(result["cadence_skipped_count"], 1)
+        self.assertEqual(result["cadence_skips"][0]["latest_run_uid"], "recent-shadow-run")
+        self.assertGreater(result["cadence_skips"][0]["remaining_seconds"], 0)
+        fake_service.run_auto_trade_once.assert_not_called()
+
+    def test_calibration_shadow_runs_stale_pairs_while_skipping_fresh_pairs(self) -> None:
+        fake_service = MagicMock()
+        fake_service.get_settings.return_value = SimpleNamespace(
+            enabled=True,
+            auto_trade_enabled=False,
+            auto_interval_minutes=5,
+            auto_strategy="dual_low",
+        )
+        fake_service.agent_repo.list_recent_runs.side_effect = [
+            [{
+                "run_uid": "fresh-cn-shadow",
+                "status": "completed",
+                "created_at": datetime.now().isoformat(),
+            }],
+            [{
+                "run_uid": "stale-us-shadow",
+                "status": "completed",
+                "created_at": (
+                    datetime.now() - timedelta(hours=23, minutes=57)
+                ).isoformat(),
+            }],
+        ]
+        fake_service.run_auto_trade_once.return_value = {
+            "accepted": True,
+            "agent_run_uid": "new-us-shadow",
+            "candidate_count": 2,
+            "planned_count": 1,
+            "submitted_count": 0,
+        }
+        env = {
+            "DSA_AGENT_CALIBRATION_SHADOW_ENABLED": "true",
+            "DSA_AGENT_CALIBRATION_SHADOW_PAIRS": "cn:dual_low,us:us_large_cap_momentum",
+            "DSA_AGENT_CALIBRATION_SHADOW_INTERVAL_MINUTES": "1440",
+        }
+
+        with patch.dict(os.environ, env, clear=False), patch(
+            "src.services.vnpy_paper_trading_service.VnpyPaperTradingService",
+            return_value=fake_service,
+        ):
+            tasks = build_vnpy_paper_trading_background_tasks()
+
+        shadow = next(task for task in tasks if task["name"] == "agent_calibration_shadow")
+        result = shadow["task"]()
+
+        self.assertTrue(result["accepted"])
+        self.assertFalse(result["skipped"])
+        self.assertEqual(result["reason"], "completed")
+        self.assertEqual(result["attempted_count"], 1)
+        self.assertEqual(result["completed_count"], 1)
+        self.assertEqual(result["cadence_skipped_count"], 1)
+        self.assertEqual(result["cadence_skips"][0]["market"], "cn")
+        call = fake_service.run_auto_trade_once.call_args
+        self.assertEqual(call.kwargs["market_override"], "us")
+        self.assertEqual(call.kwargs["strategy_override"], "us_large_cap_momentum")
+
     def test_calibration_shadow_isolates_combinations_and_fails_task_on_any_error(self) -> None:
         fake_service = MagicMock()
         fake_service.get_settings.return_value = SimpleNamespace(
@@ -8304,6 +8398,7 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
                 "submitted_count": 0,
             },
         ]
+        fake_service.agent_repo.list_recent_runs.return_value = []
         env = {
             "DSA_AGENT_CALIBRATION_SHADOW_ENABLED": "true",
             "DSA_AGENT_CALIBRATION_SHADOW_PAIRS": "cn:dual_low,us:dual_low",

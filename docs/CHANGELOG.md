@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [修复] `agent_calibration_shadow` 新增基于持久化同市场/策略最近完成 run 的跨进程采样节流，避免服务重启后 5 分钟重复灌样本，并以有界任务事件审计跳过原因、剩余时间和下一采样时间
+
 - [修复] Desktop 的 macOS PATH helper 固定按目标平台冒号拆分和拼接，不再受 Windows runner 的宿主分隔符影响，并恢复 Homebrew PATH 跨平台回归
 
 - [新功能] Docker 新增默认关闭的 vn.py 构建档位与 Compose 参数转发，显式启用后安装独立依赖并以镜像层真实导入 vn.py 核心模块和内置 DSA_SIM gateway

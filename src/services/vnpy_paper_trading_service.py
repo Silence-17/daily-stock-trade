@@ -12653,6 +12653,63 @@ def _calibration_shadow_config(settings: VnpyPaperSettings) -> Dict[str, Any]:
     }
 
 
+def _calibration_shadow_cadence(
+    service: VnpyPaperTradingService,
+    *,
+    market: str,
+    strategy: str,
+    interval_seconds: int,
+) -> Dict[str, Any]:
+    recent_runs = service.agent_repo.list_recent_runs(
+        trigger_source="agent_calibration_shadow",
+        strategy=strategy,
+        market=market,
+        limit=20,
+    )
+    latest_completed = next(
+        (
+            item
+            for item in recent_runs
+            if str(item.get("status") or "").strip().lower() == "completed"
+        ),
+        None,
+    )
+    if latest_completed is None:
+        return {"eligible": True, "reason": "no_completed_sample"}
+
+    created_text = str(latest_completed.get("created_at") or "").strip()
+    try:
+        created_at = datetime.fromisoformat(created_text.replace("Z", "+00:00"))
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(
+            f"invalid persisted calibration created_at for {market}/{strategy}"
+        ) from exc
+    now = datetime.now(created_at.tzinfo) if created_at.tzinfo else datetime.now()
+    age_seconds = max(0.0, (now - created_at).total_seconds())
+    required_seconds = max(1, int(interval_seconds))
+    grace_seconds = min(300, required_seconds // 12)
+    required_elapsed_seconds = max(1, required_seconds - grace_seconds)
+    remaining_seconds = max(0.0, required_elapsed_seconds - age_seconds)
+    return {
+        "eligible": remaining_seconds <= 0,
+        "reason": (
+            "interval_elapsed"
+            if remaining_seconds <= 0
+            else "calibration_interval_not_elapsed"
+        ),
+        "latest_run_uid": latest_completed.get("run_uid"),
+        "latest_created_at": created_text,
+        "age_seconds": round(age_seconds, 3),
+        "required_interval_seconds": required_seconds,
+        "scheduler_grace_seconds": grace_seconds,
+        "required_elapsed_seconds": required_elapsed_seconds,
+        "remaining_seconds": round(remaining_seconds, 3),
+        "next_eligible_at": (
+            created_at + timedelta(seconds=required_elapsed_seconds)
+        ).isoformat(),
+    }
+
+
 def build_vnpy_paper_trading_background_tasks(
     *,
     vnpy_main_engine: Optional[Any] = None,
@@ -12690,6 +12747,7 @@ def build_vnpy_paper_trading_background_tasks(
 
     def run_calibration_shadow() -> Dict[str, Any]:
         combinations = list(shadow_config["pairs"])
+        interval_seconds = int(shadow_config["interval_minutes"]) * 60
         if not _AUTO_AGENT_RUN_LOCK.acquire(blocking=False):
             return {
                 "accepted": False,
@@ -12700,9 +12758,23 @@ def build_vnpy_paper_trading_background_tasks(
             }
         runs: List[Dict[str, Any]] = []
         failures: List[Dict[str, str]] = []
+        cadence_skips: List[Dict[str, Any]] = []
         try:
             for market, strategy in combinations:
                 try:
+                    cadence = _calibration_shadow_cadence(
+                        service,
+                        market=market,
+                        strategy=strategy,
+                        interval_seconds=interval_seconds,
+                    )
+                    if not cadence["eligible"]:
+                        cadence_skips.append({
+                            "market": market,
+                            "strategy": strategy,
+                            **cadence,
+                        })
+                        continue
                     result = service.run_auto_trade_once(
                         execution_mode_override="dry_run",
                         ignore_auto_trade_enabled=True,
@@ -12743,23 +12815,32 @@ def build_vnpy_paper_trading_background_tasks(
             _AUTO_AGENT_RUN_LOCK.release()
         result = {
             "accepted": not failures,
-            "skipped": False,
-            "reason": "completed" if not failures else "partial_failure",
+            "skipped": bool(cadence_skips) and not runs and not failures,
+            "reason": (
+                "partial_failure"
+                if failures
+                else "calibration_interval_not_elapsed"
+                if cadence_skips and not runs
+                else "completed"
+            ),
             "configured_count": len(combinations),
             "attempted_count": len(runs) + len(failures),
             "completed_count": len(runs),
             "failed_count": len(failures),
+            "cadence_skipped_count": len(cadence_skips),
             "candidate_count": sum(int(item["candidate_count"]) for item in runs),
             "planned_count": sum(int(item["planned_count"]) for item in runs),
             "submitted_count": sum(int(item["submitted_count"]) for item in runs),
             "runs": runs,
+            "cadence_skips": cadence_skips,
             "failures": failures,
             "execution_mode": "dry_run",
             "submits_orders": False,
         }
         logger.info(
-            "Agent calibration shadow finished: completed=%s failed=%s",
+            "Agent calibration shadow finished: completed=%s cadence_skipped=%s failed=%s",
             len(runs),
+            len(cadence_skips),
             len(failures),
         )
         if failures:
