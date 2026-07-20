@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
+import requests
+
 from data_provider.base import canonical_stock_code, normalize_stock_code
 from src.config import get_config
 from src.repositories.portfolio_repo import (
@@ -643,6 +645,103 @@ class PortfolioService:
             summary["stale_count"] += item["stale_count"]
             summary["error_count"] += item["error_count"]
         return summary
+
+    def refresh_fx_pair(
+        self,
+        *,
+        from_currency: str,
+        to_currency: str,
+        as_of: Optional[date] = None,
+    ) -> Dict[str, Any]:
+        """Refresh one FX pair needed before its first cross-currency trade."""
+        from_norm = self._normalize_currency(from_currency)
+        to_norm = self._normalize_currency(to_currency)
+        as_of_date = as_of or date.today()
+        if from_norm == to_norm:
+            return {
+                "available": True,
+                "from_currency": from_norm,
+                "to_currency": to_norm,
+                "rate": 1.0,
+                "rate_date": as_of_date.isoformat(),
+                "source": "identity",
+                "stale": False,
+            }
+
+        config = get_config()
+        if not bool(getattr(config, "portfolio_fx_update_enabled", True)):
+            return {
+                "available": False,
+                "from_currency": from_norm,
+                "to_currency": to_norm,
+                "rate": None,
+                "rate_date": None,
+                "source": PORTFOLIO_FX_REFRESH_DISABLED_REASON,
+                "stale": True,
+            }
+
+        rate: Optional[float] = None
+        rate_date = as_of_date
+        source = "yfinance"
+        errors: List[str] = []
+        try:
+            rate = self._fetch_fx_rate_from_yfinance(
+                from_currency=from_norm,
+                to_currency=to_norm,
+                as_of_date=as_of_date,
+            )
+        except Exception as exc:  # noqa: BLE001 - provider fallback is intentional.
+            errors.append(f"yfinance: {exc}")
+
+        if rate is None or rate <= 0:
+            try:
+                frankfurter = self._fetch_fx_rate_from_frankfurter(
+                    from_currency=from_norm,
+                    to_currency=to_norm,
+                    as_of_date=as_of_date,
+                )
+                if frankfurter is not None:
+                    rate, rate_date = frankfurter
+                    source = "frankfurter"
+            except Exception as exc:  # noqa: BLE001 - fail closed after provider fallback.
+                errors.append(f"frankfurter: {exc}")
+
+        if rate is not None and rate > 0:
+            stale = (as_of_date - rate_date).days > PORTFOLIO_FX_MAX_AGE_DAYS
+            self.repo.save_fx_rate(
+                from_currency=from_norm,
+                to_currency=to_norm,
+                rate_date=rate_date,
+                rate=float(rate),
+                source=source,
+                is_stale=stale,
+            )
+            return {
+                "available": not stale,
+                "from_currency": from_norm,
+                "to_currency": to_norm,
+                "rate": float(rate),
+                "rate_date": rate_date.isoformat(),
+                "source": source,
+                "stale": stale,
+                "errors": errors,
+            }
+
+        cached = self.repo.get_latest_fx_rate(
+            from_currency=from_norm,
+            to_currency=to_norm,
+            as_of=as_of_date,
+        )
+        return {
+            "available": False,
+            "from_currency": from_norm,
+            "to_currency": to_norm,
+            "rate": float(cached.rate) if cached is not None and cached.rate > 0 else None,
+            "rate_date": cached.rate_date.isoformat() if cached is not None else None,
+            "source": "cache_stale" if cached is not None else "unavailable",
+            "stale": True,
+            "errors": errors,
+        }
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -1596,6 +1695,29 @@ class PortfolioService:
         if value <= 0:
             return None
         return value
+
+    @staticmethod
+    def _fetch_fx_rate_from_frankfurter(
+        *,
+        from_currency: str,
+        to_currency: str,
+        as_of_date: date,
+    ) -> Optional[Tuple[float, date]]:
+        """Fetch a dated reference rate when Yahoo FX is unavailable."""
+        response = requests.get(
+            f"https://api.frankfurter.app/{as_of_date.isoformat()}",
+            params={"from": from_currency, "to": to_currency},
+            timeout=10,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if str(payload.get("base") or "").strip().upper() != from_currency:
+            return None
+        rate = float((payload.get("rates") or {}).get(to_currency) or 0.0)
+        rate_date = date.fromisoformat(str(payload.get("date") or ""))
+        if rate <= 0 or rate_date > as_of_date:
+            return None
+        return rate, rate_date
 
     def _require_active_account(self, account_id: int) -> Any:
         account = self.repo.get_account(account_id, include_inactive=False)

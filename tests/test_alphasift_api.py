@@ -135,6 +135,127 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
             with patch.dict(os.environ, {"ALPHASIFT_DATA_DIR": str(Path(tmpdir) / "alphasift")}, clear=False):
                 return alphasift_endpoint.alphasift_hotspot_detail(config=config, **kwargs)
 
+    def test_compose_strategy_runtime_adds_overlay_without_replacing_bundled_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            package_dir = root / "package"
+            overlay_dir = root / "overlay"
+            package_dir.mkdir()
+            overlay_dir.mkdir()
+            (package_dir / "dual_low.yaml").write_text("name: dual_low\n", encoding="utf-8")
+            overlay = overlay_dir / "us_large_cap_momentum.yaml"
+            overlay.write_text("name: us_large_cap_momentum\n", encoding="utf-8")
+
+            with patch(
+                "src.services.alphasift_service._resolve_alphasift_data_dir",
+                return_value=root / "runtime",
+            ):
+                first = alphasift_service._compose_alphasift_strategy_dir(
+                    package_dir,
+                    [overlay],
+                )
+                second = alphasift_service._compose_alphasift_strategy_dir(
+                    package_dir,
+                    [overlay],
+                )
+
+            self.assertEqual(first, second)
+            self.assertEqual(
+                {item.name for item in first.glob("*.yaml")},
+                {"dual_low.yaml", "us_large_cap_momentum.yaml"},
+            )
+            self.assertEqual(
+                (first / "dual_low.yaml").read_text(encoding="utf-8"),
+                "name: dual_low\n",
+            )
+
+    def test_compose_strategy_runtime_rejects_overlay_name_collision(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            package_dir = root / "package"
+            overlay_dir = root / "overlay"
+            package_dir.mkdir()
+            overlay_dir.mkdir()
+            (package_dir / "dual_low.yaml").write_text("name: dual_low\n", encoding="utf-8")
+            overlay = overlay_dir / "dual_low.yaml"
+            overlay.write_text("name: replacement\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(RuntimeError, "must not replace bundled strategies"):
+                alphasift_service._compose_alphasift_strategy_dir(package_dir, [overlay])
+
+    def test_scoped_us_universe_override_is_explicit_and_restored(self) -> None:
+        calls = []
+
+        def original(*args, universe_source="auto", **kwargs):
+            calls.append((args, universe_source, kwargs))
+            return "snapshot"
+
+        module = SimpleNamespace(fetch_us_snapshot=original)
+
+        with patch.dict(
+            os.environ,
+            {"DSA_ALPHASIFT_US_UNIVERSE_SOURCE": "env"},
+            clear=False,
+        ), patch(
+            "src.services.alphasift_service.importlib.import_module",
+            return_value=module,
+        ):
+            with alphasift_service._alphasift_us_snapshot_universe():
+                self.assertIsNot(module.fetch_us_snapshot, original)
+                self.assertEqual(module.fetch_us_snapshot(max_workers=2), "snapshot")
+            self.assertIs(module.fetch_us_snapshot, original)
+
+        self.assertEqual(calls, [((), "env", {"max_workers": 2})])
+
+    def test_scoped_us_universe_override_rejects_unknown_source(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"DSA_ALPHASIFT_US_UNIVERSE_SOURCE": "unbounded_magic"},
+            clear=False,
+        ), self.assertRaisesRegex(ValueError, "must be auto, env, default, or sp500"):
+            with alphasift_service._alphasift_us_snapshot_universe():
+                pass
+
+    def test_dsa_us_snapshot_fallback_normalizes_quotes_and_audits_primary_error(self) -> None:
+        module = SimpleNamespace(fetch_us_universe=lambda source: ["AAPL", "MSFT"])
+        manager = MagicMock()
+        quote = SimpleNamespace(
+                price=245.0,
+                volume=1000,
+                amount=None,
+                change_pct=1.2,
+                name="Apple Inc.",
+                source=SimpleNamespace(value="stooq"),
+                total_mv=None,
+                circ_mv=None,
+                pe_ratio=None,
+                pb_ratio=None,
+                volume_ratio=None,
+                turnover_rate=None,
+            )
+        manager.get_realtime_quote.side_effect = (
+            lambda ticker, **_kwargs: quote if ticker == "AAPL" else None
+        )
+
+        with patch(
+            "src.services.alphasift_service._get_dsa_fetcher_manager",
+            return_value=manager,
+        ):
+            frame = alphasift_service._fetch_dsa_us_snapshot(
+                module,
+                universe_source="env",
+                primary_error=RuntimeError("rate limited"),
+            )
+
+        self.assertEqual(frame["code"].tolist(), ["AAPL"])
+        self.assertEqual(frame.iloc[0]["amount"], 245000.0)
+        self.assertEqual(frame.iloc[0]["snapshot_provider"], "stooq")
+        self.assertEqual(frame.attrs["snapshot_source"], "dsa_realtime_quote")
+        self.assertTrue(frame.attrs["fallback_used"])
+        self.assertIn("yfinance: rate limited", frame.attrs["source_errors"])
+        self.assertIn("MSFT: no DSA realtime quote", frame.attrs["source_errors"])
+        self.assertEqual(manager.get_realtime_quote.call_count, 2)
+
     def test_default_install_spec_is_commit_pinned(self) -> None:
         self.assertRegex(
             DEFAULT_ALPHASIFT_TEST_SPEC,
@@ -2402,6 +2523,42 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
                     "price_limit": "quote_change_below_conservative_4_5pct",
                 },
             },
+        )
+
+    def test_candidate_normalization_marks_us_static_price_limit_not_applicable(self) -> None:
+        candidate = alphasift_service._normalize_candidate(
+            {
+                "code": "AAPL",
+                "name": "Apple Inc.",
+                "price": 245.0,
+                "amount": 1200000000.0,
+                "dsa_context": {
+                    "enriched": True,
+                    "quote": {
+                        "code": "AAPL",
+                        "name": "Apple Inc.",
+                        "source": "tencent",
+                        "fetched_at": "2026-07-21T00:10:00+00:00",
+                        "price": 245.0,
+                        "pre_close": 242.0,
+                        "change_pct": 1.24,
+                        "volume": 49000000,
+                        "amount": 1200000000.0,
+                    },
+                },
+            },
+            1,
+        )
+
+        self.assertFalse(candidate["is_st"])
+        self.assertFalse(candidate["is_suspended"])
+        self.assertFalse(candidate["is_limit_up"])
+        self.assertFalse(candidate["is_limit_down"])
+        self.assertEqual(candidate["limit_status"], "not_applicable")
+        self.assertNotIn("trading_status", candidate["missing_fields"])
+        self.assertEqual(
+            candidate["trading_status_evidence"]["fields"]["price_limit"],
+            "us_market_has_no_static_daily_price_limit",
         )
 
     def test_candidate_normalization_keeps_uncertain_quote_status_fail_closed(self) -> None:

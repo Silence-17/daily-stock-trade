@@ -772,6 +772,52 @@ class PortfolioPr2TestCase(unittest.TestCase):
         self.assertTrue(bool(latest.is_stale))
         self.assertAlmostEqual(float(latest.rate), 7.0, places=6)
 
+    def test_refresh_fx_pair_bootstraps_currency_before_first_trade(self) -> None:
+        with patch.object(PortfolioService, "_fetch_fx_rate_from_yfinance", return_value=None), patch.object(
+            PortfolioService,
+            "_fetch_fx_rate_from_frankfurter",
+            return_value=(0.1395, date(2026, 1, 2)),
+        ):
+            result = self.service.refresh_fx_pair(
+                from_currency="CNY",
+                to_currency="USD",
+                as_of=date(2026, 1, 2),
+            )
+
+        self.assertTrue(result["available"])
+        self.assertEqual(result["source"], "frankfurter")
+        converted, stale, source = self.service.convert_amount(
+            amount=1000,
+            from_currency="CNY",
+            to_currency="USD",
+            as_of_date=date(2026, 1, 2),
+        )
+        self.assertAlmostEqual(converted, 139.5)
+        self.assertFalse(stale)
+        self.assertEqual(source, "direct_rate")
+
+    def test_frankfurter_fx_fetch_preserves_provider_rate_date(self) -> None:
+        response = MagicMock()
+        response.json.return_value = {
+            "date": "2026-01-02",
+            "base": "CNY",
+            "rates": {"USD": 0.1395},
+        }
+        with patch("src.services.portfolio_service.requests.get", return_value=response) as get_mock:
+            result = self.service._fetch_fx_rate_from_frankfurter(
+                from_currency="CNY",
+                to_currency="USD",
+                as_of_date=date(2026, 1, 3),
+            )
+
+        self.assertEqual(result, (0.1395, date(2026, 1, 2)))
+        response.raise_for_status.assert_called_once_with()
+        get_mock.assert_called_once_with(
+            "https://api.frankfurter.app/2026-01-03",
+            params={"from": "CNY", "to": "USD"},
+            timeout=10,
+        )
+
     def test_fx_refresh_disabled_returns_real_pair_count_without_fetching(self) -> None:
         account = self.service.create_account(name="US", broker="Demo", market="us", base_currency="CNY")
         aid = account["id"]

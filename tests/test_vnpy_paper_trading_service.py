@@ -1376,7 +1376,7 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         with patch(
             "src.services.vnpy_paper_trading_service.AlphaSiftService",
             return_value=fake_alphasift,
-        ):
+        ), patch.object(self.service.portfolio, "refresh_fx_pair", return_value={"available": False}):
             result = self.service.run_auto_trade_once()
 
         self.assertEqual(result["orders"][0]["reason"], "fx_rate_unavailable")
@@ -1384,6 +1384,27 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertEqual(result["orders"][0]["quote_currency"], "HKD")
         detail = self.service.agent_repo.get_run_detail(result["agent_run_uid"])
         self.assertFalse(detail["diagnostics"]["currency_budget"]["available"])
+
+    def test_auto_order_budget_refreshes_fx_pair_before_first_us_trade(self) -> None:
+        self.service.update_settings({"auto_market": "us", "auto_cash_per_order": 1000})
+
+        def refresh_pair(**kwargs):
+            self.service.portfolio.repo.save_fx_rate(
+                from_currency=kwargs["from_currency"],
+                to_currency=kwargs["to_currency"],
+                rate_date=kwargs["as_of"],
+                rate=0.14,
+                source="unit-test",
+            )
+            return {"available": True}
+
+        with patch.object(self.service.portfolio, "refresh_fx_pair", side_effect=refresh_pair) as refresh_mock:
+            budget = self.service._auto_order_currency_budget(self.service.get_settings())
+
+        self.assertTrue(budget["available"])
+        self.assertEqual(budget["quote_currency"], "USD")
+        self.assertAlmostEqual(budget["quote_cash_amount"], 140.0)
+        refresh_mock.assert_called_once()
 
     def test_auto_trade_hk_converts_base_budget_but_audits_base_amount(self) -> None:
         self.service.portfolio.repo.save_fx_rate(
@@ -8170,7 +8191,7 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         ]
         env = {
             "DSA_AGENT_CALIBRATION_SHADOW_ENABLED": "true",
-            "DSA_AGENT_CALIBRATION_SHADOW_PAIRS": "cn:dual_low,us:momentum_quality",
+            "DSA_AGENT_CALIBRATION_SHADOW_PAIRS": "cn:dual_low,us:us_large_cap_momentum",
             "DSA_AGENT_CALIBRATION_SHADOW_INTERVAL_MINUTES": "720",
             "DSA_AGENT_CALIBRATION_SHADOW_MAX_RESULTS": "2",
         }
@@ -8198,7 +8219,7 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
             {(call.kwargs["market_override"], call.kwargs["strategy_override"]) for call in calls},
             {
                 ("cn", "dual_low"),
-                ("us", "momentum_quality"),
+                ("us", "us_large_cap_momentum"),
             },
         )
         self.assertTrue(all(call.kwargs["execution_mode_override"] == "dry_run" for call in calls))

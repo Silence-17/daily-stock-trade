@@ -16,11 +16,12 @@ YfinanceFetcher - 兜底数据源 (Priority 4)
 
 import csv
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from io import StringIO
 from typing import Optional, List, Dict, Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 from tenacity import (
@@ -682,6 +683,100 @@ class YfinanceFetcher(BaseFetcher):
             logger.warning(f"[Stooq] 解析美股 {symbol} 行情失败: {exc}")
             return None
 
+    def _get_us_stock_quote_from_tencent(self, stock_code: str) -> Optional[UnifiedRealtimeQuote]:
+        """Fetch one US quote from Tencent before falling back to delayed Stooq data."""
+
+        symbol = stock_code.strip().upper()
+        request = Request(
+            f"https://qt.gtimg.cn/q=us{symbol}",
+            headers={
+                "Referer": "https://finance.qq.com",
+                "User-Agent": "Mozilla/5.0 (compatible; DSA/1.0; +https://github.com/ZhuLinsen/daily_stock_analysis)",
+                "Accept": "text/plain,*/*",
+            },
+        )
+        try:
+            with urlopen(request, timeout=15) as response:
+                payload = response.read().decode("gbk", "ignore").strip()
+        except (HTTPError, URLError, TimeoutError) as exc:
+            logger.warning(f"[Tencent] 获取美股 {symbol} 实时行情失败: {exc}")
+            return None
+        if not payload or '=""' in payload:
+            logger.warning(f"[Tencent] 美股 {symbol} 返回空行情")
+            return None
+
+        try:
+            start = payload.index('"') + 1
+            end = payload.rindex('"')
+            fields = payload[start:end].split("~")
+            if len(fields) < 63:
+                raise ValueError(f"field_count={len(fields)}")
+
+            def number(index: int) -> Optional[float]:
+                value = fields[index].strip() if len(fields) > index else ""
+                if not value:
+                    return None
+                parsed = float(value)
+                return parsed if parsed == parsed else None
+
+            price = number(3)
+            volume = number(36) or number(6)
+            if price is None or price <= 0 or volume is None or volume <= 0:
+                raise ValueError("missing positive price or volume")
+            timestamp = None
+            timestamp_text = fields[30].strip()
+            if timestamp_text:
+                timestamp = (
+                    datetime.strptime(timestamp_text, "%Y-%m-%d %H:%M:%S")
+                    .replace(tzinfo=ZoneInfo("America/New_York"))
+                    .astimezone(timezone.utc)
+                    .isoformat()
+                )
+            pb_ratio = number(51)
+            missing_fields = ["volume_ratio"]
+            if pb_ratio is None:
+                missing_fields.append("pb_ratio")
+            circ_mv = number(44)
+            total_mv = number(45)
+            quote = UnifiedRealtimeQuote(
+                code=symbol,
+                name=fields[46].strip() or fields[1].strip() or symbol,
+                source=RealtimeSource.TENCENT,
+                provider_timestamp=timestamp,
+                market="us",
+                currency=fields[35].strip().upper() or "USD",
+                data_quality="partial",
+                missing_fields=missing_fields,
+                price=price,
+                change_pct=number(32),
+                change_amount=number(31),
+                volume=int(volume),
+                amount=number(37) or price * volume,
+                turnover_rate=number(38),
+                amplitude=number(43),
+                open_price=number(5),
+                high=number(33),
+                low=number(34),
+                pre_close=number(4),
+                pe_ratio=number(39),
+                pb_ratio=pb_ratio,
+                circ_mv=(circ_mv * 100000000 if circ_mv is not None else None),
+                total_mv=(total_mv * 100000000 if total_mv is not None else None),
+                high_52w=number(48),
+                low_52w=number(49),
+            )
+            logger.info(f"[Tencent] 获取美股 {symbol} 实时行情成功: 价格={price}")
+            return quote
+        except Exception as exc:
+            logger.warning(f"[Tencent] 解析美股 {symbol} 行情失败: {exc}")
+            return None
+
+    def _get_us_stock_quote_fallback(self, stock_code: str) -> Optional[UnifiedRealtimeQuote]:
+        return (
+            self._get_us_stock_quote_from_tencent(stock_code)
+            or self._get_us_stock_quote_from_stooq(stock_code)
+        )
+
     def _get_us_index_realtime_quote(
         self,
         user_code: str,
@@ -849,8 +944,8 @@ class YfinanceFetcher(BaseFetcher):
                 hist = ticker.history(period='2d')
                 if hist.empty:
                     if is_us_symbol:
-                        logger.warning(f"[Yfinance] 无法获取 {symbol} 的数据，尝试 Stooq 兜底")
-                        return self._get_us_stock_quote_from_stooq(symbol)
+                        logger.warning(f"[Yfinance] 无法获取 {symbol} 的数据，尝试 Tencent/Stooq 兜底")
+                        return self._get_us_stock_quote_fallback(symbol)
                     logger.warning(f"[Yfinance] 无法获取 {symbol} 的数据")
                     return None
 
@@ -931,8 +1026,10 @@ class YfinanceFetcher(BaseFetcher):
 
         except Exception as e:
             if self._is_us_stock(stock_code):
-                logger.warning(f"[Yfinance] 获取美股 {stock_code} 实时行情失败: {e}，尝试 Stooq 兜底")
-                return self._get_us_stock_quote_from_stooq(stock_code)
+                logger.warning(
+                    f"[Yfinance] 获取美股 {stock_code} 实时行情失败: {e}，尝试 Tencent/Stooq 兜底"
+                )
+                return self._get_us_stock_quote_fallback(stock_code)
             logger.warning(f"[Yfinance] 获取 {stock_code} 实时行情失败: {e}")
             return None
 

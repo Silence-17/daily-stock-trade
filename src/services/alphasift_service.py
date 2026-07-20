@@ -11,6 +11,7 @@ import logging
 import math
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -45,10 +46,14 @@ DSA_ALPHASIFT_LLM_MAX_CANDIDATES = 12
 DSA_ALPHASIFT_LLM_TIMEOUT_SECONDS = 180
 DSA_ALPHASIFT_LLM_MAX_TOKENS = 1024
 DSA_ALPHASIFT_DAILY_FETCH_RETRIES = 3
+DSA_ALPHASIFT_US_UNIVERSE_SOURCE_ENV = "DSA_ALPHASIFT_US_UNIVERSE_SOURCE"
 DSA_ALPHASIFT_SNAPSHOT_SOURCE_PRIORITY = "sina,efinance,akshare_em,em_datacenter"
 DSA_ALPHASIFT_SNAPSHOT_SOURCE_PRIORITY_WITH_TUSHARE = "tushare,sina,efinance,akshare_em,em_datacenter"
 DSA_ALPHASIFT_CANDIDATE_CONTEXT_PROVIDERS = "news,fund_flow,announcement,quote"
 DSA_ALPHASIFT_DATA_DIR = Path("data") / "alphasift"
+DSA_ALPHASIFT_STRATEGY_OVERLAY_DIR = (
+    Path(__file__).resolve().parents[2] / "strategies" / "alphasift"
+)
 DSA_ALPHASIFT_HOTSPOT_CACHE_PATH = DSA_ALPHASIFT_DATA_DIR / "hotspots.json"
 DSA_ALPHASIFT_HOTSPOT_HISTORY_PATH = DSA_ALPHASIFT_DATA_DIR / "hotspot.history.jsonl"
 DSA_ALPHASIFT_SCREEN_CACHE_SCHEMA_VERSION = 1
@@ -979,6 +984,8 @@ class AlphaSiftService:
             "contract_version": adapter_status.get("contract_version"),
             "version": adapter_status.get("version"),
             "strategy_count": adapter_status.get("strategy_count"),
+            "supported_markets": list(adapter_status.get("supported_markets") or []),
+            "strategy_extensions": _alphasift_strategy_extension_status(),
         }
         source_health = _get_alphasift_source_health_snapshot(self.config)
         if source_health:
@@ -1001,10 +1008,18 @@ class AlphaSiftService:
         _ensure_alphasift_enabled(self.config)
         _ensure_alphasift_available_for_use()
         strategies = _list_strategies()
+        supported_markets = sorted({
+            str(market).strip().lower()
+            for strategy in strategies
+            for market in (strategy.get("market_scope") or [])
+            if str(market).strip()
+        })
         return {
             "enabled": True,
             "strategies": strategies,
             "strategy_count": len(strategies),
+            "supported_markets": supported_markets,
+            "strategy_extensions": _alphasift_strategy_extension_status(),
         }
 
     def install(self, *, request: Request) -> Dict[str, Any]:
@@ -1860,8 +1875,66 @@ def _prepare_alphasift_runtime_env() -> None:
         return
 
     package_strategies_dir = Path(spec.origin).resolve().parent / "strategies"
-    if package_strategies_dir.is_dir():
+    if not package_strategies_dir.is_dir():
+        return
+
+    overlay_files = sorted(DSA_ALPHASIFT_STRATEGY_OVERLAY_DIR.glob("*.yaml"))
+    if not overlay_files:
         os.environ["STRATEGIES_DIR"] = str(package_strategies_dir)
+        return
+
+    with _ALPHASIFT_RUNTIME_ENV_LOCK:
+        if os.getenv("STRATEGIES_DIR"):
+            return
+        composed_dir = _compose_alphasift_strategy_dir(
+            package_strategies_dir,
+            overlay_files,
+        )
+        os.environ["STRATEGIES_DIR"] = str(composed_dir)
+
+
+def _compose_alphasift_strategy_dir(
+    package_strategies_dir: Path,
+    overlay_files: List[Path],
+) -> Path:
+    package_files = sorted(package_strategies_dir.glob("*.yaml"))
+    package_names = {item.name for item in package_files}
+    collisions = sorted(item.name for item in overlay_files if item.name in package_names)
+    if collisions:
+        raise RuntimeError(
+            "DSA AlphaSift strategy overlays must not replace bundled strategies: "
+            + ", ".join(collisions)
+        )
+
+    source_files = [*package_files, *overlay_files]
+    digest = hashlib.sha256()
+    for source in source_files:
+        digest.update(source.name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(source.read_bytes())
+        digest.update(b"\0")
+    version = digest.hexdigest()[:16]
+    root = _resolve_alphasift_data_dir() / "strategies.runtime"
+    target = root / version
+    if target.is_dir():
+        return target
+
+    root.mkdir(parents=True, exist_ok=True)
+    staging = root / f".{version}.{os.getpid()}.{threading.get_ident()}"
+    try:
+        staging.mkdir(parents=False, exist_ok=False)
+        for source in source_files:
+            (staging / source.name).write_bytes(source.read_bytes())
+        try:
+            staging.rename(target)
+        except FileExistsError:
+            pass
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+    if not target.is_dir():
+        raise RuntimeError("Failed to compose AlphaSift strategy runtime directory")
+    return target
 
 
 def _get_dsa_adapter() -> Any:
@@ -1926,7 +1999,42 @@ def _call_alphasift_status() -> Dict[str, Any]:
             "AlphaSift 适配层 get_status 返回结构非法，请检查适配层版本。",
             diagnostics=diagnostics,
         ) from exc
+    try:
+        list_strategies = _get_adapter_callable(
+            adapter,
+            "list_strategies",
+            "list_strategies() 不可调用。",
+        )
+        raw_strategies = _to_plain(list_strategies())
+        if isinstance(raw_strategies, list):
+            markets = sorted({
+                str(market).strip().lower()
+                for raw_strategy in raw_strategies
+                if isinstance(_to_plain(raw_strategy), dict)
+                for market in (
+                    _to_plain(raw_strategy).get("market_scope")
+                    or _to_plain(raw_strategy).get("marketScope")
+                    or []
+                )
+                if str(market).strip()
+            })
+            if not result.get("supported_markets"):
+                result["supported_markets"] = markets
+            if result.get("strategy_count") is None:
+                result["strategy_count"] = len(raw_strategies)
+    except Exception as exc:  # noqa: BLE001 - status remains available without scope metadata.
+        logger.debug("AlphaSift strategy scope status unavailable: %s", exc)
     return result
+
+
+def _alphasift_strategy_extension_status() -> Dict[str, Any]:
+    files = sorted(DSA_ALPHASIFT_STRATEGY_OVERLAY_DIR.glob("*.yaml"))
+    return {
+        "enabled": bool(files),
+        "strategy_ids": [item.stem for item in files],
+        "merge_mode": "content_addressed_runtime_overlay" if files else "bundled_only",
+        "explicit_strategies_dir_preserved": True,
+    }
 
 
 def _is_expected_alphasift_missing(exc: ModuleNotFoundError) -> bool:
@@ -2095,6 +2203,7 @@ def _call_alphasift_screen(
             llm_timeout_seconds=llm_timeout_seconds,
             llm_max_retries=llm_max_retries,
         ),
+        _alphasift_us_snapshot_universe(),
         _alphasift_dsa_daily_history_provider(),
         _alphasift_litellm_headers(config),
     ):
@@ -2117,6 +2226,128 @@ def _call_alphasift_screen(
             if not (supports_var_kwargs or supports_var_positional or len(positional_params) >= 3):
                 raise exc
             return screen(strategy, market, max_results)
+
+
+@contextmanager
+def _alphasift_us_snapshot_universe() -> Iterator[None]:
+    source = _env_text(os.getenv(DSA_ALPHASIFT_US_UNIVERSE_SOURCE_ENV)).lower()
+    if not source or source == "auto":
+        yield
+        return
+    if source not in {"env", "default", "sp500"}:
+        raise ValueError(
+            f"{DSA_ALPHASIFT_US_UNIVERSE_SOURCE_ENV} must be auto, env, default, or sp500"
+        )
+
+    module = importlib.import_module("alphasift.snapshot_us")
+    original = getattr(module, "fetch_us_snapshot", None)
+    if not callable(original):
+        raise RuntimeError("AlphaSift US snapshot adapter is unavailable")
+    if "universe_source" not in inspect.signature(original).parameters:
+        raise RuntimeError(
+            "Installed AlphaSift does not support scoped US universe selection"
+        )
+
+    def scoped_fetch_us_snapshot(*args: Any, **kwargs: Any) -> Any:
+        kwargs.setdefault("universe_source", source)
+        try:
+            return original(*args, **kwargs)
+        except Exception as primary_exc:
+            logger.warning(
+                "AlphaSift US snapshot failed; trying DSA realtime fallback: %s",
+                primary_exc,
+            )
+            return _fetch_dsa_us_snapshot(
+                module,
+                universe_source=str(kwargs["universe_source"]),
+                primary_error=primary_exc,
+            )
+
+    with _ALPHASIFT_RUNTIME_ENV_LOCK:
+        setattr(module, "fetch_us_snapshot", scoped_fetch_us_snapshot)
+        try:
+            yield
+        finally:
+            setattr(module, "fetch_us_snapshot", original)
+
+
+def _fetch_dsa_us_snapshot(
+    snapshot_module: Any,
+    *,
+    universe_source: str,
+    primary_error: BaseException,
+) -> Any:
+    import pandas as pd
+
+    universe_loader = getattr(snapshot_module, "fetch_us_universe", None)
+    if not callable(universe_loader):
+        raise RuntimeError("AlphaSift US universe loader is unavailable") from primary_error
+    tickers = [
+        str(item).strip().upper()
+        for item in universe_loader(universe_source)
+        if str(item).strip()
+    ]
+    tickers = list(dict.fromkeys(tickers))
+    if not tickers:
+        raise RuntimeError("AlphaSift US universe is empty") from primary_error
+
+    manager = _get_dsa_fetcher_manager()
+    rows: List[Dict[str, Any]] = []
+    errors: List[str] = []
+
+    def fetch_one(ticker: str) -> Tuple[str, Any]:
+        quote = manager.get_realtime_quote(ticker, log_final_failure=False)
+        return ticker, quote
+
+    max_workers = min(4, len(tickers))
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {pool.submit(fetch_one, ticker): ticker for ticker in tickers}
+        for future in as_completed(futures):
+            ticker = futures[future]
+            try:
+                _, quote = future.result()
+            except Exception as exc:  # noqa: BLE001 - isolate per-symbol provider failures.
+                errors.append(f"{ticker}: {str(exc)[:160] or type(exc).__name__}")
+                continue
+            if quote is None:
+                errors.append(f"{ticker}: no DSA realtime quote")
+                continue
+            price = _safe_float(getattr(quote, "price", None))
+            volume = _safe_float(getattr(quote, "volume", None))
+            if price is None or price <= 0 or volume is None or volume <= 0:
+                errors.append(f"{ticker}: incomplete DSA realtime quote")
+                continue
+            amount = _safe_float(getattr(quote, "amount", None))
+            if amount is None or amount <= 0:
+                amount = price * volume
+            source_value = getattr(getattr(quote, "source", None), "value", None)
+            rows.append({
+                "code": ticker,
+                "name": _env_text(getattr(quote, "name", None)) or ticker,
+                "price": price,
+                "change_pct": _safe_float(getattr(quote, "change_pct", None)),
+                "amount": amount,
+                "total_mv": _safe_float(getattr(quote, "total_mv", None)),
+                "circ_mv": _safe_float(getattr(quote, "circ_mv", None)),
+                "pe_ratio": _safe_float(getattr(quote, "pe_ratio", None)),
+                "pb_ratio": _safe_float(getattr(quote, "pb_ratio", None)),
+                "volume_ratio": _safe_float(getattr(quote, "volume_ratio", None)),
+                "turnover_rate": _safe_float(getattr(quote, "turnover_rate", None)),
+                "industry": "",
+                "snapshot_provider": _env_text(source_value) or "dsa_realtime_quote",
+            })
+    if not rows:
+        detail = "; ".join(errors[:5]) or "no rows"
+        raise RuntimeError(f"DSA US snapshot fallback returned no valid rows: {detail}") from primary_error
+
+    frame = pd.DataFrame(rows)
+    frame.attrs["snapshot_source"] = "dsa_realtime_quote"
+    frame.attrs["fallback_used"] = True
+    frame.attrs["source_errors"] = [
+        f"yfinance: {str(primary_error)[:240] or type(primary_error).__name__}",
+        *errors,
+    ]
+    return frame
 
 
 @contextmanager
@@ -4568,7 +4799,7 @@ def _derive_candidate_trading_status(
     source: Dict[str, Any],
     dsa_context: Any,
 ) -> Dict[str, Any]:
-    """Derive conservative A-share risk flags from an observed realtime quote."""
+    """Derive conservative market-aware risk flags from an observed realtime quote."""
 
     if not isinstance(dsa_context, dict):
         return {}
@@ -4643,6 +4874,11 @@ def _derive_candidate_trading_status(
             derived["is_limit_down"] = False
             derived["limit_status"] = "not_at_limit"
             evidence_fields["price_limit"] = "quote_change_below_conservative_4_5pct"
+    elif explicit_limit is None and re.fullmatch(r"[A-Za-z][A-Za-z0-9.-]{0,14}", code):
+        derived["is_limit_up"] = False
+        derived["is_limit_down"] = False
+        derived["limit_status"] = "not_applicable"
+        evidence_fields["price_limit"] = "us_market_has_no_static_daily_price_limit"
 
     if evidence_fields:
         derived["trading_status_evidence"] = {

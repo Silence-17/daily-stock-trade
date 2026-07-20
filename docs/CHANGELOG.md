@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [新功能] 新增 DSA 管理的 `us_large_cap_momentum` AlphaSift 策略叠加、显式美股 universe、yfinance 限流后的腾讯实时行情 fallback，以及首次跨币种自动交易的按需汇率刷新；汇率仍不可用时保持 fail-closed
+- [测试] 真实美股校准 shadow `ss-agent-20260720165408-d91ad2b9` 在线筛出 3 个候选，生成 1 个 dry-run 计划且提交 0 个订单；CNY 10,000 按有效汇率换算为 USD 1,477.80
+
 - [新功能] 新增默认关闭的生产校准 shadow 调度任务，可按显式 `市场:AlphaSift策略` 配对定时生成独立 `agent_calibration_shadow` dry-run 样本；运行前严格校验策略 `market_scope`，禁用动态策略改写、下单、卖出、再平衡和账户风控副作用，并与正式自动交易互斥且不污染其最后运行、告警或熔断历史
 - [测试] Python 3.13 真实后台调度完成首个 `cn:dual_low` 校准 shadow：47.842 秒内生成 3 个候选决策和 3 条 dry-run 计划审计，均因已有持仓明确跳过，planned/submitted 与任务失败均为 0；正式 last-auto-run 未变化，DSA_SIM 保持连接且四类 EventEngine 回调完整
 

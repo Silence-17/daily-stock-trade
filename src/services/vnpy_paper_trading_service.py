@@ -88,6 +88,7 @@ ALPHASIFT_FALLBACK_STRATEGIES = (
     "oversold_reversal",
     "shrink_pullback",
     "volume_breakout",
+    "us_large_cap_momentum",
 )
 DEFAULT_AUTO_ALPHASIFT_LLM_TIMEOUT_SECONDS = 45
 DEFAULT_AUTO_ALPHASIFT_LLM_MAX_RETRIES = 0
@@ -5346,13 +5347,26 @@ class VnpyPaperTradingService:
         base_currency = str(account.get("base_currency") or "CNY").strip().upper() or "CNY"
         quote_currency = self._currency_for_market(settings.auto_market)
         base_cash_amount = max(0.0, float(settings.auto_cash_per_order or 0.0))
+        as_of_date = date.today()
         try:
             quote_cash_amount, stale, source = self.portfolio.convert_amount(
                 amount=base_cash_amount,
                 from_currency=base_currency,
                 to_currency=quote_currency,
-                as_of_date=date.today(),
+                as_of_date=as_of_date,
             )
+            if stale and base_currency != quote_currency:
+                self.portfolio.refresh_fx_pair(
+                    from_currency=base_currency,
+                    to_currency=quote_currency,
+                    as_of=as_of_date,
+                )
+                quote_cash_amount, stale, source = self.portfolio.convert_amount(
+                    amount=base_cash_amount,
+                    from_currency=base_currency,
+                    to_currency=quote_currency,
+                    as_of_date=as_of_date,
+                )
         except Exception as exc:  # noqa: BLE001 - automatic orders must fail closed on FX errors.
             return {
                 "available": False,
