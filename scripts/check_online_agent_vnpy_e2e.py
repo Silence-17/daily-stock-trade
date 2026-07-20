@@ -118,6 +118,20 @@ def _runtime_view(status: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _account_ids(payload: Dict[str, Any]) -> set[int]:
+    result = set()
+    for item in payload.get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            account_id = int(item.get("id"))
+        except (TypeError, ValueError):
+            continue
+        if account_id > 0:
+            result.add(account_id)
+    return result
+
+
 def _decision_is_traceable(decision: Dict[str, Any]) -> bool:
     if not str(decision.get("symbol") or "").strip():
         return False
@@ -158,6 +172,7 @@ def evaluate_acceptance(
     max_failed_plans: int,
     require_execution: bool,
     settings_restored: bool,
+    account_environment_restored: bool = True,
     cash_tolerance: float = 0.01,
 ) -> Dict[str, Any]:
     failures: list[str] = []
@@ -203,6 +218,8 @@ def evaluate_acceptance(
         failures.append("active_account_changed")
     if not settings_restored:
         failures.append("settings_not_restored")
+    if not account_environment_restored:
+        failures.append("account_environment_not_restored")
 
     cash_delta = None
     if before.get("cash") is not None and after.get("cash") is not None:
@@ -281,6 +298,7 @@ def evaluate_acceptance(
         "position_deltas": position_deltas,
         "runtime": runtime,
         "settings_restored": settings_restored,
+        "account_environment_restored": account_environment_restored,
     }
 
 
@@ -291,6 +309,27 @@ def _plans_are_terminal(execution_mode: str, detail: Dict[str, Any]) -> bool:
     return not any(
         str(item.get("status") or "") in ACTIVE_VNPY_PLAN_STATUSES for item in plans
     )
+
+
+def _run_is_terminal_and_coherent(
+    execution_mode: str, detail: Dict[str, Any]
+) -> bool:
+    if not _plans_are_terminal(execution_mode, detail):
+        return False
+    decisions = {
+        item.get("id"): item
+        for item in detail.get("decisions") or []
+        if isinstance(item, dict) and item.get("id") is not None
+    }
+    for plan in detail.get("trade_plans") or []:
+        if not isinstance(plan, dict) or plan.get("decision_id") is None:
+            continue
+        decision = decisions.get(plan.get("decision_id"))
+        if decision is None:
+            return False
+        if str(decision.get("status") or "") != str(plan.get("status") or ""):
+            return False
+    return True
 
 
 def _bounded_float(
@@ -340,6 +379,16 @@ def main(argv: Iterable[str] | None = None) -> int:
         action="store_true",
         help="Accept an all-skipped vn.py run without requiring a fill.",
     )
+    parser.add_argument(
+        "--isolated-account",
+        action="store_true",
+        help="Create a clean paper account, then restore the original account.",
+    )
+    parser.add_argument(
+        "--keep-isolated-account-visible",
+        action="store_true",
+        help="Keep the restored test account visible in archived account history.",
+    )
     parser.add_argument("--timeout-seconds", type=float, default=180.0)
     parser.add_argument("--poll-interval-seconds", type=float, default=0.5)
     parser.add_argument("--request-timeout-seconds", type=float, default=120.0)
@@ -376,30 +425,89 @@ def main(argv: Iterable[str] | None = None) -> int:
         parser.error("vnpy_paper requires --allow-simulated-orders")
     if args.temporarily_disable_time_gate and args.execution_mode != "vnpy_paper":
         parser.error("--temporarily-disable-time-gate requires vnpy_paper mode")
+    if args.isolated_account and args.execution_mode != "vnpy_paper":
+        parser.error("--isolated-account requires vnpy_paper mode")
+    if args.keep_isolated_account_visible and not args.isolated_account:
+        parser.error("--keep-isolated-account-visible requires --isolated-account")
 
     started_at = _utc_iso()
+    original_status: Dict[str, Any] = {}
     before_status: Dict[str, Any] = {}
     after_status: Dict[str, Any] = {}
+    final_status: Dict[str, Any] = {}
     run_response: Dict[str, Any] = {}
     run_detail: Dict[str, Any] = {}
     changed_time_gate = False
+    changed_auto_trade = False
     settings_restored = True
-    error: str | None = None
+    account_environment_restored = not args.isolated_account
+    isolated_account_cleanup_ok = not args.isolated_account
+    original_account_id: int | None = None
+    isolated_account_ids: set[int] = set()
+    baseline_account_ids: set[int] = set()
+    original_time_gate = True
+    original_auto_trade = False
+    errors: list[str] = []
     try:
-        before_status = _request_json(
+        original_status = _request_json(
             base_url,
             "/api/v1/vnpy-paper/status?include_snapshot=true&include_recent_trades=false",
             timeout_seconds=request_timeout,
         )
-        runtime = _runtime_view(before_status)
+        before_status = original_status
+        runtime = _runtime_view(original_status)
         if args.execution_mode == "vnpy_paper" and not str(
             runtime.get("gateway_class") or ""
         ).endswith(":DsaSimulatedGateway"):
             parser.error("order acceptance is restricted to DsaSimulatedGateway")
 
-        settings = before_status.get("settings")
+        settings = original_status.get("settings")
         settings = settings if isinstance(settings, dict) else {}
+        if (
+            args.temporarily_disable_time_gate
+            and "auto_trade_time_gate_enabled" not in settings
+        ):
+            raise ValueError("status is missing auto_trade_time_gate_enabled")
         original_time_gate = bool(settings.get("auto_trade_time_gate_enabled", True))
+        original_auto_trade = bool(settings.get("auto_trade_enabled", False))
+        original_account_id = _snapshot_view(original_status).get("account_id")
+
+        if args.isolated_account:
+            if original_account_id is None:
+                raise ValueError("isolated acceptance requires an active paper account")
+            if "auto_trade_enabled" not in settings:
+                raise ValueError("status is missing auto_trade_enabled")
+            accounts_before = _request_json(
+                base_url,
+                "/api/v1/vnpy-paper/accounts?include_inactive=true&include_hidden=true",
+                timeout_seconds=request_timeout,
+            )
+            baseline_account_ids = _account_ids(accounts_before)
+            if original_auto_trade:
+                # An uncertain response may already have paused the scheduler.
+                changed_auto_trade = True
+                _request_json(
+                    base_url,
+                    "/api/v1/vnpy-paper/settings",
+                    method="PUT",
+                    payload={"auto_trade_enabled": False},
+                    timeout_seconds=request_timeout,
+                )
+            before_status = _request_json(
+                base_url,
+                (
+                    "/api/v1/vnpy-paper/account/reset"
+                    "?include_snapshot=true&include_recent_trades=false"
+                ),
+                method="POST",
+                payload={},
+                timeout_seconds=request_timeout,
+            )
+            isolated_id = _snapshot_view(before_status).get("account_id")
+            if isolated_id is None or isolated_id == original_account_id:
+                raise ValueError("account reset did not create an isolated paper account")
+            isolated_account_ids.add(int(isolated_id))
+
         if args.temporarily_disable_time_gate and original_time_gate:
             # Treat an uncertain PUT response as potentially applied and restore in finally.
             changed_time_gate = True
@@ -430,44 +538,131 @@ def main(argv: Iterable[str] | None = None) -> int:
                     f"/api/v1/vnpy-paper/agent-runs/{run_uid}",
                     timeout_seconds=request_timeout,
                 )
-                if _plans_are_terminal(args.execution_mode, run_detail):
+                if _run_is_terminal_and_coherent(args.execution_mode, run_detail):
                     break
                 if time.monotonic() >= deadline:
                     break
                 time.sleep(poll_interval)
+        after_status = _request_json(
+            base_url,
+            "/api/v1/vnpy-paper/status?include_snapshot=true&include_recent_trades=false",
+            timeout_seconds=request_timeout,
+        )
     except Exception as exc:  # pragma: no cover - exercised through CLI behavior
-        error = f"{type(exc).__name__}: {exc}"
+        errors.append(f"{type(exc).__name__}: {exc}")
     finally:
+        if args.isolated_account and original_account_id is not None:
+            restored_status: Dict[str, Any] = {}
+            try:
+                restored_status = _request_json(
+                    base_url,
+                    (
+                        f"/api/v1/vnpy-paper/accounts/{original_account_id}/restore"
+                        "?include_snapshot=false&include_recent_trades=false"
+                    ),
+                    method="POST",
+                    payload={},
+                    timeout_seconds=request_timeout,
+                )
+                account_environment_restored = (
+                    _snapshot_view(restored_status).get("account_id")
+                    == original_account_id
+                )
+            except Exception as exc:  # pragma: no cover - external recovery failure
+                errors.append(f"account_restore_failed: {type(exc).__name__}: {exc}")
+
+            try:
+                accounts_after = _request_json(
+                    base_url,
+                    "/api/v1/vnpy-paper/accounts?include_inactive=true&include_hidden=true",
+                    timeout_seconds=request_timeout,
+                )
+                isolated_account_ids.update(
+                    _account_ids(accounts_after) - baseline_account_ids
+                )
+                current_account_id = accounts_after.get("current_account_id")
+                account_environment_restored = account_environment_restored or (
+                    current_account_id == original_account_id
+                )
+                if args.keep_isolated_account_visible:
+                    isolated_account_cleanup_ok = True
+                elif isolated_account_ids:
+                    cleanup = _request_json(
+                        base_url,
+                        "/api/v1/vnpy-paper/accounts/archived/cleanup",
+                        method="POST",
+                        payload={
+                            "account_ids": sorted(isolated_account_ids),
+                            "dry_run": False,
+                            "include_hidden": True,
+                        },
+                        timeout_seconds=request_timeout,
+                    )
+                    cleaned = {
+                        int(item)
+                        for item in cleanup.get("cleaned_account_ids") or []
+                        if str(item).isdigit()
+                    }
+                    isolated_account_cleanup_ok = isolated_account_ids <= cleaned
+                else:
+                    isolated_account_cleanup_ok = True
+            except Exception as exc:  # pragma: no cover - external recovery failure
+                isolated_account_cleanup_ok = False
+                errors.append(f"account_cleanup_failed: {type(exc).__name__}: {exc}")
+            account_environment_restored = (
+                account_environment_restored and isolated_account_cleanup_ok
+            )
+
+        restore_payload: Dict[str, Any] = {}
         if changed_time_gate:
+            restore_payload["auto_trade_time_gate_enabled"] = original_time_gate
+        if changed_auto_trade:
+            if account_environment_restored or not original_auto_trade:
+                restore_payload["auto_trade_enabled"] = original_auto_trade
+            else:
+                settings_restored = False
+        if restore_payload:
             try:
                 _request_json(
                     base_url,
                     "/api/v1/vnpy-paper/settings",
                     method="PUT",
-                    payload={"auto_trade_time_gate_enabled": True},
+                    payload=restore_payload,
                     timeout_seconds=request_timeout,
                 )
             except Exception as exc:  # pragma: no cover - external recovery failure
                 settings_restored = False
-                if error is None:
-                    error = f"settings_restore_failed: {type(exc).__name__}: {exc}"
+                errors.append(f"settings_restore_failed: {type(exc).__name__}: {exc}")
         try:
-            after_status = _request_json(
+            final_status = _request_json(
                 base_url,
                 "/api/v1/vnpy-paper/status?include_snapshot=true&include_recent_trades=false",
                 timeout_seconds=request_timeout,
             )
+            restored_settings = final_status.get("settings")
+            restored_settings = (
+                restored_settings if isinstance(restored_settings, dict) else {}
+            )
             if changed_time_gate:
-                restored_settings = after_status.get("settings")
-                restored_settings = (
-                    restored_settings if isinstance(restored_settings, dict) else {}
+                settings_restored = settings_restored and (
+                    bool(restored_settings.get("auto_trade_time_gate_enabled"))
+                    == original_time_gate
                 )
-                settings_restored = settings_restored and bool(
-                    restored_settings.get("auto_trade_time_gate_enabled")
+            if changed_auto_trade:
+                settings_restored = settings_restored and (
+                    bool(restored_settings.get("auto_trade_enabled"))
+                    == original_auto_trade
+                )
+            if args.isolated_account:
+                account_environment_restored = account_environment_restored and (
+                    _snapshot_view(final_status).get("account_id")
+                    == original_account_id
                 )
         except Exception as exc:  # pragma: no cover - external status failure
-            if error is None:
-                error = f"final_status_failed: {type(exc).__name__}: {exc}"
+            errors.append(f"final_status_failed: {type(exc).__name__}: {exc}")
+
+    if not after_status and not args.isolated_account:
+        after_status = final_status
 
     evaluation = evaluate_acceptance(
         execution_mode=args.execution_mode,
@@ -479,7 +674,9 @@ def main(argv: Iterable[str] | None = None) -> int:
         max_failed_plans=max_failed_plans,
         require_execution=args.execution_mode == "vnpy_paper" and not args.allow_no_fill,
         settings_restored=settings_restored,
+        account_environment_restored=account_environment_restored,
     )
+    error = "; ".join(errors) if errors else None
     if error is not None:
         evaluation["ok"] = False
         evaluation["failures"] = ["acceptance_runtime_error", *evaluation["failures"]]
@@ -491,6 +688,13 @@ def main(argv: Iterable[str] | None = None) -> int:
         "base_url": base_url,
         "execution_mode": args.execution_mode,
         "time_gate_temporarily_disabled": changed_time_gate,
+        "isolated_account": {
+            "enabled": bool(args.isolated_account),
+            "original_account_id": original_account_id,
+            "created_account_ids": sorted(isolated_account_ids),
+            "restored": account_environment_restored,
+            "cleanup_ok": isolated_account_cleanup_ok,
+        },
         "error": error,
         "run": {
             "run_uid": run_response.get("agent_run_uid"),

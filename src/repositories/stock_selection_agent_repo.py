@@ -460,6 +460,97 @@ class StockSelectionAgentRepository:
             session.refresh(row)
             return self._decision_to_dict(row)
 
+    def update_trade_plan_and_decision_execution(
+        self,
+        *,
+        plan_uid: str,
+        status: str,
+        submitted_quantity: Optional[float] = None,
+        submitted_price: Optional[float] = None,
+        trade_id: Optional[int] = None,
+        skip_reason: Optional[str] = None,
+        order_result: Optional[Dict[str, Any]] = None,
+        expected_updated_at: Optional[datetime] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Update a plan and its linked decision in one database transaction."""
+
+        with self.db.get_session() as session:
+            plan = session.execute(
+                select(StockSelectionAgentTradePlan)
+                .where(StockSelectionAgentTradePlan.plan_uid == str(plan_uid))
+                .limit(1)
+            ).scalar_one_or_none()
+            if plan is None:
+                return None
+            if (
+                expected_updated_at is not None
+                and plan.updated_at != expected_updated_at
+            ):
+                decision = (
+                    session.get(
+                        StockSelectionAgentDecision,
+                        int(plan.decision_id),
+                    )
+                    if plan.decision_id is not None
+                    else None
+                )
+                return {
+                    "trade_plan": self._trade_plan_to_dict(plan),
+                    "decision": (
+                        self._decision_to_dict(decision)
+                        if decision is not None
+                        else None
+                    ),
+                    "stale_write_skipped": True,
+                }
+
+            payload = order_result or {}
+            now = datetime.now()
+            plan.status = status
+            plan.submitted_quantity = submitted_quantity
+            plan.submitted_price = submitted_price
+            plan.trade_id = trade_id
+            plan.skip_reason = skip_reason
+            plan.order_result_json = self._json_dumps(payload)
+            plan.updated_at = now
+
+            decision = None
+            if plan.decision_id is not None:
+                decision = session.get(
+                    StockSelectionAgentDecision,
+                    int(plan.decision_id),
+                )
+            if decision is not None:
+                decision.status = status
+                decision.reason = skip_reason
+                decision.quantity = submitted_quantity
+                decision.price = submitted_price
+                decision.trade_id = trade_id
+                previous_order_result = self._json_loads(
+                    decision.order_result_json,
+                    {},
+                )
+                self._sync_decision_audit_columns(
+                    decision,
+                    payload,
+                    previous_order_result,
+                )
+                decision.order_result_json = self._json_dumps(payload)
+
+            session.commit()
+            session.refresh(plan)
+            if decision is not None:
+                session.refresh(decision)
+            return {
+                "trade_plan": self._trade_plan_to_dict(plan),
+                "decision": (
+                    self._decision_to_dict(decision)
+                    if decision is not None
+                    else None
+                ),
+                "stale_write_skipped": False,
+            }
+
     def refresh_run_trade_counts(self, run_id: int) -> Optional[Dict[str, Any]]:
         with self.db.get_session() as session:
             run = session.get(StockSelectionAgentRun, int(run_id))

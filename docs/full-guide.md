@@ -663,7 +663,7 @@ python scripts/check_env.py --config
 
 **智能导入依赖**：`pypinyin`（名称→代码拼音匹配）和 `openpyxl`（Excel .xlsx 解析）已包含在 `requirements.txt` 中，执行上述 `pip install -r requirements.txt` 时会自动安装。若使用智能导入（图片/CSV/Excel/剪贴板）功能，请确保依赖已正确安装；缺失时可能报 `ModuleNotFoundError`。
 
-可选 vn.py runtime 建议使用 Python 3.13 隔离环境。Windows PowerShell 运行 `.\scripts\setup_vnpy_runtime.ps1 -PythonExecutable "python"`；脚本会拒绝上游未声明支持的 Python 3.14，安装 `requirements-vnpy.txt`，并用真实 OrderRequest、EventEngine、MainEngine 和内置即时撮合 gateway smoke 验收。安装验收还会运行显式拒单、重复成交回报去重和三轮在途订单断线重连矩阵，确认 `DsaSimulatedGateway` 保留资金、持仓和订单缓存并且每单只入账一次。该网关无需账户参数即可在 Web 走完整 vn.py 模拟订单/成交回写；运行中的 API 可用 `scripts/check_online_agent_vnpy_e2e.py` 验证在线 Agent 到 DSA_SIM 的决策、计划、成交与账本一致性，默认只做 dry-run，模拟下单必须显式授权。真实通道仍须另装具体 gateway 并使用外部连接参数；配置后使用 `scripts/check_vnpy_gateway_soak.py` 做零下单长跑，详见 [vn.py 模拟交易](vnpy-paper-trading.md)。
+可选 vn.py runtime 建议使用 Python 3.13 隔离环境。Windows PowerShell 运行 `.\scripts\setup_vnpy_runtime.ps1 -PythonExecutable "python"`；脚本会拒绝上游未声明支持的 Python 3.14，安装 `requirements-vnpy.txt`，并用真实 OrderRequest、EventEngine、MainEngine 和内置即时撮合 gateway smoke 验收。安装验收还会运行显式拒单、重复成交回报去重和三轮在途订单断线重连矩阵，确认 `DsaSimulatedGateway` 保留资金、持仓和订单缓存并且每单只入账一次。该网关无需账户参数即可在 Web 走完整 vn.py 模拟订单/成交回写；运行中的 API 可用 `scripts/check_online_agent_vnpy_e2e.py` 验证在线 Agent 到 DSA_SIM 的决策、计划、成交与账本一致性，默认只做 dry-run，模拟下单必须显式授权，`--isolated-account` 可用临时干净账本完成正向成交后恢复原账户。真实通道仍须另装具体 gateway 并使用外部连接参数；配置后使用 `scripts/check_vnpy_gateway_soak.py` 做零下单长跑，详见 [vn.py 模拟交易](vnpy-paper-trading.md)。
 
 ### 命令行参数
 
