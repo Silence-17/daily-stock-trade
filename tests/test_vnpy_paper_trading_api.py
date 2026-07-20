@@ -2831,6 +2831,46 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
         self.assertEqual(response.json()["status"], "cancel_requested")
         service.cancel_trade_plan.assert_called_once_with("plan-api-cancel")
 
+    def test_calibration_evidence_endpoint_is_read_only_and_uses_shadow_runs(self) -> None:
+        payload = {
+            "schema_version": 1,
+            "generated_at": "2026-07-21T04:30:00+00:00",
+            "window_days": 90,
+            "filters": {
+                "trigger_source": "agent_calibration_shadow",
+                "status": "completed",
+            },
+            "evaluation": {
+                "ok": False,
+                "failures": ["cn:runs_below_threshold"],
+                "required_markets": ["cn", "hk", "us"],
+                "required_versions": [],
+                "thresholds": {"min_runs_per_market": 20},
+                "markets": {"cn": {"ok": False, "total_runs": 9}},
+            },
+            "methodology": {
+                "read_only": True,
+                "creates_agent_runs": False,
+                "places_orders": False,
+            },
+        }
+
+        with patch(
+            "api.v1.endpoints.vnpy_paper_trading.collect_persisted_calibration_evidence",
+            return_value=payload,
+        ) as collect:
+            response = self.client.get(
+                "/api/v1/vnpy-paper/agent-runs/calibration-evidence"
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.json()["evaluation"]["ok"])
+        self.assertTrue(response.json()["methodology"]["read_only"])
+        self.assertEqual(
+            collect.call_args.kwargs["markets"],
+            ["cn", "hk", "us"],
+        )
+
     def test_agent_backtest_endpoint_forwards_filters_and_returns_matrix(self) -> None:
         service = MagicMock()
         service.evaluate.return_value = {

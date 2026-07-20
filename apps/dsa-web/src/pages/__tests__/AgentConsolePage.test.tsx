@@ -9,6 +9,7 @@ const exportAgentRuns = vi.hoisted(() => vi.fn());
 const getAgentRun = vi.hoisted(() => vi.fn());
 const getAgentDailySummary = vi.hoisted(() => vi.fn());
 const getAgentDataQualityTrends = vi.hoisted(() => vi.fn());
+const getAgentCalibrationEvidence = vi.hoisted(() => vi.fn());
 const getAgentCrossRunQuality = vi.hoisted(() => vi.fn());
 const runAgentBacktest = vi.hoisted(() => vi.fn());
 const generateAgentRunRecap = vi.hoisted(() => vi.fn());
@@ -31,6 +32,7 @@ vi.mock('../../api/vnpyPaperTrading', () => ({
     getAgentRun,
     getAgentDailySummary,
     getAgentDataQualityTrends,
+    getAgentCalibrationEvidence,
     getAgentCrossRunQuality,
     runAgentBacktest,
     generateAgentRunRecap,
@@ -560,6 +562,63 @@ const dataQualityTrends = {
   filters: {},
 };
 
+const calibrationEvidence = {
+  schemaVersion: 1,
+  generatedAt: '2026-07-21T04:30:00Z',
+  windowDays: 90,
+  filters: { triggerSource: 'agent_calibration_shadow', status: 'completed' },
+  evaluation: {
+    ok: false,
+    failures: ['cn:runs_below_threshold', 'cn:mature_samples_below_threshold'],
+    requiredMarkets: ['cn', 'hk', 'us'],
+    requiredVersions: [],
+    thresholds: {
+      minRunsPerMarket: 20,
+      minObservedPerMarket: 10,
+      minObservationRatePct: 80,
+      minMatureSamples: 20,
+      minObservationDays: 5,
+      maxLatestAgeHours: 72,
+    },
+    markets: {
+      cn: {
+        ok: false,
+        failures: ['runs_below_threshold', 'mature_samples_below_threshold'],
+        totalRuns: 9,
+        observedRuns: 9,
+        observationRatePct: 100,
+        latestMatureSampleCount: 0,
+        observationDays: 2,
+      },
+      hk: {
+        ok: false,
+        failures: ['runs_below_threshold', 'observation_days_below_threshold'],
+        totalRuns: 8,
+        observedRuns: 8,
+        observationRatePct: 100,
+        latestMatureSampleCount: 0,
+        observationDays: 1,
+      },
+      us: {
+        ok: false,
+        failures: ['runs_below_threshold', 'observation_days_below_threshold'],
+        totalRuns: 10,
+        observedRuns: 10,
+        observationRatePct: 100,
+        latestMatureSampleCount: 0,
+        observationDays: 1,
+      },
+    },
+  },
+  methodology: {
+    readOnly: true,
+    createsAgentRuns: false,
+    placesOrders: false,
+    overlappingRollingSamples: true,
+    independentSampleCountClaimed: false,
+  },
+};
+
 describe('AgentConsolePage', () => {
   beforeEach(() => {
     listAgentRuns.mockReset();
@@ -567,6 +626,7 @@ describe('AgentConsolePage', () => {
     getAgentRun.mockReset();
     getAgentDailySummary.mockReset();
     getAgentDataQualityTrends.mockReset();
+    getAgentCalibrationEvidence.mockReset();
     getAgentCrossRunQuality.mockReset();
     runAgentBacktest.mockReset();
     generateAgentRunRecap.mockReset();
@@ -590,6 +650,7 @@ describe('AgentConsolePage', () => {
     });
     getAgentDailySummary.mockResolvedValue(dailySummary);
     getAgentDataQualityTrends.mockResolvedValue(dataQualityTrends);
+    getAgentCalibrationEvidence.mockResolvedValue(calibrationEvidence);
     getAgentCrossRunQuality.mockResolvedValue({
       schemaVersion: 3,
       generatedAt: '2026-07-14T10:00:00',
@@ -932,8 +993,14 @@ describe('AgentConsolePage', () => {
     await waitFor(() => expect(listAgentRuns).toHaveBeenCalledWith(25, 0, undefined));
     await waitFor(() => expect(getAgentDailySummary).toHaveBeenCalledWith(undefined, undefined));
     await waitFor(() => expect(getAgentDataQualityTrends).toHaveBeenCalledWith(30, undefined));
+    await waitFor(() => expect(getAgentCalibrationEvidence).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(getAgentRun).toHaveBeenCalledWith('ss-agent-test'));
     expect(screen.getByText('今日 Agent 总结')).toBeInTheDocument();
+    expect(screen.getByTestId('agent-calibration-evidence')).toHaveTextContent('生产校准证据');
+    expect(screen.getByTestId('agent-calibration-evidence')).toHaveTextContent('9 / 9');
+    expect(screen.getByTestId('agent-calibration-evidence')).toHaveTextContent('8 / 8');
+    expect(screen.getByTestId('agent-calibration-evidence')).toHaveTextContent('10 / 10');
+    expect(screen.getByTestId('agent-calibration-evidence')).toHaveTextContent('成熟前瞻样本不足');
     expect(screen.getByTestId('agent-current-cross-run-quality')).toHaveTextContent('insufficient_evidence');
     expect(screen.getByTestId('agent-current-cross-run-quality')).toHaveTextContent('0/3');
     expect(screen.getByTestId('agent-current-cross-run-quality')).toHaveTextContent('仅审计');
@@ -1010,7 +1077,7 @@ describe('AgentConsolePage', () => {
     expect(screen.getByTestId('agent-news-source-routing')).toHaveTextContent('下轮 anspire → tavily');
     expect(screen.getAllByText('score 85.0').length).toBeGreaterThan(0);
     expect(screen.getByText('建议人工确认')).toBeInTheDocument();
-    expect(screen.getByText('100.0%')).toBeInTheDocument();
+    expect(screen.getAllByText('100.0%').length).toBeGreaterThan(0);
     expect(screen.getByText('50.0%')).toBeInTheDocument();
     expect(screen.getByText('agent_review_blocked')).toBeInTheDocument();
     expect(screen.getByText(/autoStrategy=capital_heat/)).toBeInTheDocument();

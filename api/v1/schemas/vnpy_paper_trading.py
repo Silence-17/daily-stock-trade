@@ -893,6 +893,15 @@ class VnpyPaperAgentReturnRiskCalibrationTrendsResponse(BaseModel):
     filters: Dict[str, Any] = Field(default_factory=dict)
 
 
+class VnpyPaperAgentCalibrationEvidenceResponse(BaseModel):
+    schema_version: int = 1
+    generated_at: Optional[Any] = None
+    window_days: int = 90
+    filters: Dict[str, Any] = Field(default_factory=dict)
+    evaluation: Dict[str, Any] = Field(default_factory=dict)
+    methodology: Dict[str, Any] = Field(default_factory=dict)
+
+
 class VnpyPaperAgentRunExportResponse(BaseModel):
     generated_at: Optional[Any] = None
     limit: int

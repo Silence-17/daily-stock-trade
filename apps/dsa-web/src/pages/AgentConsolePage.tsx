@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import {
   vnpyPaperTradingApi,
+  type VnpyPaperAgentCalibrationEvidence,
   type VnpyPaperAgentDailySummary,
   type VnpyPaperAgentBacktestResponse,
   type VnpyPaperAgentCrossRunQuality,
@@ -75,6 +76,30 @@ const marketOptions = [
   { value: 'jp', label: '日股' },
   { value: 'kr', label: '韩股' },
 ];
+
+const calibrationFailureLabels: Record<string, string> = {
+  summary_unavailable: '摘要不可用',
+  summary_truncated: '摘要已截断',
+  market_filter_mismatch: '市场筛选不匹配',
+  runs_below_threshold: '运行样本不足',
+  observed_runs_below_threshold: '有效观测不足',
+  observation_rate_below_threshold: '观测覆盖率不足',
+  mature_samples_below_threshold: '成熟前瞻样本不足',
+  observation_days_below_threshold: '观察天数不足',
+  latest_observation_missing: '缺少最近观测',
+  latest_observation_in_future: '最近观测时间异常',
+  latest_observation_stale: '最近观测已过期',
+  required_versions_missing: '目标版本缺失',
+  latest_state_not_deployable: '最近状态不可部署',
+};
+
+function calibrationFailureLabel(value: string): string {
+  return calibrationFailureLabels[value] || value;
+}
+
+function marketLabel(value: string): string {
+  return marketOptions.find((item) => item.value === value)?.label || value.toUpperCase();
+}
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value)
@@ -355,6 +380,9 @@ const AgentConsolePage: React.FC = () => {
   const [runs, setRuns] = useState<VnpyPaperAgentRunSummary[]>([]);
   const [dailySummary, setDailySummary] = useState<VnpyPaperAgentDailySummary | null>(null);
   const [dataQualityTrends, setDataQualityTrends] = useState<VnpyPaperAgentDataQualityTrends | null>(null);
+  const [calibrationEvidence, setCalibrationEvidence] = useState<
+    VnpyPaperAgentCalibrationEvidence | null
+  >(null);
   const [dataQualityDays, setDataQualityDays] = useState<7 | 30 | 90>(30);
   const dataQualityDaysRef = useRef<7 | 30 | 90>(30);
   const [selectedRun, setSelectedRun] = useState<VnpyPaperAgentRunDetail | null>(null);
@@ -424,7 +452,13 @@ const AgentConsolePage: React.FC = () => {
     setError('');
     try {
       const filterPayload = buildFilters(nextFilters);
-      const [payload, summary, qualityTrends, currentCrossRunQuality] = await Promise.all([
+      const [
+        payload,
+        summary,
+        qualityTrends,
+        currentCrossRunQuality,
+        currentCalibrationEvidence,
+      ] = await Promise.all([
         vnpyPaperTradingApi.listAgentRuns(
           AGENT_RUN_PAGE_SIZE,
           nextOffset,
@@ -436,11 +470,13 @@ const AgentConsolePage: React.FC = () => {
           filterPayload,
         ).catch(() => null),
         vnpyPaperTradingApi.getAgentCrossRunQuality().catch(() => null),
+        vnpyPaperTradingApi.getAgentCalibrationEvidence().catch(() => null),
       ]);
       setRuns(payload.items);
       setDailySummary(summary);
       setDataQualityTrends(qualityTrends);
       setCrossRunQuality(currentCrossRunQuality);
+      setCalibrationEvidence(currentCalibrationEvidence);
       setRunOffset(payload.offset || nextOffset);
       setRunTotal(payload.total ?? payload.items.length);
       const preferred = String(preferredRunUid || '').trim();
@@ -454,6 +490,7 @@ const AgentConsolePage: React.FC = () => {
       setRuns([]);
       setDailySummary(null);
       setDataQualityTrends(null);
+      setCalibrationEvidence(null);
       setSelectedRun(null);
       setRunOffset(0);
       setRunTotal(0);
@@ -1067,6 +1104,139 @@ const AgentConsolePage: React.FC = () => {
 
       {error ? <InlineAlert variant="danger" title="Agent 控制台加载失败" message={error} /> : null}
       {success ? <InlineAlert variant="success" title="操作完成" message={success} /> : null}
+
+      {calibrationEvidence ? (
+        <section className="border-y border-border py-4" data-testid="agent-calibration-evidence">
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+            <div>
+              <div className="flex flex-wrap items-center gap-2">
+                <ListChecks className="h-4 w-4 text-cyan" />
+                <h2 className="text-sm font-semibold text-foreground">生产校准证据</h2>
+                {renderStatusBadge(
+                  calibrationEvidence.evaluation.ok ? 'passed' : 'warning',
+                  calibrationEvidence.evaluation.ok ? '已达标' : '积累中',
+                )}
+              </div>
+              <p className="mt-2 text-xs text-secondary-text">
+                {calibrationEvidence.windowDays} 天窗口
+                {' · shadow completed run · '}
+                {formatDateTime(calibrationEvidence.generatedAt)}
+              </p>
+            </div>
+            <dl className="grid grid-cols-2 gap-x-6 gap-y-2 text-xs text-secondary-text sm:grid-cols-4">
+              <div>
+                <dt>每市场运行数</dt>
+                <dd className="mt-1 font-semibold text-foreground">
+                  ≥ {calibrationEvidence.evaluation.thresholds.minRunsPerMarket}
+                </dd>
+              </div>
+              <div>
+                <dt>有效观测数</dt>
+                <dd className="mt-1 font-semibold text-foreground">
+                  ≥ {calibrationEvidence.evaluation.thresholds.minObservedPerMarket}
+                </dd>
+              </div>
+              <div>
+                <dt>成熟样本数</dt>
+                <dd className="mt-1 font-semibold text-foreground">
+                  ≥ {calibrationEvidence.evaluation.thresholds.minMatureSamples}
+                </dd>
+              </div>
+              <div>
+                <dt>观察天数</dt>
+                <dd className="mt-1 font-semibold text-foreground">
+                  ≥ {calibrationEvidence.evaluation.thresholds.minObservationDays}
+                </dd>
+              </div>
+            </dl>
+          </div>
+          <div className="mt-4 space-y-3 sm:hidden">
+            {calibrationEvidence.evaluation.requiredMarkets.map((market) => {
+              const item = calibrationEvidence.evaluation.markets[market];
+              if (!item) return null;
+              return (
+                <div key={market} className="border-t border-border pt-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-sm font-semibold text-foreground">
+                      {marketLabel(market)}
+                    </span>
+                    {renderStatusBadge(item.ok ? 'passed' : 'warning', item.ok ? '已达标' : '积累中')}
+                  </div>
+                  <dl className="mt-2 grid grid-cols-2 gap-x-4 gap-y-2 text-xs text-secondary-text">
+                    <div>
+                      <dt>运行 / 观测</dt>
+                      <dd className="mt-1 font-semibold text-foreground">
+                        {item.totalRuns} / {item.observedRuns}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>覆盖率</dt>
+                      <dd className="mt-1 font-semibold text-foreground">
+                        {formatPercent(item.observationRatePct)}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>成熟样本</dt>
+                      <dd className="mt-1 font-semibold text-foreground">
+                        {item.latestMatureSampleCount}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>观察天数</dt>
+                      <dd className="mt-1 font-semibold text-foreground">{item.observationDays}</dd>
+                    </div>
+                  </dl>
+                  <p className="mt-2 text-xs leading-5 text-secondary-text">
+                    {item.ok ? '已达标' : item.failures.map(calibrationFailureLabel).join('、')}
+                  </p>
+                </div>
+              );
+            })}
+          </div>
+          <div className="mt-4 hidden overflow-x-auto border border-border sm:block">
+            <table className="min-w-full text-left text-xs">
+              <thead className="bg-surface text-secondary-text">
+                <tr>
+                  <th className="px-3 py-2 font-semibold">市场</th>
+                  <th className="px-3 py-2 font-semibold">运行 / 观测</th>
+                  <th className="px-3 py-2 font-semibold">覆盖率</th>
+                  <th className="px-3 py-2 font-semibold">成熟样本</th>
+                  <th className="px-3 py-2 font-semibold">观察天数</th>
+                  <th className="px-3 py-2 font-semibold">当前缺口</th>
+                </tr>
+              </thead>
+              <tbody>
+                {calibrationEvidence.evaluation.requiredMarkets.map((market) => {
+                  const item = calibrationEvidence.evaluation.markets[market];
+                  if (!item) return null;
+                  return (
+                    <tr key={market} className="border-t border-border">
+                      <td className="px-3 py-2 font-semibold text-foreground">
+                        {marketLabel(market)}
+                      </td>
+                      <td className="px-3 py-2 text-secondary-text">
+                        {item.totalRuns} / {item.observedRuns}
+                      </td>
+                      <td className="px-3 py-2 text-secondary-text">
+                        {formatPercent(item.observationRatePct)}
+                      </td>
+                      <td className="px-3 py-2 text-secondary-text">
+                        {item.latestMatureSampleCount}
+                      </td>
+                      <td className="px-3 py-2 text-secondary-text">{item.observationDays}</td>
+                      <td className="max-w-md px-3 py-2 text-secondary-text">
+                        {item.ok
+                          ? '已达标'
+                          : item.failures.map(calibrationFailureLabel).join('、')}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      ) : null}
 
       {crossRunQuality ? (
         <section className="border-y border-border py-4" data-testid="agent-current-cross-run-quality">

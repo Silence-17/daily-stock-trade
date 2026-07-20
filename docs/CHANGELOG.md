@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [新功能] 新增三市场生产校准证据只读 API 和响应式 Agent 控制台视图，统一显示 shadow 样本的 ready/pending、阈值与逐市场缺口；真实 scheduler 首次监控在 0.028 秒内完成且未创建 run、计划或订单
+
 - [新功能] 新增 `agent_calibration_evidence` 只读后台监控，按 shadow 周期自动评估三市场生产校准门禁并持久化有界 pending/ready 诊断，不创建 Agent run、交易计划或订单
 
 - [修复] `agent_calibration_shadow` 新增基于持久化同市场/策略最近完成 run 的跨进程采样节流，避免服务重启后 5 分钟重复灌样本，并以有界任务事件审计跳过原因、剩余时间和下一采样时间

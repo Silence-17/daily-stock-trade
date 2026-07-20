@@ -879,6 +879,47 @@ export type VnpyPaperAgentReturnRiskCalibrationTrends = {
   filters?: Record<string, unknown>;
 };
 
+export type VnpyPaperAgentCalibrationMarketEvidence = {
+  ok: boolean;
+  failures: string[];
+  totalRuns: number;
+  observedRuns: number;
+  observationRatePct: number;
+  latestMatureSampleCount: number;
+  observationDays: number;
+  latestAgeHours?: number | null;
+  latestState?: string | null;
+};
+
+export type VnpyPaperAgentCalibrationEvidence = {
+  schemaVersion: number;
+  generatedAt?: string | null;
+  windowDays: number;
+  filters: Record<string, unknown>;
+  evaluation: {
+    ok: boolean;
+    failures: string[];
+    requiredMarkets: string[];
+    requiredVersions: string[];
+    thresholds: {
+      minRunsPerMarket: number;
+      minObservedPerMarket: number;
+      minObservationRatePct: number;
+      minMatureSamples: number;
+      minObservationDays: number;
+      maxLatestAgeHours: number;
+    };
+    markets: Record<string, VnpyPaperAgentCalibrationMarketEvidence>;
+  };
+  methodology: {
+    readOnly: boolean;
+    createsAgentRuns: boolean;
+    placesOrders: boolean;
+    overlappingRollingSamples: boolean;
+    independentSampleCountClaimed: boolean;
+  };
+};
+
 export type VnpyPaperAgentRunFilters = {
   triggerSource?: string;
   strategy?: string;
@@ -1742,6 +1783,13 @@ export const vnpyPaperTradingApi = {
       { params },
     );
     return toCamelCase<VnpyPaperAgentReturnRiskCalibrationTrends>(response.data);
+  },
+
+  async getAgentCalibrationEvidence(): Promise<VnpyPaperAgentCalibrationEvidence> {
+    const response = await apiClient.get<Record<string, unknown>>(
+      '/api/v1/vnpy-paper/agent-runs/calibration-evidence',
+    );
+    return toCamelCase<VnpyPaperAgentCalibrationEvidence>(response.data);
   },
 
   async runAgentBacktest(

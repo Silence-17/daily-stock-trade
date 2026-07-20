@@ -1071,6 +1071,56 @@ describe('vnpyPaperTradingApi', () => {
     expect(result.daily[0].averageUtilityPct).toBe(0.3);
   });
 
+  it('loads read-only production calibration evidence', async () => {
+    get.mockResolvedValueOnce({
+      data: {
+        schema_version: 1,
+        generated_at: '2026-07-21T04:30:00Z',
+        window_days: 90,
+        filters: { trigger_source: 'agent_calibration_shadow', status: 'completed' },
+        evaluation: {
+          ok: false,
+          failures: ['cn:runs_below_threshold'],
+          required_markets: ['cn', 'hk', 'us'],
+          required_versions: [],
+          thresholds: {
+            min_runs_per_market: 20,
+            min_observed_per_market: 10,
+            min_observation_rate_pct: 80,
+            min_mature_samples: 20,
+            min_observation_days: 5,
+            max_latest_age_hours: 72,
+          },
+          markets: {
+            cn: {
+              ok: false,
+              failures: ['runs_below_threshold'],
+              total_runs: 9,
+              observed_runs: 9,
+              observation_rate_pct: 100,
+              latest_mature_sample_count: 0,
+              observation_days: 2,
+            },
+          },
+        },
+        methodology: {
+          read_only: true,
+          creates_agent_runs: false,
+          places_orders: false,
+        },
+      },
+    });
+
+    const result = await vnpyPaperTradingApi.getAgentCalibrationEvidence();
+
+    expect(get).toHaveBeenCalledWith(
+      '/api/v1/vnpy-paper/agent-runs/calibration-evidence',
+    );
+    expect(result.evaluation.requiredMarkets).toEqual(['cn', 'hk', 'us']);
+    expect(result.evaluation.markets.cn.totalRuns).toBe(9);
+    expect(result.methodology.createsAgentRuns).toBe(false);
+  });
+
   it('generates an Agent run LLM recap', async () => {
     post.mockResolvedValueOnce({
       data: {

@@ -21,6 +21,7 @@ from api.v1.schemas.vnpy_paper_trading import (
     VnpyPaperArchivedAccountCleanupResponse,
     VnpyPaperAgentBacktestRequest,
     VnpyPaperAgentBacktestResponse,
+    VnpyPaperAgentCalibrationEvidenceResponse,
     VnpyPaperAgentCrossRunQualityResponse,
     VnpyPaperAgentDailySummaryResponse,
     VnpyPaperAgentDataQualityTrendsResponse,
@@ -55,6 +56,9 @@ from api.v1.schemas.vnpy_paper_trading import (
 from src.repositories.stock_selection_agent_repo import StockSelectionAgentRepository
 from src.repositories.portfolio_valuation_health_repo import (
     PortfolioValuationHealthRepository,
+)
+from src.services.agent_calibration_evidence_service import (
+    collect_persisted_calibration_evidence,
 )
 from src.services.portfolio_service import PortfolioBusyError
 from src.services.runtime_scheduler import RuntimeSchedulerService
@@ -2612,6 +2616,25 @@ def get_vnpy_paper_agent_return_risk_calibration_trends(
         )
     except Exception as exc:
         raise _internal_error("Summarize Agent return-risk calibration trends failed", exc)
+
+
+@router.get(
+    "/agent-runs/calibration-evidence",
+    response_model=VnpyPaperAgentCalibrationEvidenceResponse,
+    responses={500: {"model": ErrorResponse}},
+    summary="Evaluate read-only production calibration evidence",
+)
+def get_vnpy_paper_agent_calibration_evidence(
+) -> VnpyPaperAgentCalibrationEvidenceResponse:
+    try:
+        return VnpyPaperAgentCalibrationEvidenceResponse.model_validate(
+            collect_persisted_calibration_evidence(
+                _agent_repo(),
+                markets=["cn", "hk", "us"],
+            )
+        )
+    except Exception as exc:
+        raise _internal_error("Evaluate Agent calibration evidence failed", exc)
 
 
 @router.post(
