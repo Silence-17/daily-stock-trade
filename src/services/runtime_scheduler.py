@@ -286,10 +286,38 @@ class RuntimeSchedulerService:
 
     def _current_background_tasks(self, config: Config) -> List[Dict[str, Any]]:
         if self._background_tasks_provider is not None:
-            return self._background_tasks_provider(config)
-        tasks = self._current_agent_event_monitor_background_tasks(config)
-        tasks.extend(self._current_vnpy_paper_trading_background_tasks(config))
-        return tasks
+            tasks = self._background_tasks_provider(config)
+        else:
+            tasks = self._current_agent_event_monitor_background_tasks(config)
+            tasks.extend(self._current_vnpy_paper_trading_background_tasks(config))
+        return self._prepare_background_task_registration(tasks)
+
+    def _prepare_background_task_registration(
+        self,
+        tasks: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Run startup tasks once per continuous registration lifetime."""
+
+        prepared: List[Dict[str, Any]] = []
+        current_names = {
+            str(entry.get("name") or getattr(entry.get("task"), "__name__", "background_task"))
+            for entry in tasks
+        }
+        self._background_task_registered_names.intersection_update(current_names)
+        for entry in tasks:
+            normalized = dict(entry)
+            name = str(
+                normalized.get("name")
+                or getattr(normalized.get("task"), "__name__", "background_task")
+            )
+            normalized["name"] = name
+            normalized["run_immediately"] = (
+                bool(normalized.get("run_immediately", False))
+                and name not in self._background_task_registered_names
+            )
+            self._background_task_registered_names.add(name)
+            prepared.append(normalized)
+        return prepared
 
     def _current_vnpy_paper_trading_background_tasks(self, config: Config) -> List[Dict[str, Any]]:
         try:
@@ -317,7 +345,6 @@ class RuntimeSchedulerService:
         name = "agent_event_monitor"
         if not getattr(config, "agent_event_monitor_enabled", False):
             self._background_task_cache.pop(name, None)
-            self._background_task_registered_names.discard(name)
             return []
 
         cached = self._background_task_cache.get(name)
@@ -328,7 +355,6 @@ class RuntimeSchedulerService:
             )
             if not entries:
                 self._background_task_cache.pop(name, None)
-                self._background_task_registered_names.discard(name)
                 return []
             cached = dict(entries[0])
             cached["name"] = name
@@ -337,15 +363,10 @@ class RuntimeSchedulerService:
         else:
             interval_seconds = _agent_event_monitor_interval_seconds(config)
 
-        run_immediately = (
-            bool(cached.get("run_immediately", False))
-            and name not in self._background_task_registered_names
-        )
-        self._background_task_registered_names.add(name)
         return [{
             "task": cached["task"],
             "interval_seconds": interval_seconds,
-            "run_immediately": run_immediately,
+            "run_immediately": bool(cached.get("run_immediately", False)),
             "name": name,
         }]
 

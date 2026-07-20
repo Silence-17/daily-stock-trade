@@ -710,6 +710,154 @@ class RuntimeSchedulerServiceTestCase(unittest.TestCase):
             ["started", "failed", "started", "completed"],
         )
 
+    def test_immediate_background_task_runs_once_per_registration_lifetime(self) -> None:
+        enabled = True
+        task = MagicMock(return_value={"accepted": True})
+
+        def tasks_provider(_config):
+            if not enabled:
+                return []
+            return [{
+                "task": task,
+                "interval_seconds": 300,
+                "run_immediately": True,
+                "name": "vnpy_paper_auto_retry",
+            }]
+
+        service = RuntimeSchedulerService(
+            config_provider=lambda: SimpleNamespace(schedule_enabled=False),
+            background_tasks_provider=tasks_provider,
+        )
+
+        first = service._current_background_tasks(SimpleNamespace())
+        second = service._current_background_tasks(SimpleNamespace())
+        enabled = False
+        disabled = service._current_background_tasks(SimpleNamespace())
+        enabled = True
+        reenabled = service._current_background_tasks(SimpleNamespace())
+
+        self.assertTrue(first[0]["run_immediately"])
+        self.assertFalse(second[0]["run_immediately"])
+        self.assertEqual(disabled, [])
+        self.assertTrue(reenabled[0]["run_immediately"])
+
+    def test_background_task_registration_is_independent_per_task_name(self) -> None:
+        auto_trade = MagicMock(return_value={"accepted": True})
+        auto_retry = MagicMock(return_value={"accepted": True})
+        service = RuntimeSchedulerService(
+            config_provider=lambda: SimpleNamespace(schedule_enabled=False),
+            background_tasks_provider=lambda _config: [
+                {
+                    "task": auto_trade,
+                    "interval_seconds": 300,
+                    "run_immediately": False,
+                    "name": "vnpy_paper_auto_trade",
+                },
+                {
+                    "task": auto_retry,
+                    "interval_seconds": 300,
+                    "run_immediately": True,
+                    "name": "vnpy_paper_auto_retry",
+                },
+            ],
+        )
+
+        first = service._current_background_tasks(SimpleNamespace())
+        second = service._current_background_tasks(SimpleNamespace())
+
+        self.assertEqual(
+            {entry["name"]: entry["run_immediately"] for entry in first},
+            {
+                "vnpy_paper_auto_trade": False,
+                "vnpy_paper_auto_retry": True,
+            },
+        )
+        self.assertEqual(
+            {entry["name"]: entry["run_immediately"] for entry in second},
+            {
+                "vnpy_paper_auto_trade": False,
+                "vnpy_paper_auto_retry": False,
+            },
+        )
+
+    def test_reconcile_only_restarts_immediate_task_after_reregistration(self) -> None:
+        class _ImmediateScheduler:
+            def __init__(self, **_kwargs):
+                self.background_tasks = []
+                self.schedule_times = []
+
+            def add_background_task(
+                self,
+                task,
+                interval_seconds,
+                run_immediately,
+                name=None,
+                initial_delay_seconds=None,
+            ):
+                self.background_tasks.append({
+                    "task": task,
+                    "interval_seconds": interval_seconds,
+                    "run_immediately": run_immediately,
+                    "name": name,
+                    "initial_delay_seconds": initial_delay_seconds,
+                })
+                if run_immediately:
+                    task()
+
+            def run(self):
+                return None
+
+            def stop(self):
+                return None
+
+            @property
+            def schedule(self):
+                return SimpleNamespace(get_jobs=lambda: [])
+
+        enabled = True
+        auto_retry = MagicMock(return_value={
+            "accepted": True,
+            "attempted_count": 0,
+            "submitted_count": 0,
+        })
+
+        def tasks_provider(_config):
+            if not enabled:
+                return []
+            return [{
+                "task": auto_retry,
+                "interval_seconds": 300,
+                "run_immediately": True,
+                "name": "vnpy_paper_auto_retry",
+            }]
+
+        service = RuntimeSchedulerService(
+            config_provider=lambda: SimpleNamespace(schedule_enabled=False),
+            background_tasks_provider=tasks_provider,
+        )
+
+        with patch(
+            "src.services.runtime_scheduler.Scheduler",
+            _ImmediateScheduler,
+        ), patch(
+            "src.services.runtime_scheduler.threading.Thread",
+            _NoopThread,
+        ):
+            service.reconcile_from_config()
+            service.reconcile_from_config()
+            self.assertEqual(auto_retry.call_count, 1)
+
+            enabled = False
+            service.reconcile_from_config()
+            enabled = True
+            service.reconcile_from_config()
+
+        self.assertEqual(auto_retry.call_count, 2)
+        self.assertEqual(
+            [event["status"] for event in service.task_events(limit=10)],
+            ["started", "completed", "started", "completed"],
+        )
+
     def test_background_task_event_persistence_triggers_retention_cleanup(self) -> None:
         repo = _FakeTaskEventRepository()
         service = RuntimeSchedulerService(
