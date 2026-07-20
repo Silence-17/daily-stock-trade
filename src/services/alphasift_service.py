@@ -3968,6 +3968,7 @@ def _enrich_candidates_with_dsa(
             and existing_context.get("enriched")
             and _candidate_has_dsa_news(candidate)
         ):
+            _refresh_candidate_quality_after_enrichment(candidate)
             existing_warnings = existing_context.get("warnings") or []
             if isinstance(existing_warnings, list):
                 row_warnings = [str(item) for item in existing_warnings if item]
@@ -3986,6 +3987,7 @@ def _enrich_candidates_with_dsa(
                 news_provider_priority=news_provider_priority,
             )
             candidate.update(enriched)
+            _refresh_candidate_quality_after_enrichment(candidate)
             context = enriched.get("dsa_context", {})
             return (
                 index,
@@ -4034,6 +4036,21 @@ def _enrich_candidates_with_dsa(
             "fund_flow": _get_dsa_capital_flow_source_routing(),
         },
     }
+
+
+def _refresh_candidate_quality_after_enrichment(candidate: Dict[str, Any]) -> None:
+    """Refresh normalized risk evidence after post-rank context enrichment."""
+
+    context = candidate.get("dsa_context")
+    if not isinstance(context, dict):
+        return
+    source = candidate.get("raw") if isinstance(candidate.get("raw"), dict) else candidate
+    candidate.update(_derive_candidate_trading_status(candidate, source, context))
+    quality = _candidate_quality_snapshot(candidate, source, context)
+    candidate["data_quality"] = quality["status"]
+    candidate["missing_fields"] = quality["missing_fields"]
+    candidate["data_sources"] = quality["data_sources"]
+    candidate["quality_notes"] = quality["quality_notes"]
 
 
 def _summarize_dsa_candidate_context_source_health(
@@ -4499,8 +4516,14 @@ def _normalize_candidate(raw: Any, rank: int) -> Dict[str, Any]:
         or source.get("dsa_analysis_summary")
         or _extract_dsa_analysis_summary_from_context(dsa_context)
     )
-    quality = _candidate_quality_snapshot(item, source, dsa_context)
-    return {
+    derived_trading_status = _derive_candidate_trading_status(
+        item,
+        source,
+        dsa_context,
+    )
+    quality_item = {**item, **derived_trading_status}
+    quality = _candidate_quality_snapshot(quality_item, source, dsa_context)
+    normalized = {
         "rank": item.get("rank") or source.get("rank") or rank,
         "code": item.get("code") or source.get("code") or item.get("symbol") or source.get("symbol") or item.get("stock_code") or source.get("stock_code") or "",
         "name": item.get("name") or source.get("name") or item.get("stock_name") or source.get("stock_name") or "",
@@ -4536,6 +4559,99 @@ def _normalize_candidate(raw: Any, rank: int) -> Dict[str, Any]:
         "quality_notes": quality["quality_notes"],
         "raw": source,
     }
+    normalized.update(derived_trading_status)
+    return normalized
+
+
+def _derive_candidate_trading_status(
+    item: Dict[str, Any],
+    source: Dict[str, Any],
+    dsa_context: Any,
+) -> Dict[str, Any]:
+    """Derive conservative A-share risk flags from an observed realtime quote."""
+
+    if not isinstance(dsa_context, dict):
+        return {}
+    quote = dsa_context.get("quote")
+    if not isinstance(quote, dict):
+        return {}
+
+    derived: Dict[str, Any] = {}
+    evidence_fields: Dict[str, str] = {}
+    name = _env_text(
+        _first_present(item, source, "name", "stock_name")
+        or quote.get("name")
+    )
+    if (
+        name
+        and _first_present(item, source, "is_st", "st") is None
+        and quote.get("is_st") is None
+    ):
+        compact_name = name.upper().replace(" ", "")
+        derived["is_st"] = compact_name.startswith(("ST", "*ST", "S*ST"))
+        evidence_fields["is_st"] = "quote_name"
+
+    explicit_suspended = _first_present(
+        item,
+        source,
+        "is_suspended",
+        "suspended",
+        "trading_suspended",
+    )
+    if explicit_suspended is None and quote.get("is_suspended") is None:
+        price = _safe_float(quote.get("price"))
+        volume = _safe_float(quote.get("volume"))
+        amount = _safe_float(quote.get("amount"))
+        if (
+            price is not None
+            and price > 0
+            and volume is not None
+            and volume > 0
+            and amount is not None
+            and amount > 0
+        ):
+            derived["is_suspended"] = False
+            derived["trading_status"] = "trading_observed"
+            evidence_fields["is_suspended"] = "quote_positive_volume_and_amount"
+
+    explicit_limit = _first_present(
+        item,
+        source,
+        "is_limit_up",
+        "is_limit_down",
+        "price_limit_reached",
+        "limit_status",
+        "price_limit_status",
+    )
+    code = _env_text(
+        _first_present(item, source, "code", "symbol", "stock_code")
+        or quote.get("code")
+    )
+    if explicit_limit is None and re.fullmatch(r"\d{6}", code):
+        change_pct = _safe_float(quote.get("change_pct"))
+        price = _safe_float(quote.get("price"))
+        pre_close = _safe_float(quote.get("pre_close"))
+        if (
+            change_pct is not None
+            and abs(change_pct) < 4.5
+            and price is not None
+            and price > 0
+            and pre_close is not None
+            and pre_close > 0
+        ):
+            derived["is_limit_up"] = False
+            derived["is_limit_down"] = False
+            derived["limit_status"] = "not_at_limit"
+            evidence_fields["price_limit"] = "quote_change_below_conservative_4_5pct"
+
+    if evidence_fields:
+        derived["trading_status_evidence"] = {
+            "schema_version": 1,
+            "source": _env_text(quote.get("source")) or "realtime_quote",
+            "observed_at": quote.get("provider_timestamp") or quote.get("fetched_at"),
+            "fields": evidence_fields,
+        }
+    return derived
 
 
 _CANDIDATE_QUALITY_FIELD_GROUPS: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
@@ -4576,11 +4692,14 @@ def _candidate_quality_snapshot(
     dsa_context: Any,
 ) -> Dict[str, Any]:
     containers = _candidate_quality_containers(item, source, dsa_context)
-    missing_fields = [
-        field_name
-        for field_name, keys in _CANDIDATE_QUALITY_FIELD_GROUPS
-        if not _candidate_has_any_field(containers, keys)
-    ]
+    missing_fields = []
+    for field_name, keys in _CANDIDATE_QUALITY_FIELD_GROUPS:
+        if field_name == "trading_status":
+            available = _candidate_has_complete_trading_status(containers)
+        else:
+            available = _candidate_has_any_field(containers, keys)
+        if not available:
+            missing_fields.append(field_name)
     explicit = _env_text(_first_present(item, source, "data_quality", "quality_status", "quality")).lower()
     if explicit == "available":
         explicit = "ok"
@@ -4645,6 +4764,37 @@ def _candidate_has_any_field(containers: List[Dict[str, Any]], keys: Tuple[str, 
                 continue
             return True
     return False
+
+
+def _candidate_has_complete_trading_status(containers: List[Dict[str, Any]]) -> bool:
+    st_available = _candidate_has_any_field(
+        containers,
+        ("is_st", "st", "is_special_treatment", "delisting_risk", "name", "stock_name"),
+    )
+    suspension_available = _candidate_has_any_field(
+        containers,
+        (
+            "is_suspended",
+            "suspended",
+            "trading_suspended",
+            "trading_status",
+            "trade_status",
+            "suspension_status",
+        ),
+    )
+    price_limit_available = _candidate_has_any_field(
+        containers,
+        (
+            "is_limit_up",
+            "is_limit_down",
+            "price_limit_reached",
+            "limit_status",
+            "price_limit_status",
+            "limit_up_price",
+            "limit_down_price",
+        ),
+    )
+    return st_available and suspension_available and price_limit_available
 
 
 def _candidate_data_sources(containers: List[Dict[str, Any]], dsa_context: Any) -> List[str]:

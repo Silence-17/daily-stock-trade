@@ -2360,6 +2360,78 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
         self.assertNotIn("code", candidate["missing_fields"])
         self.assertNotIn("price", candidate["missing_fields"])
 
+    def test_candidate_normalization_derives_conservative_quote_trading_status(self) -> None:
+        candidate = alphasift_service._normalize_candidate(
+            {
+                "code": "600015",
+                "name": "Huaxia Bank",
+                "price": 6.98,
+                "amount": 680925106.0,
+                "dsa_context": {
+                    "enriched": True,
+                    "quote": {
+                        "code": "600015",
+                        "name": "Huaxia Bank",
+                        "source": "tencent",
+                        "fetched_at": "2026-07-20T08:28:49+00:00",
+                        "price": 6.98,
+                        "pre_close": 6.91,
+                        "change_pct": 1.01,
+                        "volume": 97941300,
+                        "amount": 680925106.0,
+                    },
+                },
+            },
+            1,
+        )
+
+        self.assertFalse(candidate["is_st"])
+        self.assertFalse(candidate["is_suspended"])
+        self.assertFalse(candidate["is_limit_up"])
+        self.assertFalse(candidate["is_limit_down"])
+        self.assertNotIn("trading_status", candidate["missing_fields"])
+        self.assertEqual(
+            candidate["trading_status_evidence"],
+            {
+                "schema_version": 1,
+                "source": "tencent",
+                "observed_at": "2026-07-20T08:28:49+00:00",
+                "fields": {
+                    "is_st": "quote_name",
+                    "is_suspended": "quote_positive_volume_and_amount",
+                    "price_limit": "quote_change_below_conservative_4_5pct",
+                },
+            },
+        )
+
+    def test_candidate_normalization_keeps_uncertain_quote_status_fail_closed(self) -> None:
+        candidate = alphasift_service._normalize_candidate(
+            {
+                "code": "600015",
+                "name": "Huaxia Bank",
+                "price": 7.25,
+                "dsa_context": {
+                    "enriched": True,
+                    "quote": {
+                        "code": "600015",
+                        "name": "Huaxia Bank",
+                        "source": "tencent",
+                        "price": 7.25,
+                        "pre_close": 6.91,
+                        "change_pct": 4.92,
+                        "volume": 97941300,
+                        "amount": 680925106.0,
+                    },
+                },
+            },
+            1,
+        )
+
+        self.assertFalse(candidate["is_st"])
+        self.assertFalse(candidate["is_suspended"])
+        self.assertNotIn("is_limit_up", candidate)
+        self.assertIn("trading_status", candidate["missing_fields"])
+
     def test_screen_uses_last_good_cache_when_adapter_runtime_fails(self) -> None:
         config = self._config(enabled=True)
         screen_mock = MagicMock(side_effect=RuntimeError("snapshot timeout"))
@@ -2937,6 +3009,52 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
         self.assertEqual(
             diagnostics["warnings"],
             ["warning-600519", "warning-000001", "warning-000651"],
+        )
+
+    def test_dsa_post_rank_enrichment_refreshes_quote_trading_status(self) -> None:
+        candidates = [{
+            "rank": 1,
+            "code": "600015",
+            "name": "Huaxia Bank",
+            "price": 6.98,
+            "missing_fields": ["trading_status"],
+            "raw": {"code": "600015", "name": "Huaxia Bank"},
+        }]
+
+        with patch(
+            "src.services.alphasift_service._build_dsa_candidate_context",
+            return_value={
+                "dsa_context": {
+                    "enriched": True,
+                    "quote": {
+                        "code": "600015",
+                        "name": "Huaxia Bank",
+                        "source": "tencent",
+                        "fetched_at": "2026-07-20T08:51:09+00:00",
+                        "price": 6.98,
+                        "pre_close": 6.91,
+                        "change_pct": 1.01,
+                        "volume": 97941300,
+                        "amount": 680925106.0,
+                    },
+                    "news": {"success": True, "results": []},
+                    "warnings": [],
+                },
+                "dsa_news": [],
+            },
+        ):
+            enriched, _diagnostics = alphasift_service._enrich_candidates_with_dsa(
+                candidates
+            )
+
+        candidate = enriched[0]
+        self.assertFalse(candidate["is_st"])
+        self.assertFalse(candidate["is_suspended"])
+        self.assertFalse(candidate["is_limit_up"])
+        self.assertNotIn("trading_status", candidate["missing_fields"])
+        self.assertEqual(
+            candidate["trading_status_evidence"]["source"],
+            "tencent",
         )
 
     def test_dsa_pre_rank_candidate_context_omits_news(self) -> None:
