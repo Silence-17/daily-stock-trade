@@ -13,6 +13,7 @@ def test_vnpy_docker_acceptance_workflow_is_manual_and_fail_closed() -> None:
 
     assert workflow[True] == {"workflow_dispatch": None}
     assert "INCLUDE_VNPY=true" in text
+    assert "stock-analysis:default-smoke" in text
     assert "stock-analysis:vnpy-smoke" in text
     assert "VNPY_RUNTIME_ENABLED=true" in text
     assert "src.services.vnpy_simulated_gateway:DsaSimulatedGateway" in text
@@ -21,6 +22,7 @@ def test_vnpy_docker_acceptance_workflow_is_manual_and_fail_closed() -> None:
     assert 'runtime["event_bridge"]["registered_count"] == 4' in text
     assert 'runtime["event_bridge"]["handler_failure_count"] == 0' in text
     assert 'scheduler["loop_running"] is True' in text
+    assert 'DELTA_BYTES="$((VNPY_BYTES - DEFAULT_BYTES))"' in text
     assert "if: failure()" in text
     assert "if: always()" in text
 

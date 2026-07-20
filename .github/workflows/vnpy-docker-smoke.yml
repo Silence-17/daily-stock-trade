@@ -21,6 +21,15 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Build default comparison image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          tags: stock-analysis:default-smoke
+          load: true
+          cache-from: type=gha,scope=stock-analysis-vnpy-smoke
+
       - name: Build optional vn.py image
         uses: docker/build-push-action@v6
         with:
@@ -104,9 +113,17 @@ jobs:
 
       - name: Record image size
         run: |
-          IMAGE_BYTES="$(docker image inspect stock-analysis:vnpy-smoke --format '{{.Size}}')"
-          echo "Optional vn.py image bytes: ${IMAGE_BYTES}"
-          echo "- Optional vn.py image bytes: \`${IMAGE_BYTES}\`" >> "$GITHUB_STEP_SUMMARY"
+          DEFAULT_BYTES="$(docker image inspect stock-analysis:default-smoke --format '{{.Size}}')"
+          VNPY_BYTES="$(docker image inspect stock-analysis:vnpy-smoke --format '{{.Size}}')"
+          DELTA_BYTES="$((VNPY_BYTES - DEFAULT_BYTES))"
+          echo "Default image bytes: ${DEFAULT_BYTES}"
+          echo "Optional vn.py image bytes: ${VNPY_BYTES}"
+          echo "Optional vn.py delta bytes: ${DELTA_BYTES}"
+          {
+            echo "- Default image bytes: \`${DEFAULT_BYTES}\`"
+            echo "- Optional vn.py image bytes: \`${VNPY_BYTES}\`"
+            echo "- Optional vn.py delta bytes: \`${DELTA_BYTES}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Show container logs on failure
         if: failure()
