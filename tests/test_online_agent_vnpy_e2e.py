@@ -9,10 +9,22 @@ from urllib.error import URLError
 import pytest
 
 import scripts.check_online_agent_vnpy_e2e as e2e
-from scripts.check_online_agent_vnpy_e2e import evaluate_acceptance, main
+from scripts.check_online_agent_vnpy_e2e import (
+    _run_is_terminal_and_coherent,
+    evaluate_acceptance,
+    main,
+)
 
 
-def _status(*, cash=100000.0, positions=None, runtime=False, time_gate=True):
+def _status(
+    *,
+    account_id=1,
+    cash=100000.0,
+    positions=None,
+    runtime=False,
+    time_gate=True,
+    auto_trade=False,
+):
     diagnostics = {}
     if runtime:
         diagnostics["vnpy_runtime"] = {
@@ -25,13 +37,17 @@ def _status(*, cash=100000.0, positions=None, runtime=False, time_gate=True):
             "event_bridge": {"registered": True, "registered_count": 4},
         }
     return {
-        "account": {"id": 1},
-        "settings": {"auto_trade_time_gate_enabled": time_gate},
+        "account": {"id": account_id},
+        "settings": {
+            "account_id": account_id,
+            "auto_trade_enabled": auto_trade,
+            "auto_trade_time_gate_enabled": time_gate,
+        },
         "snapshot": {
             "total_cash": cash,
             "accounts": [
                 {
-                    "account_id": 1,
+                    "account_id": account_id,
                     "total_cash": cash,
                     "positions": positions or [],
                 }
@@ -87,6 +103,18 @@ def test_evaluate_acceptance_accepts_traceable_dry_run_without_mutation():
     assert result["failures"] == []
     assert result["cash_delta"] == 0
     assert result["position_deltas"] == {}
+
+
+def test_terminal_run_waits_for_linked_decision_to_match_plan():
+    detail = {
+        "decisions": [_decision(status="submitted")],
+        "trade_plans": [_plan(status="filled", trade_id=31)],
+    }
+
+    assert _run_is_terminal_and_coherent("vnpy_paper", detail) is False
+    detail["decisions"][0]["status"] = "filled"
+    detail["decisions"][0]["trade_id"] = 31
+    assert _run_is_terminal_and_coherent("vnpy_paper", detail) is True
 
 
 def test_evaluate_acceptance_validates_filled_vnpy_portfolio_change():
@@ -312,4 +340,186 @@ def test_cli_restores_time_gate_when_disable_response_is_uncertain(
         {"auto_trade_time_gate_enabled": True},
     ]
     assert report["evaluation"]["settings_restored"] is True
+    assert report["evaluation"]["failures"][0] == "acceptance_runtime_error"
+
+
+def test_cli_isolated_account_books_fill_then_restores_and_cleans_up(
+    monkeypatch, tmp_path
+):
+    state = {
+        "current_account_id": 1,
+        "auto_trade": True,
+        "time_gate": True,
+        "created": False,
+        "filled": False,
+        "cleaned": False,
+    }
+    calls = []
+
+    def current_status():
+        if state["current_account_id"] == 2:
+            return _status(
+                account_id=2,
+                cash=99000.0 if state["filled"] else 100000.0,
+                positions=(
+                    [{"symbol": "600000", "quantity": 100}]
+                    if state["filled"]
+                    else []
+                ),
+                runtime=True,
+                time_gate=state["time_gate"],
+                auto_trade=state["auto_trade"],
+            )
+        return _status(
+            account_id=1,
+            cash=50000.0,
+            runtime=True,
+            time_gate=state["time_gate"],
+            auto_trade=state["auto_trade"],
+        )
+
+    def fake_request(_base_url, path, *, method="GET", payload=None, **_kwargs):
+        calls.append((method, path, payload))
+        if path.startswith("/api/v1/vnpy-paper/status"):
+            return current_status()
+        if path.startswith("/api/v1/vnpy-paper/accounts?"):
+            items = [{"id": 1}]
+            if state["created"]:
+                items.append({"id": 2})
+            return {"items": items, "current_account_id": state["current_account_id"]}
+        if method == "PUT" and path == "/api/v1/vnpy-paper/settings":
+            if "auto_trade_enabled" in payload:
+                state["auto_trade"] = payload["auto_trade_enabled"]
+            if "auto_trade_time_gate_enabled" in payload:
+                state["time_gate"] = payload["auto_trade_time_gate_enabled"]
+            return current_status()
+        if method == "POST" and path.startswith("/api/v1/vnpy-paper/account/reset"):
+            state["created"] = True
+            state["current_account_id"] = 2
+            return current_status()
+        if method == "POST" and path == "/api/v1/vnpy-paper/auto/run":
+            state["filled"] = True
+            return {"accepted": True, "agent_run_uid": "run-1"}
+        if path == "/api/v1/vnpy-paper/agent-runs/run-1":
+            return {
+                "run_uid": "run-1",
+                "status": "completed",
+                "candidate_count": 1,
+                "planned_count": 0,
+                "submitted_count": 1,
+                "skipped_count": 0,
+                "decisions": [_decision(status="filled", trade_id=31)],
+                "trade_plans": [_plan(status="filled", trade_id=31)],
+                "portfolio_change": {
+                    "booked_plan_count": 1,
+                    "items": [
+                        {
+                            "symbol": "600000",
+                            "net_quantity": 100,
+                            "net_cash_flow": -1000,
+                        }
+                    ],
+                },
+            }
+        if method == "POST" and path.startswith(
+            "/api/v1/vnpy-paper/accounts/1/restore"
+        ):
+            state["current_account_id"] = 1
+            return current_status()
+        if method == "POST" and path == "/api/v1/vnpy-paper/accounts/archived/cleanup":
+            state["cleaned"] = True
+            return {"cleaned_account_ids": [2]}
+        raise AssertionError(f"unexpected request: {method} {path}")
+
+    monkeypatch.setattr(e2e, "_request_json", fake_request)
+    output_path = tmp_path / "isolated-fill.json"
+    exit_code = main(
+        [
+            "--execution-mode",
+            "vnpy_paper",
+            "--allow-simulated-orders",
+            "--temporarily-disable-time-gate",
+            "--isolated-account",
+            "--output-json",
+            str(output_path),
+        ]
+    )
+
+    report = json.loads(output_path.read_text(encoding="utf-8"))
+    assert exit_code == 0
+    assert report["evaluation"]["filled_plan_count"] == 1
+    assert report["evaluation"]["cash_delta"] == -1000
+    assert report["isolated_account"] == {
+        "enabled": True,
+        "original_account_id": 1,
+        "created_account_ids": [2],
+        "restored": True,
+        "cleanup_ok": True,
+    }
+    assert state == {
+        "current_account_id": 1,
+        "auto_trade": True,
+        "time_gate": True,
+        "created": True,
+        "filled": True,
+        "cleaned": True,
+    }
+    assert any(path.startswith("/api/v1/vnpy-paper/account/reset") for _, path, _ in calls)
+
+
+def test_cli_isolated_account_recovers_when_reset_response_is_uncertain(
+    monkeypatch, tmp_path
+):
+    state = {"current_account_id": 1, "auto_trade": True, "created": False}
+
+    def status():
+        return _status(
+            account_id=state["current_account_id"],
+            runtime=True,
+            auto_trade=state["auto_trade"],
+        )
+
+    def fake_request(_base_url, path, *, method="GET", payload=None, **_kwargs):
+        if path.startswith("/api/v1/vnpy-paper/status"):
+            return status()
+        if path.startswith("/api/v1/vnpy-paper/accounts?"):
+            items = [{"id": 1}, *([{"id": 2}] if state["created"] else [])]
+            return {"items": items, "current_account_id": state["current_account_id"]}
+        if method == "PUT" and path == "/api/v1/vnpy-paper/settings":
+            if "auto_trade_enabled" in payload:
+                state["auto_trade"] = payload["auto_trade_enabled"]
+            return status()
+        if method == "POST" and path.startswith("/api/v1/vnpy-paper/account/reset"):
+            state["created"] = True
+            state["current_account_id"] = 2
+            raise URLError("response lost after account creation")
+        if method == "POST" and path.startswith(
+            "/api/v1/vnpy-paper/accounts/1/restore"
+        ):
+            state["current_account_id"] = 1
+            return status()
+        if method == "POST" and path == "/api/v1/vnpy-paper/accounts/archived/cleanup":
+            return {"cleaned_account_ids": [2]}
+        raise AssertionError(f"unexpected request: {method} {path}")
+
+    monkeypatch.setattr(e2e, "_request_json", fake_request)
+    output_path = tmp_path / "uncertain-reset.json"
+    exit_code = main(
+        [
+            "--execution-mode",
+            "vnpy_paper",
+            "--allow-simulated-orders",
+            "--isolated-account",
+            "--output-json",
+            str(output_path),
+        ]
+    )
+
+    report = json.loads(output_path.read_text(encoding="utf-8"))
+    assert exit_code == 1
+    assert state["current_account_id"] == 1
+    assert state["auto_trade"] is True
+    assert report["isolated_account"]["created_account_ids"] == [2]
+    assert report["isolated_account"]["restored"] is True
+    assert report["isolated_account"]["cleanup_ok"] is True
     assert report["evaluation"]["failures"][0] == "acceptance_runtime_error"

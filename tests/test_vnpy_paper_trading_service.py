@@ -3806,7 +3806,11 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
             detail = None
             while time.monotonic() < deadline:
                 detail = service.agent_repo.get_run_detail(result["agent_run_uid"])
-                if detail and detail["trade_plans"][0]["status"] == "filled":
+                if (
+                    detail
+                    and detail["trade_plans"][0]["status"] == "filled"
+                    and detail["decisions"][0]["status"] == "filled"
+                ):
                     break
                 time.sleep(0.05)
 
@@ -4295,6 +4299,12 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
             _restore_modules(installed)
 
         self.assertEqual(run_result["orders"][0]["status"], "submitted")
+        initial_audit = self.service.agent_repo.get_run_detail(
+            run_result["agent_run_uid"]
+        )
+        self.assertIsNotNone(initial_audit)
+        assert initial_audit is not None
+        submitted_plan = initial_audit["trade_plans"][0]
         callback = self.service.sync_vnpy_trade_callback(
             vt_orderid="SIM.1",
             vt_tradeid="SIM.T1",
@@ -4328,6 +4338,23 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertEqual(audit["trade_plans"][0]["status"], "filled")
         self.assertEqual(audit["trade_plans"][0]["trade_id"], callback["trade_id"])
         self.assertEqual(audit["trade_plans"][0]["submitted_price"], 10.2)
+        stale_update = (
+            self.service.agent_repo.update_trade_plan_and_decision_execution(
+                plan_uid=str(submitted_plan["plan_uid"]),
+                status="submitted",
+                submitted_quantity=100,
+                submitted_price=10.0,
+                trade_id=None,
+                skip_reason=None,
+                order_result=run_result["orders"][0],
+                expected_updated_at=submitted_plan["updated_at"],
+            )
+        )
+        self.assertIsNotNone(stale_update)
+        assert stale_update is not None
+        self.assertTrue(stale_update["stale_write_skipped"])
+        self.assertEqual(stale_update["trade_plan"]["status"], "filled")
+        self.assertEqual(stale_update["decision"]["status"], "filled")
         decision = audit["decisions"][0]
         self.assertEqual(decision["position_plan"]["symbol"], "600519")
         self.assertEqual(decision["risk_review"]["status"], "passed")
@@ -4362,6 +4389,36 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertTrue(duplicate["accepted"])
         self.assertEqual(duplicate["trade_id"], callback["trade_id"])
         self.assertTrue(duplicate["raw"]["duplicate_callback"])
+
+        self.service.agent_repo.update_decision_execution(
+            decision_id=int(decision["id"]),
+            status="submitted",
+            reason=None,
+            quantity=100,
+            price=10.2,
+            trade_id=None,
+            order_result=decision["order_result"],
+        )
+        repaired = self.service.sync_vnpy_trade_callback(
+            vt_orderid="SIM.1",
+            vt_tradeid="SIM.T1",
+            symbol="600519",
+            side="buy",
+            market="cn",
+            quantity=100,
+            price=10.2,
+        )
+        repaired_audit = self.service.agent_repo.get_run_detail(
+            run_result["agent_run_uid"]
+        )
+        self.assertTrue(repaired["raw"]["duplicate_callback"])
+        assert repaired_audit is not None
+        self.assertEqual(repaired_audit["trade_plans"][0]["status"], "filled")
+        self.assertEqual(repaired_audit["decisions"][0]["status"], "filled")
+        self.assertEqual(
+            repaired_audit["decisions"][0]["trade_id"],
+            callback["trade_id"],
+        )
 
     def test_vnpy_trade_callbacks_accumulate_multiple_fills_idempotently(self) -> None:
         run = self.service.agent_repo.create_run(

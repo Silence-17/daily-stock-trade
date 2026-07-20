@@ -1843,6 +1843,7 @@ class VnpyPaperTradingService:
         existing_trade_id = _safe_int(plan.get("trade_id"))
         legacy_filled = str(plan.get("status") or "") == "filled" and existing_trade_id is not None and not synced_trades
         if trade_ref in synced_refs or legacy_filled or str(plan.get("status") or "") == "filled":
+            self._repair_linked_decision_from_trade_plan(plan)
             return {
                 "accepted": True,
                 "status": str(plan.get("status") or "filled"),
@@ -1995,7 +1996,7 @@ class VnpyPaperTradingService:
             status=next_status,
             reason=next_reason,
         )
-        self.agent_repo.update_trade_plan_execution(
+        self.agent_repo.update_trade_plan_and_decision_execution(
             plan_uid=str(plan["plan_uid"]),
             status=next_status,
             submitted_quantity=cumulative_quantity,
@@ -2004,17 +2005,6 @@ class VnpyPaperTradingService:
             skip_reason=next_reason,
             order_result=result,
         )
-        decision_id = _safe_int(plan.get("decision_id"))
-        if decision_id is not None:
-            self.agent_repo.update_decision_execution(
-                decision_id=decision_id,
-                status=next_status,
-                reason=next_reason,
-                quantity=cumulative_quantity,
-                price=average_price,
-                trade_id=int(created["id"]),
-                order_result=result,
-            )
         run_id = _safe_int(plan.get("run_id"))
         if run_id is not None:
             self.agent_repo.refresh_run_trade_counts(run_id)
@@ -4263,7 +4253,7 @@ class VnpyPaperTradingService:
 
             next_status = self._trade_plan_status(order)
             reason = str(order.get("reason")) if order.get("reason") else None
-            self.agent_repo.update_trade_plan_execution(
+            execution_update = self.agent_repo.update_trade_plan_and_decision_execution(
                 plan_uid=plan_key,
                 status=next_status,
                 submitted_quantity=_safe_float(order.get("quantity")) if order.get("accepted") else None,
@@ -4271,18 +4261,21 @@ class VnpyPaperTradingService:
                 trade_id=_safe_int(order.get("trade_id")),
                 skip_reason=reason,
                 order_result=order,
+                expected_updated_at=plan.get("updated_at"),
             )
-            decision_id = _safe_int(plan.get("decision_id"))
-            if decision_id is not None:
-                self.agent_repo.update_decision_execution(
-                    decision_id=decision_id,
-                    status=next_status,
-                    reason=reason,
-                    quantity=_safe_float(order.get("quantity")),
-                    price=_safe_float(order.get("price")),
-                    trade_id=_safe_int(order.get("trade_id")),
-                    order_result=order,
+            if (
+                isinstance(execution_update, dict)
+                and execution_update.get("stale_write_skipped")
+            ):
+                persisted_plan = execution_update.get("trade_plan")
+                persisted_order = (
+                    persisted_plan.get("order_result")
+                    if isinstance(persisted_plan, dict)
+                    and isinstance(persisted_plan.get("order_result"), dict)
+                    else None
                 )
+                if persisted_order is not None:
+                    order = persisted_order
             reconciled_order = self._reconcile_new_vnpy_submission(
                 plan_uid=plan_key,
                 order=order,
@@ -4298,6 +4291,28 @@ class VnpyPaperTradingService:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+    def _repair_linked_decision_from_trade_plan(self, plan: Dict[str, Any]) -> None:
+        decision_id = _safe_int(plan.get("decision_id"))
+        if decision_id is None:
+            return
+        order_result = (
+            plan.get("order_result")
+            if isinstance(plan.get("order_result"), dict)
+            else {}
+        )
+        self.agent_repo.update_decision_execution(
+            decision_id=decision_id,
+            status=str(plan.get("status") or "submitted"),
+            reason=(str(plan.get("skip_reason")) if plan.get("skip_reason") else None),
+            quantity=_safe_float(plan.get("submitted_quantity")),
+            price=_safe_float(plan.get("submitted_price")),
+            trade_id=_safe_int(plan.get("trade_id")),
+            order_result=order_result,
+        )
+        run_id = _safe_int(plan.get("run_id"))
+        if run_id is not None:
+            self.agent_repo.refresh_run_trade_counts(run_id)
+
     def _handle_vnpy_order_event(self, event: Any) -> None:
         try:
             data = self._event_data(event)
@@ -4493,7 +4508,7 @@ class VnpyPaperTradingService:
             status=status,
             reason=reason,
         )
-        self.agent_repo.update_trade_plan_execution(
+        self.agent_repo.update_trade_plan_and_decision_execution(
             plan_uid=str(plan["plan_uid"]),
             status=status,
             submitted_quantity=quantity,
@@ -4501,18 +4516,8 @@ class VnpyPaperTradingService:
             trade_id=_safe_int(plan.get("trade_id")),
             skip_reason=reason if status == "failed" else None,
             order_result=result,
+            expected_updated_at=plan.get("updated_at"),
         )
-        decision_id = _safe_int(plan.get("decision_id"))
-        if decision_id is not None:
-            self.agent_repo.update_decision_execution(
-                decision_id=decision_id,
-                status=status,
-                reason=reason,
-                quantity=quantity,
-                price=price,
-                trade_id=_safe_int(plan.get("trade_id")),
-                order_result=result,
-            )
         run_id = _safe_int(plan.get("run_id"))
         if run_id is not None:
             self.agent_repo.refresh_run_trade_counts(run_id)
