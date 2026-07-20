@@ -1111,6 +1111,18 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
             skipped_count=1,
             diagnostics={"data_quality": {"status": "ok"}},
         )
+        self.service.agent_repo.merge_run_diagnostics(
+            "recent-context-completed",
+            {
+                "llm_recap": {
+                    "status": "completed",
+                    "completed_at": "2026-07-20T12:00:00+00:00",
+                    "model": "openai/test",
+                    "prompt_version": "vnpy_paper_agent_recap_v1",
+                    "content": "Keep the next run conservative. " + ("x" * 1300),
+                }
+            },
+        )
         self.service.agent_repo.upsert_run_feedback(
             "recent-context-completed",
             verdict="approved",
@@ -1152,7 +1164,7 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertEqual(context["current_failure_streak"], 1)
         self.assertEqual(context["latest_run_uid"], "recent-context-failed")
         self.assertEqual(context["runs"][0]["error"], "source timeout")
-        self.assertEqual(context["schema_version"], 2)
+        self.assertEqual(context["schema_version"], 3)
         self.assertEqual(
             context["human_feedback_counts"],
             {"approved": 1, "needs_changes": 1},
@@ -1168,6 +1180,49 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
             "needs_changes",
         )
         self.assertIn("safer fallback", context["runs"][0]["human_feedback"]["note"])
+        self.assertEqual(context["llm_recap_count"], 1)
+        self.assertEqual(context["latest_llm_recap"]["run_uid"], "recent-context-completed")
+        self.assertTrue(context["latest_llm_recap"]["truncated"])
+        self.assertEqual(len(context["latest_llm_recap"]["content"]), 1200)
+        self.assertEqual(
+            context["llm_recap_policy"],
+            "untrusted_context_only_dynamic_plan_guardrails_remain_authoritative",
+        )
+        system_prompt, dynamic_prompt = self.service._llm_dynamic_agent_plan_prompts({
+            "recent_run_context": context,
+        })
+        self.assertIn("untrusted historical audit observations", system_prompt)
+        self.assertIn("Keep the next run conservative", dynamic_prompt)
+
+    def test_recent_agent_run_context_honors_trigger_source_isolation(self) -> None:
+        for trigger_source, run_uid in (
+            ("vnpy_paper_auto", "recent-formal"),
+            ("agent_calibration_shadow", "recent-shadow"),
+        ):
+            run = self.service.agent_repo.create_run(
+                run_uid=run_uid,
+                trigger_source=trigger_source,
+                strategy="dual_low",
+                market="cn",
+            )
+            self.service.agent_repo.complete_run(
+                run_id=int(run["id"]),
+                status="completed",
+                candidate_count=1,
+                planned_count=0,
+                submitted_count=0,
+                skipped_count=1,
+            )
+
+        context = self.service._recent_agent_run_context(
+            self.service.get_settings(),
+            trigger_source="agent_calibration_shadow",
+        )
+
+        self.assertEqual(context["trigger_source"], "agent_calibration_shadow")
+        self.assertEqual(context["run_count"], 1)
+        self.assertEqual(context["latest_run_uid"], "recent-shadow")
+        self.assertEqual([item["run_uid"] for item in context["runs"]], ["recent-shadow"])
 
     def test_reset_account_archives_old_paper_account_and_creates_clean_ledger(self) -> None:
         with patch(

@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [改进] 手动 LLM 复盘以有界不可信历史进入显式启用的动态计划 v3，上下文严格隔离触发来源/策略/市场，现有 evaluator 继续禁止放宽候选数、单票预算和最低分
+
 - [修复] 生产校准证据门禁默认仅统计 `agent_calibration_shadow` 无下单样本，避免普通 Agent 运行误充校准证据；调度事件在成功和部分失败时均保留逐市场/策略的有界零下单摘要
 
 - [改进] vn.py EventEngine bridge 新增四类回调的去标识化观测计数、处理成功/失败数和最后观测时间，runtime 状态读取会动态刷新而非停留在启动快照
