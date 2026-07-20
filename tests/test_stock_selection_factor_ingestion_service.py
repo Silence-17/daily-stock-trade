@@ -60,12 +60,17 @@ class StockSelectionFactorIngestionServiceTestCase(unittest.TestCase):
         )
 
         self.assertEqual(result["row_count"], 1)
+        self.assertEqual(result["complete_row_count"], 1)
+        self.assertEqual(result["partial_row_count"], 0)
+        self.assertEqual(result["exact_daily_row_count"], 1)
+        self.assertEqual(result["valuation_complete_row_count"], 1)
         self.assertFalse(result["methodology"]["uses_future_values"])
         row = self.repository.upsert_many.call_args.kwargs["rows"][0]
         self.assertEqual(row["pe_ratio"], 10)
         self.assertEqual(row["pb_ratio"], 2)
         self.assertEqual(row["total_mv"], 1e10)
         self.assertEqual(row["source"]["valuation_dates"]["pe_ratio"], "2024-01-04")
+        self.assertEqual(row["source"]["daily"], "custom.daily_fetcher")
         self.assertGreaterEqual(row["factors"]["daily_data_points"], 60)
         self.assertIsNotNone(row["factors"]["change_60d"])
         self.assertEqual(row["quality_status"], "complete")
@@ -186,6 +191,69 @@ class StockSelectionFactorIngestionServiceTestCase(unittest.TestCase):
                 snapshot_dates=[date(2024, 1, 5)],
                 universe=[{"symbol": "600519"}],
             )
+
+    def test_default_daily_route_prefers_sina_and_normalizes_turnover_units(self) -> None:
+        class Ak:
+            stock_zh_a_hist = MagicMock()
+
+            @staticmethod
+            def stock_zh_a_daily(**_: object) -> pd.DataFrame:
+                return pd.DataFrame({
+                    "date": [date(2024, 1, 4), date(2024, 1, 5)],
+                    "open": [10.0, 10.5],
+                    "high": [10.8, 11.0],
+                    "low": [9.8, 10.4],
+                    "close": [10.5, 10.8],
+                    "volume": [1000, 1200],
+                    "amount": [10000, 13000],
+                    "turnover": [0.02, 0.03],
+                })
+
+        fetcher = StockSelectionFactorIngestionService._build_daily_fetcher(Ak)
+        frame = fetcher(
+            symbol="920748",
+            period="daily",
+            start_date="20240101",
+            end_date="20240105",
+            adjust="",
+        )
+
+        self.assertEqual(frame.attrs["source_provider"], "akshare.stock_zh_a_daily_sina")
+        self.assertEqual(frame["turnover_rate"].tolist(), [2.0, 3.0])
+        self.assertAlmostEqual(frame.iloc[1]["change_pct"], (10.8 / 10.5 - 1) * 100)
+        Ak.stock_zh_a_hist.assert_not_called()
+
+    def test_default_daily_route_falls_back_to_eastmoney_with_source_audit(self) -> None:
+        class Ak:
+            @staticmethod
+            def stock_zh_a_daily(**_: object) -> pd.DataFrame:
+                raise RuntimeError("sina unavailable")
+
+            @staticmethod
+            def stock_zh_a_hist(**_: object) -> pd.DataFrame:
+                return pd.DataFrame({
+                    "date": [date(2024, 1, 5)],
+                    "open": [10.0],
+                    "high": [10.8],
+                    "low": [9.8],
+                    "close": [10.5],
+                    "volume": [1000],
+                    "amount": [10000],
+                })
+
+        fetcher = StockSelectionFactorIngestionService._build_daily_fetcher(Ak)
+        frame = fetcher(
+            symbol="600519",
+            period="daily",
+            start_date="20240101",
+            end_date="20240105",
+            adjust="",
+        )
+
+        self.assertEqual(
+            frame.attrs["source_provider"],
+            "akshare.stock_zh_a_hist_eastmoney",
+        )
 
 
 if __name__ == "__main__":

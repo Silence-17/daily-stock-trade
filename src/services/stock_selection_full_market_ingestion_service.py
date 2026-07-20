@@ -53,22 +53,27 @@ class StockSelectionFullMarketIngestionService:
             limit=6000,
         )
         universe = []
+        universe_sources = set()
         for resolved in resolved_dates:
             if resolved.get("truncated"):
                 raise RuntimeError("historical universe exceeds the supported 6000-symbol safety limit")
             snapshot_date = str(resolved.get("snapshot_date") or "")
+            methodology = resolved.get("methodology") or {}
+            universe_sources.add(str(methodology.get("source") or "unknown"))
             universe.extend(
                 {**item, "snapshot_date": snapshot_date}
                 for item in list(resolved.get("items") or [])
             )
         if not universe:
             raise RuntimeError("historical universe is empty")
+        universe_source = "+".join(sorted(universe_sources))
         return self.repository.create(
             job_id=uuid.uuid4().hex,
             market=str(market).lower(),
             snapshot_dates=dates,
             universe=universe,
             batch_size=batch_size,
+            universe_source=universe_source,
         )
 
     def run(self, job_id: str, *, task_id: Optional[str] = None, force: bool = False) -> Dict[str, Any]:

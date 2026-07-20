@@ -8,6 +8,8 @@ from typing import Any, Callable, Dict, Iterable, List, Optional
 
 import pandas as pd
 
+from data_provider.base import is_bse_code, normalize_stock_code
+
 from src.repositories.stock_selection_factor_snapshot_repo import (
     StockSelectionFactorSnapshotRepository,
 )
@@ -63,6 +65,7 @@ class StockSelectionFactorIngestionService:
         rows_by_date: Dict[date, List[Dict[str, Any]]] = {item: [] for item in dates}
         corporate_action_rows: List[Dict[str, Any]] = []
         errors: List[Dict[str, str]] = []
+        used_daily_sources = set()
         for item in symbols:
             symbol = str(item.get("symbol") or item.get("code") or "").strip()
             name = str(item.get("name") or "").strip()
@@ -77,9 +80,15 @@ class StockSelectionFactorIngestionService:
                     adjust="",
                 )
                 normalized_daily = self._normalize_daily(daily)
+                daily_source = str(
+                    normalized_daily.attrs.get("source_provider")
+                    or "custom.daily_fetcher"
+                )
+                used_daily_sources.add(daily_source)
             except Exception as exc:
                 errors.append({"symbol": symbol, "stage": "daily", "error": str(exc)})
                 normalized_daily = pd.DataFrame()
+                daily_source = "unavailable"
 
             if corporate_action_fetcher is not None:
                 try:
@@ -108,6 +117,7 @@ class StockSelectionFactorIngestionService:
                     industry=item.get("industry"),
                     snapshot_date=snapshot_date,
                     daily=normalized_daily,
+                    daily_source=daily_source,
                     valuations=valuations,
                 )
                 rows_by_date[snapshot_date].append(row)
@@ -115,6 +125,18 @@ class StockSelectionFactorIngestionService:
 
         inserted = 0
         updated = 0
+        persisted_rows = [row for rows in rows_by_date.values() for row in rows]
+        complete_row_count = sum(
+            1 for row in persisted_rows if row.get("quality_status") == "complete"
+        )
+        exact_daily_row_count = sum(
+            1 for row in persisted_rows if row.get("price") is not None
+        )
+        valuation_complete_row_count = sum(
+            1
+            for row in persisted_rows
+            if all(row.get(field) is not None for field in self.VALUATION_INDICATORS)
+        )
         for snapshot_date, rows in rows_by_date.items():
             result = self.repository.upsert_many(
                 market=market_value,
@@ -135,6 +157,10 @@ class StockSelectionFactorIngestionService:
             "snapshot_dates": [item.isoformat() for item in dates],
             "symbol_count": len(symbols),
             "row_count": sum(len(rows) for rows in rows_by_date.values()),
+            "complete_row_count": complete_row_count,
+            "partial_row_count": len(persisted_rows) - complete_row_count,
+            "exact_daily_row_count": exact_daily_row_count,
+            "valuation_complete_row_count": valuation_complete_row_count,
             "inserted": inserted,
             "updated": updated,
             "corporate_action_count": corporate_action_result["total"],
@@ -144,7 +170,14 @@ class StockSelectionFactorIngestionService:
             "errors": errors,
             "methodology": {
                 "universe_source": "caller_supplied_point_in_time_universe",
-                "daily_source": "akshare.stock_zh_a_hist",
+                "daily_source": "provider_fallback_route",
+                "daily_source_route": [
+                    "akshare.stock_zh_a_daily_sina",
+                    "akshare.stock_zh_a_hist_eastmoney",
+                    "tencent.fqkline",
+                    "baostock.query_history_k_data_plus",
+                ],
+                "daily_sources_used": sorted(used_daily_sources),
                 "valuation_source": "akshare.stock_zh_valuation_baidu",
                 "corporate_action_source": (
                     "tushare.dividend" if corporate_action_fetcher is not None else "unavailable"
@@ -155,6 +188,7 @@ class StockSelectionFactorIngestionService:
                 "uses_current_universe_fallback": False,
                 "uses_future_values": False,
                 "corporate_actions_do_not_feed_selection_factors": True,
+                "complete_row_rule": "all required factor fields are non-null",
             },
         }
 
@@ -166,6 +200,7 @@ class StockSelectionFactorIngestionService:
         industry: Any,
         snapshot_date: date,
         daily: pd.DataFrame,
+        daily_source: str,
         valuations: Dict[str, pd.DataFrame],
     ) -> Dict[str, Any]:
         history = daily[daily["date"] <= snapshot_date].copy() if not daily.empty else pd.DataFrame()
@@ -203,7 +238,7 @@ class StockSelectionFactorIngestionService:
             **values,
             "factors": factors,
             "source": {
-                "daily": "akshare.stock_zh_a_hist",
+                "daily": daily_source,
                 "valuation": "akshare.stock_zh_valuation_baidu",
                 "valuation_dates": valuation_dates,
             },
@@ -221,6 +256,7 @@ class StockSelectionFactorIngestionService:
     def _normalize_daily(frame: Any) -> pd.DataFrame:
         if not isinstance(frame, pd.DataFrame) or frame.empty:
             return pd.DataFrame()
+        source_provider = frame.attrs.get("source_provider")
         aliases = {
             "日期": "date",
             "开盘": "open",
@@ -239,7 +275,10 @@ class StockSelectionFactorIngestionService:
         result["date"] = pd.to_datetime(result["date"], errors="coerce").dt.date
         for column in set(result.columns) - {"date"}:
             result[column] = pd.to_numeric(result[column], errors="coerce")
-        return result.dropna(subset=["date"]).sort_values("date").reset_index(drop=True)
+        result = result.dropna(subset=["date"]).sort_values("date").reset_index(drop=True)
+        if source_provider:
+            result.attrs["source_provider"] = source_provider
+        return result
 
     @staticmethod
     def _normalize_valuation(frame: Any) -> pd.DataFrame:
@@ -273,7 +312,123 @@ class StockSelectionFactorIngestionService:
             import akshare as ak
         except ImportError as exc:
             raise RuntimeError("AKShare is unavailable") from exc
-        return self.daily_fetcher or ak.stock_zh_a_hist, self.valuation_fetcher or ak.stock_zh_valuation_baidu
+        return (
+            self.daily_fetcher or self._build_daily_fetcher(ak),
+            self.valuation_fetcher or ak.stock_zh_valuation_baidu,
+        )
+
+    @staticmethod
+    def _build_daily_fetcher(ak: Any) -> Callable[..., pd.DataFrame]:
+        from data_provider.baostock_fetcher import BaostockFetcher
+        from data_provider.tencent_fetcher import TencentFetcher
+
+        tencent = TencentFetcher()
+        baostock = BaostockFetcher()
+
+        def fetch(
+            *,
+            symbol: str,
+            period: str,
+            start_date: str,
+            end_date: str,
+            adjust: str,
+        ) -> pd.DataFrame:
+            code = normalize_stock_code(symbol)
+            start_iso = StockSelectionFactorIngestionService._iso_date(start_date)
+            end_iso = StockSelectionFactorIngestionService._iso_date(end_date)
+            errors = []
+
+            try:
+                prefix = StockSelectionFactorIngestionService._market_prefix(code)
+                frame = ak.stock_zh_a_daily(
+                    symbol=f"{prefix}{code}",
+                    start_date=start_date,
+                    end_date=end_date,
+                    adjust=adjust,
+                )
+                frame = StockSelectionFactorIngestionService._normalize_sina_daily(frame)
+                if not frame.empty:
+                    frame.attrs["source_provider"] = "akshare.stock_zh_a_daily_sina"
+                    return frame
+                errors.append("akshare.stock_zh_a_daily_sina returned no rows")
+            except Exception as exc:
+                errors.append(f"akshare.stock_zh_a_daily_sina failed: {exc}")
+
+            try:
+                frame = ak.stock_zh_a_hist(
+                    symbol=code,
+                    period=period,
+                    start_date=start_date,
+                    end_date=end_date,
+                    adjust=adjust,
+                )
+                if isinstance(frame, pd.DataFrame) and not frame.empty:
+                    frame.attrs["source_provider"] = "akshare.stock_zh_a_hist_eastmoney"
+                    return frame
+                errors.append("akshare.stock_zh_a_hist_eastmoney returned no rows")
+            except Exception as exc:
+                errors.append(f"akshare.stock_zh_a_hist_eastmoney failed: {exc}")
+
+            try:
+                frame = tencent.get_daily_data(
+                    code,
+                    start_date=start_iso,
+                    end_date=end_iso,
+                )
+                if isinstance(frame, pd.DataFrame) and not frame.empty:
+                    frame = frame.rename(columns={"pct_chg": "change_pct"})
+                    frame.attrs["source_provider"] = "tencent.fqkline"
+                    return frame
+                errors.append("tencent.fqkline returned no rows")
+            except Exception as exc:
+                errors.append(f"tencent.fqkline failed: {exc}")
+
+            if not is_bse_code(code):
+                try:
+                    frame = baostock.get_daily_data(
+                        code,
+                        start_date=start_iso,
+                        end_date=end_iso,
+                    )
+                    if isinstance(frame, pd.DataFrame) and not frame.empty:
+                        frame = frame.rename(columns={"pct_chg": "change_pct"})
+                        frame.attrs["source_provider"] = (
+                            "baostock.query_history_k_data_plus"
+                        )
+                        return frame
+                    errors.append("baostock.query_history_k_data_plus returned no rows")
+                except Exception as exc:
+                    errors.append(f"baostock.query_history_k_data_plus failed: {exc}")
+
+            raise RuntimeError("; ".join(errors))
+
+        return fetch
+
+    @staticmethod
+    def _normalize_sina_daily(frame: Any) -> pd.DataFrame:
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            return pd.DataFrame()
+        result = frame.copy()
+        result["change_pct"] = pd.to_numeric(
+            result.get("close"), errors="coerce"
+        ).pct_change(fill_method=None) * 100
+        if "turnover" in result.columns:
+            result["turnover_rate"] = pd.to_numeric(
+                result["turnover"], errors="coerce"
+            ) * 100
+        return result
+
+    @staticmethod
+    def _market_prefix(code: str) -> str:
+        if is_bse_code(code):
+            return "bj"
+        if code.startswith(("5", "6", "9")):
+            return "sh"
+        return "sz"
+
+    @staticmethod
+    def _iso_date(value: str) -> str:
+        return pd.to_datetime(value, errors="raise").date().isoformat()
 
     def _resolve_corporate_action_fetcher(self) -> Optional[Callable[..., List[Dict[str, Any]]]]:
         if self.corporate_action_fetcher is not None:

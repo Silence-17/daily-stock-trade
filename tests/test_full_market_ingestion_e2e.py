@@ -24,7 +24,12 @@ def _completed_job():
         "completed_batches": 200,
         "row_count": 4950,
         "source_error_count": 50,
-        "result": {"corporate_action_count": 12},
+        "result": {
+            "corporate_action_count": 12,
+            "complete_row_count": 4950,
+            "exact_daily_row_count": 4975,
+            "valuation_complete_row_count": 4960,
+        },
         "recovery_state": "complete",
     }
 
@@ -41,6 +46,8 @@ def test_evaluate_full_market_job_accepts_complete_bounded_coverage():
 
     assert result["ok"] is True
     assert result["coverage_ratio"] == 0.99
+    assert result["exact_daily_coverage_ratio"] == 0.995
+    assert result["valuation_coverage_ratio"] == 0.992
     assert result["source_error_ratio"] == 0.01
 
 
@@ -56,6 +63,7 @@ def test_evaluate_full_market_job_reports_completion_quality_failures():
         "source_error_count": 1000,
         "recovery_state": "orphaned",
     })
+    job["result"]["complete_row_count"] = 4
     result = evaluate_full_market_job(
         job,
         min_symbols=1000,
@@ -77,6 +85,25 @@ def test_evaluate_full_market_job_reports_completion_quality_failures():
         "checkpoint_progress_stalled",
         "recovery_state_not_complete",
     ]
+
+
+def test_evaluate_full_market_job_rejects_inserted_but_partial_factor_rows():
+    job = _completed_job()
+    job["row_count"] = 5000
+    job["result"]["complete_row_count"] = 4000
+
+    result = evaluate_full_market_job(
+        job,
+        min_symbols=4000,
+        min_coverage_ratio=0.95,
+        max_source_error_ratio=0.02,
+        progress_regressed=False,
+        stalled=False,
+    )
+
+    assert result["ok"] is False
+    assert result["failures"] == ["factor_coverage_below_threshold"]
+    assert result["coverage_ratio"] == 0.8
 
 
 def test_cli_observes_latest_completed_job(monkeypatch, tmp_path):

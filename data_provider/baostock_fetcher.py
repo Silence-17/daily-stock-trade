@@ -374,6 +374,79 @@ class BaostockFetcher(BaseFetcher):
         
         return None
 
+    def get_stock_lifecycle_list(self) -> Optional[pd.DataFrame]:
+        """Return Shanghai/Shenzhen stock lifecycle rows, including delisted stocks."""
+        try:
+            with self._baostock_session() as bs:
+                result = bs.query_stock_basic()
+                if result.error_code != '0':
+                    logger.warning(
+                        "Baostock lifecycle stock list lookup failed: %s",
+                        result.error_msg,
+                    )
+                    return None
+
+                rows = []
+                while result.next():
+                    rows.append(result.get_row_data())
+                if not rows:
+                    return None
+
+                frame = pd.DataFrame(rows, columns=result.fields)
+                required = {'code', 'code_name', 'ipoDate', 'outDate', 'type'}
+                missing = sorted(required - set(frame.columns))
+                if missing:
+                    logger.warning(
+                        "Baostock lifecycle stock list is missing fields: %s",
+                        ", ".join(missing),
+                    )
+                    return None
+
+                work = frame.loc[frame['type'].astype(str).str.strip() == '1'].copy()
+                work['exchange'] = work['code'].astype(str).str[:2].map({
+                    'sh': 'SSE',
+                    'sz': 'SZSE',
+                })
+                work = work.loc[work['exchange'].notna()].copy()
+                work['code'] = work['code'].astype(str).str.split('.').str[-1]
+                work = work.loc[work['code'].str.fullmatch(r'\d{6}', na=False)].copy()
+                work['name'] = work['code_name'].astype(str).str.strip()
+                work['list_date'] = work['ipoDate'].astype(str).str.strip()
+                delist_text = work['outDate'].astype(str).str.strip()
+                work['list_status'] = delist_text.map(lambda value: 'D' if value else 'L')
+                work['delist_date'] = delist_text.astype(object)
+                work.loc[delist_text.eq(''), 'delist_date'] = None
+                work['industry'] = None
+                work['market'] = None
+                work = work[[
+                    'code',
+                    'name',
+                    'industry',
+                    'market',
+                    'exchange',
+                    'list_status',
+                    'list_date',
+                    'delist_date',
+                ]].drop_duplicates(subset=['code'], keep='last')
+                work.attrs['lifecycle_methodology'] = {
+                    'source': 'baostock.query_stock_basic',
+                    'sources': ['baostock.query_stock_basic'],
+                    'coverage_exchanges': ['SSE', 'SZSE'],
+                    'includes_delisted_symbols': True,
+                    'uses_current_universe_fallback': False,
+                    'point_in_time_name_and_industry': False,
+                    'permission_requirement': None,
+                    'delist_date_semantics': 'provider_reported_last_active_date',
+                }
+                logger.info(
+                    "Baostock lifecycle stock list lookup succeeded: %s rows",
+                    len(work),
+                )
+                return work
+        except Exception as exc:
+            logger.warning("Baostock lifecycle stock list lookup failed: %s", exc)
+            return None
+
 
 if __name__ == "__main__":
     # 测试代码

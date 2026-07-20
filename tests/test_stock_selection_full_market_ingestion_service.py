@@ -36,6 +36,10 @@ class _FakeIngestion:
             "updated": 0,
             "error_count": 0,
             "errors": [],
+            "complete_row_count": row_count,
+            "partial_row_count": 0,
+            "exact_daily_row_count": row_count,
+            "valuation_complete_row_count": row_count,
             "corporate_action_count": len(symbols),
             "corporate_action_inserted": len(symbols),
             "corporate_action_updated": 0,
@@ -65,6 +69,7 @@ class StockSelectionFullMarketIngestionServiceTestCase(unittest.TestCase):
                     for index in range(1, 6)
                 ],
                 "truncated": False,
+                "methodology": {"source": "fixture.lifecycle"},
             }
             for snapshot_date in kwargs["snapshot_dates"]
         ]
@@ -110,6 +115,9 @@ class StockSelectionFullMarketIngestionServiceTestCase(unittest.TestCase):
         self.assertEqual(result["result"]["corporate_action_count"], 10)
         self.assertEqual(result["result"]["corporate_action_inserted"], 10)
         self.assertEqual(result["result"]["corporate_action_updated"], 0)
+        self.assertEqual(result["result"]["complete_row_count"], 10)
+        self.assertEqual(result["result"]["exact_daily_row_count"], 10)
+        self.assertEqual(result["universe_source"], "fixture.lifecycle")
         self.assertTrue(progress)
         self.assertEqual(service.list_recent(limit=1)[0]["job_id"], job["job_id"])
 

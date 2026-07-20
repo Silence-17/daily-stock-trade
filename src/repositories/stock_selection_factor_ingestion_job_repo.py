@@ -28,12 +28,14 @@ class StockSelectionFactorIngestionJobRepository:
         snapshot_dates: List[date],
         universe: List[Dict[str, Any]],
         batch_size: int,
+        universe_source: str = "unknown",
     ) -> Dict[str, Any]:
         now = utc_naive_now()
         with self.db.get_session() as session:
             row = StockSelectionFactorIngestionJob(
                 job_id=job_id,
                 market=market,
+                universe_source=str(universe_source or "unknown")[:64],
                 snapshot_dates_json=self._dumps([item.isoformat() for item in snapshot_dates]),
                 universe_json=self._dumps(universe),
                 batch_size=batch_size,
@@ -115,6 +117,10 @@ class StockSelectionFactorIngestionJobRepository:
                 "corporate_action_count",
                 "corporate_action_inserted",
                 "corporate_action_updated",
+                "complete_row_count",
+                "partial_row_count",
+                "exact_daily_row_count",
+                "valuation_complete_row_count",
             ):
                 result[key] = int(result.get(key) or 0) + int(batch_result.get(key) or 0)
             row.result_json = self._dumps(result)

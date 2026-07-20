@@ -58,8 +58,20 @@ def evaluate_full_market_job(
     next_offset = int(job.get("next_offset") or 0)
     remaining = int(job.get("remaining_work_items") or 0)
     row_count = int(job.get("row_count") or 0)
+    result_payload = job.get("result") or {}
+    complete_row_count = int(result_payload.get("complete_row_count") or 0)
+    exact_daily_row_count = int(result_payload.get("exact_daily_row_count") or 0)
+    valuation_complete_row_count = int(
+        result_payload.get("valuation_complete_row_count") or 0
+    )
     source_errors = int(job.get("source_error_count") or 0)
-    coverage_ratio = row_count / total_work_items if total_work_items else 0.0
+    coverage_ratio = complete_row_count / total_work_items if total_work_items else 0.0
+    exact_daily_coverage_ratio = (
+        exact_daily_row_count / total_work_items if total_work_items else 0.0
+    )
+    valuation_coverage_ratio = (
+        valuation_complete_row_count / total_work_items if total_work_items else 0.0
+    )
     source_error_ratio = source_errors / total_work_items if total_work_items else 1.0
 
     if status != "completed":
@@ -95,7 +107,12 @@ def evaluate_full_market_job(
         "completed_work_items": next_offset,
         "completed_batches": int(job.get("completed_batches") or 0),
         "row_count": row_count,
+        "complete_row_count": complete_row_count,
         "coverage_ratio": round(coverage_ratio, 6),
+        "exact_daily_row_count": exact_daily_row_count,
+        "exact_daily_coverage_ratio": round(exact_daily_coverage_ratio, 6),
+        "valuation_complete_row_count": valuation_complete_row_count,
+        "valuation_coverage_ratio": round(valuation_coverage_ratio, 6),
         "source_error_count": source_errors,
         "source_error_ratio": round(source_error_ratio, 6),
         "corporate_action_count": int(

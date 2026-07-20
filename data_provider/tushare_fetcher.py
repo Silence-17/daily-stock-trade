@@ -693,7 +693,18 @@ class TushareFetcher(BaseFetcher):
 
         result = pd.concat(frames, ignore_index=True)
         result["code"] = result["ts_code"].astype(str).str.split(".").str[0]
-        return result.drop_duplicates(subset=["code", "list_status"], keep="last")
+        result = result.drop_duplicates(subset=["code", "list_status"], keep="last")
+        result.attrs["lifecycle_methodology"] = {
+            "source": "tushare.stock_basic",
+            "sources": ["tushare.stock_basic"],
+            "coverage_exchanges": ["SSE", "SZSE", "BSE"],
+            "includes_delisted_symbols": True,
+            "uses_current_universe_fallback": False,
+            "point_in_time_name_and_industry": False,
+            "permission_requirement": "Tushare stock_basic permission",
+            "delist_date_semantics": "provider_reported_delist_date",
+        }
+        return result
 
     def get_stock_corporate_actions(
         self,
