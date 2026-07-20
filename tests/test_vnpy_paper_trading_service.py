@@ -69,6 +69,10 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         )
         os.environ["ENV_FILE"] = str(self.env_path)
         os.environ["DATABASE_PATH"] = str(self.db_path)
+        self.original_calibration_shadow_enabled = os.environ.get(
+            "DSA_AGENT_CALIBRATION_SHADOW_ENABLED"
+        )
+        os.environ["DSA_AGENT_CALIBRATION_SHADOW_ENABLED"] = "false"
         Config.reset_instance()
         DatabaseManager.reset_instance()
         self.service = VnpyPaperTradingService(
@@ -81,6 +85,12 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         Config.reset_instance()
         os.environ.pop("ENV_FILE", None)
         os.environ.pop("DATABASE_PATH", None)
+        if self.original_calibration_shadow_enabled is None:
+            os.environ.pop("DSA_AGENT_CALIBRATION_SHADOW_ENABLED", None)
+        else:
+            os.environ["DSA_AGENT_CALIBRATION_SHADOW_ENABLED"] = (
+                self.original_calibration_shadow_enabled
+            )
         self.temp_dir.cleanup()
 
     def test_auto_alphasift_llm_policy_allows_bounded_environment_override(self) -> None:
@@ -3652,6 +3662,89 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         settings_after = self.service.get_settings()
         self.assertEqual(settings_after.auto_execution_mode, "paper")
         self.assertFalse(settings_after.auto_trade_enabled)
+
+    def test_calibration_shadow_overrides_are_audited_without_persisting_settings(self) -> None:
+        self.service.update_settings({
+            "auto_trade_enabled": False,
+            "auto_execution_mode": "paper",
+            "auto_market": "cn",
+            "auto_strategy": "dual_low",
+            "auto_max_results": 5,
+        })
+        fake_alphasift = MagicMock()
+        fake_alphasift.screen.return_value = {"candidates": [], "warnings": []}
+        fake_alphasift.strategies.return_value = {
+            "strategies": [{"id": "momentum_quality", "market_scope": ["cn"]}],
+        }
+
+        with patch(
+            "src.services.vnpy_paper_trading_service.AlphaSiftService",
+            return_value=fake_alphasift,
+        ), patch.object(self.service, "_record_last_auto_run") as record_last_run:
+            result = self.service.run_auto_trade_once(
+                execution_mode_override="dry_run",
+                ignore_auto_trade_enabled=True,
+                market_override="cn",
+                strategy_override="momentum_quality",
+                max_results_override=2,
+                calibration_shadow=True,
+                trigger_source_override="agent_calibration_shadow",
+            )
+
+        fake_alphasift.screen.assert_called_once()
+        screen_call = fake_alphasift.screen.call_args.kwargs
+        self.assertEqual(screen_call["market"], "cn")
+        self.assertEqual(screen_call["strategy"], "momentum_quality")
+        self.assertEqual(screen_call["max_results"], 2)
+        audit = self.service.agent_repo.get_run_detail(result["agent_run_uid"])
+        self.assertIsNotNone(audit)
+        assert audit is not None
+        self.assertTrue(audit["diagnostics"]["calibration_shadow"])
+        self.assertEqual(audit["diagnostics"]["execution_mode"], "dry_run")
+        self.assertEqual(audit["market"], "cn")
+        self.assertEqual(audit["strategy"], "momentum_quality")
+        self.assertEqual(audit["trigger_source"], "agent_calibration_shadow")
+        self.assertEqual(audit["max_results"], 2)
+        record_last_run.assert_not_called()
+        persisted = self.service.get_settings()
+        self.assertEqual(persisted.auto_market, "cn")
+        self.assertEqual(persisted.auto_strategy, "dual_low")
+        self.assertEqual(persisted.auto_max_results, 5)
+        self.assertEqual(persisted.auto_execution_mode, "paper")
+        self.assertFalse(persisted.auto_trade_enabled)
+
+    def test_calibration_shadow_rejects_any_order_capable_execution_mode(self) -> None:
+        with self.assertRaisesRegex(ValueError, "requires dry_run"):
+            self.service.run_auto_trade_once(
+                execution_mode_override="paper",
+                ignore_auto_trade_enabled=True,
+                calibration_shadow=True,
+            )
+
+        with self.assertRaisesRegex(ValueError, "requires ignore_auto_trade_enabled"):
+            self.service.run_auto_trade_once(
+                execution_mode_override="dry_run",
+                calibration_shadow=True,
+            )
+
+    def test_calibration_shadow_rejects_strategy_market_scope_mismatch_before_run(self) -> None:
+        fake_alphasift = MagicMock()
+        fake_alphasift.strategies.return_value = {
+            "strategies": [{"id": "dual_low", "market_scope": ["cn"]}],
+        }
+        with patch(
+            "src.services.vnpy_paper_trading_service.AlphaSiftService",
+            return_value=fake_alphasift,
+        ), self.assertRaisesRegex(ValueError, "does not support market 'us'"):
+            self.service.run_auto_trade_once(
+                execution_mode_override="dry_run",
+                ignore_auto_trade_enabled=True,
+                market_override="us",
+                strategy_override="dual_low",
+                calibration_shadow=True,
+                trigger_source_override="agent_calibration_shadow",
+            )
+        self.assertEqual(self.service.agent_repo.list_recent_runs(limit=10), [])
 
     def test_auto_trade_vnpy_paper_submits_order_to_main_engine_without_local_fill(self) -> None:
         installed = _install_fake_vnpy_modules()
@@ -8060,6 +8153,99 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertEqual(tasks[0]["name"], "vnpy_paper_auto_retry")
         self.assertEqual(tasks[0]["interval_seconds"], 5 * 60)
         self.assertTrue(tasks[0]["run_immediately"])
+
+    def test_background_task_builder_adds_order_free_multi_market_shadow_runs(self) -> None:
+        fake_service = MagicMock()
+        fake_service.get_settings.return_value = SimpleNamespace(
+            enabled=True,
+            auto_trade_enabled=False,
+            auto_interval_minutes=5,
+            auto_strategy="dual_low",
+        )
+        fake_service.retry_due_trade_plans.return_value = {}
+        fake_service.run_auto_trade_once.side_effect = [
+            {"accepted": True, "agent_run_uid": f"run-{index}", "candidate_count": 2,
+             "planned_count": 2, "submitted_count": 0}
+            for index in range(2)
+        ]
+        env = {
+            "DSA_AGENT_CALIBRATION_SHADOW_ENABLED": "true",
+            "DSA_AGENT_CALIBRATION_SHADOW_PAIRS": "cn:dual_low,us:momentum_quality",
+            "DSA_AGENT_CALIBRATION_SHADOW_INTERVAL_MINUTES": "720",
+            "DSA_AGENT_CALIBRATION_SHADOW_MAX_RESULTS": "2",
+        }
+
+        with patch.dict(os.environ, env, clear=False), patch(
+            "src.services.vnpy_paper_trading_service.VnpyPaperTradingService",
+            return_value=fake_service,
+        ):
+            tasks = build_vnpy_paper_trading_background_tasks()
+
+        self.assertEqual(
+            [task["name"] for task in tasks],
+            ["vnpy_paper_auto_retry", "agent_calibration_shadow"],
+        )
+        shadow = tasks[1]
+        self.assertEqual(shadow["interval_seconds"], 720 * 60)
+        self.assertEqual(shadow["initial_delay_seconds"], 300)
+        result = shadow["task"]()
+        self.assertEqual(result["completed_count"], 2)
+        self.assertEqual(result["submitted_count"], 0)
+        self.assertFalse(result["submits_orders"])
+        calls = fake_service.run_auto_trade_once.call_args_list
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(
+            {(call.kwargs["market_override"], call.kwargs["strategy_override"]) for call in calls},
+            {
+                ("cn", "dual_low"),
+                ("us", "momentum_quality"),
+            },
+        )
+        self.assertTrue(all(call.kwargs["execution_mode_override"] == "dry_run" for call in calls))
+        self.assertTrue(all(call.kwargs["ignore_auto_trade_enabled"] for call in calls))
+        self.assertTrue(all(call.kwargs["calibration_shadow"] for call in calls))
+        self.assertTrue(all(call.kwargs["max_results_override"] == 2 for call in calls))
+        self.assertTrue(all(
+            call.kwargs["trigger_source_override"] == "agent_calibration_shadow"
+            for call in calls
+        ))
+
+    def test_calibration_shadow_isolates_combinations_and_fails_task_on_any_error(self) -> None:
+        fake_service = MagicMock()
+        fake_service.get_settings.return_value = SimpleNamespace(
+            enabled=True,
+            auto_trade_enabled=False,
+            auto_interval_minutes=5,
+            auto_strategy="dual_low",
+        )
+        fake_service.run_auto_trade_once.side_effect = [
+            RuntimeError("provider unavailable"),
+            {
+                "accepted": True,
+                "agent_run_uid": "run-us",
+                "candidate_count": 2,
+                "planned_count": 2,
+                "submitted_count": 0,
+            },
+        ]
+        env = {
+            "DSA_AGENT_CALIBRATION_SHADOW_ENABLED": "true",
+            "DSA_AGENT_CALIBRATION_SHADOW_PAIRS": "cn:dual_low,us:dual_low",
+        }
+
+        with patch.dict(os.environ, env, clear=False), patch(
+            "src.services.vnpy_paper_trading_service.VnpyPaperTradingService",
+            return_value=fake_service,
+        ):
+            tasks = build_vnpy_paper_trading_background_tasks()
+
+        shadow = next(task for task in tasks if task["name"] == "agent_calibration_shadow")
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "completed=1 failed=1 pairs=cn/dual_low",
+        ):
+            shadow["task"]()
+        self.assertEqual(fake_service.run_auto_trade_once.call_count, 2)
 
     def test_background_task_builder_injects_runtime_engines_into_service(self) -> None:
         main_engine = object()

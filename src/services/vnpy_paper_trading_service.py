@@ -96,6 +96,13 @@ DEFAULT_AUTO_ALPHASIFT_LLM_COOLDOWN_MINUTES = 60
 DEFAULT_AUTO_ALPHASIFT_LLM_PROBE_TIMEOUT_SECONDS = 10
 DEFAULT_AUTO_ALPHASIFT_LLM_PROBE_LEASE_SECONDS = 300
 ALLOWED_AUTO_MARKETS = {"cn", "hk", "us", "jp", "kr", "tw"}
+CALIBRATION_SHADOW_ENABLED_ENV = "DSA_AGENT_CALIBRATION_SHADOW_ENABLED"
+CALIBRATION_SHADOW_PAIRS_ENV = "DSA_AGENT_CALIBRATION_SHADOW_PAIRS"
+CALIBRATION_SHADOW_INTERVAL_MINUTES_ENV = "DSA_AGENT_CALIBRATION_SHADOW_INTERVAL_MINUTES"
+CALIBRATION_SHADOW_MAX_RESULTS_ENV = "DSA_AGENT_CALIBRATION_SHADOW_MAX_RESULTS"
+DEFAULT_CALIBRATION_SHADOW_INTERVAL_MINUTES = 1440
+DEFAULT_CALIBRATION_SHADOW_MAX_RESULTS = 3
+_AUTO_AGENT_RUN_LOCK = threading.Lock()
 AUTO_CROSS_MARKET_LINKS = {
     "cn": ("hk", "us"),
     "hk": ("cn", "us"),
@@ -2303,6 +2310,11 @@ class VnpyPaperTradingService:
         *,
         execution_mode_override: Optional[str] = None,
         ignore_auto_trade_enabled: bool = False,
+        market_override: Optional[str] = None,
+        strategy_override: Optional[str] = None,
+        max_results_override: Optional[int] = None,
+        calibration_shadow: bool = False,
+        trigger_source_override: Optional[str] = None,
     ) -> Dict[str, Any]:
         run_timing_started = time.monotonic()
         stage_timing_started = run_timing_started
@@ -2325,6 +2337,14 @@ class VnpyPaperTradingService:
             stage_timings["completed_stage"] = stage
             stage_timing_started = now
 
+        def record_last_run(result: Dict[str, Any]) -> None:
+            if not calibration_shadow:
+                self._record_last_auto_run(result)
+
+        def record_run_alert(event_type: str, **kwargs: Any) -> None:
+            if not calibration_shadow:
+                self._record_auto_trade_alert_event(event_type, **kwargs)
+
         settings = self.get_settings()
         override_mode = str(execution_mode_override or "").strip().lower()
         if override_mode:
@@ -2333,8 +2353,57 @@ class VnpyPaperTradingService:
             settings = replace(settings, auto_execution_mode=override_mode)
         if ignore_auto_trade_enabled:
             settings = replace(settings, auto_trade_enabled=True)
+        if calibration_shadow:
+            if override_mode != "dry_run":
+                raise ValueError("calibration_shadow requires dry_run execution mode")
+            if not ignore_auto_trade_enabled:
+                raise ValueError("calibration_shadow requires ignore_auto_trade_enabled")
+            settings = replace(
+                settings,
+                auto_failure_fuse_enabled=False,
+                auto_max_drawdown_pct=None,
+                auto_consecutive_loss_limit=None,
+                auto_sell_enabled=False,
+                auto_rebalance_enabled=False,
+                auto_llm_plan_enabled=False,
+            )
+        override_market = str(market_override or "").strip().lower()
+        if override_market:
+            if override_market not in ALLOWED_AUTO_MARKETS:
+                raise ValueError("market_override must be a supported auto-trading market")
+            settings = replace(settings, auto_market=override_market)
+        override_strategy = str(strategy_override or "").strip()
+        if override_strategy:
+            if override_strategy not in ALPHASIFT_FALLBACK_STRATEGIES:
+                raise ValueError("strategy_override must be a supported AlphaSift strategy")
+            settings = replace(settings, auto_strategy=override_strategy)
+        if max_results_override is not None:
+            try:
+                override_max_results = int(max_results_override)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("max_results_override must be between 1 and 10") from exc
+            if not 1 <= override_max_results <= 10:
+                raise ValueError("max_results_override must be between 1 and 10")
+            settings = replace(settings, auto_max_results=override_max_results)
+        if calibration_shadow:
+            self._validate_calibration_shadow_pair(settings)
+        run_trigger_source = str(
+            trigger_source_override or "vnpy_paper_auto"
+        ).strip().lower()
+        if (
+            not run_trigger_source
+            or len(run_trigger_source) > 64
+            or any(
+                not (character.isalnum() or character in {"_", "-"})
+                for character in run_trigger_source
+            )
+        ):
+            raise ValueError("trigger_source_override contains unsupported characters")
         run_uid = f"ss-agent-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:8]}"
-        recent_run_context = self._recent_agent_run_context(settings)
+        recent_run_context = self._recent_agent_run_context(
+            settings,
+            trigger_source=run_trigger_source,
+        )
         cross_run_quality = self._cross_run_quality_snapshot(
             settings,
             recent_run_context=recent_run_context,
@@ -2355,14 +2424,25 @@ class VnpyPaperTradingService:
         )
         settings = self._apply_llm_dynamic_agent_plan(settings, llm_dynamic_plan)
         with self._lock:
-            alphasift_llm_policy = self._auto_alphasift_llm_policy(settings)
+            alphasift_llm_policy = self._auto_alphasift_llm_policy(
+                settings,
+                trigger_source=run_trigger_source,
+            )
             run_diagnostics = {
                 "engine": "vnpy_local_paper_ledger",
                 "execution_mode": settings.auto_execution_mode,
                 "execution_mode_override": override_mode or None,
                 "ignore_auto_trade_enabled": bool(ignore_auto_trade_enabled),
+                "calibration_shadow": bool(calibration_shadow),
+                "trigger_source": run_trigger_source,
+                "runtime_overrides": {
+                    "market": override_market or None,
+                    "strategy": override_strategy or None,
+                    "max_results": max_results_override,
+                },
                 "agent_plan": self._build_agent_plan(
                     settings,
+                    trigger_source=run_trigger_source,
                     execution_mode_override=override_mode or None,
                     ignore_auto_trade_enabled=bool(ignore_auto_trade_enabled),
                     llm_dynamic_plan=llm_dynamic_plan,
@@ -2378,7 +2458,7 @@ class VnpyPaperTradingService:
             finish_timing_stage("planning")
             run = self.agent_repo.create_run(
                 run_uid=run_uid,
-                trigger_source="vnpy_paper_auto",
+                trigger_source=run_trigger_source,
                 strategy=settings.auto_strategy,
                 market=settings.auto_market,
                 max_results=settings.auto_max_results,
@@ -2417,17 +2497,18 @@ class VnpyPaperTradingService:
                 error="auto_trade_disabled",
                 diagnostics={**run_diagnostics, "reason": "auto_trade_disabled"},
             )
-            self._record_last_auto_run(result)
+            record_last_run(result)
             return result
 
         failure_fuse_reason, failure_fuse_diagnostics = self._failure_fuse_reason(
             settings,
             current_run_id=run_id,
+            trigger_source=run_trigger_source,
         )
         if failure_fuse_diagnostics:
             run_diagnostics["failure_fuse"] = failure_fuse_diagnostics
         if failure_fuse_diagnostics.get("auto_recovered"):
-            self._record_auto_trade_alert_event(
+            record_run_alert(
                 "failure_fuse_auto_recovered",
                 status="resolved",
                 reason="failure_fuse_cooldown_elapsed",
@@ -2473,7 +2554,7 @@ class VnpyPaperTradingService:
                     "failure_fuse": failure_fuse_diagnostics,
                 },
             )
-            self._record_auto_trade_alert_event(
+            record_run_alert(
                 "failure_fuse_open",
                 status="triggered",
                 reason=failure_fuse_reason,
@@ -2487,7 +2568,7 @@ class VnpyPaperTradingService:
                     "failure_fuse": failure_fuse_diagnostics,
                 },
             )
-            self._record_last_auto_run(result)
+            record_last_run(result)
             return result
 
         time_gate_reason, time_gate_diagnostics = self._auto_trade_time_gate(settings)
@@ -2523,7 +2604,7 @@ class VnpyPaperTradingService:
                     "market_phase": time_gate_diagnostics,
                 },
             )
-            self._record_last_auto_run(result)
+            record_last_run(result)
             return result
 
         orders: List[Dict[str, Any]] = self._run_auto_sell_checks(settings, run_id=run_id)
@@ -2562,7 +2643,7 @@ class VnpyPaperTradingService:
                 error=reason,
                 diagnostics={**run_diagnostics, "reason": reason},
             )
-            self._record_auto_trade_alert_event(
+            record_run_alert(
                 reason,
                 status="triggered",
                 reason=str(cross_run_quality.get("reason") or reason),
@@ -2576,7 +2657,7 @@ class VnpyPaperTradingService:
                     "cross_run_quality": cross_run_quality,
                 },
             )
-            self._record_last_auto_run(result)
+            record_last_run(result)
             return result
 
         config = get_config()
@@ -2620,7 +2701,7 @@ class VnpyPaperTradingService:
                 error=str(exc),
                 diagnostics={**run_diagnostics, "stage": "alphasift_screen"},
             )
-            self._record_auto_trade_alert_event(
+            record_run_alert(
                 "alphasift_screen_failed",
                 status="failed",
                 reason=str(exc) or "alphasift_screen_failed",
@@ -2723,7 +2804,7 @@ class VnpyPaperTradingService:
                     "source_routing": screen.get("source_routing") if isinstance(screen, dict) else None,
                 },
             )
-            self._record_auto_trade_alert_event(
+            record_run_alert(
                 reason,
                 status=(
                     "degraded"
@@ -2750,7 +2831,7 @@ class VnpyPaperTradingService:
                     "source_routing": screen.get("source_routing") if isinstance(screen, dict) else None,
                 },
             )
-            self._record_last_auto_run(result)
+            record_last_run(result)
             return result
 
         currency_budget = self._auto_order_currency_budget(settings)
@@ -2782,7 +2863,7 @@ class VnpyPaperTradingService:
         )
         run_diagnostics["market_context_risk"] = market_risk_diagnostics
         if account_risk_diagnostics.get("drawdown_guard_transition") == "recovered":
-            self._record_auto_trade_alert_event(
+            record_run_alert(
                 "account_drawdown_recovered",
                 status="resolved",
                 reason="account_drawdown_recovered",
@@ -2805,7 +2886,7 @@ class VnpyPaperTradingService:
         consecutive_loss_transition = consecutive_losses.get("guard_transition")
         if consecutive_loss_transition in {"opened", "recovered"}:
             recovered = consecutive_loss_transition == "recovered"
-            self._record_auto_trade_alert_event(
+            record_run_alert(
                 "consecutive_loss_recovered" if recovered else "consecutive_loss_limit_reached",
                 status="resolved" if recovered else "triggered",
                 reason=(
@@ -2826,7 +2907,7 @@ class VnpyPaperTradingService:
             )
         if account_risk_reason:
             if account_risk_reason != "consecutive_loss_limit_reached":
-                self._record_auto_trade_alert_event(
+                record_run_alert(
                     account_risk_reason,
                     status=(
                         "failed"
@@ -3389,7 +3470,7 @@ class VnpyPaperTradingService:
         # A synchronous gateway callback can make a persisted plan terminal before
         # complete_run writes the initial accepted-order counts.
         self.agent_repo.refresh_run_trade_counts(run_id)
-        self._record_last_auto_run(result)
+        record_last_run(result)
         return result
 
     def generate_agent_run_llm_recap(
@@ -5418,6 +5499,7 @@ class VnpyPaperTradingService:
         self,
         settings: VnpyPaperSettings,
         *,
+        trigger_source: str = "vnpy_paper_auto",
         execution_mode_override: Optional[str],
         ignore_auto_trade_enabled: bool,
         llm_dynamic_plan: Optional[Dict[str, Any]] = None,
@@ -5452,7 +5534,7 @@ class VnpyPaperTradingService:
             "schema_version": 1,
             "created_at": _utc_now_iso(),
             "objective": "screen_online_candidates_and_generate_simulated_trade_plans",
-            "trigger_source": "vnpy_paper_auto",
+            "trigger_source": trigger_source,
             "strategy": settings.auto_strategy,
             "market": settings.auto_market,
             "max_results": settings.auto_max_results,
@@ -5744,6 +5826,7 @@ class VnpyPaperTradingService:
         self,
         settings: VnpyPaperSettings,
         *,
+        trigger_source: str = "vnpy_paper_auto",
         limit: int = 5,
     ) -> Dict[str, Any]:
         recent = self.agent_repo.list_recent_runs(
@@ -5816,6 +5899,7 @@ class VnpyPaperTradingService:
         return {
             "schema_version": 2,
             "scope": "same_trigger_strategy_market",
+            "trigger_source": trigger_source,
             "strategy": settings.auto_strategy,
             "market": settings.auto_market,
             "limit": limit,
@@ -5855,6 +5939,8 @@ class VnpyPaperTradingService:
     def _auto_alphasift_llm_policy(
         self,
         settings: VnpyPaperSettings,
+        *,
+        trigger_source: str = "vnpy_paper_auto",
     ) -> Dict[str, Any]:
         policy = _resolve_auto_alphasift_llm_policy()
         if not policy["circuit_breaker_enabled"]:
@@ -5863,7 +5949,7 @@ class VnpyPaperTradingService:
             return policy
 
         recent = self.agent_repo.list_recent_runs(
-            trigger_source="vnpy_paper_auto",
+            trigger_source=trigger_source,
             strategy=settings.auto_strategy,
             market=settings.auto_market,
             limit=20,
@@ -6566,6 +6652,40 @@ class VnpyPaperTradingService:
                 strategies.append({"id": strategy_id, "name": strategy_id, "category": "fallback", "description": ""})
         return strategies, warnings
 
+    def _validate_calibration_shadow_pair(self, settings: VnpyPaperSettings) -> None:
+        payload = AlphaSiftService(config=get_config()).strategies()
+        raw_strategies = payload.get("strategies") if isinstance(payload, dict) else None
+        if not isinstance(raw_strategies, list):
+            raise ValueError("AlphaSift strategy metadata is unavailable for calibration shadow")
+        strategy = next(
+            (
+                item
+                for item in raw_strategies
+                if isinstance(item, dict)
+                and str(item.get("id") or "").strip() == settings.auto_strategy
+            ),
+            None,
+        )
+        if strategy is None:
+            raise ValueError(
+                f"AlphaSift strategy {settings.auto_strategy!r} is unavailable for calibration shadow"
+            )
+        raw_scope = strategy.get("market_scope") or strategy.get("marketScope") or []
+        market_scope = {
+            str(item).strip().lower()
+            for item in (raw_scope if isinstance(raw_scope, list) else [raw_scope])
+            if str(item).strip()
+        }
+        if not market_scope:
+            raise ValueError(
+                f"AlphaSift strategy {settings.auto_strategy!r} has no market_scope metadata"
+            )
+        if settings.auto_market not in market_scope:
+            raise ValueError(
+                f"AlphaSift strategy {settings.auto_strategy!r} does not support "
+                f"market {settings.auto_market!r}; supported={','.join(sorted(market_scope))}"
+            )
+
     def _llm_dynamic_agent_plan_prompt_payload(
         self,
         *,
@@ -7013,12 +7133,13 @@ class VnpyPaperTradingService:
         settings: VnpyPaperSettings,
         *,
         current_run_id: int,
+        trigger_source: str = "vnpy_paper_auto",
     ) -> Tuple[Optional[str], Dict[str, Any]]:
         if not settings.auto_failure_fuse_enabled:
             return None, {}
         threshold = max(2, min(20, int(settings.auto_failure_fuse_threshold or 3)))
         recent = self.agent_repo.list_recent_runs(
-            trigger_source="vnpy_paper_auto",
+            trigger_source=trigger_source,
             strategy=settings.auto_strategy,
             market=settings.auto_market,
             limit=max(threshold, 20),
@@ -12400,6 +12521,76 @@ class VnpyPaperTradingService:
         }
 
 
+def _calibration_shadow_int_env(
+    name: str,
+    default: int,
+    *,
+    minimum: int,
+    maximum: int,
+) -> int:
+    value = _safe_int(os.getenv(name))
+    if value is None:
+        return default
+    if not minimum <= value <= maximum:
+        logger.warning(
+            "Invalid %s=%r; expected %s..%s and using %s",
+            name,
+            os.getenv(name),
+            minimum,
+            maximum,
+            default,
+        )
+        return default
+    return value
+
+
+def _calibration_shadow_config(settings: VnpyPaperSettings) -> Dict[str, Any]:
+    default_pair = (
+        f"{str(getattr(settings, 'auto_market', 'cn')).strip().lower()}:"
+        f"{str(getattr(settings, 'auto_strategy', 'dual_low')).strip()}"
+    )
+    requested = [
+        item.strip()
+        for item in str(os.getenv(CALIBRATION_SHADOW_PAIRS_ENV) or default_pair).split(",")
+        if item.strip()
+    ]
+    pairs: List[Tuple[str, str]] = []
+    invalid_pairs: List[str] = []
+    for item in requested:
+        market, separator, strategy = item.partition(":")
+        market = market.strip().lower()
+        strategy = strategy.strip()
+        if (
+            separator != ":"
+            or market not in ALLOWED_AUTO_MARKETS
+            or strategy not in ALPHASIFT_FALLBACK_STRATEGIES
+        ):
+            invalid_pairs.append(item)
+            continue
+        pair = (market, strategy)
+        if pair not in pairs:
+            pairs.append(pair)
+    if invalid_pairs:
+        logger.warning("Ignore invalid calibration shadow pairs: %s", invalid_pairs)
+    return {
+        "enabled": parse_env_bool(os.getenv(CALIBRATION_SHADOW_ENABLED_ENV), False),
+        "pairs": pairs,
+        "interval_minutes": _calibration_shadow_int_env(
+            CALIBRATION_SHADOW_INTERVAL_MINUTES_ENV,
+            DEFAULT_CALIBRATION_SHADOW_INTERVAL_MINUTES,
+            minimum=60,
+            maximum=10080,
+        ),
+        "max_results": _calibration_shadow_int_env(
+            CALIBRATION_SHADOW_MAX_RESULTS_ENV,
+            DEFAULT_CALIBRATION_SHADOW_MAX_RESULTS,
+            minimum=1,
+            maximum=10,
+        ),
+        "invalid_pairs": invalid_pairs,
+    }
+
+
 def build_vnpy_paper_trading_background_tasks(
     *,
     vnpy_main_engine: Optional[Any] = None,
@@ -12414,15 +12605,109 @@ def build_vnpy_paper_trading_background_tasks(
     settings = service.get_settings()
     if not settings.enabled:
         return []
+    shadow_config = _calibration_shadow_config(settings)
 
     def run_auto_trade() -> Dict[str, Any]:
-        result = service.run_auto_trade_once()
+        if not _AUTO_AGENT_RUN_LOCK.acquire(blocking=False):
+            return {
+                "accepted": False,
+                "skipped": True,
+                "reason": "auto_agent_run_in_progress",
+            }
+        try:
+            result = service.run_auto_trade_once()
+        finally:
+            _AUTO_AGENT_RUN_LOCK.release()
         logger.info(
             "vn.py paper auto trade finished: submitted=%s skipped=%s reason=%s",
             result.get("submitted_count"),
             result.get("skipped_count"),
             result.get("reason"),
         )
+        return result
+
+    def run_calibration_shadow() -> Dict[str, Any]:
+        combinations = list(shadow_config["pairs"])
+        if not _AUTO_AGENT_RUN_LOCK.acquire(blocking=False):
+            return {
+                "accepted": False,
+                "skipped": True,
+                "reason": "auto_agent_run_in_progress",
+                "attempted_count": 0,
+                "configured_count": len(combinations),
+            }
+        runs: List[Dict[str, Any]] = []
+        failures: List[Dict[str, str]] = []
+        try:
+            for market, strategy in combinations:
+                try:
+                    result = service.run_auto_trade_once(
+                        execution_mode_override="dry_run",
+                        ignore_auto_trade_enabled=True,
+                        market_override=market,
+                        strategy_override=strategy,
+                        max_results_override=int(shadow_config["max_results"]),
+                        calibration_shadow=True,
+                        trigger_source_override="agent_calibration_shadow",
+                    )
+                    if int(result.get("submitted_count") or 0) != 0:
+                        raise RuntimeError(
+                            "calibration shadow violated zero-order invariant"
+                        )
+                    runs.append({
+                        "market": market,
+                        "strategy": strategy,
+                        "agent_run_uid": result.get("agent_run_uid"),
+                        "accepted": bool(result.get("accepted")),
+                        "skipped": bool(result.get("skipped")),
+                        "reason": result.get("reason"),
+                        "candidate_count": int(result.get("candidate_count") or 0),
+                        "planned_count": int(result.get("planned_count") or 0),
+                        "submitted_count": int(result.get("submitted_count") or 0),
+                    })
+                except Exception as exc:  # noqa: BLE001 - isolate market/strategy samples.
+                    logger.exception(
+                        "Calibration shadow run failed for %s/%s: %s",
+                        market,
+                        strategy,
+                        exc,
+                    )
+                    failures.append({
+                        "market": market,
+                        "strategy": strategy,
+                        "error": str(exc)[:240] or type(exc).__name__,
+                    })
+        finally:
+            _AUTO_AGENT_RUN_LOCK.release()
+        result = {
+            "accepted": not failures,
+            "skipped": False,
+            "reason": "completed" if not failures else "partial_failure",
+            "configured_count": len(combinations),
+            "attempted_count": len(runs) + len(failures),
+            "completed_count": len(runs),
+            "failed_count": len(failures),
+            "candidate_count": sum(int(item["candidate_count"]) for item in runs),
+            "planned_count": sum(int(item["planned_count"]) for item in runs),
+            "submitted_count": sum(int(item["submitted_count"]) for item in runs),
+            "runs": runs,
+            "failures": failures,
+            "execution_mode": "dry_run",
+            "submits_orders": False,
+        }
+        logger.info(
+            "Agent calibration shadow finished: completed=%s failed=%s",
+            len(runs),
+            len(failures),
+        )
+        if failures:
+            failed_pairs = ",".join(
+                f"{item['market']}/{item['strategy']}" for item in failures
+            )
+            raise RuntimeError(
+                "agent_calibration_shadow_partial_failure: "
+                f"completed={len(runs)} failed={len(failures)} pairs={failed_pairs}"
+            )
         return result
 
     def run_auto_retry() -> Dict[str, Any]:
@@ -12459,6 +12744,14 @@ def build_vnpy_paper_trading_background_tasks(
                 "initial_delay_seconds": _auto_trade_initial_delay_seconds(service, settings),
             },
         )
+    if shadow_config["enabled"] and shadow_config["pairs"]:
+        tasks.append({
+            "task": run_calibration_shadow,
+            "interval_seconds": int(shadow_config["interval_minutes"]) * 60,
+            "run_immediately": False,
+            "name": "agent_calibration_shadow",
+            "initial_delay_seconds": 300,
+        })
     return tasks
 
 

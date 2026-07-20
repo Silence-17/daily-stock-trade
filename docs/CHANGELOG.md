@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [新功能] 新增默认关闭的生产校准 shadow 调度任务，可按显式 `市场:AlphaSift策略` 配对定时生成独立 `agent_calibration_shadow` dry-run 样本；运行前严格校验策略 `market_scope`，禁用动态策略改写、下单、卖出、再平衡和账户风控副作用，并与正式自动交易互斥且不污染其最后运行、告警或熔断历史
+- [测试] Python 3.13 真实后台调度完成首个 `cn:dual_low` 校准 shadow：47.842 秒内生成 3 个候选决策和 3 条 dry-run 计划审计，均因已有持仓明确跳过，planned/submitted 与任务失败均为 0；正式 last-auto-run 未变化，DSA_SIM 保持连接且四类 EventEngine 回调完整
+
 - [新功能] 新增只读 `scripts/check_agent_calibration_evidence.py` 生产校准证据门禁，按市场分别校验 90 天运行量、目标快照观测率、最新成熟样本数、观测日期数、证据时效、目标版本、摘要截断和不可部署状态；默认检查 A 股/港股/美股，不触发 Agent run 或订单，并可输出 CI/部署可留存 JSON
 - [测试] 新增三市场完整证据通过及样本不足、截断、低观测率、低成熟度、日期不足、陈旧/未来时间、版本缺失、blocked 和市场缺失失败矩阵；真实 API 默认门禁准确返回非零：A 股 17 个 completed run、16 个目标快照、94.12% 观测率，但仅 4 个观测日和 0 个成熟样本，港股/美股均无样本
 - [新功能] 已实施公司行动新增 Tushare -> AkShare EastMoney -> 巨潮资讯 -> 北交所官方权益分派实施公告 PDF fallback；免费源只接受有效除权日的实施方案，按每十股口径标准化现金分红与送转倍数，持久化实际 provider，并通过北交所官方当前/旧代码映射补齐 920 代码启用前的历史，已验证覆盖 SSE/SZSE/BSE
