@@ -5,7 +5,8 @@ from __future__ import annotations
 
 import unittest
 from datetime import date
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import pandas as pd
 
@@ -172,6 +173,95 @@ class StockSelectionFactorIngestionServiceTestCase(unittest.TestCase):
         self.assertEqual(result["row_count"], 1)
         self.assertEqual(result["corporate_action_count"], 0)
         self.assertIn("corporate_actions", [item["stage"] for item in result["errors"]])
+
+    def test_methodology_audits_actual_free_corporate_action_source(self) -> None:
+        action_repository = MagicMock()
+        action_repository.upsert_many.return_value = {
+            "inserted": 1,
+            "updated": 0,
+            "total": 1,
+        }
+        service = StockSelectionFactorIngestionService(
+            repository=self.repository,
+            daily_fetcher=MagicMock(return_value=self._daily_frame()),
+            valuation_fetcher=MagicMock(return_value=self._valuation_frame(10)),
+            corporate_action_repository=action_repository,
+            corporate_action_fetcher=MagicMock(return_value=[{
+                "symbol": "600519",
+                "effective_date": date(2024, 1, 10),
+                "action_type": "cash_dividend",
+                "cash_dividend_per_share": 1.5,
+                "source": "akshare.stock_fhps_detail_em",
+                "source_record_key": "free|600519|2024-01-10|cash_dividend",
+            }]),
+        )
+
+        result = service.ingest(
+            market="cn",
+            snapshot_dates=[date(2024, 1, 5)],
+            universe=[{"symbol": "600519", "name": "贵州茅台"}],
+        )
+
+        methodology = result["methodology"]
+        self.assertEqual(
+            methodology["corporate_action_sources_used"],
+            ["akshare.stock_fhps_detail_em"],
+        )
+        self.assertEqual(
+            methodology["corporate_action_free_coverage_exchanges"],
+            [],
+        )
+        self.assertEqual(
+            methodology["corporate_action_source_route"],
+            ["custom.corporate_action_fetcher"],
+        )
+
+    def test_default_corporate_action_route_keeps_tushare_priority(self) -> None:
+        tushare = MagicMock()
+        tushare.is_available.return_value = True
+        tushare.get_stock_corporate_actions.return_value = [{"source": "tushare.dividend"}]
+        free = MagicMock()
+        with (
+            patch("src.config.get_config", return_value=SimpleNamespace(tushare_token="token")),
+            patch(
+                "data_provider.tushare_fetcher.TushareFetcher",
+                return_value=tushare,
+            ),
+            patch(
+                "data_provider.akshare_corporate_action_fetcher."
+                "AkshareCorporateActionFetcher"
+            ) as free_class,
+        ):
+            free_class.return_value.get_stock_corporate_actions = free
+            fetcher = StockSelectionFactorIngestionService()._resolve_corporate_action_fetcher()
+            result = fetcher(stock_code="600519")
+
+        self.assertEqual(result, [{"source": "tushare.dividend"}])
+        tushare.get_stock_corporate_actions.assert_called_once_with(stock_code="600519")
+        free.assert_not_called()
+
+    def test_default_corporate_action_route_falls_back_after_tushare_error(self) -> None:
+        tushare = MagicMock()
+        tushare.is_available.return_value = True
+        tushare.get_stock_corporate_actions.side_effect = RuntimeError("permission denied")
+        free = MagicMock(return_value=[{"source": "akshare.stock_fhps_detail_em"}])
+        with (
+            patch("src.config.get_config", return_value=SimpleNamespace(tushare_token="token")),
+            patch(
+                "data_provider.tushare_fetcher.TushareFetcher",
+                return_value=tushare,
+            ),
+            patch(
+                "data_provider.akshare_corporate_action_fetcher."
+                "AkshareCorporateActionFetcher"
+            ) as free_class,
+        ):
+            free_class.return_value.get_stock_corporate_actions = free
+            fetcher = StockSelectionFactorIngestionService()._resolve_corporate_action_fetcher()
+            result = fetcher(stock_code="600519")
+
+        self.assertEqual(result, [{"source": "akshare.stock_fhps_detail_em"}])
+        free.assert_called_once_with(stock_code="600519")
 
     def test_requires_explicit_point_in_time_names_and_bounded_cn_inputs(self) -> None:
         service = StockSelectionFactorIngestionService(
