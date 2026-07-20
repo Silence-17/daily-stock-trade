@@ -9,6 +9,8 @@ log() {
 }
 
 PYTHON_BIN="${PYTHON_BIN:-}"
+INCLUDE_VNPY_DESKTOP="${DSA_INCLUDE_VNPY_DESKTOP:-false}"
+SKIP_DEPENDENCY_INSTALL="${DSA_SKIP_DESKTOP_DEPENDENCY_INSTALL:-false}"
 if [[ -z "${PYTHON_BIN}" ]]; then
   if command -v python3 >/dev/null 2>&1; then
     PYTHON_BIN="python3"
@@ -38,14 +40,30 @@ if ! "${PYTHON_BIN}" -m PyInstaller --version >/dev/null 2>&1; then
   "${PYTHON_BIN}" -m pip install pyinstaller
 fi
 
-log "Installing backend dependencies..."
-"${PYTHON_BIN}" -m pip install -r "${ROOT_DIR}/requirements.txt"
+if [[ "${SKIP_DEPENDENCY_INSTALL}" != "true" ]]; then
+  log "Installing backend dependencies..."
+  "${PYTHON_BIN}" -m pip install -r "${ROOT_DIR}/requirements.txt"
+else
+  log "Skipping backend dependency installation; import checks remain enabled."
+fi
 
 log "Checking python-multipart availability..."
 "${PYTHON_BIN}" -c "import multipart, multipart.multipart"
 
 log "Checking AlphaSift adapter availability..."
 "${PYTHON_BIN}" -c "import alphasift.dsa_adapter"
+
+if [[ "${INCLUDE_VNPY_DESKTOP}" == "true" ]]; then
+  log "Installing optional vn.py desktop runtime..."
+  "${PYTHON_BIN}" -c 'import sys; raise SystemExit(0 if sys.version_info[:2] >= (3, 10) and sys.version_info[:2] <= (3, 13) else 1)' || {
+    echo "ERROR: the vn.py desktop bundle requires Python 3.10-3.13."
+    exit 1
+  }
+  if [[ "${SKIP_DEPENDENCY_INSTALL}" != "true" ]]; then
+    "${PYTHON_BIN}" -m pip install --prefer-binary --extra-index-url https://pypi.vnpy.com -r "${ROOT_DIR}/requirements-vnpy.txt"
+  fi
+  "${PYTHON_BIN}" -c "import vnpy, vnpy.event, vnpy.trader.engine, vnpy.trader.event, vnpy.trader.object"
+fi
 
 if [[ -d "${ROOT_DIR}/dist/backend" ]]; then
   rm -rf "${ROOT_DIR}/dist/backend"
@@ -90,6 +108,9 @@ hidden_imports=(
   "src.services.analysis_service"
   "src.services.history_service"
   "src.services.alphasift_service"
+  "src.services.vnpy_adapter"
+  "src.services.vnpy_runtime"
+  "src.services.vnpy_simulated_gateway"
   "alphasift"
   "alphasift.dsa_adapter"
   "uvicorn.logging"
@@ -112,6 +133,9 @@ done
 pushd "${ROOT_DIR}" >/dev/null
 cmd=("${PYTHON_BIN}" -m PyInstaller --name stock_analysis --onedir --noconfirm --noconsole --add-data "static:static" --add-data "strategies:strategies" --collect-data litellm --collect-data tiktoken)
 cmd+=("--collect-all" "alphasift")
+if [[ "${INCLUDE_VNPY_DESKTOP}" == "true" ]]; then
+  cmd+=("--collect-all" "vnpy" "--collect-all" "talib")
+fi
 cmd+=("${hidden_import_args[@]}" "main.py")
 
 echo "Running: ${cmd[*]}"
@@ -142,6 +166,17 @@ else
   echo "ERROR: packaged backend artifact cannot import alphasift.dsa_adapter."
   cat /tmp/alphasift-packaged-import.log
   exit 1
+fi
+
+if [[ "${INCLUDE_VNPY_DESKTOP}" == "true" ]]; then
+  log "Verifying packaged vn.py runtime importability..."
+  if DSA_PACKAGED_VNPY_IMPORT_PROBE=1 "${packaged_entry}" >/tmp/vnpy-packaged-import.log 2>&1; then
+    cat /tmp/vnpy-packaged-import.log
+  else
+    echo "ERROR: packaged backend artifact cannot import the vn.py runtime."
+    cat /tmp/vnpy-packaged-import.log
+    exit 1
+  fi
 fi
 
 log "Verifying static asset references (packaged)..."

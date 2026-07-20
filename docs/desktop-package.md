@@ -197,11 +197,26 @@ npm run build
 powershell -ExecutionPolicy Bypass -File scripts\build-backend.ps1
 ```
 
+默认产物保留轻量本地 paper 能力。需要在桌面安装包中启用 vn.py runtime 和内置 `DSA_SIM` 时，必须使用 Python 3.10-3.13 并显式构建：
+
+```powershell
+$env:PYTHON_BIN = ".venv-vnpy\Scripts\python.exe"
+powershell -ExecutionPolicy Bypass -File scripts\build-backend.ps1 -IncludeVnpy
+```
+
+若构建环境已提前安装并锁定全部依赖，可追加 `-SkipDependencyInstall` 避免构建时重新访问网络；该选项不会跳过 Python 版本、模块导入和冻结产物探针，缺依赖仍会失败。
+
+该档位会安装 `requirements-vnpy.txt`、让 PyInstaller 收集 vn.py 与 TA-Lib 动态子模块，并使用冻结后的 `stock_analysis.exe` 实际导入事件引擎、交易对象和 `DsaSimulatedGateway`；任一导入失败都会阻断构建。无控制台桌面进程缺少标准输出流时会定向到系统空设备，vn.py/Loguru 不会因此阻断 runtime，应用文件日志仍保留。具体券商 gateway 插件仍须另行安装、收集和配置，不会被基础 vn.py 档位猜测加入。
+
+2026-07-21 Windows 验收使用 Python 3.13.14 和 `-IncludeVnpy -SkipDependencyInstall`：冻结后端通过真实 HTTP 启动检查，状态接口确认 `mode=vnpy_runtime`、`DSA_SIM` 已连接、四类 EventEngine 回调已注册且调度循环存活；Electron 生成约 220.6 MiB 的 NSIS 安装器，解包目录约 655.0 MiB，内置后端哈希与验收产物一致。该结果只证明内置模拟 gateway 的桌面发布链路，不代表外部券商 gateway 已打包或连接。
+
 - macOS：
 
 ```bash
 bash scripts/build-backend-macos.sh
 ```
+
+macOS 的 vn.py 档位使用 `DSA_INCLUDE_VNPY_DESKTOP=true bash scripts/build-backend-macos.sh`，并执行相同的冻结产物导入门禁；预装依赖环境可同时设置 `DSA_SKIP_DESKTOP_DEPENDENCY_INSTALL=true`。
 
 该脚本会在安装依赖后执行 `--collect-all alphasift`，并校验打包产物中可导入 `alphasift.dsa_adapter`，避免分步命令遗漏内置 AlphaSift 模块。
 

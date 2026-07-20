@@ -1,4 +1,10 @@
+param(
+  [switch]$IncludeVnpy,
+  [switch]$SkipDependencyInstall
+)
+
 $ErrorActionPreference = 'Stop'
+$includeVnpyRuntime = $IncludeVnpy -or ($env:DSA_INCLUDE_VNPY_DESKTOP -eq 'true')
 
 Write-Host 'Building React UI (static assets)...'
 Push-Location 'apps\dsa-web'
@@ -40,10 +46,14 @@ if (-not (Test-PythonCode -Python $pythonBin -Code "import PyInstaller")) {
   & $pythonBin -m pip install pyinstaller
 }
 
-Write-Host 'Installing backend dependencies...'
-& $pythonBin -m pip install -r requirements.txt
-if ($LASTEXITCODE -ne 0) {
-  throw "pip install -r requirements.txt failed with exit code $LASTEXITCODE."
+if (-not $SkipDependencyInstall) {
+  Write-Host 'Installing backend dependencies...'
+  & $pythonBin -m pip install -r requirements.txt
+  if ($LASTEXITCODE -ne 0) {
+    throw "pip install -r requirements.txt failed with exit code $LASTEXITCODE."
+  }
+} else {
+  Write-Host 'Skipping backend dependency installation; import checks remain enabled.'
 }
 
 Write-Host 'Checking python-multipart availability...'
@@ -54,6 +64,24 @@ if (-not (Test-PythonCode -Python $pythonBin -Code "import multipart, multipart.
 Write-Host 'Checking AlphaSift adapter availability...'
 if (-not (Test-PythonCode -Python $pythonBin -Code "import alphasift.dsa_adapter")) {
   throw 'alphasift.dsa_adapter is not importable after installing requirements.'
+}
+
+if ($includeVnpyRuntime) {
+  Write-Host 'Installing optional vn.py desktop runtime...'
+  $versionJson = & $pythonBin -c "import json,sys; print(json.dumps({'major':sys.version_info.major,'minor':sys.version_info.minor,'version':sys.version.split()[0]}))"
+  $version = $versionJson | ConvertFrom-Json
+  if ($version.major -ne 3 -or $version.minor -lt 10 -or $version.minor -gt 13) {
+    throw "The vn.py desktop bundle requires Python 3.10-3.13; found $($version.version)."
+  }
+  if (-not $SkipDependencyInstall) {
+    & $pythonBin -m pip install --prefer-binary --extra-index-url https://pypi.vnpy.com -r requirements-vnpy.txt
+    if ($LASTEXITCODE -ne 0) {
+      throw "pip install -r requirements-vnpy.txt failed with exit code $LASTEXITCODE."
+    }
+  }
+  if (-not (Test-PythonCode -Python $pythonBin -Code "import vnpy, vnpy.event, vnpy.trader.engine, vnpy.trader.event, vnpy.trader.object")) {
+    throw 'vn.py core runtime is not importable in the selected Python environment.'
+  }
 }
 
 if (Test-Path 'dist\backend') {
@@ -101,6 +129,9 @@ $hiddenImports = @(
   'src.services.analysis_service',
   'src.services.history_service',
   'src.services.alphasift_service',
+  'src.services.vnpy_adapter',
+  'src.services.vnpy_runtime',
+  'src.services.vnpy_simulated_gateway',
   'uvicorn.logging',
   'uvicorn.loops',
   'uvicorn.loops.auto',
@@ -127,6 +158,9 @@ $pyInstallerArgs = @(
   '--collect-all', 'alphasift'
 )
 $pyInstallerArgs += $hiddenImportArgs
+if ($includeVnpyRuntime) {
+  $pyInstallerArgs += @('--collect-all', 'vnpy', '--collect-all', 'talib')
+}
 $pyInstallerArgs += 'main.py'
 
 Write-Host "Running: $pythonBin $($pyInstallerArgs -join ' ')"
@@ -158,6 +192,29 @@ try {
     Remove-Item Env:DSA_PACKAGED_ALPHASIFT_IMPORT_PROBE -ErrorAction SilentlyContinue
   } else {
     $env:DSA_PACKAGED_ALPHASIFT_IMPORT_PROBE = $previousProbe
+  }
+}
+
+if ($includeVnpyRuntime) {
+  Write-Host 'Verifying packaged vn.py runtime importability...'
+  $previousVnpyProbe = $env:DSA_PACKAGED_VNPY_IMPORT_PROBE
+  $vnpyProbeStdout = Join-Path $env:TEMP 'dsa-packaged-vnpy-probe.stdout.log'
+  $vnpyProbeStderr = Join-Path $env:TEMP 'dsa-packaged-vnpy-probe.stderr.log'
+  try {
+    $env:DSA_PACKAGED_VNPY_IMPORT_PROBE = '1'
+    $vnpyProbeProcess = Start-Process -FilePath $packagedEntry -Wait -PassThru `
+      -RedirectStandardOutput $vnpyProbeStdout -RedirectStandardError $vnpyProbeStderr
+    if ($vnpyProbeProcess.ExitCode -ne 0) {
+      Get-Content $vnpyProbeStdout -ErrorAction SilentlyContinue | Write-Host
+      Get-Content $vnpyProbeStderr -ErrorAction SilentlyContinue | Write-Host
+      throw "Packaged backend cannot import the vn.py runtime; probe exited with code $($vnpyProbeProcess.ExitCode)."
+    }
+  } finally {
+    if ($null -eq $previousVnpyProbe) {
+      Remove-Item Env:DSA_PACKAGED_VNPY_IMPORT_PROBE -ErrorAction SilentlyContinue
+    } else {
+      $env:DSA_PACKAGED_VNPY_IMPORT_PROBE = $previousVnpyProbe
+    }
   }
 }
 

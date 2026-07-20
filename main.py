@@ -26,11 +26,19 @@ from __future__ import annotations
 import json
 import multiprocessing
 import os
+import sys
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 from dotenv import dotenv_values
 from src.config import setup_env
+
+_PACKAGED_STDIO_FALLBACKS = []
+for _stream_name in ("stdout", "stderr"):
+    if getattr(sys, _stream_name, None) is None:
+        _fallback_stream = open(os.devnull, "w", encoding="utf-8", buffering=1)
+        setattr(sys, _stream_name, _fallback_stream)
+        _PACKAGED_STDIO_FALLBACKS.append(_fallback_stream)
 
 _INITIAL_PROCESS_ENV = dict(os.environ)
 setup_env()
@@ -58,9 +66,30 @@ if os.getenv("DSA_PACKAGED_ALPHASIFT_IMPORT_PROBE") == "1":
     print("OK: packaged AlphaSift adapter import succeeded")
     sys.exit(0)
 
+if os.getenv("DSA_PACKAGED_VNPY_IMPORT_PROBE") == "1":
+    import importlib
+    import sys
+
+    packaged_vnpy_modules = (
+        "vnpy",
+        "vnpy.event",
+        "vnpy.trader.engine",
+        "vnpy.trader.event",
+        "vnpy.trader.object",
+        "src.services.vnpy_simulated_gateway",
+    )
+    try:
+        for module_name in packaged_vnpy_modules:
+            importlib.import_module(module_name)
+    except Exception as exc:
+        print(f"ERROR: packaged vn.py runtime import failed: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    print("OK: packaged vn.py runtime import succeeded")
+    sys.exit(0)
+
 import argparse
 import logging
-import sys
 import time
 import uuid
 from datetime import date, datetime, timezone, timedelta
