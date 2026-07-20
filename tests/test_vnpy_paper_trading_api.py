@@ -2147,6 +2147,110 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
         self.assertEqual(filtered_performance["strategy_attribution"], [])
         self.assertEqual(filtered_performance["industry_attribution"], [])
 
+    def test_auto_run_api_persists_risk_rejection_matrix_without_trades_e2e(self) -> None:
+        fake_alphasift = MagicMock()
+        fake_alphasift.screen.return_value = {
+            "quality_status": "ok",
+            "candidates": [
+                {
+                    "code": "600519",
+                    "name": "贵州茅台",
+                    "score": 90,
+                    "price": 10.0,
+                    "amount": 200000000,
+                },
+                {
+                    "code": "000001",
+                    "name": "ST测试",
+                    "score": 85,
+                    "price": 10.0,
+                    "amount": 200000000,
+                },
+                {
+                    "code": "300750",
+                    "name": "宁德时代",
+                    "score": 80,
+                    "price": 20.0,
+                    "amount": 200000000,
+                    "is_suspended": True,
+                },
+                {
+                    "code": "002594",
+                    "name": "比亚迪",
+                    "score": 75,
+                    "price": 30.0,
+                    "limit_up_price": 30.0,
+                    "amount": 200000000,
+                },
+                {
+                    "code": "601318",
+                    "name": "中国平安",
+                    "score": 70,
+                    "price": 10.0,
+                    "amount": "5000万",
+                },
+            ],
+            "warnings": [],
+            "source_errors": [],
+        }
+
+        with patch(
+            "api.v1.endpoints.vnpy_paper_trading.VnpyPaperTradingService",
+            side_effect=self._service,
+        ), patch(
+            "src.services.vnpy_paper_trading_service.AlphaSiftService",
+            return_value=fake_alphasift,
+        ):
+            settings_resp = self.client.put(
+                "/api/v1/vnpy-paper/settings?include_snapshot=false&include_recent_trades=false",
+                json={
+                    "auto_trade_enabled": True,
+                    "auto_trade_time_gate_enabled": False,
+                    "auto_strategy": "dual_low",
+                    "auto_market": "cn",
+                    "auto_max_results": 5,
+                    "auto_cash_per_order": 1200,
+                    "auto_min_score": 50,
+                    "auto_min_turnover": 100000000,
+                    "auto_symbol_blacklist": ["600519"],
+                },
+            )
+            run_resp = self.client.post("/api/v1/vnpy-paper/auto/run")
+            run_uid = run_resp.json()["agent_run_uid"]
+            detail_resp = self.client.get(f"/api/v1/vnpy-paper/agent-runs/{run_uid}")
+            trades_resp = self.client.get("/api/v1/portfolio/trades?page=1&page_size=20")
+
+        expected_reasons = [
+            "symbol_blacklisted",
+            "st_or_delisting_risk",
+            "suspended_stock",
+            "price_limit_reached",
+            "liquidity_below_threshold",
+        ]
+        self.assertEqual(settings_resp.status_code, 200)
+        self.assertEqual(run_resp.status_code, 200)
+        run_payload = run_resp.json()
+        self.assertTrue(run_payload["accepted"])
+        self.assertEqual(run_payload["candidate_count"], 5)
+        self.assertEqual(run_payload["planned_count"], 0)
+        self.assertEqual(run_payload["submitted_count"], 0)
+        self.assertEqual(run_payload["skipped_count"], 5)
+        self.assertEqual([item["reason"] for item in run_payload["orders"]], expected_reasons)
+
+        self.assertEqual(detail_resp.status_code, 200)
+        detail = detail_resp.json()
+        self.assertEqual(detail["status"], "completed")
+        self.assertEqual(detail["candidate_count"], 5)
+        self.assertEqual(detail["submitted_count"], 0)
+        self.assertEqual(detail["skipped_count"], 5)
+        self.assertEqual([item["reason"] for item in detail["decisions"]], expected_reasons)
+        self.assertEqual(
+            [item["skip_reason"] for item in detail["trade_plans"]],
+            expected_reasons,
+        )
+        self.assertEqual(trades_resp.status_code, 200)
+        self.assertEqual(trades_resp.json()["total"], 0)
+
     def test_trade_plan_recovery_summary_endpoint_returns_matrix(self) -> None:
         repo = StockSelectionAgentRepository()
         run = repo.create_run(
