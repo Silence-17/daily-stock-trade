@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [新功能] 在线 Agent -> vn.py 验收门禁新增 `--trigger-mode scheduler` 并将 JSON 证据升级为 schema v2：不调用手动 `/auto/run`，以调度前 Agent run 集合作为基线，启用一分钟自动买入后捕获首个新 run 并立即停止后续周期，只接受引用同一 `agent_run_uid` 的 `vnpy_paper_auto_trade completed` 事件；隔离账户、执行模式、间隔、时段门禁和自动开关均在结束时恢复，已有自动任务仍在运行时拒绝启动验收
+- [测试] 在线 Agent -> vn.py 验收门禁 11 项测试通过，新增纯调度触发、禁止手动接口和调度启用响应丢失后的完整恢复；真实 Python 3.13 API 调度 run `ss-agent-20260720104205-9066bffd` 由后台任务自动触发并在 37.934 秒内完成，3 候选、3 提交、3 成交，临时账户现金变化 -29538，`600015 +1400`、`600016 +2800`、`000001 +900` 与 run 账本完全一致；原账户 2 和全部设置恢复，临时账户 5 隐藏，DSA_SIM 保持 connected 和四类回调
 - [新功能] 在线 Agent -> vn.py 验收门禁新增 `--isolated-account`：执行前记录账户集合并暂停自动买入，创建干净 paper 账本完成正向成交，随后恢复原账户和设置、按账户 ID 差分隐藏临时归档账本；reset/restore/cleanup 响应丢失或恢复状态不确定时保持自动买入关闭并非零退出，避免验收污染当前账户
 - [测试] 隔离账户生命周期新增完整成交恢复与 reset 响应丢失恢复矩阵；真实 Python 3.13 API 的隔离 run `ss-agent-20260720101013-dd345609` 产生 3 候选、3 提交、3 成交，临时账户资金变化 -29538 且三票持仓增量完全匹配，随后原账户 2、现金 17702、9 个持仓、自动交易及时段门禁均恢复，临时账户 3 隐藏，DSA_SIM 保持 connected 和四类回调
 - [修复] vn.py 成交回写现将交易计划与关联决策放在同一数据库事务更新；提交线程和迟到订单回调使用计划 `updated_at` 乐观版本检查，陈旧 `submitted` 不再覆盖更晚 `filled`，重复成交回放还会修复历史终态计划对应的滞后决策

@@ -24,6 +24,8 @@ def _status(
     runtime=False,
     time_gate=True,
     auto_trade=False,
+    auto_interval=1440,
+    execution_mode="paper",
 ):
     diagnostics = {}
     if runtime:
@@ -42,6 +44,8 @@ def _status(
             "account_id": account_id,
             "auto_trade_enabled": auto_trade,
             "auto_trade_time_gate_enabled": time_gate,
+            "auto_interval_minutes": auto_interval,
+            "auto_execution_mode": execution_mode,
         },
         "snapshot": {
             "total_cash": cash,
@@ -523,3 +527,205 @@ def test_cli_isolated_account_recovers_when_reset_response_is_uncertain(
     assert report["isolated_account"]["restored"] is True
     assert report["isolated_account"]["cleanup_ok"] is True
     assert report["evaluation"]["failures"][0] == "acceptance_runtime_error"
+
+
+def test_cli_scheduler_mode_correlates_new_run_without_direct_trigger(
+    monkeypatch, tmp_path
+):
+    state = {
+        "current_account_id": 1,
+        "auto_trade": False,
+        "time_gate": True,
+        "auto_interval": 1440,
+        "execution_mode": "paper",
+        "created": False,
+        "new_run_visible": False,
+        "filled": False,
+    }
+    calls = []
+
+    def status():
+        isolated = state["current_account_id"] == 2
+        return _status(
+            account_id=state["current_account_id"],
+            cash=99000.0 if isolated and state["filled"] else 100000.0,
+            positions=(
+                [{"symbol": "600000", "quantity": 100}]
+                if isolated and state["filled"]
+                else []
+            ),
+            runtime=True,
+            time_gate=state["time_gate"],
+            auto_trade=state["auto_trade"],
+            auto_interval=state["auto_interval"],
+            execution_mode=state["execution_mode"],
+        )
+
+    def fake_request(_base_url, path, *, method="GET", payload=None, **_kwargs):
+        calls.append((method, path, payload))
+        if path.startswith("/api/v1/vnpy-paper/status"):
+            return status()
+        if path.startswith("/api/v1/vnpy-paper/accounts?"):
+            items = [{"id": 1}, *([{"id": 2}] if state["created"] else [])]
+            return {"items": items, "current_account_id": state["current_account_id"]}
+        if method == "POST" and path.startswith("/api/v1/vnpy-paper/account/reset"):
+            state["created"] = True
+            state["current_account_id"] = 2
+            return status()
+        if method == "PUT" and path == "/api/v1/vnpy-paper/settings":
+            if "auto_trade_enabled" in payload:
+                state["auto_trade"] = payload["auto_trade_enabled"]
+            if "auto_trade_time_gate_enabled" in payload:
+                state["time_gate"] = payload["auto_trade_time_gate_enabled"]
+            if "auto_interval_minutes" in payload:
+                state["auto_interval"] = payload["auto_interval_minutes"]
+            if "auto_execution_mode" in payload:
+                state["execution_mode"] = payload["auto_execution_mode"]
+            if payload.get("auto_trade_enabled") is True:
+                state["new_run_visible"] = True
+            return status()
+        if path.startswith("/api/v1/vnpy-paper/agent-runs?"):
+            items = [{"run_uid": "old-run"}]
+            if state["new_run_visible"]:
+                items.insert(0, {"run_uid": "scheduled-run"})
+            return {"items": items, "limit": 100, "offset": 0, "total": len(items)}
+        if path == "/api/v1/vnpy-paper/agent-runs/scheduled-run":
+            state["filled"] = True
+            return {
+                "run_uid": "scheduled-run",
+                "status": "completed",
+                "candidate_count": 1,
+                "submitted_count": 1,
+                "decisions": [_decision(status="filled", trade_id=31)],
+                "trade_plans": [_plan(status="filled", trade_id=31)],
+                "portfolio_change": {
+                    "booked_plan_count": 1,
+                    "items": [{
+                        "symbol": "600000",
+                        "net_quantity": 100,
+                        "net_cash_flow": -1000,
+                    }],
+                },
+            }
+        if path.startswith("/api/v1/vnpy-paper/task-events?"):
+            return {
+                "items": [{
+                    "name": "vnpy_paper_auto_trade",
+                    "status": "completed",
+                    "details": {"agent_run_uid": "scheduled-run"},
+                }]
+            }
+        if method == "POST" and path.startswith(
+            "/api/v1/vnpy-paper/accounts/1/restore"
+        ):
+            state["current_account_id"] = 1
+            return status()
+        if method == "POST" and path == "/api/v1/vnpy-paper/accounts/archived/cleanup":
+            return {"cleaned_account_ids": [2]}
+        raise AssertionError(f"unexpected request: {method} {path}")
+
+    monkeypatch.setattr(e2e, "_request_json", fake_request)
+    output_path = tmp_path / "scheduled-fill.json"
+    exit_code = main([
+        "--execution-mode", "vnpy_paper",
+        "--trigger-mode", "scheduler",
+        "--allow-simulated-orders",
+        "--isolated-account",
+        "--output-json", str(output_path),
+    ])
+
+    report = json.loads(output_path.read_text(encoding="utf-8"))
+    assert exit_code == 0
+    assert report["trigger_mode"] == "scheduler"
+    assert report["run"]["run_uid"] == "scheduled-run"
+    assert report["scheduler_event"]["details"]["agent_run_uid"] == "scheduled-run"
+    assert report["evaluation"]["filled_plan_count"] == 1
+    assert not any(path == "/api/v1/vnpy-paper/auto/run" for _, path, _ in calls)
+    assert state["current_account_id"] == 1
+    assert state["auto_trade"] is False
+    assert state["time_gate"] is True
+    assert state["auto_interval"] == 1440
+    assert state["execution_mode"] == "paper"
+
+
+def test_cli_scheduler_mode_restores_settings_when_enable_response_is_lost(
+    monkeypatch, tmp_path
+):
+    state = {
+        "account": 1,
+        "auto": False,
+        "gate": True,
+        "interval": 1440,
+        "mode": "paper",
+        "created": False,
+    }
+    updates = []
+
+    def status():
+        return _status(
+            account_id=state["account"],
+            runtime=True,
+            auto_trade=state["auto"],
+            time_gate=state["gate"],
+            auto_interval=state["interval"],
+            execution_mode=state["mode"],
+        )
+
+    def fake_request(_base_url, path, *, method="GET", payload=None, **_kwargs):
+        if path.startswith("/api/v1/vnpy-paper/status"):
+            return status()
+        if path.startswith("/api/v1/vnpy-paper/accounts?"):
+            items = [{"id": 1}, *([{"id": 2}] if state["created"] else [])]
+            return {"items": items, "current_account_id": state["account"]}
+        if method == "POST" and path.startswith("/api/v1/vnpy-paper/account/reset"):
+            state["created"] = True
+            state["account"] = 2
+            return status()
+        if path.startswith("/api/v1/vnpy-paper/agent-runs?"):
+            return {"items": []}
+        if method == "PUT" and path == "/api/v1/vnpy-paper/settings":
+            updates.append(dict(payload))
+            state["auto"] = payload.get("auto_trade_enabled", state["auto"])
+            state["gate"] = payload.get("auto_trade_time_gate_enabled", state["gate"])
+            state["interval"] = payload.get("auto_interval_minutes", state["interval"])
+            state["mode"] = payload.get("auto_execution_mode", state["mode"])
+            if payload.get("auto_trade_enabled") is True:
+                raise URLError("response lost after scheduler enable")
+            return status()
+        if method == "POST" and path.startswith(
+            "/api/v1/vnpy-paper/accounts/1/restore"
+        ):
+            state["account"] = 1
+            return status()
+        if method == "POST" and path == "/api/v1/vnpy-paper/accounts/archived/cleanup":
+            return {"cleaned_account_ids": [2]}
+        raise AssertionError(f"unexpected request: {method} {path}")
+
+    monkeypatch.setattr(e2e, "_request_json", fake_request)
+    output_path = tmp_path / "scheduler-enable-lost.json"
+    exit_code = main([
+        "--execution-mode", "vnpy_paper",
+        "--trigger-mode", "scheduler",
+        "--allow-simulated-orders",
+        "--isolated-account",
+        "--output-json", str(output_path),
+    ])
+
+    report = json.loads(output_path.read_text(encoding="utf-8"))
+    assert exit_code == 1
+    assert report["evaluation"]["settings_restored"] is True
+    assert report["evaluation"]["failures"][0] == "acceptance_runtime_error"
+    assert state == {
+        "account": 1,
+        "auto": False,
+        "gate": True,
+        "interval": 1440,
+        "mode": "paper",
+        "created": True,
+    }
+    assert updates[-1] == {
+        "auto_trade_time_gate_enabled": True,
+        "auto_interval_minutes": 1440,
+        "auto_execution_mode": "paper",
+        "auto_trade_enabled": False,
+    }
