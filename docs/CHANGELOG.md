@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [修复] 全市场历史因子作业 API 现将持久化 `task_id` 与当前进程任务队列对账，返回 `active/orphaned/retryable/complete` 恢复状态；服务重启后遗留的 pending/processing 租约可由普通恢复请求安全接管，真正活跃的任务仍返回 409，显式 force 能力仅保留给 API 操作员
+- [改进] Agent 控制台展示全市场作业恢复状态；活跃任务只显示运行提示，不再提供一律强制接管按钮，orphaned 作业提供“恢复中断作业”，失败作业从最近检查点继续
+- [新功能] 新增 `scripts/check_full_market_ingestion_e2e.py` 全市场在线采集验收门禁；默认只观察已有作业，创建外部任务必须显式授权，可校验股票规模、工作项/检查点完成度、因子覆盖率、源错误率、进度回退/停滞和恢复终态并输出 JSON
+- [测试] 新增活跃租约拒绝、重启 orphaned 自动接管和全市场验收器回归；真实 Python 3.13 API 重启态验证返回 `recovery_state=orphaned`、`resume_allowed=true`，Agent 控制台在 1440px 与 390px 均无横向溢出。外部历史 universe 探测因当前 Tushare token 缺少 `stock_basic` 权限返回 424，未创建长任务，成功在线全市场证据仍明确保留为未完成
 - [新功能] 在线 Agent -> vn.py 验收门禁新增 `--trigger-mode scheduler` 并将 JSON 证据升级为 schema v2：不调用手动 `/auto/run`，以调度前 Agent run 集合作为基线，启用一分钟自动买入后捕获首个新 run 并立即停止后续周期，只接受引用同一 `agent_run_uid` 的 `vnpy_paper_auto_trade completed` 事件；隔离账户、执行模式、间隔、时段门禁和自动开关均在结束时恢复，已有自动任务仍在运行时拒绝启动验收
 - [测试] 在线 Agent -> vn.py 验收门禁 11 项测试通过，新增纯调度触发、禁止手动接口和调度启用响应丢失后的完整恢复；真实 Python 3.13 API 调度 run `ss-agent-20260720104205-9066bffd` 由后台任务自动触发并在 37.934 秒内完成，3 候选、3 提交、3 成交，临时账户现金变化 -29538，`600015 +1400`、`600016 +2800`、`000001 +900` 与 run 账本完全一致；原账户 2 和全部设置恢复，临时账户 5 隐藏，DSA_SIM 保持 connected 和四类回调
 - [新功能] 在线 Agent -> vn.py 验收门禁新增 `--isolated-account`：执行前记录账户集合并暂停自动买入，创建干净 paper 账本完成正向成交，随后恢复原账户和设置、按账户 ID 差分隐藏临时归档账本；reset/restore/cleanup 响应丢失或恢复状态不确定时保持自动买入关闭并非零退出，避免验收污染当前账户

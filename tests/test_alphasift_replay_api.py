@@ -221,6 +221,7 @@ class AlphaSiftReplayApiTestCase(unittest.TestCase):
         }
         queue = MagicMock()
         queue.submit_background_task.return_value = SimpleNamespace(task_id="queue-task-1")
+        queue.get_task.return_value = SimpleNamespace(status="pending")
         with (
             patch(
                 "api.v1.endpoints.alphasift.StockSelectionFullMarketIngestionService",
@@ -247,10 +248,19 @@ class AlphaSiftReplayApiTestCase(unittest.TestCase):
 
     def test_full_market_ingestion_resume_rejects_active_job_without_force(self) -> None:
         service = MagicMock()
-        service.get.return_value = {"job_id": "full-job-1", "status": "processing"}
-        with patch(
-            "api.v1.endpoints.alphasift.StockSelectionFullMarketIngestionService",
-            return_value=service,
+        service.get.return_value = {
+            "job_id": "full-job-1",
+            "status": "processing",
+            "task_id": "active-task",
+        }
+        queue = MagicMock()
+        queue.get_task.return_value = SimpleNamespace(status="processing")
+        with (
+            patch(
+                "api.v1.endpoints.alphasift.StockSelectionFullMarketIngestionService",
+                return_value=service,
+            ),
+            patch("api.v1.endpoints.alphasift.get_task_queue", return_value=queue),
         ):
             response = self.client.post(
                 "/api/v1/alphasift/replay/full-market-ingestion/jobs/full-job-1/resume"
@@ -258,6 +268,35 @@ class AlphaSiftReplayApiTestCase(unittest.TestCase):
 
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.json()["detail"]["error"], "full_market_ingestion_job_active")
+
+    def test_full_market_ingestion_resume_takes_over_orphaned_job(self) -> None:
+        service = MagicMock()
+        service.get.return_value = {
+            "job_id": "full-job-1",
+            "status": "processing",
+            "task_id": "lost-task",
+        }
+        queue = MagicMock()
+        queue.get_task.side_effect = [None, SimpleNamespace(status="pending")]
+        with (
+            patch(
+                "api.v1.endpoints.alphasift.StockSelectionFullMarketIngestionService",
+                return_value=service,
+            ),
+            patch("api.v1.endpoints.alphasift.get_task_queue", return_value=queue),
+            patch(
+                "api.v1.endpoints.alphasift._submit_full_market_ingestion_job",
+                return_value="replacement-task",
+            ) as submit,
+        ):
+            response = self.client.post(
+                "/api/v1/alphasift/replay/full-market-ingestion/jobs/full-job-1/resume"
+            )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()["task_id"], "replacement-task")
+        self.assertEqual(response.json()["recovery_state"], "active")
+        submit.assert_called_once_with("full-job-1", force=True)
 
     def test_full_market_ingestion_lists_persistent_jobs(self) -> None:
         service = MagicMock()
