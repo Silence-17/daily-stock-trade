@@ -26,6 +26,7 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from fastapi import HTTPException, Request
 from pydantic import BaseModel, Field
+import yaml
 
 from src.auth import COOKIE_NAME, is_auth_enabled, refresh_auth_state, verify_session
 from src.config import Config, DEFAULT_ALPHASIFT_INSTALL_SPEC, get_configured_llm_models
@@ -47,6 +48,13 @@ DSA_ALPHASIFT_LLM_TIMEOUT_SECONDS = 180
 DSA_ALPHASIFT_LLM_MAX_TOKENS = 1024
 DSA_ALPHASIFT_DAILY_FETCH_RETRIES = 3
 DSA_ALPHASIFT_US_UNIVERSE_SOURCE_ENV = "DSA_ALPHASIFT_US_UNIVERSE_SOURCE"
+DSA_ALPHASIFT_HK_TICKERS_ENV = "ALPHASIFT_HK_TICKERS"
+DSA_ALPHASIFT_HK_STRATEGY_ID = "hk_liquid_momentum"
+DSA_ALPHASIFT_DEFAULT_HK_UNIVERSE = (
+    "HK00700", "HK09988", "HK03690", "HK01810", "HK00941",
+    "HK01299", "HK02318", "HK01398", "HK03988", "HK00005",
+    "HK00939", "HK00883", "HK09618", "HK09888", "HK01024",
+)
 DSA_ALPHASIFT_SNAPSHOT_SOURCE_PRIORITY = "sina,efinance,akshare_em,em_datacenter"
 DSA_ALPHASIFT_SNAPSHOT_SOURCE_PRIORITY_WITH_TUSHARE = "tushare,sina,efinance,akshare_em,em_datacenter"
 DSA_ALPHASIFT_CANDIDATE_CONTEXT_PROVIDERS = "news,fund_flow,announcement,quote"
@@ -977,14 +985,28 @@ class AlphaSiftService:
 
     def status(self) -> Dict[str, Any]:
         adapter_status, available, diagnostics = _get_alphasift_status_snapshot()
+        extension_markets = _alphasift_strategy_extension_markets()
+        strategy_count = adapter_status.get("strategy_count")
+        if available:
+            try:
+                strategy_count = len(_list_strategies())
+            except Exception as exc:  # noqa: BLE001 - retain adapter status on list failure.
+                logger.debug("AlphaSift extended strategy count unavailable: %s", exc)
         payload = {
             "enabled": bool(self.config.alphasift_enabled),
             "available": available,
             "install_spec_is_default": _is_default_alphasift_install_spec(self.config.alphasift_install_spec),
             "contract_version": adapter_status.get("contract_version"),
             "version": adapter_status.get("version"),
-            "strategy_count": adapter_status.get("strategy_count"),
-            "supported_markets": list(adapter_status.get("supported_markets") or []),
+            "strategy_count": strategy_count,
+            "supported_markets": sorted({
+                *[
+                    str(item).strip().lower()
+                    for item in (adapter_status.get("supported_markets") or [])
+                    if str(item).strip()
+                ],
+                *extension_markets,
+            }),
             "strategy_extensions": _alphasift_strategy_extension_status(),
         }
         source_health = _get_alphasift_source_health_snapshot(self.config)
@@ -1271,11 +1293,11 @@ class AlphaSiftService:
     ) -> Dict[str, Any]:
         _ensure_alphasift_enabled(self.config)
         _ensure_alphasift_available_for_use()
-        _ensure_supported_market(market)
         _ensure_supported_strategy(strategy)
 
-        adapter = _get_dsa_adapter()
-        screen = _get_adapter_callable(adapter, "screen", "screen() 不可调用。")
+        dsa_managed_hk = market == "hk" and strategy == DSA_ALPHASIFT_HK_STRATEGY_ID
+        if not dsa_managed_hk:
+            _ensure_supported_market(market)
         source_health_before = _get_alphasift_source_health_snapshot(self.config)
         source_routing = build_alphasift_snapshot_source_routing(
             self.config,
@@ -1283,17 +1305,33 @@ class AlphaSiftService:
             source_health_items=source_health_trends,
         )
         try:
-            raw = _call_alphasift_screen(
-                screen,
-                strategy,
-                market,
-                max_results,
-                self.config,
-                snapshot_source_priority=str(source_routing["effective_priority"]),
-                use_llm=bool(use_llm),
-                llm_timeout_seconds=llm_timeout_seconds,
-                llm_max_retries=llm_max_retries,
-            )
+            if dsa_managed_hk:
+                raw = _call_dsa_hk_screen(
+                    strategy=strategy,
+                    max_results=max_results,
+                    config=self.config,
+                    use_llm=bool(use_llm),
+                )
+                source_routing = {
+                    "configured_priority": ["tencent", "akshare", "longbridge"],
+                    "effective_priority": ["tencent", "akshare", "longbridge"],
+                    "adjusted": False,
+                    "reason": "dsa_hk_compatibility_pipeline",
+                }
+            else:
+                adapter = _get_dsa_adapter()
+                screen = _get_adapter_callable(adapter, "screen", "screen() 不可调用。")
+                raw = _call_alphasift_screen(
+                    screen,
+                    strategy,
+                    market,
+                    max_results,
+                    self.config,
+                    snapshot_source_priority=str(source_routing["effective_priority"]),
+                    use_llm=bool(use_llm),
+                    llm_timeout_seconds=llm_timeout_seconds,
+                    llm_max_retries=llm_max_retries,
+                )
         except ValueError as exc:
             raise HTTPException(
                 status_code=400,
@@ -2034,7 +2072,25 @@ def _alphasift_strategy_extension_status() -> Dict[str, Any]:
         "strategy_ids": [item.stem for item in files],
         "merge_mode": "content_addressed_runtime_overlay" if files else "bundled_only",
         "explicit_strategies_dir_preserved": True,
+        "dsa_compatibility_screen_strategy_ids": [
+            item.stem for item in files if item.stem == DSA_ALPHASIFT_HK_STRATEGY_ID
+        ],
     }
+
+
+def _alphasift_strategy_extension_markets() -> List[str]:
+    markets: set[str] = set()
+    for filepath in sorted(DSA_ALPHASIFT_STRATEGY_OVERLAY_DIR.glob("*.yaml")):
+        try:
+            payload = yaml.safe_load(filepath.read_text(encoding="utf-8")) or {}
+            screening = payload.get("screening") if isinstance(payload, dict) else {}
+            scope = screening.get("market_scope") if isinstance(screening, dict) else []
+            for market in scope if isinstance(scope, list) else []:
+                if str(market).strip():
+                    markets.add(str(market).strip().lower())
+        except Exception as exc:  # noqa: BLE001 - status remains available with malformed overlays.
+            logger.warning("Unable to read AlphaSift strategy overlay scope %s: %s", filepath, exc)
+    return sorted(markets)
 
 
 def _is_expected_alphasift_missing(exc: ModuleNotFoundError) -> bool:
@@ -2347,6 +2403,186 @@ def _fetch_dsa_us_snapshot(
         f"yfinance: {str(primary_error)[:240] or type(primary_error).__name__}",
         *errors,
     ]
+    return frame
+
+
+def _call_dsa_hk_screen(
+    *,
+    strategy: str,
+    max_results: int,
+    config: Config,
+    use_llm: bool,
+) -> Dict[str, Any]:
+    """Run HK screening with AlphaSift's strategy, filters, and factor scorer."""
+    if strategy != DSA_ALPHASIFT_HK_STRATEGY_ID:
+        raise ValueError(f"Unsupported DSA HK strategy: {strategy}")
+    strategy_path = DSA_ALPHASIFT_STRATEGY_OVERLAY_DIR / f"{strategy}.yaml"
+    if not strategy_path.is_file():
+        raise RuntimeError(f"DSA HK strategy file is unavailable: {strategy_path.name}")
+
+    from alphasift.filter import apply_hard_filters
+    from alphasift.scorer import compute_screen_scores, factor_score_columns
+    from alphasift.strategy import load_strategy
+
+    strategy_model = load_strategy(strategy_path)
+    if "hk" not in strategy_model.screening.market_scope:
+        raise ValueError(f"Strategy {strategy!r} does not declare HK market scope")
+    snapshot = _fetch_dsa_hk_snapshot(_dsa_hk_universe())
+    filtered = apply_hard_filters(snapshot, strategy_model.screening.hard_filters)
+    scored = compute_screen_scores(filtered, strategy_model.screening)
+    scored = scored.sort_values(
+        ["screen_score", "amount", "code"],
+        ascending=[False, False, True],
+        kind="mergesort",
+    )
+
+    factor_columns = factor_score_columns()
+    candidates: List[Dict[str, Any]] = []
+    for rank, (_, row) in enumerate(scored.head(max_results).iterrows(), 1):
+        screen_score = _safe_float(row.get("screen_score")) or 0.0
+        change_pct = _safe_float(row.get("change_pct")) or 0.0
+        risk_flags: List[str] = []
+        if change_pct >= 7.0:
+            risk_flags.append("hk_intraday_chase_risk")
+        elif change_pct <= -7.0:
+            risk_flags.append("hk_intraday_breakdown_risk")
+        risk_level = "high" if risk_flags else "low"
+        factor_scores = {
+            factor: round(value, 4)
+            for factor, column in factor_columns.items()
+            if (value := _safe_float(row.get(column))) is not None
+        }
+        candidates.append({
+            "rank": rank,
+            "code": _env_text(row.get("code")),
+            "name": _env_text(row.get("name")),
+            "final_score": round(screen_score, 4),
+            "screen_score": round(screen_score, 4),
+            "ranking_reason": "DSA港股兼容管线：流动性、动量、估值与稳定性因子综合排序",
+            "risk_level": risk_level,
+            "risk_flags": risk_flags,
+            "price": _safe_float(row.get("price")),
+            "change_pct": change_pct,
+            "amount": _safe_float(row.get("amount")),
+            "total_mv": _safe_float(row.get("total_mv")),
+            "turnover_rate": _safe_float(row.get("turnover_rate")),
+            "volume_ratio": _safe_float(row.get("volume_ratio")),
+            "pe_ratio": _safe_float(row.get("pe_ratio")),
+            "pb_ratio": _safe_float(row.get("pb_ratio")),
+            "industry": _env_text(row.get("industry")),
+            "factor_scores": factor_scores,
+            "dsa_context": {
+                "enriched": False,
+                "quote": row.get("quote_payload") or {},
+                "warnings": [],
+            },
+        })
+
+    source_errors = [str(item) for item in snapshot.attrs.get("source_errors", [])]
+    warnings: List[str] = []
+    if use_llm:
+        warnings.append(
+            "DSA HK compatibility screening uses deterministic AlphaSift factor ranking; "
+            "AlphaSift 0.2.0 does not expose an HK LLM pipeline"
+        )
+    return {
+        "strategy": strategy,
+        "market": "hk",
+        "run_id": f"dsa-hk-{int(time.time() * 1000)}",
+        "snapshot_count": len(snapshot),
+        "after_filter_count": len(filtered),
+        "snapshot_source": "dsa_realtime_quote",
+        "source_errors": source_errors,
+        "warnings": warnings,
+        "quality_status": "partial" if source_errors else "ok",
+        "fallback_used": any(
+            _env_text(row.get("snapshot_provider")) != "tencent"
+            for _, row in snapshot.iterrows()
+        ),
+        "llm_ranked": False,
+        "daily_enriched": False,
+        "risk_enabled": True,
+        "portfolio_diversity_enabled": False,
+        "candidates": candidates,
+    }
+
+
+def _dsa_hk_universe() -> List[str]:
+    from data_provider.base import normalize_stock_code
+
+    raw = _env_text(os.getenv(DSA_ALPHASIFT_HK_TICKERS_ENV))
+    configured = [item.strip() for item in raw.split(",") if item.strip()] if raw else []
+    values = configured or list(DSA_ALPHASIFT_DEFAULT_HK_UNIVERSE)
+    tickers: List[str] = []
+    for value in values:
+        normalized = normalize_stock_code(value).upper()
+        if re.fullmatch(r"\d{5}", normalized):
+            normalized = f"HK{normalized}"
+        if not re.fullmatch(r"HK\d{5}", normalized):
+            raise ValueError(
+                f"{DSA_ALPHASIFT_HK_TICKERS_ENV} contains invalid HK ticker: {value!r}"
+            )
+        if normalized not in tickers:
+            tickers.append(normalized)
+    if not tickers:
+        raise ValueError(f"{DSA_ALPHASIFT_HK_TICKERS_ENV} resolved to an empty universe")
+    if len(tickers) > 100:
+        raise ValueError(f"{DSA_ALPHASIFT_HK_TICKERS_ENV} supports at most 100 tickers")
+    return tickers
+
+
+def _fetch_dsa_hk_snapshot(tickers: List[str]) -> Any:
+    import pandas as pd
+
+    manager = _get_dsa_fetcher_manager()
+    rows: List[Dict[str, Any]] = []
+    errors: List[str] = []
+
+    def fetch_one(ticker: str) -> Tuple[str, Any]:
+        return ticker, manager.get_realtime_quote(ticker, log_final_failure=False)
+
+    with ThreadPoolExecutor(max_workers=min(4, len(tickers))) as pool:
+        futures = {pool.submit(fetch_one, ticker): ticker for ticker in tickers}
+        for future in as_completed(futures):
+            ticker = futures[future]
+            try:
+                _, quote = future.result()
+            except Exception as exc:  # noqa: BLE001 - isolate per-symbol provider failures.
+                errors.append(f"{ticker}: {str(exc)[:160] or type(exc).__name__}")
+                continue
+            price = _safe_float(getattr(quote, "price", None)) if quote is not None else None
+            volume = _safe_float(getattr(quote, "volume", None)) if quote is not None else None
+            if quote is None or price is None or price <= 0 or volume is None or volume <= 0:
+                errors.append(f"{ticker}: no complete DSA realtime quote")
+                continue
+            amount = _safe_float(getattr(quote, "amount", None))
+            if amount is None or amount <= 0:
+                amount = price * volume
+            source = _env_text(getattr(getattr(quote, "source", None), "value", None))
+            quote_payload = quote.to_dict() if callable(getattr(quote, "to_dict", None)) else {}
+            rows.append({
+                "code": ticker,
+                "name": _env_text(getattr(quote, "name", None)) or ticker,
+                "price": price,
+                "change_pct": _safe_float(getattr(quote, "change_pct", None)),
+                "amount": amount,
+                "total_mv": _safe_float(getattr(quote, "total_mv", None)),
+                "circ_mv": _safe_float(getattr(quote, "circ_mv", None)),
+                "pe_ratio": _safe_float(getattr(quote, "pe_ratio", None)),
+                "pb_ratio": _safe_float(getattr(quote, "pb_ratio", None)),
+                "volume_ratio": _safe_float(getattr(quote, "volume_ratio", None)),
+                "turnover_rate": _safe_float(getattr(quote, "turnover_rate", None)),
+                "industry": "",
+                "snapshot_provider": source or "dsa_realtime_quote",
+                "quote_payload": quote_payload,
+            })
+    if not rows:
+        detail = "; ".join(errors[:5]) or "no rows"
+        raise RuntimeError(f"DSA HK snapshot returned no valid rows: {detail}")
+    frame = pd.DataFrame(rows)
+    frame.attrs["snapshot_source"] = "dsa_realtime_quote"
+    frame.attrs["source_errors"] = errors
+    frame.attrs["fallback_used"] = any(row["snapshot_provider"] != "tencent" for row in rows)
     return frame
 
 
@@ -4878,7 +5114,11 @@ def _derive_candidate_trading_status(
         derived["is_limit_up"] = False
         derived["is_limit_down"] = False
         derived["limit_status"] = "not_applicable"
-        evidence_fields["price_limit"] = "us_market_has_no_static_daily_price_limit"
+        evidence_fields["price_limit"] = (
+            "hk_market_has_no_static_daily_price_limit"
+            if re.fullmatch(r"HK\d{5}", code.upper())
+            else "us_market_has_no_static_daily_price_limit"
+        )
 
     if evidence_fields:
         derived["trading_status_evidence"] = {

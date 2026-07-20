@@ -2199,6 +2199,17 @@ class DataFetcherManager:
                 primary_kw: dict = {}
                 secondary_kw: dict = {}
             else:
+                direct_quote = self._try_fetcher_quote(
+                    stock_code,
+                    "TencentFetcher",
+                    health_market="hk",
+                )
+                if direct_quote is not None:
+                    logger.info(f"[实时行情] 港股 {stock_code} 成功获取 (来源: TencentFetcher)")
+                    return self._enrich_realtime_quote(
+                        direct_quote,
+                        realtime_cache_ttl=getattr(config, "realtime_cache_ttl", None),
+                    )
                 primary_src = "LongbridgeFetcher" if prefer_lb else "AkshareFetcher"
                 secondary_src = "AkshareFetcher" if prefer_lb else "LongbridgeFetcher"
                 market_label = "港股"

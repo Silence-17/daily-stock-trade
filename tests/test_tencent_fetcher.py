@@ -6,6 +6,7 @@ from __future__ import annotations
 from unittest.mock import patch
 
 import pandas as pd
+import pytest
 
 from data_provider.tencent_fetcher import TencentFetcher, _to_tencent_symbol
 
@@ -14,6 +15,41 @@ def test_tencent_symbol_conversion_supports_a_share_markets() -> None:
     assert _to_tencent_symbol("600519") == "sh600519"
     assert _to_tencent_symbol("000001") == "sz000001"
     assert _to_tencent_symbol("920748") == "bj920748"
+
+
+def test_tencent_fetcher_parses_direct_hk_realtime_quote() -> None:
+    fields = [""] * 78
+    values = {
+        0: "100", 1: "腾讯控股", 2: "00700", 3: "477.800", 4: "461.600",
+        5: "465.600", 6: "30822839.0", 30: "2026/07/20 16:08:30",
+        31: "16.200", 32: "3.51", 33: "481.800", 34: "465.600",
+        36: "30822839.0", 37: "14678311361.300", 38: "0.34", 39: "17.45",
+        43: "3.51", 44: "43444.0428", 45: "43444.0428", 48: "677.700",
+        49: "411.000", 58: "3.45", 75: "HKD",
+    }
+    for index, value in values.items():
+        fields[index] = value
+
+    class FakeResponse:
+        content = f'v_r_hk00700="{"~".join(fields)}";'.encode("gb18030")
+
+        def raise_for_status(self) -> None:
+            return None
+
+    with patch("data_provider.tencent_fetcher.requests.get", return_value=FakeResponse()) as get_mock:
+        quote = TencentFetcher().get_realtime_quote("HK00700")
+
+    assert quote is not None
+    assert quote.code == "HK00700"
+    assert quote.name == "腾讯控股"
+    assert quote.market == "hk"
+    assert quote.currency == "HKD"
+    assert quote.price == 477.8
+    assert quote.volume == 30822839
+    assert quote.amount == 14678311361.3
+    assert quote.total_mv == pytest.approx(4344404280000.0)
+    assert quote.provider_timestamp == "2026-07-20T08:08:30+00:00"
+    get_mock.assert_called_once()
 
 
 def test_tencent_fetcher_parses_qfq_daily_response() -> None:

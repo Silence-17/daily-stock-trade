@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+import re
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import requests
@@ -16,6 +18,7 @@ except ImportError:  # pragma: no cover - dependency is present in supported ins
     xcals = None
 
 from .base import BaseFetcher, DataFetchError, STANDARD_COLUMNS, normalize_stock_code, is_bse_code
+from .realtime_types import RealtimeSource, UnifiedRealtimeQuote
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +33,7 @@ class TencentFetcher(BaseFetcher):
     allow_empty_daily_data = True
 
     _KLINE_ENDPOINT = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
+    _QUOTE_ENDPOINT = "https://qt.gtimg.cn/q=r_hk{code}"
     _HTTP_TIMEOUT_SECONDS = 8
 
     def _fetch_raw_data(self, stock_code: str, start_date: str, end_date: str) -> pd.DataFrame:
@@ -95,6 +99,87 @@ class TencentFetcher(BaseFetcher):
             normalized["pct_chg"] = normalized["close"].pct_change().fillna(0.0) * 100
         normalized = normalized[["date", "open", "high", "low", "close", "volume", "amount", "pct_chg"]]
         return normalized
+
+    def get_realtime_quote(self, stock_code: str) -> Optional[UnifiedRealtimeQuote]:
+        """Fetch one HK quote directly without downloading the full market table."""
+        code = normalize_stock_code(stock_code)
+        match = re.fullmatch(r"HK(\d{5})", code)
+        if not match:
+            return None
+        hk_code = match.group(1)
+        try:
+            response = requests.get(
+                self._QUOTE_ENDPOINT.format(code=hk_code),
+                headers={
+                    "Referer": "https://finance.qq.com",
+                    "User-Agent": "Mozilla/5.0 (compatible; DSA/1.0)",
+                    "Accept": "text/plain,*/*",
+                },
+                timeout=self._HTTP_TIMEOUT_SECONDS,
+            )
+            response.raise_for_status()
+            payload = response.content.decode("gb18030", "ignore").strip()
+            if not payload or '=""' in payload:
+                return None
+            fields = payload[payload.index('"') + 1:payload.rindex('"')].split("~")
+            if len(fields) < 60:
+                raise ValueError(f"field_count={len(fields)}")
+
+            def number(index: int) -> Optional[float]:
+                value = fields[index].strip() if len(fields) > index else ""
+                if not value:
+                    return None
+                parsed = float(value)
+                return parsed if parsed == parsed else None
+
+            price = number(3)
+            volume = number(36) or number(6)
+            if price is None or price <= 0 or volume is None or volume <= 0:
+                raise ValueError("missing positive price or volume")
+            provider_timestamp = None
+            timestamp_text = fields[30].strip()
+            if timestamp_text:
+                provider_timestamp = (
+                    datetime.strptime(timestamp_text, "%Y/%m/%d %H:%M:%S")
+                    .replace(tzinfo=ZoneInfo("Asia/Hong_Kong"))
+                    .astimezone(timezone.utc)
+                    .isoformat()
+                )
+            total_mv = number(44)
+            circ_mv = number(45)
+            missing_fields = ["volume_ratio"]
+            quote = UnifiedRealtimeQuote(
+                code=f"HK{hk_code}",
+                name=fields[1].strip() or f"HK{hk_code}",
+                source=RealtimeSource.TENCENT,
+                provider_timestamp=provider_timestamp,
+                market="hk",
+                currency=(fields[75].strip().upper() if len(fields) > 75 else "") or "HKD",
+                data_quality="partial",
+                missing_fields=missing_fields,
+                price=price,
+                change_pct=number(32),
+                change_amount=number(31),
+                volume=int(volume),
+                amount=number(37) or price * volume,
+                turnover_rate=number(38),
+                amplitude=number(43),
+                open_price=number(5),
+                high=number(33),
+                low=number(34),
+                pre_close=number(4),
+                pe_ratio=number(39),
+                pb_ratio=number(58),
+                total_mv=(total_mv * 100000000 if total_mv is not None else None),
+                circ_mv=(circ_mv * 100000000 if circ_mv is not None else None),
+                high_52w=number(48),
+                low_52w=number(49),
+            )
+            logger.info("TencentFetcher HK realtime quote succeeded for %s", stock_code)
+            return quote
+        except Exception as exc:  # noqa: BLE001 - realtime routing falls back to other providers.
+            logger.warning("TencentFetcher HK realtime quote failed for %s: %s", stock_code, exc)
+            return None
 
 
 def _to_tencent_symbol(stock_code: str) -> str:

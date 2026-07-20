@@ -1,0 +1,58 @@
+# Liquid HK large-cap strategy for DSA's AlphaSift compatibility pipeline.
+name: hk_liquid_momentum
+display_name: HK Liquid Momentum
+description: Liquid Hong Kong large caps with controlled momentum and valuation-aware ranking
+version: "1.0"
+category: framework
+tags: [hk, large_cap, momentum, value, liquid]
+
+screening:
+  enabled: true
+  market_scope: [hk]
+  hard_filters:
+    exclude_st: false
+    amount_min: 20000000
+    change_pct_min: -8.0
+    change_pct_max: 10.0
+    price_min: 1
+    price_max: 1200
+  tech_weight: 0.42
+  factor_weights:
+    momentum: 0.27
+    value: 0.17
+    liquidity: 0.22
+    activity: 0.10
+    stability: 0.18
+    reversal: 0.03
+    theme_heat: 0.02
+    size: 0.01
+  scoring_profile:
+    momentum_chase_start_pct: 6.0
+    momentum_chase_penalty_slope: 12.0
+    momentum_downside_start_pct: -5.0
+    momentum_downside_penalty_slope: 9.0
+    activity_ideal_volume_ratio: 1.8
+    stability_hot_change_pct: 8.0
+  risk_profile:
+    chase_change_pct: 8.0
+    abnormal_volume_ratio: 5.0
+    low_llm_confidence: 0.50
+  portfolio_profile:
+    max_same_bucket: 1
+    concentration_penalty: 4.0
+    buckets:
+      Internet: [Interactive Media, Internet Retail, Software]
+      Financials: [Banks, Insurance, Financial Services]
+      Consumer: [Consumer Cyclical, Consumer Defensive, Retail]
+      Telecom: [Telecom Services, Communication Services]
+      Energy: [Energy, Oil & Gas]
+  scorecard_profile:
+    value_quality_bonus: 1.5
+    capital_confirmed_bonus: 2.0
+    volume_spike_ratio: 4.5
+    hot_money_penalty: 2.0
+  ranking_hints: |
+    Prefer liquid Hong Kong large caps with constructive but non-extended momentum,
+    observable turnover, reasonable valuation, and stable price action. Penalize
+    sharp chasing and incomplete market evidence.
+  max_output: 5

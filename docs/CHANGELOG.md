@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [新功能] 新增 `hk_liquid_momentum` 港股兼容筛选管线与显式 `ALPHASIFT_HK_TICKERS` 股票池，复用 AlphaSift 策略解析、硬过滤和因子评分；新增腾讯港股单票直连实时行情，失败时保留 AkShare/Longbridge 降级
+- [测试] 真实港股校准 shadow `ss-agent-20260720171834-1109843a` 在 25.85 秒内从 15 只快照筛出 3 个候选，生成 1 个 HKD dry-run 计划且提交 0 个订单；单票腾讯行情耗时 0.055 秒
+
 - [新功能] 新增 DSA 管理的 `us_large_cap_momentum` AlphaSift 策略叠加、显式美股 universe、yfinance 限流后的腾讯实时行情 fallback，以及首次跨币种自动交易的按需汇率刷新；汇率仍不可用时保持 fail-closed
 - [测试] 真实美股校准 shadow `ss-agent-20260720165408-d91ad2b9` 在线筛出 3 个候选，生成 1 个 dry-run 计划且提交 0 个订单；CNY 10,000 按有效汇率换算为 USD 1,477.80
 

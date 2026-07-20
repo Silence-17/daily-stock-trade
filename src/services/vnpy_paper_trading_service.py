@@ -89,6 +89,7 @@ ALPHASIFT_FALLBACK_STRATEGIES = (
     "shrink_pullback",
     "volume_breakout",
     "us_large_cap_momentum",
+    "hk_liquid_momentum",
 )
 DEFAULT_AUTO_ALPHASIFT_LLM_TIMEOUT_SECONDS = 45
 DEFAULT_AUTO_ALPHASIFT_LLM_MAX_RETRIES = 0

@@ -17,6 +17,8 @@ from typing import Any, Dict, List
 from unittest.mock import ANY, MagicMock, patch
 import threading
 
+import pandas as pd
+
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
@@ -256,6 +258,120 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
         self.assertIn("MSFT: no DSA realtime quote", frame.attrs["source_errors"])
         self.assertEqual(manager.get_realtime_quote.call_count, 2)
 
+    def test_hk_universe_is_canonical_bounded_and_rejects_invalid_codes(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"ALPHASIFT_HK_TICKERS": "00700,1810.HK,HK00700"},
+            clear=False,
+        ):
+            self.assertEqual(alphasift_service._dsa_hk_universe(), ["HK00700", "HK01810"])
+
+        with patch.dict(
+            os.environ,
+            {"ALPHASIFT_HK_TICKERS": "HK00700,AAPL"},
+            clear=False,
+        ), self.assertRaisesRegex(ValueError, "invalid HK ticker"):
+            alphasift_service._dsa_hk_universe()
+
+    def test_dsa_hk_screen_reuses_alphasift_filters_and_factor_scores(self) -> None:
+        snapshot = pd.DataFrame([
+            {
+                "code": "HK00700", "name": "Tencent", "price": 477.8,
+                "change_pct": 3.5, "amount": 14600000000.0, "total_mv": 4.3e12,
+                "circ_mv": 4.3e12, "pe_ratio": 17.4, "pb_ratio": 3.4,
+                "volume_ratio": None, "turnover_rate": 0.34, "industry": "",
+                "snapshot_provider": "tencent", "quote_payload": {"source": "tencent"},
+            },
+            {
+                "code": "HK09988", "name": "Alibaba", "price": 110.0,
+                "change_pct": 12.0, "amount": 1000000000.0, "total_mv": 2.0e12,
+                "circ_mv": 2.0e12, "pe_ratio": 20.0, "pb_ratio": 2.5,
+                "volume_ratio": None, "turnover_rate": 0.5, "industry": "",
+                "snapshot_provider": "tencent", "quote_payload": {"source": "tencent"},
+            },
+        ])
+        snapshot.attrs["source_errors"] = []
+
+        with patch("src.services.alphasift_service._fetch_dsa_hk_snapshot", return_value=snapshot):
+            result = alphasift_service._call_dsa_hk_screen(
+                strategy="hk_liquid_momentum",
+                max_results=3,
+                config=self._config(enabled=True),
+                use_llm=True,
+            )
+
+        self.assertEqual(result["market"], "hk")
+        self.assertEqual(result["snapshot_count"], 2)
+        self.assertEqual(result["after_filter_count"], 1)
+        self.assertFalse(result["llm_ranked"])
+        self.assertEqual(result["candidates"][0]["code"], "HK00700")
+        self.assertIn("momentum", result["candidates"][0]["factor_scores"])
+        self.assertTrue(result["warnings"])
+
+    def test_service_routes_hk_extension_without_calling_unsupported_adapter_screen(self) -> None:
+        adapter_screen = MagicMock(side_effect=AssertionError("adapter HK screen must not run"))
+        adapter = _make_adapter_module(
+            screen=adapter_screen,
+            list_strategies=lambda: [
+                {
+                    "id": "hk_liquid_momentum",
+                    "name": "HK Liquid Momentum",
+                    "market_scope": ["hk"],
+                }
+            ],
+            get_status=lambda: {
+                "supported_markets": ["cn", "us"],
+                "contract_version": "1",
+                "version": "0.2.0",
+                "strategy_count": 1,
+            },
+        )
+        raw = {
+            "strategy": "hk_liquid_momentum",
+            "market": "hk",
+            "snapshot_count": 1,
+            "after_filter_count": 1,
+            "snapshot_source": "dsa_realtime_quote",
+            "candidates": [{"code": "HK00700", "name": "Tencent", "score": 70, "price": 477.8}],
+        }
+
+        with patch("src.services.alphasift_service._get_dsa_adapter", return_value=adapter), patch(
+            "src.services.alphasift_service._call_dsa_hk_screen",
+            return_value=raw,
+        ) as hk_screen:
+            result = self._screen(
+                self._config(enabled=True),
+                strategy="hk_liquid_momentum",
+                market="hk",
+                max_results=3,
+                use_llm=False,
+            )
+
+        self.assertEqual(result["market"], "hk")
+        self.assertEqual(result["candidate_count"], 1)
+        self.assertEqual(result["source_routing"]["reason"], "dsa_hk_compatibility_pipeline")
+        hk_screen.assert_called_once()
+        adapter_screen.assert_not_called()
+
+    def test_hk_candidate_has_non_limit_market_evidence(self) -> None:
+        result = alphasift_service._derive_candidate_trading_status(
+            {"code": "HK00700", "name": "Tencent"},
+            {"code": "HK00700"},
+            {
+                "quote": {
+                    "code": "HK00700", "name": "Tencent", "price": 477.8,
+                    "volume": 1000, "amount": 477800, "source": "tencent",
+                    "provider_timestamp": "2026-07-20T08:08:30+00:00",
+                }
+            },
+        )
+
+        self.assertEqual(result["limit_status"], "not_applicable")
+        self.assertEqual(
+            result["trading_status_evidence"]["fields"]["price_limit"],
+            "hk_market_has_no_static_daily_price_limit",
+        )
+
     def test_default_install_spec_is_commit_pinned(self) -> None:
         self.assertRegex(
             DEFAULT_ALPHASIFT_TEST_SPEC,
@@ -289,13 +405,16 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
         with patch(
             "src.services.alphasift_service._call_alphasift_status",
             return_value={"available": True, "contract_version": "1", "version": "0.2.0", "strategy_count": 8},
+        ), patch(
+            "src.services.alphasift_service._list_strategies",
+            return_value=[{"id": str(index)} for index in range(10)],
         ):
             payload = alphasift_endpoint.alphasift_status(config=config)
 
         self.assertTrue(payload["available"])
         self.assertEqual(payload["contract_version"], "1")
         self.assertEqual(payload["version"], "0.2.0")
-        self.assertEqual(payload["strategy_count"], 8)
+        self.assertEqual(payload["strategy_count"], 10)
 
     def test_status_includes_alphasift_source_health_snapshot(self) -> None:
         config = self._config(enabled=True)
