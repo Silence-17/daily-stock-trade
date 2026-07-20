@@ -582,6 +582,8 @@ docker run --rm stock-analysis:vnpy python -c "import vnpy; from src.services.vn
 
 For Compose, run `DSA_INCLUDE_VNPY_DOCKER=true docker compose -f docker/docker-compose.yml build`. The optional build installs `requirements-vnpy.txt` and imports the vn.py event/trading modules plus the built-in gateway inside the image; an import failure aborts the build. Broker-specific gateway plugins still require separate installation and configuration, and production acceptance must use the external-gateway soak gate rather than treating `DSA_SIM` as real-account evidence.
 
+The repository also provides the manual `.github/workflows/vnpy-docker-smoke.yml` workflow. It publishes no image and reads no broker credentials; it builds both image profiles, starts the optional image, and gates health, DSA_SIM connectivity, four EventEngine callbacks, handler failures, and the scheduler loop. The 2026-07-21 Linux acceptance measured 1,459,313,565 bytes for the default image and 2,229,015,999 bytes for the vn.py image, a 769,702,434-byte increase that retains vn.py 4.4.0's declared PySide6 and analysis dependencies rather than privately trimming the standard runtime with `--no-deps`.
+
 ---
 
 ## Local Deployment

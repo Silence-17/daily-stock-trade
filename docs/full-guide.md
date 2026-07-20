@@ -645,6 +645,8 @@ docker run --rm stock-analysis:vnpy python -c "import vnpy; from src.services.vn
 
 Compose 可使用 `DSA_INCLUDE_VNPY_DOCKER=true docker compose -f docker/docker-compose.yml build`。构建会安装独立的 `requirements-vnpy.txt`，并在镜像层内真实导入 vn.py 事件/交易模块和内置 gateway；导入失败会中止构建。具体券商 gateway 插件仍需另行安装和配置，且生产验收必须使用外部 gateway 长跑门禁，不能把 `DSA_SIM` 当作真实账户证据。
 
+仓库提供手动工作流 `.github/workflows/vnpy-docker-smoke.yml`，它不会发布镜像或读取券商凭据，会构建默认/可选镜像并启动可选镜像门禁健康状态、DSA_SIM 连接、四类事件桥、handler 失败和调度循环。2026-07-21 Linux 验收中，默认镜像为 1,459,313,565 字节，可选 vn.py 镜像为 2,229,015,999 字节，净增 769,702,434 字节；该增量保留 vn.py 4.4.0 声明的 PySide6 与分析依赖，不使用 `--no-deps` 私自裁剪标准运行时。
+
 ---
 
 ## 本地运行详细配置
