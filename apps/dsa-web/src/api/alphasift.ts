@@ -428,6 +428,10 @@ export type AlphaSiftFullMarketIngestionJob = {
   sourceErrorCount: number;
   errors: Array<Record<string, unknown>>;
   taskId?: string | null;
+  taskStatus?: string | null;
+  recoveryState?: 'active' | 'orphaned' | 'retryable' | 'complete' | 'unavailable';
+  resumeAllowed?: boolean;
+  forceTakeoverRequired?: boolean;
   error?: string | null;
   heartbeatAt?: string | null;
   completedAt?: string | null;

@@ -855,12 +855,13 @@ describe('AgentConsolePage', () => {
       status: 'failed', batchSize: 25, totalSymbols: 5000, totalWorkItems: 5000, nextOffset: 50,
       remainingWorkItems: 4950, progressPct: 1, completedBatches: 2, rowCount: 50, inserted: 50,
       updated: 0, sourceErrorCount: 1, errors: [], error: 'source timeout',
+      recoveryState: 'retryable', resumeAllowed: true, forceTakeoverRequired: false,
     });
     resumeFullMarketIngestion.mockResolvedValue({
       jobId: 'full-job-1', market: 'cn', snapshotDates: ['2024-01-05'], universeSource: 'tushare_stock_basic',
       status: 'pending', batchSize: 25, totalSymbols: 5000, totalWorkItems: 5000, nextOffset: 50,
       remainingWorkItems: 4950, progressPct: 1, completedBatches: 2, rowCount: 50, inserted: 50,
-      updated: 0, sourceErrorCount: 1, errors: [],
+      updated: 0, sourceErrorCount: 1, errors: [], recoveryState: 'active', resumeAllowed: false,
     });
     startFactorIngestion.mockResolvedValue({
       taskId: 'factor-task-1',
@@ -1318,6 +1319,25 @@ describe('AgentConsolePage', () => {
     expect(await screen.findByTestId('agent-full-market-ingestion-result')).toHaveTextContent('工作项 50/5000');
     fireEvent.click(screen.getByTestId('agent-full-market-ingestion-resume'));
     await waitFor(() => expect(resumeFullMarketIngestion).toHaveBeenCalledWith('full-job-1', false));
+  });
+
+  it('protects an active full-market ingestion job from duplicate takeover', async () => {
+    listFullMarketIngestions.mockResolvedValue({
+      items: [{
+        jobId: 'full-job-active', market: 'cn', snapshotDates: ['2024-01-05'],
+        universeSource: 'tushare_stock_basic', status: 'processing', taskStatus: 'running',
+        batchSize: 25, totalSymbols: 5000, totalWorkItems: 5000, nextOffset: 50,
+        remainingWorkItems: 4950, progressPct: 1, completedBatches: 2, rowCount: 50,
+        inserted: 50, updated: 0, sourceErrorCount: 0, errors: [], recoveryState: 'active',
+        resumeAllowed: false, forceTakeoverRequired: true,
+      }],
+      limit: 1,
+    });
+
+    renderPage();
+
+    expect(await screen.findByText('后台任务仍在运行，不允许重复接管')).toBeInTheDocument();
+    expect(screen.queryByTestId('agent-full-market-ingestion-resume')).not.toBeInTheDocument();
   });
 
   it('pages through Agent run history with offset', async () => {

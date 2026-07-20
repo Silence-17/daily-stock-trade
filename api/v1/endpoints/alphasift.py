@@ -261,6 +261,51 @@ def _submit_full_market_ingestion_job(job_id: str, *, force: bool = False) -> st
     return task_id
 
 
+def _with_full_market_recovery(
+    job: Dict[str, Any],
+    *,
+    task_queue: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """Reconcile a persistent ingestion lease with this process task queue."""
+
+    status = str(job.get("status") or "").strip().lower()
+    task_id = str(job.get("task_id") or "").strip()
+    queue_status = None
+    if task_id:
+        queue = task_queue or get_task_queue()
+        task = queue.get_task(task_id)
+        if task is not None:
+            raw_status = getattr(task, "status", None)
+            queue_status = (
+                raw_status.value
+                if isinstance(raw_status, QueueTaskStatus)
+                else str(raw_status or "").strip().lower() or None
+            )
+
+    active = queue_status in {
+        QueueTaskStatus.PENDING.value,
+        QueueTaskStatus.PROCESSING.value,
+        QueueTaskStatus.CANCEL_REQUESTED.value,
+    }
+    if status == "completed":
+        recovery_state = "complete"
+    elif status == "failed":
+        recovery_state = "retryable"
+    elif status in {"pending", "processing"} and active:
+        recovery_state = "active"
+    elif status in {"pending", "processing"}:
+        recovery_state = "orphaned"
+    else:
+        recovery_state = "unavailable"
+    return {
+        **job,
+        "task_status": queue_status,
+        "recovery_state": recovery_state,
+        "resume_allowed": recovery_state in {"retryable", "orphaned"},
+        "force_takeover_required": recovery_state == "active",
+    }
+
+
 @router.post("/replay/full-market-ingestion/jobs", status_code=202)
 def alphasift_create_full_market_ingestion_job(
     payload: AlphaSiftFullMarketIngestionRequest,
@@ -272,7 +317,7 @@ def alphasift_create_full_market_ingestion_job(
             batch_size=payload.batch_size,
         )
         task_id = _submit_full_market_ingestion_job(job["job_id"])
-        return {**job, "task_id": task_id}
+        return _with_full_market_recovery({**job, "task_id": task_id})
     except ValueError as exc:
         raise api_error(400, "full_market_ingestion_invalid", str(exc)) from exc
     except RuntimeError as exc:
@@ -284,7 +329,10 @@ def alphasift_list_full_market_ingestion_jobs(
     limit: int = Query(20, ge=1, le=100),
 ) -> Dict[str, Any]:
     return {
-        "items": StockSelectionFullMarketIngestionService().list_recent(limit=limit),
+        "items": [
+            _with_full_market_recovery(job)
+            for job in StockSelectionFullMarketIngestionService().list_recent(limit=limit)
+        ],
         "limit": limit,
     }
 
@@ -292,7 +340,9 @@ def alphasift_list_full_market_ingestion_jobs(
 @router.get("/replay/full-market-ingestion/jobs/{job_id}")
 def alphasift_get_full_market_ingestion_job(job_id: str) -> Dict[str, Any]:
     try:
-        return StockSelectionFullMarketIngestionService().get(job_id)
+        return _with_full_market_recovery(
+            StockSelectionFullMarketIngestionService().get(job_id)
+        )
     except ValueError as exc:
         raise api_error(404, "full_market_ingestion_job_not_found", str(exc)) from exc
 
@@ -304,13 +354,16 @@ def alphasift_resume_full_market_ingestion_job(
 ) -> Dict[str, Any]:
     service = StockSelectionFullMarketIngestionService()
     try:
-        job = service.get(job_id)
+        job = _with_full_market_recovery(service.get(job_id))
         if job["status"] == "completed":
             return job
-        if job["status"] == "processing" and not force:
+        if job["recovery_state"] == "active" and not force:
             raise api_error(409, "full_market_ingestion_job_active", "job is already processing")
-        task_id = _submit_full_market_ingestion_job(job_id, force=force)
-        return {**job, "task_id": task_id, "status": "pending"}
+        takeover = force or job["recovery_state"] == "orphaned"
+        task_id = _submit_full_market_ingestion_job(job_id, force=takeover)
+        return _with_full_market_recovery(
+            {**job, "task_id": task_id, "status": "pending"}
+        )
     except HTTPException:
         raise
     except ValueError as exc:

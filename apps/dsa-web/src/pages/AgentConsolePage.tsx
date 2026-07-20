@@ -1441,18 +1441,22 @@ const AgentConsolePage: React.FC = () => {
               <span>工作项 {fullMarketJob.nextOffset}/{fullMarketJob.totalWorkItems}</span>
               <span>批次 {fullMarketJob.completedBatches}</span>
               <span>源错误 {fullMarketJob.sourceErrorCount}</span>
+              <span>恢复状态 {fullMarketJob.recoveryState || 'unknown'}</span>
             </div>
             {fullMarketJob.error ? <div className="text-danger">{fullMarketJob.error}</div> : null}
-            {['failed', 'processing'].includes(fullMarketJob.status) ? (
+            {fullMarketJob.recoveryState === 'active' ? (
+              <div>后台任务仍在运行，不允许重复接管</div>
+            ) : null}
+            {fullMarketJob.resumeAllowed ? (
               <Button
                 data-testid="agent-full-market-ingestion-resume"
                 variant="outline"
-                onClick={() => void handleResumeFullMarketIngestion(fullMarketJob.status === 'processing')}
+                onClick={() => void handleResumeFullMarketIngestion(false)}
                 isLoading={fullMarketLoading}
                 loadingText="恢复中..."
               >
                 <RefreshCw className="h-4 w-4" />
-                {fullMarketJob.status === 'processing' ? '强制从检查点接管' : '从检查点继续'}
+                {fullMarketJob.recoveryState === 'orphaned' ? '恢复中断作业' : '从检查点继续'}
               </Button>
             ) : null}
           </div>
