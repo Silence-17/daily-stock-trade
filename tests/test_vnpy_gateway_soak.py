@@ -4,8 +4,17 @@
 from __future__ import annotations
 
 import json
+from subprocess import CompletedProcess
+from unittest.mock import Mock
 
-from scripts.check_vnpy_gateway_soak import _safe_runtime_summary, evaluate_soak
+import scripts.check_vnpy_gateway_soak as gateway_soak
+from src.services.vnpy_runtime import VnpyRuntimeSettings
+
+from scripts.check_vnpy_gateway_soak import (
+    _run_gateway_preflight,
+    _safe_runtime_summary,
+    evaluate_soak,
+)
 
 
 def test_evaluate_soak_accepts_connected_runtime_and_required_events() -> None:
@@ -134,3 +143,87 @@ def test_safe_runtime_summary_omits_connection_path_and_message() -> None:
     assert summary["settings_source"] == "file"
     assert "broker-account" not in encoded
     assert "should-not-leak" not in encoded
+
+
+def test_preflight_subprocess_uses_environment_without_exposing_settings_path(
+    monkeypatch,
+) -> None:
+    completed = CompletedProcess(
+        args=[],
+        returncode=0,
+        stdout=json.dumps({"ok": True, "evaluation": {"failures": []}}),
+        stderr="",
+    )
+    run = Mock(return_value=completed)
+    monkeypatch.setattr(gateway_soak.subprocess, "run", run)
+
+    result = _run_gateway_preflight(
+        require_external_gateway=True,
+        require_all_default_keys=True,
+        timeout_seconds=45.0,
+    )
+
+    command = run.call_args.args[0]
+    assert result["ok"] is True
+    assert result["exit_code"] == 0
+    assert "--require-external-gateway" in command
+    assert "--require-all-default-keys" in command
+    assert all("settings" not in argument.lower() for argument in command)
+    assert run.call_args.kwargs["timeout"] == 45.0
+
+
+def test_preflight_failure_exits_before_runtime_bootstrap(
+    monkeypatch,
+    capsys,
+) -> None:
+    settings = VnpyRuntimeSettings(
+        enabled=True,
+        gateway_class="src.services.vnpy_simulated_gateway:DsaSimulatedGateway",
+        gateway_name="DSA_SIM",
+        connect_on_start=True,
+    )
+    monkeypatch.setattr(gateway_soak, "load_vnpy_runtime_settings", lambda: settings)
+    monkeypatch.setattr(
+        gateway_soak,
+        "_run_gateway_preflight",
+        lambda **_kwargs: {
+            "ok": False,
+            "evaluation": {"failures": ["builtin_gateway_not_external"]},
+        },
+    )
+    bootstrap = Mock(side_effect=AssertionError("must not connect"))
+    monkeypatch.setattr(gateway_soak, "bootstrap_vnpy_runtime", bootstrap)
+
+    exit_code = gateway_soak.main(
+        ["--duration-seconds", "1", "--require-external-gateway"]
+    )
+    result = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 1
+    assert bootstrap.call_count == 0
+    assert result["schema_version"] == 3
+    assert result["connection_attempted"] is False
+    assert result["evaluation"]["failures"] == ["preflight_failed"]
+    assert result["evaluation"]["preflight_failures"] == [
+        "builtin_gateway_not_external"
+    ]
+
+
+def test_preflight_timeout_is_sanitized(monkeypatch) -> None:
+    monkeypatch.setattr(
+        gateway_soak.subprocess,
+        "run",
+        Mock(side_effect=gateway_soak.subprocess.TimeoutExpired("secret-command", 5)),
+    )
+
+    result = _run_gateway_preflight(
+        require_external_gateway=True,
+        require_all_default_keys=True,
+        timeout_seconds=5.0,
+    )
+
+    assert result == {
+        "ok": False,
+        "error_type": "TimeoutExpired",
+        "failures": ["preflight_process_failed"],
+    }
