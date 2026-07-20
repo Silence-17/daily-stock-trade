@@ -201,11 +201,12 @@ class StockSelectionFactorIngestionService:
                         "tushare.dividend",
                         "akshare.stock_fhps_detail_em",
                         "akshare.stock_dividend_cninfo",
+                        "bse.companyAnnouncement.pdf",
                     ] if corporate_action_fetcher is not None else []
                 ),
                 "corporate_action_sources_used": sorted(used_corporate_action_sources),
                 "corporate_action_free_coverage_exchanges": (
-                    [] if custom_corporate_action_fetcher else ["SSE", "SZSE"]
+                    [] if custom_corporate_action_fetcher else ["SSE", "SZSE", "BSE"]
                 ),
                 "corporate_action_horizon_days": 400,
                 "valuation_asof_rule": "latest_value_on_or_before_snapshot_date",

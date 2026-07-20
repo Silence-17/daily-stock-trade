@@ -20,10 +20,22 @@ class AkshareCorporateActionFetcher:
     _cache_lock = threading.Lock()
     _cache: Dict[str, tuple[float, List[Dict[str, Any]]]] = {}
 
-    def __init__(self, *, client: Optional[Any] = None) -> None:
+    def __init__(
+        self,
+        *,
+        client: Optional[Any] = None,
+        bse_fetcher: Optional[Any] = None,
+    ) -> None:
         if client is None:
             import akshare as client
         self.client = client
+        if bse_fetcher is None:
+            from data_provider.bse_corporate_action_fetcher import (
+                BseCorporateActionFetcher,
+            )
+
+            bse_fetcher = BseCorporateActionFetcher()
+        self.bse_fetcher = bse_fetcher
 
     def get_stock_corporate_actions(
         self,
@@ -34,7 +46,11 @@ class AkshareCorporateActionFetcher:
     ) -> List[Dict[str, Any]]:
         code = normalize_stock_code(stock_code)
         if is_bse_code(code):
-            return []
+            return self.bse_fetcher.get_stock_corporate_actions(
+                code,
+                start_date=start_date,
+                end_date=end_date,
+            )
         events = self._load(code)
         return [
             dict(item)

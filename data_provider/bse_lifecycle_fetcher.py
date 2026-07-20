@@ -193,6 +193,7 @@ class BseLifecycleFetcher:
             listed = self._normalize_list_date(values[-3])
             rows.append({
                 "code": new_code,
+                "legacy_code": old_code,
                 "name": values[-4].strip(),
                 "industry": None,
                 "market": "BSE",
@@ -204,6 +205,13 @@ class BseLifecycleFetcher:
         if not rows:
             raise RuntimeError("BSE code-mapping page returned no parseable rows")
         return rows
+
+    def get_legacy_code_map(self) -> Dict[str, str]:
+        return {
+            str(row["code"]): str(row["legacy_code"])
+            for row in self._fetch_code_mapping_rows()
+            if row.get("code") and row.get("legacy_code")
+        }
 
     def _fetch_final_delist_rows(self) -> List[Dict[str, Any]]:
         fields = [

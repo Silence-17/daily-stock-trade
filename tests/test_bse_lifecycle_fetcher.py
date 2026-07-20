@@ -83,3 +83,14 @@ def test_bse_lifecycle_fails_closed_for_delisted_symbol_without_listing_date() -
 
 def test_bse_selected_layer_date_is_clamped_to_exchange_opening() -> None:
     assert BseLifecycleFetcher._normalize_list_date("2020/07/27") == "2021-11-15"
+
+
+def test_bse_official_mapping_exposes_legacy_code_without_changing_lifecycle_schema() -> None:
+    fetcher = _StubFetcher(
+        current=[_row("920748", listed="2023-08-16")],
+        mapping=[{**_row("920748", listed="2023-08-16"), "legacy_code": "833748"}],
+        delisted=[],
+    )
+
+    assert fetcher.get_legacy_code_map() == {"920748": "833748"}
+    assert "legacy_code" not in fetcher.get_stock_lifecycle_list().columns

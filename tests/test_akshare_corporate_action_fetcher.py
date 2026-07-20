@@ -90,14 +90,25 @@ class AkshareCorporateActionFetcherTestCase(unittest.TestCase):
                 client=client
             ).get_stock_corporate_actions("600519")
 
-    def test_bse_returns_no_unverified_events_without_calling_free_sources(self) -> None:
+    def test_bse_routes_to_official_fetcher_without_calling_sse_szse_sources(self) -> None:
         client = MagicMock()
+        bse_fetcher = MagicMock()
+        bse_fetcher.get_stock_corporate_actions.return_value = [{
+            "symbol": "920680",
+            "source": "bse.companyAnnouncement.pdf",
+        }]
 
         events = AkshareCorporateActionFetcher(
-            client=client
+            client=client,
+            bse_fetcher=bse_fetcher,
         ).get_stock_corporate_actions("920680")
 
-        self.assertEqual(events, [])
+        self.assertEqual(events[0]["source"], "bse.companyAnnouncement.pdf")
+        bse_fetcher.get_stock_corporate_actions.assert_called_once_with(
+            "920680",
+            start_date=None,
+            end_date=None,
+        )
         client.stock_fhps_detail_em.assert_not_called()
         client.stock_dividend_cninfo.assert_not_called()
 
