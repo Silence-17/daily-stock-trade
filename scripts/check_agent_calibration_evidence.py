@@ -201,7 +201,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--days", type=int, default=90)
     parser.add_argument("--market", action="append", dest="markets", default=[])
     parser.add_argument("--strategy")
-    parser.add_argument("--trigger-source")
+    parser.add_argument(
+        "--trigger-source",
+        default="agent_calibration_shadow",
+        help=(
+            "Agent run trigger source to include. Defaults to the order-free "
+            "calibration shadow collector."
+        ),
+    )
     parser.add_argument("--status", default="completed")
     parser.add_argument("--required-version", action="append", default=[])
     parser.add_argument("--min-runs-per-market", type=int, default=20)

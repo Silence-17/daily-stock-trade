@@ -151,6 +151,43 @@ class _FakeTaskEventRepository:
 
 
 class RuntimeSchedulerServiceTestCase(unittest.TestCase):
+    def test_background_task_result_summary_keeps_bounded_shadow_evidence(self) -> None:
+        details = RuntimeSchedulerService._summarize_background_task_result({
+            "accepted": True,
+            "configured_count": 2,
+            "completed_count": 2,
+            "submitted_count": 0,
+            "execution_mode": "dry_run",
+            "submits_orders": False,
+            "runs": [
+                {
+                    "market": "cn",
+                    "strategy": "dual_low",
+                    "agent_run_uid": "run-cn",
+                    "submitted_count": 0,
+                    "private_payload": "excluded",
+                },
+                {
+                    "market": "us",
+                    "strategy": "us_large_cap_momentum",
+                    "agent_run_uid": "run-us",
+                    "submitted_count": 0,
+                },
+            ],
+            "failures": [],
+            "unbounded_payload": "excluded",
+        })
+
+        self.assertEqual(details["configured_count"], 2)
+        self.assertEqual(details["completed_count"], 2)
+        self.assertEqual(details["submitted_count"], 0)
+        self.assertEqual(details["execution_mode"], "dry_run")
+        self.assertFalse(details["submits_orders"])
+        self.assertEqual(details["run_count"], 2)
+        self.assertEqual(details["failure_count"], 0)
+        self.assertNotIn("private_payload", details["runs"][0])
+        self.assertNotIn("unbounded_payload", details)
+
     def test_vnpy_background_tasks_receive_runtime_engine_dependencies(self) -> None:
         config = SimpleNamespace(schedule_enabled=False)
         main_engine = object()

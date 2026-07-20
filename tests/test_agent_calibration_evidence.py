@@ -108,6 +108,7 @@ def test_cli_reads_each_market_and_writes_machine_readable_evidence(tmp_path: Pa
 
     def read_summary(url: str, *, timeout_seconds: float) -> dict:
         assert timeout_seconds == 4.0
+        assert "trigger_source=agent_calibration_shadow" in url
         market = next(item for item in ("cn", "hk", "us") if f"market={item}" in url)
         return _summary(market)
 
@@ -131,5 +132,6 @@ def test_cli_reads_each_market_and_writes_machine_readable_evidence(tmp_path: Pa
     assert reader.call_count == 3
     assert payload["evaluation"]["ok"] is True
     assert payload["evaluation"]["required_markets"] == ["cn", "hk", "us"]
+    assert payload["filters"]["trigger_source"] == "agent_calibration_shadow"
     assert payload["methodology"]["creates_agent_runs"] is False
     assert payload["methodology"]["places_orders"] is False

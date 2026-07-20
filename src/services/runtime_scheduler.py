@@ -392,6 +392,14 @@ class RuntimeSchedulerService:
             "attemptedCount",
             "failed_count",
             "failedCount",
+            "configured_count",
+            "configuredCount",
+            "completed_count",
+            "completedCount",
+            "execution_mode",
+            "executionMode",
+            "submits_orders",
+            "submitsOrders",
             "messages",
         }
         details = {
@@ -403,6 +411,40 @@ class RuntimeSchedulerService:
         if isinstance(messages, list) and len(messages) > 5:
             details["messages"] = messages[:5]
             details["message_count"] = len(messages)
+        runs = result.get("runs")
+        if isinstance(runs, list):
+            details["runs"] = [
+                {
+                    key: item.get(key)
+                    for key in (
+                        "market",
+                        "strategy",
+                        "agent_run_uid",
+                        "accepted",
+                        "skipped",
+                        "reason",
+                        "candidate_count",
+                        "planned_count",
+                        "submitted_count",
+                    )
+                    if key in item
+                }
+                for item in runs[:10]
+                if isinstance(item, dict)
+            ]
+            details["run_count"] = len(runs)
+        failures = result.get("failures")
+        if isinstance(failures, list):
+            details["failures"] = [
+                {
+                    key: item.get(key)
+                    for key in ("market", "strategy", "error")
+                    if key in item
+                }
+                for item in failures[:10]
+                if isinstance(item, dict)
+            ]
+            details["failure_count"] = len(failures)
         return details
 
     def _record_background_task_event(
