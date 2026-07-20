@@ -451,6 +451,7 @@
 - 定义可选依赖、Python 3.10 至 3.13 版本边界和安装验证；`requirements-vnpy.txt`、PowerShell 安装脚本及真实 runtime smoke 已完成。
 - 接 vn.py EventEngine / Gateway 或 paper adapter；当前已完成 `OrderRequest` / `CancelRequest` payload 映射、adapter 诊断、可选注入式 `MainEngine.send_order` / `cancel_order` 调用、订单/成交/账户/持仓回写 API、注入式 EventEngine attach 和 opt-in runtime bootstrap，并在 Python 3.13 隔离环境完成 EventEngine/MainEngine 启停验收。
 - 映射订单、成交、账户、持仓；当前订单请求、提交态、订单状态回写、成交入账、账户/持仓诊断快照、注入式 EventEngine 回调和启动期 add/connect 入口已有基础桥接，真实 Gateway 运行态未完成。
+- 零连接 gateway 预检已完成：可校验插件加载、注册名称、连接 JSON 结构和默认键，且生产门禁拒绝内置 `DSA_SIM` 与仓库内敏感配置；下一步仍需由部署方提供具体外部 gateway 插件和脱离仓库的账户配置，再执行连接及长跑验收。
 - 增加 vn.py smoke test 和文档。
 
 Windows Desktop 的 opt-in vn.py 打包已完成实物验收：Python 3.13.14 冻结产物成功导入 vn.py/TA-Lib/内置 gateway，并在无控制台启动下返回健康状态、确认 `DSA_SIM` 连接和四类 EventEngine 回调；Electron 产出 220.6 MiB NSIS 安装器，安装包内后端哈希与已验收产物一致。Linux Docker 也已通过手动 Actions 工作流完成双镜像构建、运行态健康/连接/事件桥/调度门禁和体积增量验收。macOS 脚本已同步相同的依赖、收集与冻结探针契约，但因当前为 Windows 环境未执行 macOS 实物构建。

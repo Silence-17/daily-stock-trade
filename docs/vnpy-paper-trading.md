@@ -284,6 +284,18 @@ VNPY_AUTO_ATTACH_EVENTS=true
 
 内置网关只用于功能验收和本地模拟，不提供真实行情撮合、手续费、滑点、部分成交概率或网关状态持久化；进程重启会重置网关内存账户，但不会删除 DSA Portfolio 流水。接真实通道时仍需安装具体 gateway 插件，把敏感连接参数放入外部 JSON，并显式配置 `VNPY_CONNECT_SETTINGS_PATH`。未配置 gateway 时，runtime 和事件引擎可以为可用状态，但 `diagnostics.vnpy_bridge.available=false` 且 reason 为 `gateway_name_not_configured`，这是预期的安全状态。
 
+### 连接前 gateway 预检
+
+在允许任何连接前，可先验证 gateway 类是否可加载、注册名称是否正确，以及外部连接 JSON 的键名是否覆盖 gateway 的 `default_setting`：
+
+```powershell
+.\.venv-vnpy\Scripts\python.exe scripts\check_vnpy_gateway_preflight.py `
+  --gateway-class src.services.vnpy_simulated_gateway:DsaSimulatedGateway `
+  --gateway-name DSA_SIM
+```
+
+真实通道的部署门禁应增加 `--require-external-gateway --require-all-default-keys`，并通过 `--settings-path` 指向仓库之外的连接 JSON。生产门禁会拒绝 `DSA_SIM`，也会拒绝位于仓库内的连接文件。输出只包含键名、计数和错误类型，不包含文件路径或字段值。该脚本强制关闭启动连接、事件自动挂接和自动重连，不订阅行情、不调用 gateway 网络接口、不创建订单；通过预检只证明插件和静态配置契约可用，真实连接、回报及长跑仍须使用 soak 工具单独验收。
+
 ## vn.py bridge 边界
 
 - `vnpy_paper` 模式负责把 DSA 通过风控后的买入计划和自动卖出计划转换为 vn.py `OrderRequest` 并调用 `MainEngine.send_order`，也可把提交态计划转换为 vn.py `CancelRequest` 并调用 `MainEngine.cancel_order` 发起撤单；订单状态、成交、账户和持仓回报可通过 `/vnpy-events/*` 同步回 DSA，或在宿主进程注入 EventEngine 后通过 `/vnpy-events/attach` 注册自动回调。DSA 也可以在 `VNPY_RUNTIME_ENABLED=true` 时创建 EventEngine/MainEngine 并按配置 add gateway/connect；连接请求与确认状态分开审计，已知断开状态会阻止新增委托。内置 `DsaSimulatedGateway` 默认在重连时保留资金、持仓、订单和计数器，恢复未完成延迟成交且保证单次成交，设置 `preserve_state_on_reconnect=false` 可显式重置。该模拟网关已完成事件回写与循环重连验收；真实券商 gateway 的连接参数、重连和长跑仍需部署方显式验证。

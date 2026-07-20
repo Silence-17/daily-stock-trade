@@ -1658,4 +1658,8 @@ Technical indicator rules use daily-close edge triggers only. Partial-bar handli
 
 ---
 
+### vn.py Gateway Preflight
+
+Run `python scripts/check_vnpy_gateway_preflight.py` to validate gateway loading, registration naming, and connection JSON key names without connecting. For a real channel, add `--require-external-gateway --require-all-default-keys` and point `--settings-path` to a file outside the repository. Output excludes the settings path and values. A passing preflight does not connect, subscribe, place orders, or replace real-gateway connection and soak acceptance. See [vn.py Paper Trading](vnpy-paper-trading.md) for the complete contract.
+
 For more questions, please [submit an Issue](https://github.com/ZhuLinsen/daily_stock_analysis/issues)
