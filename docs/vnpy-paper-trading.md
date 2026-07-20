@@ -169,6 +169,25 @@
 
 该命令读取现有 `VNPY_*` 环境配置，禁用 DSA 业务事件桥，只注册只读事件计数器，不创建 Agent run、交易计划或订单。连接率、从未确认连接、运行时不可用、时长未完成及任一 `--require-event` 缺失都会返回非零退出码。`--require-reconnect` 只适合预期验收窗口内会发生重连的场景，会强制要求至少一次重连尝试、至少一次重连成功且结束时保持 connected；未计划故障注入的稳定性长跑可省略。对内置 `DsaSimulatedGateway` 使用 `--simulated-disconnect-at-seconds <秒数>` 时会自动启用相同门禁，并额外要求断线确实已注入。空仓账户不一定产生 position 事件，因此只在明确有持仓时要求 `--require-event position`；order/trade 也只应在独立模拟账户已有外部活动时要求。schema v2 JSON 仅包含 gateway 类/名称、聚合连接状态、事件计数和重连统计，不包含连接文件路径或参数内容。
 
+上述脚本会创建独立 MainEngine，适合验证 gateway 插件本身，但不能证明承载 Web/API 的服务进程持续健康；部分真实通道还会限制同账户重复登录。API 已按部署配置启动后，应优先另开终端运行下面的只读主进程验收：
+
+```powershell
+python scripts\check_vnpy_deployed_runtime_soak.py `
+  --base-url http://127.0.0.1:8000 `
+  --duration-seconds 21600 `
+  --sample-interval-seconds 5 `
+  --min-api-success-ratio 0.995 `
+  --min-runtime-ready-ratio 0.995 `
+  --min-connected-ratio 0.995 `
+  --min-event-bridge-ratio 0.995 `
+  --max-process-changes 0 `
+  --max-gateway-changes 0 `
+  --max-reconnect-failure-count 0 `
+  --output-json "$env:TEMP\vnpy-deployed-runtime-soak.json"
+```
+
+该脚本只调用轻量 `/api/v1/vnpy-paper/status` GET 接口，不修改设置、不触发选股，也不提交或撤销订单。默认要求订单、成交、账户、持仓四类回调在每个成功样本中持续注册，并校验 runtime/MainEngine/EventEngine/gateway 就绪、连接确认、contract 版本、`process_started_at` 和 gateway 身份稳定性，以及重连计数器不回退。计划在窗口内由外部断网或 broker 模拟故障验证自动恢复时，可加 `--min-reconnect-success-count 1`；容许受控滚动重启或 gateway 切换时才提高相应变化上限。JSON 仅记录部署版本、gateway 类/名称和聚合指标，不包含连接文件路径或账户参数。
+
 API 与自动任务需要联合长跑时，可另开终端执行只读 scheduler 验收：
 
 ```powershell

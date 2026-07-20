@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [新功能] 新增 `scripts/check_vnpy_deployed_runtime_soak.py` 只读部署态 vn.py 长跑门禁，直接观察承载 Web/API 的主进程，不另起 MainEngine；可校验 API、runtime、gateway 连接、四类 EventEngine 回调的持续可用率、后端 contract、进程/gateway 身份变化及验收窗口内自动重连计数的增量与单调性，并输出不含连接参数的 JSON
+- [测试] 新增部署态 runtime 验收成功、完整失败矩阵、间歇性回调和伪 HTTP 合同回归；真实 Python 3.13 DSA_SIM API 的 75 秒验收取得 75/75 成功样本，API/runtime/连接/四类回调注册率均为 100%，进程变化、接口错误和重连失败均为 0，且未创建 Agent run、计划或订单
 - [修复] 全市场历史因子作业 API 现将持久化 `task_id` 与当前进程任务队列对账，返回 `active/orphaned/retryable/complete` 恢复状态；服务重启后遗留的 pending/processing 租约可由普通恢复请求安全接管，真正活跃的任务仍返回 409，显式 force 能力仅保留给 API 操作员
 - [改进] Agent 控制台展示全市场作业恢复状态；活跃任务只显示运行提示，不再提供一律强制接管按钮，orphaned 作业提供“恢复中断作业”，失败作业从最近检查点继续
 - [新功能] 新增 `scripts/check_full_market_ingestion_e2e.py` 全市场在线采集验收门禁；默认只观察已有作业，创建外部任务必须显式授权，可校验股票规模、工作项/检查点完成度、因子覆盖率、源错误率、进度回退/停滞和恢复终态并输出 JSON
