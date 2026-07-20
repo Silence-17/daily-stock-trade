@@ -162,11 +162,12 @@
   --sample-interval-seconds 5 `
   --startup-grace-seconds 60 `
   --min-connected-ratio 0.995 `
+  --require-reconnect `
   --require-event account `
   --output-json "$env:TEMP\vnpy-gateway-soak.json"
 ```
 
-该命令读取现有 `VNPY_*` 环境配置，禁用 DSA 业务事件桥，只注册只读事件计数器，不创建 Agent run、交易计划或订单。连接率、从未确认连接、运行时不可用、时长未完成及任一 `--require-event` 缺失都会返回非零退出码。空仓账户不一定产生 position 事件，因此只在明确有持仓时要求 `--require-event position`；order/trade 也只应在独立模拟账户已有外部活动时要求。JSON 仅包含 gateway 类/名称、聚合连接状态、事件计数和重连统计，不包含连接文件路径或参数内容。
+该命令读取现有 `VNPY_*` 环境配置，禁用 DSA 业务事件桥，只注册只读事件计数器，不创建 Agent run、交易计划或订单。连接率、从未确认连接、运行时不可用、时长未完成及任一 `--require-event` 缺失都会返回非零退出码。`--require-reconnect` 只适合预期验收窗口内会发生重连的场景，会强制要求至少一次重连尝试、至少一次重连成功且结束时保持 connected；未计划故障注入的稳定性长跑可省略。对内置 `DsaSimulatedGateway` 使用 `--simulated-disconnect-at-seconds <秒数>` 时会自动启用相同门禁，并额外要求断线确实已注入。空仓账户不一定产生 position 事件，因此只在明确有持仓时要求 `--require-event position`；order/trade 也只应在独立模拟账户已有外部活动时要求。schema v2 JSON 仅包含 gateway 类/名称、聚合连接状态、事件计数和重连统计，不包含连接文件路径或参数内容。
 
 runtime 启动前会创建部署工作目录下已忽略的 `.vntrader/`，供 vn.py 保存本地运行状态，避免受限服务账户回退写入用户主目录。需要由 DSA 托管 vn.py EventEngine/MainEngine 时，显式设置：
 

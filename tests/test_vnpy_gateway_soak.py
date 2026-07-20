@@ -61,6 +61,55 @@ def test_evaluate_soak_marks_interruption_without_duration_duplicate() -> None:
     assert result["failures"] == ["interrupted"]
 
 
+def test_evaluate_soak_requires_confirmed_reconnect_and_restored_connection() -> None:
+    result = evaluate_soak(
+        runtime_available=True,
+        duration_completed=True,
+        interrupted=False,
+        sample_counts={"connected": 9, "disconnected": 1},
+        event_counts={},
+        required_events=[],
+        min_connected_ratio=0.9,
+        require_reconnect=True,
+        disconnect_injection_required=True,
+        disconnect_injected=True,
+        reconnect_attempt_count=1,
+        reconnect_success_count=1,
+        final_connection_status="connected",
+    )
+
+    assert result["ok"] is True
+    assert result["failures"] == []
+    assert result["require_reconnect"] is True
+    assert result["reconnect_success_count"] == 1
+
+
+def test_evaluate_soak_reports_each_reconnect_acceptance_failure() -> None:
+    result = evaluate_soak(
+        runtime_available=True,
+        duration_completed=True,
+        interrupted=False,
+        sample_counts={"connected": 10},
+        event_counts={},
+        required_events=[],
+        min_connected_ratio=1.0,
+        require_reconnect=True,
+        disconnect_injection_required=True,
+        disconnect_injected=False,
+        reconnect_attempt_count=0,
+        reconnect_success_count=0,
+        final_connection_status="disconnected",
+    )
+
+    assert result["ok"] is False
+    assert result["failures"] == [
+        "simulated_disconnect_not_injected",
+        "reconnect_not_attempted",
+        "reconnect_not_confirmed",
+        "connection_not_restored",
+    ]
+
+
 def test_safe_runtime_summary_omits_connection_path_and_message() -> None:
     summary = _safe_runtime_summary(
         {

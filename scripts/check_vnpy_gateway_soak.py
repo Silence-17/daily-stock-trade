@@ -56,6 +56,12 @@ def evaluate_soak(
     event_counts: Dict[str, int],
     required_events: Iterable[str],
     min_connected_ratio: float,
+    require_reconnect: bool = False,
+    disconnect_injection_required: bool = False,
+    disconnect_injected: bool = False,
+    reconnect_attempt_count: int = 0,
+    reconnect_success_count: int = 0,
+    final_connection_status: str = "unknown",
 ) -> Dict[str, Any]:
     total_samples = sum(max(0, int(value or 0)) for value in sample_counts.values())
     connected_samples = max(0, int(sample_counts.get("connected") or 0))
@@ -77,6 +83,15 @@ def evaluate_soak(
         failures.append("connected_ratio_below_threshold")
     if missing_events:
         failures.append("required_events_missing")
+    if disconnect_injection_required and not disconnect_injected:
+        failures.append("simulated_disconnect_not_injected")
+    if require_reconnect:
+        if reconnect_attempt_count <= 0:
+            failures.append("reconnect_not_attempted")
+        if reconnect_success_count <= 0:
+            failures.append("reconnect_not_confirmed")
+        if final_connection_status != "connected":
+            failures.append("connection_not_restored")
     return {
         "ok": not failures,
         "failures": failures,
@@ -86,6 +101,12 @@ def evaluate_soak(
         "min_connected_ratio": min_connected_ratio,
         "required_events": required,
         "missing_events": missing_events,
+        "require_reconnect": require_reconnect,
+        "disconnect_injection_required": disconnect_injection_required,
+        "disconnect_injected": disconnect_injected,
+        "reconnect_attempt_count": max(0, int(reconnect_attempt_count or 0)),
+        "reconnect_success_count": max(0, int(reconnect_success_count or 0)),
+        "final_connection_status": final_connection_status,
     }
 
 
@@ -183,6 +204,11 @@ def main(argv: list[str] | None = None) -> int:
         type=float,
         default=0.0,
         help="Explicit DsaSimulatedGateway-only disconnect injection (0 disables it).",
+    )
+    parser.add_argument(
+        "--require-reconnect",
+        action="store_true",
+        help="Require an observed reconnect attempt, success, and connected final state.",
     )
     parser.add_argument("--output-json", type=Path)
     args = parser.parse_args(argv)
@@ -293,10 +319,12 @@ def main(argv: list[str] | None = None) -> int:
         if runtime_handle.event_engine is not None:
             _unregister_event_counters(runtime_handle.event_engine, registrations)
         final_diagnostics = runtime_handle.refresh_diagnostics()
+        runtime_summary = _safe_runtime_summary(final_diagnostics)
         runtime_handle.close()
 
     ended_monotonic = time.monotonic()
     observed_duration = max(0.0, ended_monotonic - measurement_started)
+    reconnect_summary = runtime_summary["auto_reconnect"]
     evaluation = evaluate_soak(
         runtime_available=bool(final_diagnostics.get("available")),
         duration_completed=observed_duration + 0.05 >= duration,
@@ -305,9 +333,15 @@ def main(argv: list[str] | None = None) -> int:
         event_counts=dict(event_counts),
         required_events=args.require_event,
         min_connected_ratio=min_ratio,
+        require_reconnect=bool(args.require_reconnect or disconnect_at > 0),
+        disconnect_injection_required=disconnect_at > 0,
+        disconnect_injected=disconnect_injected,
+        reconnect_attempt_count=int(reconnect_summary["attempt_count"]),
+        reconnect_success_count=int(reconnect_summary["success_count"]),
+        final_connection_status=str(runtime_summary["connection_status"]),
     )
     result = {
-        "schema_version": 1,
+        "schema_version": 2,
         "ok": evaluation["ok"],
         "started_at": started_at,
         "ended_at": _utc_iso(),
@@ -325,7 +359,7 @@ def main(argv: list[str] | None = None) -> int:
             name: int(event_counts.get(name) or 0) for name in EVENT_NAMES
         },
         "disconnect_injected": disconnect_injected,
-        "runtime": _safe_runtime_summary(final_diagnostics),
+        "runtime": runtime_summary,
         "evaluation": evaluation,
     }
     output = json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True)

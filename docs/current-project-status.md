@@ -475,6 +475,9 @@ The readiness and system health status are `warning` because the current time is
   - `python -m pytest tests/test_vnpy_paper_trading_api.py -q -p no:cacheprovider`: 46 passed. The new HTTP-level matrix saves settings, runs five fixed candidates, rejects blacklist, ST/delisting, suspension, price-limit, and insufficient-liquidity cases in one Agent run, persists the same reasons in decisions and trade plans, and verifies that the Portfolio ledger remains empty.
   - `cd apps/dsa-web && npm.cmd test -- --run`: 91 files passed, 980 tests passed, and 2 tests were skipped. The stale JP/KR alert-option assertion now follows the backend-supported CN/HK/US boundary, the first-run setup smoke enters the required base category, and the comprehensive paper-trading render test has an explicit integration-test timeout.
   - Web lint completed with no errors and the pre-existing `SettingsPage.tsx:553` hook warning; the TypeScript/Vite production build passed. Browser screenshot capture remains unavailable because the installed Browser plugin lacks its required runtime file; deterministic component tests and the production build are the replacement evidence.
+- Gateway reconnect-soak acceptance validation on 2026-07-17
+  - `python -m pytest tests/test_vnpy_gateway_soak.py -q -p no:cacheprovider`: 6 passed. Reconnect acceptance independently checks disconnect injection, reconnect attempt, reconnect success, and final connected state; compilation and full Flake8 passed.
+  - A Python 3.13.14 DSA_SIM smoke injected disconnect at 1 second, observed one reconnect attempt and one success, transitioned back to connected at 5.25 seconds, ended connected, and returned success without placing an order. This validates the schema-v2 harness, not a real broker gateway.
 
 ## Unfinished Goals
 
