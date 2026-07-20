@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [新功能] 新增 `scripts/check_online_agent_vnpy_e2e.py` 在线 Agent 到 vn.py 模拟交易验收门禁；默认仅执行 `dry_run`，只有显式授权且运行中的 gateway 为内置 `DsaSimulatedGateway` 时才允许提交模拟委托，可轮询 run/计划终态并校验候选解释、决策关联、成交 ID、Portfolio 资金/持仓变化、runtime 连接和四类事件桥，临时关闭交易时段门禁时会在 `finally` 恢复原设置
+- [测试] 新验收门禁的纯函数和伪 HTTP 服务测试共 6 项通过，包含关闭时段门禁响应丢失后的强制恢复；并在真实 Python 3.13 API 上完成一轮 3 候选 dry-run 与一轮 DSA_SIM 全部已有持仓跳过验收，两轮均为 3 决策/3 计划、0 失败、现金和持仓零变化，后者确认交易时段门禁恢复开启，gateway 保持 connected 且四类回调完整
 - [测试] 完成真实 Python 3.13 API 的在线选股 Agent -> DSA_SIM 模拟成交验收：临时关闭并最终恢复交易时段门禁，一轮 3 候选产生 1 笔 vn.py 委托和 2 个已有持仓跳过；`DSA_SIM.1` 经真实 EventEngine 回写为 `filled`，Portfolio 新增 `600015` 买入 1400 股 @ 6.98，成交总数 12->13、现金 27474->17702，gateway 保持 connected 且四类回调仍注册
 - [修复] AlphaSift 后置候选增强现会从实时行情保守派生并审计交易状态：非 ST 名称、正成交量/成交额和 A 股绝对涨跌幅低于 4.5% 分别证明 ST、停牌和涨跌停检查的明确否定结果；接近最低 5% 限幅或证据不全继续 fail-closed，并在增强完成后刷新 `missing_fields`。真实 Python 3.13 dry-run 从修复前 3/3 `candidate_trading_status_unavailable` 改为 1 个有效计划、2 个已有持仓跳过、0 提交、0 新成交
 - [测试] Runtime scheduler 测试改为只替换目标 `sys.modules` 键，避免 `patch.dict` 回滚整个模块表后触发 LiteLLM/Pydantic/tokenizers 原生扩展二次初始化；完整 27 项现已在 Python 3.13 与 3.14 同进程通过，并完成真实 Python 3.13 API + DSA_SIM 的 75 秒 scheduler soak，74 次采样全部可达且 loop/恢复任务注册率均为 100%，新增 1 次恢复终态、0 失败、0 重叠跳过
