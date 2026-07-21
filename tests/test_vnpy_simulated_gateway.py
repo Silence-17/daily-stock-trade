@@ -100,7 +100,7 @@ class VnpySimulatedGatewayTestCase(unittest.TestCase):
             gateway.close()
             disconnected = gateway.get_state_snapshot()
             self.assertFalse(disconnected["connected"])
-            self.assertEqual(disconnected["active_order_ids"], ["1"])
+            self.assertEqual(disconnected["active_order_ids"], [vt_orderid.split(".", 1)[1]])
 
             main_engine.connect(setting, "DSA_SIM")
             deadline = time.monotonic() + 3.0
@@ -203,3 +203,50 @@ class VnpySimulatedGatewayTestCase(unittest.TestCase):
         finally:
             event_engine.unregister(EVENT_TRADE, capture_trade)
             main_engine.close()
+
+    def test_fresh_gateway_instances_do_not_reuse_order_or_trade_ids(self) -> None:
+        from vnpy.event import EventEngine
+        from vnpy.trader.constant import Direction, Exchange, Offset, OrderType, Status
+        from vnpy.trader.engine import MainEngine
+        from vnpy.trader.object import OrderRequest
+
+        from src.services.vnpy_simulated_gateway import DsaSimulatedGateway
+
+        observed_ids = []
+        for _ in range(2):
+            event_engine = EventEngine()
+            main_engine = MainEngine(event_engine)
+            main_engine.add_gateway(DsaSimulatedGateway, "DSA_SIM")
+            main_engine.connect({"fill_delay_ms": 20}, "DSA_SIM")
+            try:
+                vt_orderid = main_engine.send_order(
+                    OrderRequest(
+                        symbol="600519",
+                        exchange=Exchange.SSE,
+                        direction=Direction.LONG,
+                        type=OrderType.LIMIT,
+                        volume=100,
+                        price=10,
+                        offset=Offset.NONE,
+                        reference="dsa:test:fresh_gateway_ids",
+                    ),
+                    "DSA_SIM",
+                )
+                deadline = time.monotonic() + 3.0
+                while time.monotonic() < deadline:
+                    order = main_engine.get_order(vt_orderid)
+                    if order is not None and order.status == Status.ALLTRADED:
+                        break
+                    time.sleep(0.02)
+                trades = [
+                    trade
+                    for trade in main_engine.get_all_trades()
+                    if trade.vt_orderid == vt_orderid
+                ]
+                self.assertEqual(len(trades), 1)
+                observed_ids.append((vt_orderid, trades[0].vt_tradeid))
+            finally:
+                main_engine.close()
+
+        self.assertNotEqual(observed_ids[0][0], observed_ids[1][0])
+        self.assertNotEqual(observed_ids[0][1], observed_ids[1][1])

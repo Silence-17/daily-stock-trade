@@ -4664,7 +4664,10 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         account_id = int(self.service.get_settings().account_id)
         trades = self.service.portfolio.list_trade_events(account_id=account_id, page=1)
         self.assertEqual(len(trades["items"]), 1)
-        self.assertEqual(trades["items"][0]["trade_uid"], "vnpy-trade-SIM.T1")
+        self.assertEqual(
+            trades["items"][0]["trade_uid"],
+            f"vnpy-trade-{self.service._dedup_hash('2026-07-03:SIM.T1')}",
+        )
         self.assertEqual(trades["items"][0]["price"], 10.2)
 
         audit = self.service.agent_repo.get_run_detail(run_result["agent_run_uid"])
@@ -4757,6 +4760,64 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertEqual(
             repaired_audit["decisions"][0]["trade_id"],
             callback["trade_id"],
+        )
+
+    def test_vnpy_trade_id_can_repeat_on_a_later_trade_date(self) -> None:
+        account = self.service.ensure_account()
+        account_id = int(account["id"])
+        self.service.portfolio.record_trade(
+            account_id=account_id,
+            symbol="000001",
+            trade_date=date(2026, 7, 20),
+            side="buy",
+            quantity=100,
+            price=10,
+            market="cn",
+            currency="CNY",
+            trade_uid="vnpy-trade-DSA_SIM.1",
+            dedup_hash=self.service._dedup_hash("vnpy-trade:DSA_SIM.1"),
+        )
+        run = self.service.agent_repo.create_run(
+            run_uid="reused-vnpy-trade-id-run",
+            trigger_source="vnpy_paper_auto",
+            strategy="dual_low",
+            market="cn",
+            settings={},
+            diagnostics={},
+        )
+        self.service.agent_repo.record_trade_plan(
+            plan_uid="reused-vnpy-trade-id-plan",
+            run_id=int(run["id"]),
+            decision_id=None,
+            symbol="000776",
+            market="cn",
+            side="buy",
+            status="submitted",
+            execution_mode="vnpy_paper",
+            planned_cash_amount=1000,
+            planned_quantity=100,
+            planned_price=10,
+            submitted_quantity=100,
+            submitted_price=10,
+            order_result={"status": "submitted", "raw": {"vt_orderid": "DSA_SIM.1"}},
+        )
+
+        callback = self.service.sync_vnpy_trade_callback(
+            vt_orderid="DSA_SIM.1",
+            vt_tradeid="DSA_SIM.1",
+            quantity=100,
+            price=10,
+            trade_date=date(2026, 7, 21),
+        )
+
+        self.assertTrue(callback["accepted"])
+        self.assertEqual(callback["status"], "filled")
+        self.assertIsNotNone(callback["trade_id"])
+        trades = self.service.portfolio.list_trade_events(account_id=account_id, page=1)
+        self.assertEqual(len(trades["items"]), 2)
+        self.assertEqual(
+            len({item["trade_uid"] for item in trades["items"]}),
+            2,
         )
 
     def test_vnpy_trade_callbacks_accumulate_multiple_fills_idempotently(self) -> None:

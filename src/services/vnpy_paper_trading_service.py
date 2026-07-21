@@ -2155,7 +2155,8 @@ class VnpyPaperTradingService:
         account_id = int(account["id"])
         trade_day = self._coerce_trade_date(trade_date)
         trade_ref = str(vt_tradeid or "").strip() or f"{order_id}:{trade_quantity}:{trade_price}:{trade_day.isoformat()}"
-        trade_uid = f"vnpy-trade-{trade_ref}"[:128]
+        trade_identity = f"{trade_day.isoformat()}:{trade_ref}"
+        trade_uid = f"vnpy-trade-{self._dedup_hash(trade_identity)}"
         original_order = plan.get("order_result") if isinstance(plan.get("order_result"), dict) else {}
         order_raw = original_order.get("raw") if isinstance(original_order, dict) else {}
         if not isinstance(order_raw, dict):
@@ -2219,7 +2220,7 @@ class VnpyPaperTradingService:
                 market=market_norm,
                 currency=currency or self._currency_for_market(market_norm),
                 trade_uid=trade_uid,
-                dedup_hash=self._dedup_hash(f"vnpy-trade:{trade_ref}"),
+                dedup_hash=self._dedup_hash(f"vnpy-trade:{trade_identity}"),
                 note=f"vn.py callback | vt_orderid={order_id}",
             )
         except PortfolioConflictError:

@@ -12,6 +12,7 @@ from copy import copy
 from datetime import datetime
 from threading import RLock, Timer
 from typing import Any
+from uuid import uuid4
 
 from vnpy.trader.constant import Direction, Exchange, Status
 from vnpy.trader.gateway import BaseGateway
@@ -47,6 +48,7 @@ class DsaSimulatedGateway(BaseGateway):
         self._closed = False
         self._ever_connected = False
         self._connect_count = 0
+        self._session_id = uuid4().hex
         self._order_count = 0
         self._trade_count = 0
         self._balance = 1_000_000.0
@@ -72,6 +74,8 @@ class DsaSimulatedGateway(BaseGateway):
                     0.0,
                     _as_float(payload.get("initial_balance"), 1_000_000.0),
                 )
+                if reset_state:
+                    self._session_id = uuid4().hex
                 self._order_count = 0
                 self._trade_count = 0
                 self._orders.clear()
@@ -124,7 +128,7 @@ class DsaSimulatedGateway(BaseGateway):
 
         with self._lock:
             self._order_count += 1
-            orderid = str(self._order_count)
+            orderid = f"{self._session_id}-{self._order_count}"
             order = req.create_order_data(orderid, self.gateway_name)
             order.datetime = datetime.now()
             self._orders[orderid] = order
@@ -178,6 +182,7 @@ class DsaSimulatedGateway(BaseGateway):
             return {
                 "connected": self._connected and not self._closed,
                 "connect_count": self._connect_count,
+                "session_id": self._session_id,
                 "balance": self._balance,
                 "order_count": len(self._orders),
                 "trade_count": self._trade_count,
@@ -234,7 +239,7 @@ class DsaSimulatedGateway(BaseGateway):
                 symbol=order.symbol,
                 exchange=order.exchange,
                 orderid=order.orderid,
-                tradeid=str(self._trade_count),
+                tradeid=f"{self._session_id}-{self._trade_count}",
                 direction=order.direction,
                 offset=order.offset,
                 price=order.price,

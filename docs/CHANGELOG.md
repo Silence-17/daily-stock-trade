@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [修复] 内置 DSA_SIM 为每个进程会话和显式状态重置生成唯一委托/成交编号前缀，避免服务重启后从 `DSA_SIM.1` 重新计数导致新成交回调与历史流水冲突；Portfolio 的 vn.py 成交幂等身份同时纳入交易日，允许券商跨日合法复用成交号并保持同日重复回调幂等
+- [测试] 新增 DSA_SIM 跨实例委托/成交编号唯一性和 vn.py 跨交易日复用成交号回归；真实 vn.py Python 环境下网关与 paper service 192 项测试通过
+
 - [新功能] 新增默认关闭的 `VNPY_PRODUCTION_PREFLIGHT_ENABLED` runtime 生产连接门禁；启用后启动连接、自动重连和手动重连统一在 `connect()` 前拒绝内置 DSA_SIM、仓库内连接文件、无效 JSON 和缺失 gateway 默认键，API 保持启动并仅暴露脱敏诊断
 
 - [改进] `check_vnpy_gateway_soak.py` 升级为 schema v3 并默认在独立子进程执行零连接预检；生产门禁可在创建 MainEngine 前拒绝内置 gateway、缺失默认配置键或仓库内连接文件，长跑观测时长不再包含 runtime 关闭耗时
