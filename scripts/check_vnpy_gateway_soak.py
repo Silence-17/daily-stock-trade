@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
+import os
 import subprocess
 import sys
 import time
@@ -240,11 +241,90 @@ def _run_gateway_preflight(
     return payload
 
 
+def _write_json_file(result: Dict[str, Any], output_path: Path) -> None:
+    output = json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True)
+    target = output_path.expanduser()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+    try:
+        temporary.write_text(output + "\n", encoding="utf-8")
+        temporary.replace(target)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def _write_result(result: Dict[str, Any], output_path: Path | None) -> None:
     output = json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True)
     if output_path is not None:
-        output_path.expanduser().write_text(output + "\n", encoding="utf-8")
+        _write_json_file(result, output_path)
     print(output)
+
+
+def _build_soak_result(
+    *,
+    phase: str,
+    started_at: str,
+    settings: Any,
+    preflight: Dict[str, Any],
+    requested_duration: float,
+    observed_duration: float,
+    sample_interval: float,
+    startup_grace: float,
+    sample_counts: Counter[str],
+    transitions: list[Dict[str, Any]],
+    event_counts: Counter[str],
+    disconnect_injected: bool,
+    runtime_summary: Dict[str, Any],
+    required_events: Iterable[str],
+    min_connected_ratio: float,
+    require_reconnect: bool,
+    disconnect_injection_required: bool,
+    interrupted: bool,
+) -> Dict[str, Any]:
+    reconnect_summary = runtime_summary["auto_reconnect"]
+    duration_completed = observed_duration + 0.05 >= requested_duration
+    evaluation = evaluate_soak(
+        runtime_available=bool(runtime_summary.get("available")),
+        duration_completed=duration_completed,
+        interrupted=interrupted,
+        sample_counts=dict(sample_counts),
+        event_counts=dict(event_counts),
+        required_events=required_events,
+        min_connected_ratio=min_connected_ratio,
+        require_reconnect=require_reconnect,
+        disconnect_injection_required=disconnect_injection_required,
+        disconnect_injected=disconnect_injected,
+        reconnect_attempt_count=int(reconnect_summary["attempt_count"]),
+        reconnect_success_count=int(reconnect_summary["success_count"]),
+        final_connection_status=str(runtime_summary["connection_status"]),
+    )
+    return {
+        "schema_version": 3,
+        "phase": phase,
+        "checkpoint": phase == "running",
+        "ok": evaluation["ok"],
+        "started_at": started_at,
+        "ended_at": None if phase == "running" else _utc_iso(),
+        "updated_at": _utc_iso(),
+        "gateway": {
+            "class": settings.gateway_class,
+            "name": settings.gateway_name,
+        },
+        "preflight": preflight,
+        "connection_attempted": True,
+        "requested_duration_seconds": requested_duration,
+        "observed_duration_seconds": round(observed_duration, 3),
+        "sample_interval_seconds": sample_interval,
+        "startup_grace_seconds": startup_grace,
+        "sample_counts": dict(sorted(sample_counts.items())),
+        "transitions": transitions[:200],
+        "event_counts": {
+            name: int(event_counts.get(name) or 0) for name in EVENT_NAMES
+        },
+        "disconnect_injected": disconnect_injected,
+        "runtime": runtime_summary,
+        "evaluation": evaluation,
+    }
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -282,6 +362,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Require every gateway default_setting key in the external settings JSON.",
     )
     parser.add_argument("--preflight-timeout-seconds", type=float, default=120.0)
+    parser.add_argument(
+        "--checkpoint-interval-seconds",
+        type=float,
+        default=60.0,
+        help="Atomically refresh --output-json during the soak (0 disables it).",
+    )
     parser.add_argument("--output-json", type=Path)
     args = parser.parse_args(argv)
     duration = _bounded_float(
@@ -318,6 +404,13 @@ def main(argv: list[str] | None = None) -> int:
         minimum=5.0,
         maximum=600.0,
     )
+    checkpoint_interval = _bounded_float(
+        parser,
+        "--checkpoint-interval-seconds",
+        args.checkpoint_interval_seconds,
+        minimum=0.0,
+        maximum=3600.0,
+    )
 
     loaded_settings = load_vnpy_runtime_settings()
     settings = replace(loaded_settings, auto_attach_events=False)
@@ -340,6 +433,8 @@ def main(argv: list[str] | None = None) -> int:
             preflight_evaluation = {}
         result = {
             "schema_version": 3,
+            "phase": "preflight_failed",
+            "checkpoint": False,
             "ok": False,
             "started_at": started_at,
             "ended_at": _utc_iso(),
@@ -395,6 +490,7 @@ def main(argv: list[str] | None = None) -> int:
             measurement_started = time.monotonic()
             measurement_deadline = measurement_started + duration
             next_sample_at = measurement_started
+            next_checkpoint_at = measurement_started + checkpoint_interval
             while True:
                 now = time.monotonic()
                 if now >= measurement_deadline:
@@ -419,6 +515,35 @@ def main(argv: list[str] | None = None) -> int:
                         }
                     )
                     last_status = status
+                if (
+                    args.output_json is not None
+                    and checkpoint_interval > 0
+                    and now >= next_checkpoint_at
+                ):
+                    checkpoint_runtime = _safe_runtime_summary(diagnostics)
+                    checkpoint = _build_soak_result(
+                        phase="running",
+                        started_at=started_at,
+                        settings=settings,
+                        preflight=preflight,
+                        requested_duration=duration,
+                        observed_duration=max(0.0, now - measurement_started),
+                        sample_interval=interval,
+                        startup_grace=startup_grace,
+                        sample_counts=sample_counts,
+                        transitions=transitions,
+                        event_counts=event_counts,
+                        disconnect_injected=disconnect_injected,
+                        runtime_summary=checkpoint_runtime,
+                        required_events=args.require_event,
+                        min_connected_ratio=min_ratio,
+                        require_reconnect=bool(args.require_reconnect or disconnect_at > 0),
+                        disconnect_injection_required=disconnect_at > 0,
+                        interrupted=False,
+                    )
+                    _write_json_file(checkpoint, args.output_json)
+                    while next_checkpoint_at <= now:
+                        next_checkpoint_at += checkpoint_interval
                 next_sample_at += interval
                 time.sleep(
                     max(
@@ -437,46 +562,26 @@ def main(argv: list[str] | None = None) -> int:
         runtime_handle.close()
 
     observed_duration = max(0.0, measurement_ended - measurement_started)
-    reconnect_summary = runtime_summary["auto_reconnect"]
-    evaluation = evaluate_soak(
-        runtime_available=bool(final_diagnostics.get("available")),
-        duration_completed=observed_duration + 0.05 >= duration,
-        interrupted=interrupted,
-        sample_counts=dict(sample_counts),
-        event_counts=dict(event_counts),
+    result = _build_soak_result(
+        phase="interrupted" if interrupted else "completed",
+        started_at=started_at,
+        settings=settings,
+        preflight=preflight,
+        requested_duration=duration,
+        observed_duration=observed_duration,
+        sample_interval=interval,
+        startup_grace=startup_grace,
+        sample_counts=sample_counts,
+        transitions=transitions,
+        event_counts=event_counts,
+        disconnect_injected=disconnect_injected,
+        runtime_summary=runtime_summary,
         required_events=args.require_event,
         min_connected_ratio=min_ratio,
         require_reconnect=bool(args.require_reconnect or disconnect_at > 0),
         disconnect_injection_required=disconnect_at > 0,
-        disconnect_injected=disconnect_injected,
-        reconnect_attempt_count=int(reconnect_summary["attempt_count"]),
-        reconnect_success_count=int(reconnect_summary["success_count"]),
-        final_connection_status=str(runtime_summary["connection_status"]),
+        interrupted=interrupted,
     )
-    result = {
-        "schema_version": 3,
-        "ok": evaluation["ok"],
-        "started_at": started_at,
-        "ended_at": _utc_iso(),
-        "gateway": {
-            "class": settings.gateway_class,
-            "name": settings.gateway_name,
-        },
-        "preflight": preflight,
-        "connection_attempted": True,
-        "requested_duration_seconds": duration,
-        "observed_duration_seconds": round(observed_duration, 3),
-        "sample_interval_seconds": interval,
-        "startup_grace_seconds": startup_grace,
-        "sample_counts": dict(sorted(sample_counts.items())),
-        "transitions": transitions[:200],
-        "event_counts": {
-            name: int(event_counts.get(name) or 0) for name in EVENT_NAMES
-        },
-        "disconnect_injected": disconnect_injected,
-        "runtime": runtime_summary,
-        "evaluation": evaluation,
-    }
     _write_result(result, args.output_json)
     if interrupted:
         return 130

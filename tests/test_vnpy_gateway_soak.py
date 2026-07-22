@@ -5,14 +5,17 @@ from __future__ import annotations
 
 import json
 from subprocess import CompletedProcess
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import scripts.check_vnpy_gateway_soak as gateway_soak
 from src.services.vnpy_runtime import VnpyRuntimeSettings
 
 from scripts.check_vnpy_gateway_soak import (
+    _build_soak_result,
     _run_gateway_preflight,
     _safe_runtime_summary,
+    _write_json_file,
     evaluate_soak,
 )
 
@@ -227,3 +230,49 @@ def test_preflight_timeout_is_sanitized(monkeypatch) -> None:
         "error_type": "TimeoutExpired",
         "failures": ["preflight_process_failed"],
     }
+
+
+def test_running_checkpoint_is_explicitly_incomplete_and_sanitized() -> None:
+    result = _build_soak_result(
+        phase="running",
+        started_at="2026-07-22T00:00:00+00:00",
+        settings=SimpleNamespace(gateway_class="vendor:Gateway", gateway_name="SIM"),
+        preflight={"ok": True},
+        requested_duration=3600.0,
+        observed_duration=120.0,
+        sample_interval=5.0,
+        startup_grace=30.0,
+        sample_counts=gateway_soak.Counter({"connected": 24}),
+        transitions=[{"elapsed_seconds": 0.0, "from": None, "to": "connected"}],
+        event_counts=gateway_soak.Counter({"account": 2}),
+        disconnect_injected=False,
+        runtime_summary={
+            "available": True,
+            "connection_status": "connected",
+            "auto_reconnect": {"attempt_count": 0, "success_count": 0},
+        },
+        required_events=["account"],
+        min_connected_ratio=0.99,
+        require_reconnect=False,
+        disconnect_injection_required=False,
+        interrupted=False,
+    )
+
+    assert result["phase"] == "running"
+    assert result["checkpoint"] is True
+    assert result["ended_at"] is None
+    assert result["ok"] is False
+    assert result["evaluation"]["failures"] == ["duration_incomplete"]
+    assert result["event_counts"]["account"] == 2
+
+
+def test_json_checkpoint_replaces_atomically(tmp_path) -> None:
+    output_path = tmp_path / "nested" / "soak.json"
+    _write_json_file({"phase": "running", "sample": 1}, output_path)
+    _write_json_file({"phase": "completed", "sample": 2}, output_path)
+
+    assert json.loads(output_path.read_text(encoding="utf-8")) == {
+        "phase": "completed",
+        "sample": 2,
+    }
+    assert list(output_path.parent.glob(".*.tmp")) == []

@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [改进] 为 vn.py gateway 长跑验收增加周期性原子检查点和明确的证据生命周期状态
 - [修复] 修复 Agent 校准证据后台任务因数据库依赖来源错误而定时失败的问题
 
 - [修复] `agent_calibration_shadow` 的跨运行质量快照严格限定最近 90 天、同市场/策略、`trigger_source=agent_calibration_shadow` 且 run 已完成的决策，普通自动交易样本不再混入生产校准
