@@ -907,7 +907,19 @@ class BacktestService:
         logger.warning(f"无法确定分析日期，跳过记录: {analysis.code}#{getattr(analysis, 'id', '?')}")
         return None
 
-    def _try_fill_daily_data(self, *, code: str, analysis_date: date, eval_window_days: int) -> None:
+    def _try_fill_daily_data(
+        self,
+        *,
+        code: str,
+        analysis_date: date,
+        eval_window_days: int,
+    ) -> Dict[str, Any]:
+        result: Dict[str, Any] = {
+            "succeeded": False,
+            "source": None,
+            "saved_row_count": 0,
+            "error_type": None,
+        }
         try:
             from data_provider.base import DataFetcherManager
 
@@ -921,10 +933,18 @@ class BacktestService:
                 days=eval_window_days * 2,
             )
             if df is None or df.empty:
-                return
+                result["error_type"] = "EmptyResult"
+                return result
             self.db.save_daily_data(df, code=code, data_source=source)
+            result.update({
+                "succeeded": True,
+                "source": str(source or "unknown"),
+                "saved_row_count": int(len(df)),
+            })
         except Exception as exc:
             logger.warning(f"补全日线数据失败({code}): {exc}")
+            result["error_type"] = type(exc).__name__
+        return result
 
     def _recompute_summaries(self, *, touched_codes: List[str], eval_window_days: int, engine_version: str) -> None:
         with self.db.get_session() as session:

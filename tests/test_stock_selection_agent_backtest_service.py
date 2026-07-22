@@ -259,7 +259,17 @@ class StockSelectionAgentBacktestServiceTestCase(unittest.TestCase):
                 action="skip",
             )
 
-        with patch.object(self.service.backtest, "_try_fill_daily_data") as refresh:
+        refresh_result = {
+            "succeeded": True,
+            "source": "TencentFetcher",
+            "saved_row_count": 10,
+            "error_type": None,
+        }
+        with patch.object(
+            self.service.backtest,
+            "_try_fill_daily_data",
+            return_value=refresh_result,
+        ) as refresh:
             result = self.service.evaluate(
                 eval_windows=[5],
                 refresh_missing=True,
@@ -271,7 +281,13 @@ class StockSelectionAgentBacktestServiceTestCase(unittest.TestCase):
             eval_window_days=9,
         )
         self.assertEqual(result["refresh_attempted_count"], 1)
+        self.assertEqual(result["refresh_succeeded_count"], 1)
+        self.assertEqual(result["refresh_failed_count"], 0)
         self.assertEqual(result["refresh_skipped_not_due_count"], 0)
+        self.assertEqual(result["refresh_source_counts"], {"TencentFetcher": 1})
+        self.assertEqual(result["refresh_saved_row_count"], 10)
+        self.assertEqual(result["refresh_resolved_anchor_count"], 0)
+        self.assertEqual(result["refresh_unresolved_anchor_count"], 3)
         self.assertEqual(result["matrix"]["5"]["insufficient_count"], 3)
 
     def test_refresh_missing_skips_symbols_before_shortest_horizon_is_due(self) -> None:
@@ -293,7 +309,40 @@ class StockSelectionAgentBacktestServiceTestCase(unittest.TestCase):
 
         refresh.assert_not_called()
         self.assertEqual(result["refresh_attempted_count"], 0)
+        self.assertEqual(result["refresh_succeeded_count"], 0)
+        self.assertEqual(result["refresh_failed_count"], 0)
         self.assertEqual(result["refresh_skipped_not_due_count"], 1)
+
+    def test_refresh_audit_rechecks_missing_anchors_after_success(self) -> None:
+        anchor = datetime.now() - timedelta(days=10)
+        decision = {
+            "symbol": "600519",
+            "created_at": anchor,
+        }
+        refresh_result = {
+            "succeeded": True,
+            "source": "TencentFetcher",
+            "saved_row_count": 6,
+            "error_type": None,
+        }
+        with patch.object(
+            self.service,
+            "_load_forward_bars",
+            side_effect=[([], None), ([object()] * 5, "600519")],
+        ), patch.object(
+            self.service.backtest,
+            "_try_fill_daily_data",
+            return_value=refresh_result,
+        ):
+            audit = self.service._prefetch_missing_forward_bars(
+                decisions=[decision],
+                min_window=5,
+                max_window=5,
+            )
+
+        self.assertEqual(audit["refresh_succeeded_count"], 1)
+        self.assertEqual(audit["refresh_resolved_anchor_count"], 1)
+        self.assertEqual(audit["refresh_unresolved_anchor_count"], 0)
 
     def test_strategy_and_created_at_filters_apply_to_decisions(self) -> None:
         self._record_decision(

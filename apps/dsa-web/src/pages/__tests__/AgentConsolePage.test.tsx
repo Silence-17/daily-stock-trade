@@ -747,7 +747,13 @@ describe('AgentConsolePage', () => {
       scannedCount: 2,
       truncated: false,
       refreshAttemptedCount: 0,
+      refreshSucceededCount: 0,
+      refreshFailedCount: 0,
       refreshSkippedNotDueCount: 0,
+      refreshSourceCounts: {},
+      refreshSavedRowCount: 0,
+      refreshResolvedAnchorCount: 0,
+      refreshUnresolvedAnchorCount: 0,
       statusCounts: { filled: 1, skipped: 1 },
       matrix: {
         1: {

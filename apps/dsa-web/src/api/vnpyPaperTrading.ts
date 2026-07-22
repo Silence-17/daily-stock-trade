@@ -1064,7 +1064,13 @@ export type VnpyPaperAgentBacktestResponse = {
   scannedCount: number;
   truncated: boolean;
   refreshAttemptedCount: number;
+  refreshSucceededCount: number;
+  refreshFailedCount: number;
   refreshSkippedNotDueCount: number;
+  refreshSourceCounts: Record<string, number>;
+  refreshSavedRowCount: number;
+  refreshResolvedAnchorCount: number;
+  refreshUnresolvedAnchorCount: number;
   statusCounts: Record<string, number>;
   matrix: Record<string, VnpyPaperAgentBacktestMetric>;
   strategyMatrix: Record<string, Record<string, VnpyPaperAgentBacktestMetric>>;
@@ -1099,7 +1105,13 @@ export type VnpyPaperAgentCrossRunQuality = {
   maxDecisions: number;
   refreshMissing?: boolean;
   refreshAttemptedCount?: number;
+  refreshSucceededCount?: number;
+  refreshFailedCount?: number;
   refreshSkippedNotDueCount?: number;
+  refreshSourceCounts?: Record<string, number>;
+  refreshSavedRowCount?: number;
+  refreshResolvedAnchorCount?: number;
+  refreshUnresolvedAnchorCount?: number;
   sampleCount: number;
   matureSampleCount: number;
   coveragePct?: number | null;
@@ -1498,6 +1510,13 @@ function buildStatusParams(options?: VnpyPaperStatusOptions): Record<string, boo
   return Object.keys(params).length ? params : undefined;
 }
 
+function preserveNumericMap(value: unknown): Record<string, number> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  return Object.fromEntries(
+    Object.entries(value).filter((entry): entry is [string, number] => typeof entry[1] === 'number'),
+  );
+}
+
 function buildAgentRunParams(
   limit: number,
   offset: number | null,
@@ -1878,14 +1897,18 @@ export const vnpyPaperTradingApi = {
         neutral_band_pct: payload.neutralBandPct ?? 2,
       },
     );
-    return toCamelCase<VnpyPaperAgentBacktestResponse>(response.data);
+    const result = toCamelCase<VnpyPaperAgentBacktestResponse>(response.data);
+    result.refreshSourceCounts = preserveNumericMap(response.data.refresh_source_counts);
+    return result;
   },
 
   async getAgentCrossRunQuality(): Promise<VnpyPaperAgentCrossRunQuality> {
     const response = await apiClient.get<Record<string, unknown>>(
       '/api/v1/vnpy-paper/agent-runs/cross-run-quality',
     );
-    return toCamelCase<VnpyPaperAgentCrossRunQuality>(response.data);
+    const result = toCamelCase<VnpyPaperAgentCrossRunQuality>(response.data);
+    result.refreshSourceCounts = preserveNumericMap(response.data.refresh_source_counts);
+    return result;
   },
 
   async generateAgentRunRecap(

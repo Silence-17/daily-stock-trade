@@ -3082,7 +3082,13 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
             "scanned_count": 2,
             "truncated": False,
             "refresh_attempted_count": 0,
+            "refresh_succeeded_count": 0,
+            "refresh_failed_count": 0,
             "refresh_skipped_not_due_count": 2,
+            "refresh_source_counts": {"TencentFetcher": 1},
+            "refresh_saved_row_count": 6,
+            "refresh_resolved_anchor_count": 1,
+            "refresh_unresolved_anchor_count": 0,
             "status_counts": {"filled": 1, "skipped": 1},
             "matrix": {
                 "1": {
@@ -3140,6 +3146,11 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.json()["methodology"]["lookahead_protection"])
         self.assertEqual(response.json()["refresh_skipped_not_due_count"], 2)
+        self.assertEqual(
+            response.json()["refresh_source_counts"],
+            {"TencentFetcher": 1},
+        )
+        self.assertEqual(response.json()["refresh_resolved_anchor_count"], 1)
         self.assertEqual(response.json()["matrix"]["1"]["coverage_pct"], 50.0)
         self.assertEqual(response.json()["review_quality_matrix"][0]["model"], "openai/model-a")
         self.assertEqual(
@@ -3197,7 +3208,13 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
             "max_decisions": 200,
             "refresh_missing": False,
             "refresh_attempted_count": 0,
+            "refresh_succeeded_count": 0,
+            "refresh_failed_count": 0,
             "refresh_skipped_not_due_count": 3,
+            "refresh_source_counts": {},
+            "refresh_saved_row_count": 0,
+            "refresh_resolved_anchor_count": 0,
+            "refresh_unresolved_anchor_count": 0,
             "sample_count": 3,
             "mature_sample_count": 0,
             "coverage_pct": 0.0,

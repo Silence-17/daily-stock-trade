@@ -1841,7 +1841,13 @@ describe('vnpyPaperTradingApi', () => {
         scanned_count: 2,
         truncated: false,
         refresh_attempted_count: 0,
+        refresh_succeeded_count: 0,
+        refresh_failed_count: 0,
         refresh_skipped_not_due_count: 2,
+        refresh_source_counts: { TencentFetcher: 1 },
+        refresh_saved_row_count: 6,
+        refresh_resolved_anchor_count: 1,
+        refresh_unresolved_anchor_count: 0,
         status_counts: { filled: 2 },
         matrix: {
           1: {
@@ -1930,6 +1936,8 @@ describe('vnpyPaperTradingApi', () => {
     });
     expect(result.scannedCount).toBe(2);
     expect(result.refreshSkippedNotDueCount).toBe(2);
+    expect(result.refreshSourceCounts).toEqual({ TencentFetcher: 1 });
+    expect(result.refreshResolvedAnchorCount).toBe(1);
     expect(result.methodology.lookaheadProtection).toBe(true);
     expect(result.matrix['1'].averageReturnPct).toBe(1.25);
     expect(result.matrix['1'].returnRiskUtilityPct).toBe(0.35);
@@ -1972,6 +1980,7 @@ describe('vnpyPaperTradingApi', () => {
         min_mature_samples: 10,
         min_win_rate_pct: 45,
         max_decisions: 200,
+        refresh_source_counts: { TencentFetcher: 2 },
         sample_count: 20,
         mature_sample_count: 18,
         coverage_pct: 90,
@@ -1999,6 +2008,7 @@ describe('vnpyPaperTradingApi', () => {
 
     expect(get).toHaveBeenCalledWith('/api/v1/vnpy-paper/agent-runs/cross-run-quality');
     expect(result.matureSampleCount).toBe(18);
+    expect(result.refreshSourceCounts).toEqual({ TencentFetcher: 2 });
     expect(result.gateBlocked).toBe(true);
     expect(result.transition).toBe('healthy->blocked');
     expect(result.reviewQualityState).toBe('blocked');

@@ -13,6 +13,8 @@ import unittest
 from datetime import date, datetime
 from unittest.mock import patch
 
+import pandas as pd
+
 from src.config import Config
 from src.core.backtest_engine import OVERALL_SENTINEL_CODE
 from src.repositories.backtest_repo import BacktestRepository
@@ -1631,6 +1633,66 @@ class BacktestServiceTestCase(unittest.TestCase):
         self.assertEqual(stats["insufficient"], 1)
         self.assertEqual(stats["diagnostics"]["empty_reason"], "insufficient_daily_data")
         self.assertIn("可用日线行情不足", stats["message"])
+
+    def test_try_fill_daily_data_returns_provider_audit(self) -> None:
+        frame = pd.DataFrame(
+            [
+                {
+                    "date": "2024-01-02",
+                    "open": 10.0,
+                    "high": 11.0,
+                    "low": 9.5,
+                    "close": 10.5,
+                    "volume": 1000,
+                }
+            ]
+        )
+        service = BacktestService(self.db)
+        with patch("data_provider.base.DataFetcherManager") as manager_class:
+            manager_class.return_value.get_daily_data.return_value = (
+                frame,
+                "TencentFetcher",
+            )
+            result = service._try_fill_daily_data(
+                code="600519",
+                analysis_date=date(2024, 1, 1),
+                eval_window_days=5,
+            )
+
+        self.assertEqual(
+            result,
+            {
+                "succeeded": True,
+                "source": "TencentFetcher",
+                "saved_row_count": 1,
+                "error_type": None,
+            },
+        )
+        with self.db.get_session() as session:
+            rows = (
+                session.query(StockDaily)
+                .filter_by(code="600519", date=date(2024, 1, 2))
+                .all()
+            )
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0].data_source, "TencentFetcher")
+
+    def test_try_fill_daily_data_reports_sanitized_failure(self) -> None:
+        service = BacktestService(self.db)
+        with patch("data_provider.base.DataFetcherManager") as manager_class:
+            manager_class.return_value.get_daily_data.side_effect = RuntimeError(
+                "provider secret should not enter the response"
+            )
+            result = service._try_fill_daily_data(
+                code="600519",
+                analysis_date=date(2024, 1, 1),
+                eval_window_days=5,
+            )
+
+        self.assertEqual(result["succeeded"], False)
+        self.assertEqual(result["saved_row_count"], 0)
+        self.assertEqual(result["error_type"], "RuntimeError")
+        self.assertNotIn("provider secret", str(result))
 
     def _run_and_get_result(self) -> BacktestResult:
         """Helper: run backtest and return the single BacktestResult row."""

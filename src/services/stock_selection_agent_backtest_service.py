@@ -128,6 +128,16 @@ class StockSelectionAgentBacktestService:
             "refresh_skipped_not_due_count": int(
                 result.get("refresh_skipped_not_due_count") or 0
             ),
+            "refresh_succeeded_count": int(result.get("refresh_succeeded_count") or 0),
+            "refresh_failed_count": int(result.get("refresh_failed_count") or 0),
+            "refresh_source_counts": dict(result.get("refresh_source_counts") or {}),
+            "refresh_saved_row_count": int(result.get("refresh_saved_row_count") or 0),
+            "refresh_resolved_anchor_count": int(
+                result.get("refresh_resolved_anchor_count") or 0
+            ),
+            "refresh_unresolved_anchor_count": int(
+                result.get("refresh_unresolved_anchor_count") or 0
+            ),
             "sample_count": int(metrics.get("sample_count") or 0),
             "mature_sample_count": completed_count,
             "coverage_pct": metrics.get("coverage_pct"),
@@ -278,15 +288,12 @@ class StockSelectionAgentBacktestService:
         )
         items: List[Dict[str, Any]] = []
         max_window = max(windows)
-        refresh_attempted = 0
-        refresh_skipped_not_due = 0
+        refresh_audit = self._empty_refresh_audit()
         if refresh_missing:
-            refresh_attempted, refresh_skipped_not_due = (
-                self._prefetch_missing_forward_bars(
-                    decisions=source["items"],
-                    min_window=min(windows),
-                    max_window=max_window,
-                )
+            refresh_audit = self._prefetch_missing_forward_bars(
+                decisions=source["items"],
+                min_window=min(windows),
+                max_window=max_window,
             )
 
         for decision in source["items"]:
@@ -434,8 +441,7 @@ class StockSelectionAgentBacktestService:
             "total": source["total"],
             "scanned_count": len(items),
             "truncated": bool(source["truncated"]),
-            "refresh_attempted_count": refresh_attempted,
-            "refresh_skipped_not_due_count": refresh_skipped_not_due,
+            **refresh_audit,
             "status_counts": dict(Counter(str(item.get("decision_status") or "unknown") for item in items)),
             "matrix": matrix,
             "strategy_matrix": strategy_matrix,
@@ -444,13 +450,26 @@ class StockSelectionAgentBacktestService:
             "items": items,
         }
 
+    @staticmethod
+    def _empty_refresh_audit() -> Dict[str, Any]:
+        return {
+            "refresh_attempted_count": 0,
+            "refresh_succeeded_count": 0,
+            "refresh_failed_count": 0,
+            "refresh_skipped_not_due_count": 0,
+            "refresh_source_counts": {},
+            "refresh_saved_row_count": 0,
+            "refresh_resolved_anchor_count": 0,
+            "refresh_unresolved_anchor_count": 0,
+        }
+
     def _prefetch_missing_forward_bars(
         self,
         *,
         decisions: List[Dict[str, Any]],
         min_window: int,
         max_window: int,
-    ) -> tuple[int, int]:
+    ) -> Dict[str, Any]:
         """Refresh each symbol once, using its earliest eligible decision anchor."""
 
         today = datetime.now().date()
@@ -472,8 +491,8 @@ class StockSelectionAgentBacktestService:
             )
             current["anchor_dates"].add(anchor_date)
 
-        attempted = 0
-        skipped_not_due = 0
+        audit = self._empty_refresh_audit()
+        source_counts: Counter[str] = Counter()
         for item in grouped.values():
             eligible_anchors = sorted(
                 anchor_date
@@ -481,7 +500,7 @@ class StockSelectionAgentBacktestService:
                 if (today - anchor_date).days >= min_window
             )
             if not eligible_anchors:
-                skipped_not_due += 1
+                audit["refresh_skipped_not_due_count"] += 1
                 continue
             code_candidates = item["code_candidates"]
             missing_anchors: List[tuple[Any, Optional[str]]] = []
@@ -501,13 +520,35 @@ class StockSelectionAgentBacktestService:
                 0,
                 (latest_anchor - earliest_anchor).days,
             )
-            attempted += 1
-            self.backtest._try_fill_daily_data(
+            audit["refresh_attempted_count"] += 1
+            refresh_result = self.backtest._try_fill_daily_data(
                 code=missing_anchors[0][1] or code_candidates[0],
                 analysis_date=earliest_anchor,
                 eval_window_days=refresh_window,
             )
-        return attempted, skipped_not_due
+            if isinstance(refresh_result, dict) and refresh_result.get("succeeded"):
+                audit["refresh_succeeded_count"] += 1
+                source_counts[str(refresh_result.get("source") or "unknown")] += 1
+                audit["refresh_saved_row_count"] += int(
+                    refresh_result.get("saved_row_count") or 0
+                )
+            else:
+                audit["refresh_failed_count"] += 1
+
+            for anchor_date, _matched_code in missing_anchors:
+                refreshed_bars, _refreshed_code = self._load_forward_bars(
+                    code_candidates=code_candidates,
+                    anchor_date=anchor_date,
+                    eval_window_days=max_window,
+                )
+                key = (
+                    "refresh_resolved_anchor_count"
+                    if len(refreshed_bars) >= max_window
+                    else "refresh_unresolved_anchor_count"
+                )
+                audit[key] += 1
+        audit["refresh_source_counts"] = dict(sorted(source_counts.items()))
+        return audit
 
     @classmethod
     def _decision_reviews(cls, order_result: Dict[str, Any]) -> List[Dict[str, Any]]:

@@ -764,7 +764,13 @@ class VnpyPaperAgentBacktestResponse(BaseModel):
     scanned_count: int = 0
     truncated: bool = False
     refresh_attempted_count: int = 0
+    refresh_succeeded_count: int = 0
+    refresh_failed_count: int = 0
     refresh_skipped_not_due_count: int = 0
+    refresh_source_counts: Dict[str, int] = Field(default_factory=dict)
+    refresh_saved_row_count: int = 0
+    refresh_resolved_anchor_count: int = 0
+    refresh_unresolved_anchor_count: int = 0
     status_counts: Dict[str, int] = Field(default_factory=dict)
     matrix: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
     strategy_matrix: Dict[str, Dict[str, Dict[str, Any]]] = Field(default_factory=dict)
@@ -799,7 +805,13 @@ class VnpyPaperAgentCrossRunQualityResponse(BaseModel):
     max_decisions: int
     refresh_missing: bool = False
     refresh_attempted_count: int = 0
+    refresh_succeeded_count: int = 0
+    refresh_failed_count: int = 0
     refresh_skipped_not_due_count: int = 0
+    refresh_source_counts: Dict[str, int] = Field(default_factory=dict)
+    refresh_saved_row_count: int = 0
+    refresh_resolved_anchor_count: int = 0
+    refresh_unresolved_anchor_count: int = 0
     sample_count: int = 0
     mature_sample_count: int = 0
     coverage_pct: Optional[float] = None
