@@ -8652,6 +8652,9 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
 
     def test_calibration_evidence_monitor_is_read_only_and_reports_evidence_state(self) -> None:
         fake_service = MagicMock()
+        del fake_service.db
+        repository_db = MagicMock(name="repository_db")
+        fake_service.agent_repo.db = repository_db
         fake_service.get_settings.return_value = SimpleNamespace(
             enabled=True,
             auto_trade_enabled=False,
@@ -8721,7 +8724,7 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         latest_collect = collect.call_args
         self.assertEqual(latest_collect.args, (fake_service.agent_repo,))
         self.assertEqual(latest_collect.kwargs["markets"], ["cn", "us"])
-        self.assertIs(latest_collect.kwargs["quality_service"].db, fake_service.db)
+        self.assertIs(latest_collect.kwargs["quality_service"].db, repository_db)
         self.assertTrue(result["accepted"])
         self.assertFalse(result["evidence_ready"])
         self.assertEqual(result["reason"], "calibration_evidence_pending")

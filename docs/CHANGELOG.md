@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [修复] 修复 Agent 校准证据后台任务因数据库依赖来源错误而定时失败的问题
+
 - [修复] `agent_calibration_shadow` 的跨运行质量快照严格限定最近 90 天、同市场/策略、`trigger_source=agent_calibration_shadow` 且 run 已完成的决策，普通自动交易样本不再混入生产校准
 - [改进] 校准证据和趋势 API 新增不联网的当前 shadow-only 前瞻重算、持久化/当前/有效成熟样本来源以及旧快照范围不明计数；Agent 控制台在两者不同时并列显示当前值和快照值
 - [修复] 缺少 `cross_run_quality` 来源范围证明的历史 shadow 快照降为 unknown，不再计入有效目标观测；run 数及其 shadow 决策仍保留为真实采样和当前前瞻重算证据

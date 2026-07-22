@@ -13269,7 +13269,7 @@ def build_vnpy_paper_trading_background_tasks(
         evidence = collect_persisted_calibration_evidence(
             service.agent_repo,
             markets=markets,
-            quality_service=StockSelectionAgentBacktestService(service.db),
+            quality_service=StockSelectionAgentBacktestService(service.agent_repo.db),
         )
         evaluation = evidence["evaluation"]
         market_evidence = []
