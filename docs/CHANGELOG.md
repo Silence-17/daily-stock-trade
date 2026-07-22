@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [修复] 校准 shadow 在生成新运行快照前自动补齐已经到期候选的前瞻日线，使成熟样本会随交易日推进而增长；正式自动交易和只读证据监控仍不联网补数
+- [改进] Agent 前瞻补数按股票合并重复决策，并跳过尚未达到最短观察期的股票；API 新增补数尝试数和未到期跳过数审计，避免同一股票跨 run 重复联网
+- [测试] 新增重复股票补数去重、跨日期覆盖、未到期跳过和 calibration shadow 启用刷新回归；旧线上路径对 96 条 CN 决策发起 96 次补数耗时 177.68 秒，最终实现收敛为 5 次尝试和 4 个未到期跳过，耗时 10.40 秒且识别出 3 个真实 5 日成熟样本
 - [新功能] 新增只读 `GET /api/v1/vnpy-paper/gateway/preflight` 和 Web“生产预检”操作，可在不连接、不订阅、不下单的前提下检查当前加载的外部 gateway、配置文件位置、默认键完整性和生产门禁状态
 - [改进] Web 外部 gateway 预检只展示 gateway 身份、配置键计数、缺失键和 reason code；连接文件路径、配置值与读取异常正文始终不进入响应
 - [测试] 新增外部 gateway 预检成功、无效配置脱敏、runtime 不可用、API camelCase 和 Web 失败结果展示回归

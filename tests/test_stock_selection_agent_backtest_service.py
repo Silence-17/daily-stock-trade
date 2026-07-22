@@ -6,7 +6,7 @@ from __future__ import annotations
 import os
 import tempfile
 import unittest
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from unittest.mock import patch
 
 from src.config import Config
@@ -246,6 +246,55 @@ class StockSelectionAgentBacktestServiceTestCase(unittest.TestCase):
         self.assertEqual(result["matrix"]["1"]["unable_reason_counts"], {"invalid_anchor_price": 1})
         self.assertEqual(result["matrix"]["5"]["coverage_pct"], 0.0)
 
+    def test_refresh_missing_deduplicates_repeated_symbol_decisions(self) -> None:
+        earliest_anchor = datetime.now() - timedelta(days=15)
+        for index in range(3):
+            self._record_decision(
+                run_uid=f"agent-refresh-{index}",
+                strategy="dual_low",
+                symbol="600519",
+                status="skipped",
+                price=100.0,
+                created_at=earliest_anchor + timedelta(days=index * 2),
+                action="skip",
+            )
+
+        with patch.object(self.service.backtest, "_try_fill_daily_data") as refresh:
+            result = self.service.evaluate(
+                eval_windows=[5],
+                refresh_missing=True,
+            )
+
+        refresh.assert_called_once_with(
+            code="600519",
+            analysis_date=earliest_anchor.date(),
+            eval_window_days=9,
+        )
+        self.assertEqual(result["refresh_attempted_count"], 1)
+        self.assertEqual(result["refresh_skipped_not_due_count"], 0)
+        self.assertEqual(result["matrix"]["5"]["insufficient_count"], 3)
+
+    def test_refresh_missing_skips_symbols_before_shortest_horizon_is_due(self) -> None:
+        self._record_decision(
+            run_uid="agent-refresh-not-due",
+            strategy="dual_low",
+            symbol="600519",
+            status="skipped",
+            price=100.0,
+            created_at=datetime.now(),
+            action="skip",
+        )
+
+        with patch.object(self.service.backtest, "_try_fill_daily_data") as refresh:
+            result = self.service.evaluate(
+                eval_windows=[5],
+                refresh_missing=True,
+            )
+
+        refresh.assert_not_called()
+        self.assertEqual(result["refresh_attempted_count"], 0)
+        self.assertEqual(result["refresh_skipped_not_due_count"], 1)
+
     def test_strategy_and_created_at_filters_apply_to_decisions(self) -> None:
         self._record_decision(
             run_uid="agent-january-dual",
@@ -307,8 +356,10 @@ class StockSelectionAgentBacktestServiceTestCase(unittest.TestCase):
                 strategy="dual_low",
                 market="cn",
                 min_mature_samples=10,
+                refresh_missing=True,
             )
         self.assertEqual(insufficient["state"], "insufficient_evidence")
+        self.assertTrue(insufficient["refresh_missing"])
 
         base_result["matrix"]["5"].update(
             completed_count=12,

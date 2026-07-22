@@ -1841,6 +1841,7 @@ describe('vnpyPaperTradingApi', () => {
         scanned_count: 2,
         truncated: false,
         refresh_attempted_count: 0,
+        refresh_skipped_not_due_count: 2,
         status_counts: { filled: 2 },
         matrix: {
           1: {
@@ -1928,6 +1929,7 @@ describe('vnpyPaperTradingApi', () => {
       neutral_band_pct: 2,
     });
     expect(result.scannedCount).toBe(2);
+    expect(result.refreshSkippedNotDueCount).toBe(2);
     expect(result.methodology.lookaheadProtection).toBe(true);
     expect(result.matrix['1'].averageReturnPct).toBe(1.25);
     expect(result.matrix['1'].returnRiskUtilityPct).toBe(0.35);

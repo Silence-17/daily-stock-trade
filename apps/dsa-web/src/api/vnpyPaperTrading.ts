@@ -1064,6 +1064,7 @@ export type VnpyPaperAgentBacktestResponse = {
   scannedCount: number;
   truncated: boolean;
   refreshAttemptedCount: number;
+  refreshSkippedNotDueCount: number;
   statusCounts: Record<string, number>;
   matrix: Record<string, VnpyPaperAgentBacktestMetric>;
   strategyMatrix: Record<string, Record<string, VnpyPaperAgentBacktestMetric>>;
@@ -1096,6 +1097,9 @@ export type VnpyPaperAgentCrossRunQuality = {
   minMatureSamples: number;
   minWinRatePct: number;
   maxDecisions: number;
+  refreshMissing?: boolean;
+  refreshAttemptedCount?: number;
+  refreshSkippedNotDueCount?: number;
   sampleCount: number;
   matureSampleCount: number;
   coveragePct?: number | null;

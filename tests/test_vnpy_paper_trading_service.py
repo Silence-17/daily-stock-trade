@@ -3937,10 +3937,23 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
             "strategies": [{"id": "momentum_quality", "market_scope": ["cn"]}],
         }
 
+        quality_snapshot = {
+            "state": "insufficient_evidence",
+            "reason": "mature_sample_count_below_threshold",
+            "gate_enabled": False,
+            "gate_blocked": False,
+        }
         with patch(
             "src.services.vnpy_paper_trading_service.AlphaSiftService",
             return_value=fake_alphasift,
-        ), patch.object(self.service, "_record_last_auto_run") as record_last_run:
+        ), patch.object(
+            self.service,
+            "_cross_run_quality_snapshot",
+            return_value=quality_snapshot,
+        ) as build_quality, patch.object(
+            self.service,
+            "_record_last_auto_run",
+        ) as record_last_run:
             result = self.service.run_auto_trade_once(
                 execution_mode_override="dry_run",
                 ignore_auto_trade_enabled=True,
@@ -3965,6 +3978,7 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertEqual(audit["strategy"], "momentum_quality")
         self.assertEqual(audit["trigger_source"], "agent_calibration_shadow")
         self.assertEqual(audit["max_results"], 2)
+        self.assertTrue(build_quality.call_args.kwargs["refresh_missing"])
         record_last_run.assert_not_called()
         persisted = self.service.get_settings()
         self.assertEqual(persisted.auto_market, "cn")

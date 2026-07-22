@@ -34,6 +34,7 @@ class StockSelectionAgentBacktestService:
         min_win_rate_pct: float = 45.0,
         max_decisions: int = 200,
         previous_state: Optional[str] = None,
+        refresh_missing: bool = False,
     ) -> Dict[str, Any]:
         """Build a deterministic rolling quality state from mature persisted candidates."""
 
@@ -46,7 +47,7 @@ class StockSelectionAgentBacktestService:
             eval_windows=[horizon],
             include_skipped=True,
             max_decisions=max_decisions,
-            refresh_missing=False,
+            refresh_missing=refresh_missing,
         )
         metrics = dict(result["matrix"].get(str(horizon)) or {})
         completed_count = int(metrics.get("completed_count") or 0)
@@ -122,6 +123,11 @@ class StockSelectionAgentBacktestService:
             "min_mature_samples": minimum,
             "min_win_rate_pct": threshold,
             "max_decisions": max(1, min(2000, int(max_decisions))),
+            "refresh_missing": bool(refresh_missing),
+            "refresh_attempted_count": int(result.get("refresh_attempted_count") or 0),
+            "refresh_skipped_not_due_count": int(
+                result.get("refresh_skipped_not_due_count") or 0
+            ),
             "sample_count": int(metrics.get("sample_count") or 0),
             "mature_sample_count": completed_count,
             "coverage_pct": metrics.get("coverage_pct"),
@@ -273,6 +279,15 @@ class StockSelectionAgentBacktestService:
         items: List[Dict[str, Any]] = []
         max_window = max(windows)
         refresh_attempted = 0
+        refresh_skipped_not_due = 0
+        if refresh_missing:
+            refresh_attempted, refresh_skipped_not_due = (
+                self._prefetch_missing_forward_bars(
+                    decisions=source["items"],
+                    min_window=min(windows),
+                    max_window=max_window,
+                )
+            )
 
         for decision in source["items"]:
             created_at = decision.get("created_at") or decision.get("run_created_at")
@@ -293,18 +308,6 @@ class StockSelectionAgentBacktestService:
                     anchor_date=anchor_date,
                     eval_window_days=max_window,
                 )
-                if refresh_missing and len(bars) < max_window:
-                    refresh_attempted += 1
-                    self.backtest._try_fill_daily_data(
-                        code=matched_code or code_candidates[0],
-                        analysis_date=anchor_date,
-                        eval_window_days=max_window,
-                    )
-                    bars, matched_code = self._load_forward_bars(
-                        code_candidates=code_candidates,
-                        anchor_date=anchor_date,
-                        eval_window_days=max_window,
-                    )
 
             horizons: Dict[str, Dict[str, Any]] = {}
             for window in windows:
@@ -432,6 +435,7 @@ class StockSelectionAgentBacktestService:
             "scanned_count": len(items),
             "truncated": bool(source["truncated"]),
             "refresh_attempted_count": refresh_attempted,
+            "refresh_skipped_not_due_count": refresh_skipped_not_due,
             "status_counts": dict(Counter(str(item.get("decision_status") or "unknown") for item in items)),
             "matrix": matrix,
             "strategy_matrix": strategy_matrix,
@@ -439,6 +443,71 @@ class StockSelectionAgentBacktestService:
             "review_policy_quality": review_policy_quality,
             "items": items,
         }
+
+    def _prefetch_missing_forward_bars(
+        self,
+        *,
+        decisions: List[Dict[str, Any]],
+        min_window: int,
+        max_window: int,
+    ) -> tuple[int, int]:
+        """Refresh each symbol once, using its earliest eligible decision anchor."""
+
+        today = datetime.now().date()
+        grouped: Dict[str, Dict[str, Any]] = {}
+        for decision in decisions:
+            created_at = decision.get("created_at") or decision.get("run_created_at")
+            anchor_date = created_at.date() if isinstance(created_at, datetime) else None
+            symbol = str(decision.get("symbol") or "").strip()
+            code_candidates = self.backtest._build_daily_code_candidates(symbol)
+            if anchor_date is None or not code_candidates:
+                continue
+            key = code_candidates[0]
+            current = grouped.setdefault(
+                key,
+                {
+                    "anchor_dates": set(),
+                    "code_candidates": code_candidates,
+                },
+            )
+            current["anchor_dates"].add(anchor_date)
+
+        attempted = 0
+        skipped_not_due = 0
+        for item in grouped.values():
+            eligible_anchors = sorted(
+                anchor_date
+                for anchor_date in item["anchor_dates"]
+                if (today - anchor_date).days >= min_window
+            )
+            if not eligible_anchors:
+                skipped_not_due += 1
+                continue
+            code_candidates = item["code_candidates"]
+            missing_anchors: List[tuple[Any, Optional[str]]] = []
+            for anchor_date in eligible_anchors:
+                bars, matched_code = self._load_forward_bars(
+                    code_candidates=code_candidates,
+                    anchor_date=anchor_date,
+                    eval_window_days=max_window,
+                )
+                if len(bars) < max_window:
+                    missing_anchors.append((anchor_date, matched_code))
+            if not missing_anchors:
+                continue
+            earliest_anchor = missing_anchors[0][0]
+            latest_anchor = missing_anchors[-1][0]
+            refresh_window = max_window + max(
+                0,
+                (latest_anchor - earliest_anchor).days,
+            )
+            attempted += 1
+            self.backtest._try_fill_daily_data(
+                code=missing_anchors[0][1] or code_candidates[0],
+                analysis_date=earliest_anchor,
+                eval_window_days=refresh_window,
+            )
+        return attempted, skipped_not_due
 
     @classmethod
     def _decision_reviews(cls, order_result: Dict[str, Any]) -> List[Dict[str, Any]]:

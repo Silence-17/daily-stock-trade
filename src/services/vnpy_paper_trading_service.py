@@ -2734,6 +2734,7 @@ class VnpyPaperTradingService:
         cross_run_quality = self._cross_run_quality_snapshot(
             settings,
             recent_run_context=recent_run_context,
+            refresh_missing=calibration_shadow,
         )
         recent_run_context["cross_run_quality"] = cross_run_quality
         market_objective = self._build_cross_market_objective(
@@ -6566,6 +6567,7 @@ class VnpyPaperTradingService:
         settings: VnpyPaperSettings,
         *,
         recent_run_context: Dict[str, Any],
+        refresh_missing: bool = False,
     ) -> Dict[str, Any]:
         recent_runs = list(recent_run_context.get("runs") or [])
         previous_state = None
@@ -6587,6 +6589,7 @@ class VnpyPaperTradingService:
                 min_win_rate_pct=settings.auto_cross_run_min_win_rate_pct,
                 max_decisions=settings.auto_cross_run_max_decisions,
                 previous_state=previous_state,
+                refresh_missing=refresh_missing,
             )
         except Exception as exc:  # noqa: BLE001 - enabled gate must fail closed.
             logger.warning("Failed to build cross-run Agent quality snapshot: %s", exc)
