@@ -307,11 +307,23 @@ class VnpyRuntimeTestCase(unittest.TestCase):
             finally:
                 _restore_modules(installed)
 
-        self.assertTrue(handle.diagnostics["production_preflight"]["ok"])
-        self.assertEqual(len(handle.main_engine.connects), 1)
-        self.assertNotIn("secret", json.dumps(handle.diagnostics))
-        self.assertNotIn(str(settings_path), json.dumps(handle.diagnostics))
-        handle.close()
+            self.assertTrue(handle.diagnostics["production_preflight"]["ok"])
+            self.assertEqual(len(handle.main_engine.connects), 1)
+            preflight = handle.run_production_preflight()
+            self.assertTrue(preflight["ok"])
+            self.assertEqual(preflight["failures"], [])
+            self.assertTrue(preflight["external_gateway"])
+            self.assertTrue(preflight["settings_valid"])
+            self.assertEqual(preflight["provided_key_count"], 2)
+            self.assertFalse(preflight["connect_attempted"])
+            self.assertFalse(preflight["subscriptions_created"])
+            self.assertFalse(preflight["orders_created"])
+            self.assertEqual(len(handle.main_engine.connects), 1)
+            self.assertNotIn("secret", json.dumps(handle.diagnostics))
+            self.assertNotIn("secret", json.dumps(preflight))
+            self.assertNotIn(str(settings_path), json.dumps(handle.diagnostics))
+            self.assertNotIn(str(settings_path), json.dumps(preflight))
+            handle.close()
 
     def test_production_preflight_sanitizes_settings_read_failure(self) -> None:
         installed = _install_fake_vnpy_runtime_modules()
@@ -338,8 +350,15 @@ class VnpyRuntimeTestCase(unittest.TestCase):
                 handle.diagnostics["connect"]["reason"],
                 "production_preflight_failed",
             )
+            preflight = handle.run_production_preflight()
+            self.assertFalse(preflight["ok"])
+            self.assertIn("connect_settings_invalid", preflight["failures"])
+            self.assertEqual(preflight["settings_error_type"], "FileNotFoundError")
+            self.assertFalse(preflight["connect_attempted"])
             self.assertNotIn(str(secret_path), encoded)
             self.assertNotIn("secret-broker-account", encoded)
+            self.assertNotIn(str(secret_path), json.dumps(preflight))
+            self.assertNotIn("secret-broker-account", json.dumps(preflight))
             handle.close()
 
     def test_bootstrap_connects_opt_in_gateway_without_settings_file(self) -> None:

@@ -38,6 +38,7 @@ import {
   type VnpyPaperAccount,
   type VnpyPaperAutoRunResponse,
   type VnpyPaperExecutionMode,
+  type VnpyPaperGatewayPreflightResponse,
   type VnpyPaperMarket,
   type VnpyPaperOrderResult,
   type VnpyPaperPerformanceResponse,
@@ -916,6 +917,8 @@ const VnpyPaperTradingPage: React.FC = () => {
   const [cleaningArchivedAccounts, setCleaningArchivedAccounts] = useState(false);
   const [resettingFailureFuse, setResettingFailureFuse] = useState(false);
   const [reconnectingGateway, setReconnectingGateway] = useState(false);
+  const [preflightingGateway, setPreflightingGateway] = useState(false);
+  const [gatewayPreflight, setGatewayPreflight] = useState<VnpyPaperGatewayPreflightResponse | null>(null);
   const [snapshotLoading, setSnapshotLoading] = useState(false);
   const [snapshotError, setSnapshotError] = useState('');
   const [error, setError] = useState('');
@@ -1705,6 +1708,23 @@ const VnpyPaperTradingPage: React.FC = () => {
     }
   };
 
+  const handlePreflightGateway = async () => {
+    setPreflightingGateway(true);
+    setError('');
+    setSuccess('');
+    try {
+      const result = await vnpyPaperTradingApi.preflightGateway();
+      setGatewayPreflight(result);
+      if (result.ok) {
+        setSuccess('外部 vn.py gateway 生产预检通过');
+      }
+    } catch (err) {
+      setError(toApiErrorMessage(err, 'vn.py gateway 生产预检失败'));
+    } finally {
+      setPreflightingGateway(false);
+    }
+  };
+
   const handleSaveSettings = async (event: React.FormEvent) => {
     event.preventDefault();
     setSaving(true);
@@ -2141,6 +2161,16 @@ const VnpyPaperTradingPage: React.FC = () => {
             <RefreshCw className="h-4 w-4" />
             重连网关
           </Button>
+          <Button
+            variant="outline"
+            isLoading={preflightingGateway}
+            loadingText="预检中..."
+            onClick={() => void handlePreflightGateway()}
+            title="零连接检查外部 gateway 与连接参数合同"
+          >
+            <ShieldCheck className="h-4 w-4" />
+            生产预检
+          </Button>
           <Button variant="outline" isLoading={ensuring} loadingText="初始化中..." onClick={() => void handleEnsureAccount()}>
             <WalletCards className="h-4 w-4" />
             初始化账户
@@ -2163,6 +2193,15 @@ const VnpyPaperTradingPage: React.FC = () => {
       {taskMetricsError ? <InlineAlert variant="warning" title="后台任务长期指标加载失败" message={taskMetricsError} /> : null}
       {paperAccountsError ? <InlineAlert variant="warning" title="账户历史加载失败" message={paperAccountsError} /> : null}
       {success ? <InlineAlert variant="success" message={success} /> : null}
+      {gatewayPreflight ? (
+        <InlineAlert
+          variant={gatewayPreflight.ok ? 'success' : 'warning'}
+          title="外部 gateway 生产预检"
+          message={gatewayPreflight.ok
+            ? `已通过 · ${gatewayPreflight.gatewayName || '-'} · 配置键 ${gatewayPreflight.providedKeyCount}/${gatewayPreflight.defaultSettingKeyCount}`
+            : `未通过：${gatewayPreflight.failures.join('、') || 'unknown'} · 配置键 ${gatewayPreflight.providedKeyCount}/${gatewayPreflight.defaultSettingKeyCount}`}
+        />
+      ) : null}
       <InlineAlert
         variant="warning"
         title="模拟交易"

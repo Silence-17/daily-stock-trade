@@ -821,6 +821,32 @@ export type VnpyPaperGatewayReconnectResponse = {
   reconnect: Record<string, unknown>;
 };
 
+export type VnpyPaperGatewayPreflightResponse = {
+  schemaVersion: number;
+  generatedAt?: string | null;
+  ok: boolean;
+  failures: string[];
+  runtimeAvailable: boolean;
+  gatewayRegistered: boolean;
+  externalGateway: boolean;
+  gatewayClass?: string | null;
+  gatewayName?: string | null;
+  productionPreflightEnabled: boolean;
+  settingsProvided: boolean;
+  settingsValid: boolean;
+  settingsSource: string;
+  settingsErrorType?: string | null;
+  settingsInsideRepository: boolean;
+  defaultSettingKeyCount: number;
+  providedKeyCount: number;
+  missingDefaultKeys: string[];
+  connectAttempted: boolean;
+  subscriptionsCreated: boolean;
+  ordersCreated: boolean;
+  settingsPathExposed: boolean;
+  settingsValuesExposed: boolean;
+};
+
 export type VnpyPaperAgentReturnRiskCalibrationDailyItem = {
   date: string;
   runSnapshotCount: number;
@@ -1504,6 +1530,13 @@ export const vnpyPaperTradingApi = {
       '/api/v1/vnpy-paper/gateway/reconnect',
     );
     return toCamelCase<VnpyPaperGatewayReconnectResponse>(response.data);
+  },
+
+  async preflightGateway(): Promise<VnpyPaperGatewayPreflightResponse> {
+    const response = await apiClient.get<Record<string, unknown>>(
+      '/api/v1/vnpy-paper/gateway/preflight',
+    );
+    return toCamelCase<VnpyPaperGatewayPreflightResponse>(response.data);
   },
 
   async getTaskHealth(): Promise<VnpyPaperTaskHealthResponse> {

@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [新功能] 新增只读 `GET /api/v1/vnpy-paper/gateway/preflight` 和 Web“生产预检”操作，可在不连接、不订阅、不下单的前提下检查当前加载的外部 gateway、配置文件位置、默认键完整性和生产门禁状态
+- [改进] Web 外部 gateway 预检只展示 gateway 身份、配置键计数、缺失键和 reason code；连接文件路径、配置值与读取异常正文始终不进入响应
+- [测试] 新增外部 gateway 预检成功、无效配置脱敏、runtime 不可用、API camelCase 和 Web 失败结果展示回归
 - [修复] 日级自动模拟交易不再按 API 进程启动时刻永久漂移；首次任务在可交易窗口开始后保留 5 分钟启动与选股余量，当天已有正式运行时直接对齐下一交易日，分钟级自定义轮询保持原行为
 - [修复] 自动交易 readiness 按下一次任务自己的日期投影对应交易窗口，避免把次日任务与当日收盘时间比较并误报 `next_auto_run_after_window`
 - [测试] 新增日级任务同日防重复跨重启对齐、开盘缓冲和跨日期交易窗口诊断回归

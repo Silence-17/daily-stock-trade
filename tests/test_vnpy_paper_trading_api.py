@@ -717,6 +717,66 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
             "vnpy_runtime_unavailable",
         )
 
+    def test_gateway_preflight_returns_sanitized_zero_connect_contract(self) -> None:
+        class RuntimeHandle:
+            def run_production_preflight(self):
+                return {
+                    "schema_version": 1,
+                    "generated_at": "2026-07-22T04:00:00+00:00",
+                    "ok": False,
+                    "failures": [
+                        "builtin_gateway_not_external",
+                        "default_setting_keys_missing",
+                    ],
+                    "runtime_available": True,
+                    "gateway_registered": True,
+                    "external_gateway": False,
+                    "gateway_class": "src.services.vnpy_simulated_gateway:DsaSimulatedGateway",
+                    "gateway_name": "DSA_SIM",
+                    "production_preflight_enabled": False,
+                    "settings_provided": False,
+                    "settings_valid": True,
+                    "settings_source": "gateway_defaults",
+                    "settings_inside_repository": False,
+                    "default_setting_key_count": 5,
+                    "provided_key_count": 0,
+                    "missing_default_keys": ["initial_balance"],
+                    "connect_attempted": False,
+                    "subscriptions_created": False,
+                    "orders_created": False,
+                    "settings_path_exposed": False,
+                    "settings_values_exposed": False,
+                }
+
+        original = getattr(self.client.app.state, "vnpy_runtime_handle", None)
+        self.client.app.state.vnpy_runtime_handle = RuntimeHandle()
+        try:
+            response = self.client.get("/api/v1/vnpy-paper/gateway/preflight")
+        finally:
+            self.client.app.state.vnpy_runtime_handle = original
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertFalse(payload["ok"])
+        self.assertEqual(
+            payload["failures"],
+            ["builtin_gateway_not_external", "default_setting_keys_missing"],
+        )
+        self.assertFalse(payload["connect_attempted"])
+        self.assertFalse(payload["settings_path_exposed"])
+        self.assertNotIn("settings_path", payload)
+
+    def test_gateway_preflight_reports_unavailable_runtime(self) -> None:
+        original = getattr(self.client.app.state, "vnpy_runtime_handle", None)
+        self.client.app.state.vnpy_runtime_handle = None
+        try:
+            response = self.client.get("/api/v1/vnpy-paper/gateway/preflight")
+        finally:
+            self.client.app.state.vnpy_runtime_handle = original
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["error"], "vnpy_runtime_unavailable")
+
     def test_status_and_manual_order_use_local_paper_account(self) -> None:
         with patch(
             "api.v1.endpoints.vnpy_paper_trading.VnpyPaperTradingService",

@@ -159,6 +159,15 @@ class VnpyRuntimeHandle:
             trigger="manual",
         )
 
+    def run_production_preflight(self) -> Dict[str, Any]:
+        """Evaluate the loaded gateway contract without connecting or exposing settings."""
+
+        with self._diagnostics_lock:
+            return _run_loaded_runtime_production_preflight(
+                settings=self.settings,
+                main_engine=self.main_engine,
+            )
+
     def _run_reconnect_check(
         self,
         *,
@@ -861,6 +870,68 @@ def _evaluate_production_connect_preflight(
         "settings_path_exposed": False,
         "settings_values_exposed": False,
     }
+
+
+def _run_loaded_runtime_production_preflight(
+    *,
+    settings: VnpyRuntimeSettings,
+    main_engine: Any,
+) -> Dict[str, Any]:
+    settings_path = (
+        Path(settings.connect_settings_path).expanduser()
+        if settings.connect_settings_path
+        else None
+    )
+    payload: Dict[str, Any] = {}
+    settings_valid = True
+    settings_error_type: Optional[str] = None
+    if settings_path is not None:
+        try:
+            loaded = json.loads(settings_path.read_text(encoding="utf-8"))
+            if not isinstance(loaded, dict):
+                raise TypeError("settings must be an object")
+            payload = loaded
+        except Exception as exc:  # noqa: BLE001 - response intentionally suppresses details.
+            settings_valid = False
+            settings_error_type = type(exc).__name__
+
+    gateway_name = str(settings.gateway_name or "").strip()
+    evaluation = _evaluate_production_connect_preflight(
+        main_engine=main_engine,
+        gateway_name=gateway_name,
+        gateway_class_path=settings.gateway_class,
+        settings_path=settings_path,
+        payload=payload,
+    )
+    failures = list(evaluation.get("failures") or [])
+    if not settings.enabled or main_engine is None:
+        failures.insert(0, "runtime_unavailable")
+    if not gateway_name:
+        failures.append("gateway_name_unresolved")
+    if not settings_valid:
+        failures.append("connect_settings_invalid")
+    failures = list(dict.fromkeys(failures))
+    evaluation.update(
+        {
+            "schema_version": 1,
+            "generated_at": _utc_iso(),
+            "ok": not failures,
+            "failures": failures,
+            "runtime_available": bool(settings.enabled and main_engine is not None),
+            "gateway_class": settings.gateway_class,
+            "gateway_name": settings.gateway_name,
+            "production_preflight_enabled": settings.production_preflight_enabled,
+            "settings_valid": settings_valid,
+            "settings_error_type": settings_error_type,
+            "settings_source": "file" if settings_path is not None else "gateway_defaults",
+            "connect_attempted": False,
+            "subscriptions_created": False,
+            "orders_created": False,
+            "settings_path_exposed": False,
+            "settings_values_exposed": False,
+        }
+    )
+    return evaluation
 
 
 def _record_production_preflight_failure(

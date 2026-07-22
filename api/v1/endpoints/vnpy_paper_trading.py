@@ -35,6 +35,7 @@ from api.v1.schemas.vnpy_paper_trading import (
     VnpyPaperAgentRunListResponse,
     VnpyPaperAutoRunRequest,
     VnpyPaperAutoRunResponse,
+    VnpyPaperGatewayPreflightResponse,
     VnpyPaperGatewayReconnectResponse,
     VnpyPaperOrderRequest,
     VnpyPaperOrderResult,
@@ -1810,6 +1811,32 @@ def get_vnpy_paper_status(
         )
     except Exception as exc:
         raise _internal_error("Get vn.py paper trading status failed", exc)
+
+
+@router.get(
+    "/gateway/preflight",
+    response_model=VnpyPaperGatewayPreflightResponse,
+    responses={
+        503: {"model": ErrorResponse},
+        500: {"model": ErrorResponse},
+    },
+    summary="Run a zero-connect vn.py production gateway preflight",
+)
+def preflight_vnpy_gateway(request: Request) -> VnpyPaperGatewayPreflightResponse:
+    runtime_handle = getattr(request.app.state, "vnpy_runtime_handle", None)
+    preflight = getattr(runtime_handle, "run_production_preflight", None)
+    if not callable(preflight):
+        raise api_error(
+            503,
+            "vnpy_runtime_unavailable",
+            "vn.py runtime preflight is not available in this process",
+        )
+    try:
+        return VnpyPaperGatewayPreflightResponse.model_validate(preflight())
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _internal_error("Preflight vn.py gateway failed", exc)
 
 
 @router.post(

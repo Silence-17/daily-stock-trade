@@ -1879,4 +1879,4 @@ worker 会把 `triggered`、`skipped`、`degraded`、`failed` 写入 `alert_trig
 
 ### vn.py Gateway 连接前预检
 
-运行 `python scripts/check_vnpy_gateway_preflight.py` 可在零连接状态下检查 gateway 加载、注册名称和连接 JSON 的键名。真实通道应增加 `--require-external-gateway --require-all-default-keys`，并把 `--settings-path` 指向仓库外文件；输出不会包含路径或配置值。预检不连接、不订阅、不下单，通过结果不能替代真实 gateway 的连接和长跑验收。完整参数见 [vn.py 模拟交易说明](vnpy-paper-trading.md)。
+运行 `python scripts/check_vnpy_gateway_preflight.py` 可在零连接状态下检查 gateway 加载、注册名称和连接 JSON 的键名。真实通道应增加 `--require-external-gateway --require-all-default-keys`，并把 `--settings-path` 指向仓库外文件；输出不会包含路径或配置值。运行中的 Web/API 也提供 `GET /api/v1/vnpy-paper/gateway/preflight` 和模拟交易页“生产预检”，对当前已加载 runtime 执行相同性质的只读检查，并只返回键名、计数和 reason code。预检不连接、不订阅、不下单，通过结果不能替代真实 gateway 的连接和长跑验收。完整参数见 [vn.py 模拟交易说明](vnpy-paper-trading.md)。

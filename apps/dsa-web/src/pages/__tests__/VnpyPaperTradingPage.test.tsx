@@ -6,6 +6,7 @@ import VnpyPaperTradingPage from '../VnpyPaperTradingPage';
 
 const getStatus = vi.hoisted(() => vi.fn());
 const reconnectGateway = vi.hoisted(() => vi.fn());
+const preflightGateway = vi.hoisted(() => vi.fn());
 const getTaskHealth = vi.hoisted(() => vi.fn());
 const getTaskEvents = vi.hoisted(() => vi.fn());
 const getTaskEventSummary = vi.hoisted(() => vi.fn());
@@ -35,6 +36,7 @@ vi.mock('../../api/vnpyPaperTrading', () => ({
   vnpyPaperTradingApi: {
     getStatus,
     reconnectGateway,
+    preflightGateway,
     getTaskHealth,
     getTaskEvents,
     getTaskEventSummary,
@@ -1004,6 +1006,7 @@ describe('VnpyPaperTradingPage', () => {
   beforeEach(() => {
     getStatus.mockReset();
     reconnectGateway.mockReset();
+    preflightGateway.mockReset();
     getTaskHealth.mockReset();
     getTaskEvents.mockReset();
     getTaskEventSummary.mockReset();
@@ -1037,6 +1040,28 @@ describe('VnpyPaperTradingPage', () => {
       reason: null,
       connect: { connected: true, status: 'connected' },
       reconnect: { lastTrigger: 'manual', lastResult: 'reconnected' },
+    });
+    preflightGateway.mockResolvedValue({
+      schemaVersion: 1,
+      ok: false,
+      failures: ['builtin_gateway_not_external', 'default_setting_keys_missing'],
+      runtimeAvailable: true,
+      gatewayRegistered: true,
+      externalGateway: false,
+      gatewayName: 'DSA_SIM',
+      productionPreflightEnabled: false,
+      settingsProvided: false,
+      settingsValid: true,
+      settingsSource: 'gateway_defaults',
+      settingsInsideRepository: false,
+      defaultSettingKeyCount: 5,
+      providedKeyCount: 0,
+      missingDefaultKeys: ['initial_balance'],
+      connectAttempted: false,
+      subscriptionsCreated: false,
+      ordersCreated: false,
+      settingsPathExposed: false,
+      settingsValuesExposed: false,
     });
     getTaskHealth.mockResolvedValue(taskHealthResponse);
     getTaskEvents.mockResolvedValue(taskEventListResponse);
@@ -1616,6 +1641,22 @@ describe('VnpyPaperTradingPage', () => {
     await waitFor(() => expect(reconnectGateway).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(listAlertTriggers).toHaveBeenCalledTimes(2));
     expect(await screen.findByText('vn.py gateway 已重新连接')).toBeInTheDocument();
+  });
+
+  it('runs and renders the zero-connect production gateway preflight', async () => {
+    render(
+      <UiLanguageProvider>
+        <VnpyPaperTradingPage />
+      </UiLanguageProvider>,
+    );
+
+    const preflightButton = await screen.findByRole('button', { name: '生产预检' });
+    fireEvent.click(preflightButton);
+
+    await waitFor(() => expect(preflightGateway).toHaveBeenCalledTimes(1));
+    const result = await screen.findByText(/builtin_gateway_not_external/);
+    expect(result).toHaveTextContent('default_setting_keys_missing');
+    expect(result).toHaveTextContent('0/5');
   });
 
   it('renders paper account status, positions, and trades', async () => {

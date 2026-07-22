@@ -1010,6 +1010,41 @@ describe('vnpyPaperTradingApi', () => {
     expect(result.reconnect.attemptCount).toBe(1);
   });
 
+  it('runs a zero-connect gateway preflight and camelCases the contract', async () => {
+    get.mockResolvedValueOnce({
+      data: {
+        schema_version: 1,
+        ok: false,
+        failures: ['builtin_gateway_not_external'],
+        runtime_available: true,
+        gateway_registered: true,
+        external_gateway: false,
+        gateway_name: 'DSA_SIM',
+        production_preflight_enabled: false,
+        settings_provided: false,
+        settings_valid: true,
+        settings_source: 'gateway_defaults',
+        settings_inside_repository: false,
+        default_setting_key_count: 5,
+        provided_key_count: 0,
+        missing_default_keys: ['initial_balance'],
+        connect_attempted: false,
+        subscriptions_created: false,
+        orders_created: false,
+        settings_path_exposed: false,
+        settings_values_exposed: false,
+      },
+    });
+
+    const result = await vnpyPaperTradingApi.preflightGateway();
+
+    expect(get).toHaveBeenCalledWith('/api/v1/vnpy-paper/gateway/preflight');
+    expect(result.ok).toBe(false);
+    expect(result.gatewayName).toBe('DSA_SIM');
+    expect(result.missingDefaultKeys).toEqual(['initial_balance']);
+    expect(result.connectAttempted).toBe(false);
+  });
+
   it('loads Agent return-risk calibration trends with filters', async () => {
     get.mockResolvedValueOnce({
       data: {

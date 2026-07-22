@@ -536,6 +536,10 @@ The readiness and system health status are `warning` because the current time is
 - Deployed vn.py runtime soak validation on 2026-07-20
   - `python -m pytest tests/test_vnpy_deployed_runtime_soak.py -q -p no:cacheprovider`: 4 passed across healthy acceptance, the complete failure matrix, intermittent callback registration, and a live HTTP-contract fixture; compilation and full Flake8 passed.
   - A 75-second read-only run against the Python 3.13.14 API recorded 75/75 successful samples and 100% API/runtime/connected/event-bridge/four-callback ratios, with contract v3, one stable process identity, no response errors, and no new reconnect failures. It did not create an Agent run, plan, or order.
+- Zero-connect gateway preflight Web/API validation on 2026-07-22
+  - Focused runtime/API tests passed 8 cases; focused Web API/page suites passed 64 tests. Web lint completed with no errors and the pre-existing `SettingsPage.tsx:553` hook warning; the TypeScript/Vite production build passed.
+  - The live `GET /api/v1/vnpy-paper/gateway/preflight` response rejected `DSA_SIM` with `builtin_gateway_not_external` and `default_setting_keys_missing`, reported `0/5` configured keys, exposed neither settings paths nor values, and confirmed zero connect, subscription, and order attempts. The current Agent run, observed-event count, connected gateway, and four callbacks remained unchanged.
+  - In-app Browser verification passed on the deployed `/paper-trading` page at the default desktop viewport and at 390 x 844. The `生产预检` action rendered the expected warning and reason codes without horizontal overflow; screenshots were retained as task evidence rather than repository files.
 
 ## Unfinished Goals
 

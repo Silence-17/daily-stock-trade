@@ -456,6 +456,7 @@
 - 零连接 gateway 预检已完成：可校验插件加载、注册名称、连接 JSON 结构和默认键，且生产门禁拒绝内置 `DSA_SIM` 与仓库内敏感配置；下一步仍需由部署方提供具体外部 gateway 插件和脱离仓库的账户配置，再执行连接及长跑验收。
 - 独立 gateway soak 已默认串联预检并升级为 schema v3：预检不通过时在创建 MainEngine 前以 `connection_attempted=false` 退出，生产模式强制外部 gateway、仓库外配置和完整默认键；长跑时长已排除关闭耗时，避免验收窗口虚增。
 - API runtime 新增默认关闭的生产预检开关，启用后启动连接、自动重连和手动重连统一 fail-closed；静态配置失败不会调用 gateway、不会启动重连循环，API 与脱敏诊断保持可用。真实 vn.py 4.4 对 DSA_SIM 的启动/手动重连均已验证为零连接、零订单、零成交。
+- Web 模拟交易页已新增当前 runtime 的零连接“生产预检”，通过只读 API 重新读取外部 JSON 并展示 gateway 是否注册/外部、配置键覆盖和失败 reason code；响应固定声明未连接、未订阅、未下单且不暴露路径或参数值。该能力完成了配置到启动门禁之间的操作闭环，但不替代真实账户连接和长跑证据。
 - 增加 vn.py smoke test 和文档。
 
 Windows Desktop 的 opt-in vn.py 打包已完成实物验收：Python 3.13.14 冻结产物成功导入 vn.py/TA-Lib/内置 gateway，并在无控制台启动下返回健康状态、确认 `DSA_SIM` 连接和四类 EventEngine 回调；Electron 产出 220.6 MiB NSIS 安装器，安装包内后端哈希与已验收产物一致。Linux Docker 也已通过手动 Actions 工作流完成双镜像构建、运行态健康/连接/事件桥/调度门禁和体积增量验收。macOS 脚本已同步相同的依赖、收集与冻结探针契约，但因当前为 Windows 环境未执行 macOS 实物构建。

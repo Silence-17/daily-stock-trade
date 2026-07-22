@@ -465,6 +465,32 @@ class VnpyPaperGatewayReconnectResponse(BaseModel):
     reconnect: Dict[str, Any] = Field(default_factory=dict)
 
 
+class VnpyPaperGatewayPreflightResponse(BaseModel):
+    schema_version: int = 1
+    generated_at: Optional[Any] = None
+    ok: bool = False
+    failures: List[str] = Field(default_factory=list)
+    runtime_available: bool = False
+    gateway_registered: bool = False
+    external_gateway: bool = False
+    gateway_class: Optional[str] = None
+    gateway_name: Optional[str] = None
+    production_preflight_enabled: bool = False
+    settings_provided: bool = False
+    settings_valid: bool = False
+    settings_source: str = "gateway_defaults"
+    settings_error_type: Optional[str] = None
+    settings_inside_repository: bool = False
+    default_setting_key_count: int = 0
+    provided_key_count: int = 0
+    missing_default_keys: List[str] = Field(default_factory=list)
+    connect_attempted: bool = False
+    subscriptions_created: bool = False
+    orders_created: bool = False
+    settings_path_exposed: bool = False
+    settings_values_exposed: bool = False
+
+
 class VnpyPaperPerformanceResponse(BaseModel):
     account: Optional[Dict[str, Any]] = None
     initial_cash: float = 0.0
