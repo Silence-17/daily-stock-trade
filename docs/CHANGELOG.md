@@ -9,12 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [修复] `agent_calibration_shadow` 的跨运行质量快照严格限定最近 90 天、同市场/策略、`trigger_source=agent_calibration_shadow` 且 run 已完成的决策，普通自动交易样本不再混入生产校准
+- [改进] 校准证据和趋势 API 新增不联网的当前 shadow-only 前瞻重算、持久化/当前/有效成熟样本来源以及旧快照范围不明计数；Agent 控制台在两者不同时并列显示当前值和快照值
+- [修复] 缺少 `cross_run_quality` 来源范围证明的历史 shadow 快照降为 unknown，不再计入有效目标观测；run 数及其 shadow 决策仍保留为真实采样和当前前瞻重算证据
+- [测试] 新增前瞻评价来源/状态过滤、shadow 快照范围透传、旧快照淘汰、当前质量无副作用重算和 Web 双值展示回归；在线 API/CLI 均确认 CN/HK/US 当前 shadow-only 成熟样本为 0，读取前后保持 58 runs、161 plans、31 trades
 - [改进] Agent 前瞻补数审计新增成功/失败请求数、实际供应商分布、写入行数和补齐/仍缺失锚点数，区分“数据源请求成功”与“观察窗口已经成熟”
 - [修复] Web vn.py API 客户端保留 `refresh_source_counts` 的动态供应商键，避免通用 camelCase 转换改写 `TencentFetcher` 等来源身份
 - [测试] 新增日线补数成功写入、异常脱敏、刷新后锚点复查及前后端供应商键契约回归
 - [修复] 校准 shadow 在生成新运行快照前自动补齐已经到期候选的前瞻日线，使成熟样本会随交易日推进而增长；正式自动交易和只读证据监控仍不联网补数
 - [改进] Agent 前瞻补数按股票合并重复决策，并跳过尚未达到最短观察期的股票；API 新增补数尝试数和未到期跳过数审计，避免同一股票跨 run 重复联网
-- [测试] 新增重复股票补数去重、跨日期覆盖、未到期跳过和 calibration shadow 启用刷新回归；旧线上路径对 96 条 CN 决策发起 96 次补数耗时 177.68 秒，最终实现收敛为 5 次尝试和 4 个未到期跳过，耗时 10.40 秒且识别出 3 个真实 5 日成熟样本
+- [测试] 新增重复股票补数去重、跨日期覆盖、未到期跳过和 calibration shadow 启用刷新回归；旧线上路径对 96 条 CN 决策发起 96 次补数耗时 177.68 秒，最终实现收敛为 5 次尝试和 4 个未到期跳过，耗时 10.40 秒且在正式全来源质量口径识别出 3 个真实 5 日成熟样本
 - [新功能] 新增只读 `GET /api/v1/vnpy-paper/gateway/preflight` 和 Web“生产预检”操作，可在不连接、不订阅、不下单的前提下检查当前加载的外部 gateway、配置文件位置、默认键完整性和生产门禁状态
 - [改进] Web 外部 gateway 预检只展示 gateway 身份、配置键计数、缺失键和 reason code；连接文件路径、配置值与读取异常正文始终不进入响应
 - [测试] 新增外部 gateway 预检成功、无效配置脱敏、runtime 不可用、API camelCase 和 Web 失败结果展示回归

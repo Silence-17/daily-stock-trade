@@ -231,6 +231,8 @@ class StockSelectionAgentRepository:
         *,
         strategy: Optional[str] = None,
         market: Optional[str] = None,
+        trigger_source: Optional[str] = None,
+        run_status: Optional[str] = None,
         created_from: Optional[datetime] = None,
         created_to: Optional[datetime] = None,
         include_skipped: bool = True,
@@ -241,6 +243,8 @@ class StockSelectionAgentRepository:
         limit = max(1, min(2000, int(limit or 500)))
         strategy_value = str(strategy or "").strip()
         market_value = str(market or "").strip().lower()
+        trigger_source_value = str(trigger_source or "").strip()
+        run_status_value = str(run_status or "").strip()
         created_from_norm = self._datetime_filter_value(created_from)
         created_to_norm = self._datetime_filter_value(created_to)
 
@@ -258,6 +262,12 @@ class StockSelectionAgentRepository:
                 query = query.where(StockSelectionAgentRun.strategy == strategy_value)
             if market_value:
                 query = query.where(StockSelectionAgentDecision.market == market_value)
+            if trigger_source_value:
+                query = query.where(
+                    StockSelectionAgentRun.trigger_source == trigger_source_value
+                )
+            if run_status_value:
+                query = query.where(StockSelectionAgentRun.status == run_status_value)
             if created_from_norm is not None:
                 query = query.where(StockSelectionAgentDecision.created_at >= created_from_norm)
             if created_to_norm is not None:
@@ -1241,6 +1251,7 @@ class StockSelectionAgentRepository:
         version_counts: Counter[str] = Counter()
         market_counts: Counter[str] = Counter()
         strategy_counts: Counter[str] = Counter()
+        run_strategy_counts: Counter[str] = Counter()
         transition_counts: Counter[str] = Counter()
         daily: Dict[str, Dict[str, Any]] = {}
         groups: Dict[str, Dict[str, Any]] = {}
@@ -1249,15 +1260,31 @@ class StockSelectionAgentRepository:
         gate_blocked_count = 0
         latest: Optional[Dict[str, Any]] = None
         max_mature_sample_count = 0
+        scope_mismatch_count = 0
 
         for row in rows:
             run = self._run_to_dict(row)
+            run_strategy_value = str(
+                run.get("strategy") or "unknown"
+            ).strip() or "unknown"
+            run_strategy_counts[run_strategy_value] += 1
             diagnostics = (
                 run.get("diagnostics") if isinstance(run.get("diagnostics"), dict) else {}
             )
             quality = diagnostics.get("cross_run_quality")
             if not isinstance(quality, dict):
                 continue
+            if str(trigger_source or "").strip() == "agent_calibration_shadow":
+                quality_trigger_source = str(
+                    quality.get("trigger_source") or ""
+                ).strip()
+                quality_run_status = str(quality.get("run_status") or "").strip()
+                if (
+                    quality_trigger_source != "agent_calibration_shadow"
+                    or quality_run_status != "completed"
+                ):
+                    scope_mismatch_count += 1
+                    continue
             objective = quality.get("return_risk_objective")
             if not isinstance(objective, dict):
                 continue
@@ -1283,7 +1310,7 @@ class StockSelectionAgentRepository:
             )
             day_key = created_at.date().isoformat() if isinstance(created_at, datetime) else "unknown"
             market_value = str(run.get("market") or "unknown").strip().lower() or "unknown"
-            strategy_value = str(run.get("strategy") or "unknown").strip() or "unknown"
+            strategy_value = run_strategy_value
             mature_sample_count = self._safe_non_negative_int(
                 quality.get("mature_sample_count")
             )
@@ -1412,6 +1439,7 @@ class StockSelectionAgentRepository:
             "scanned_count": len(rows),
             "observed_count": observed_count,
             "unknown_count": unknown_count,
+            "scope_mismatch_count": scope_mismatch_count,
             "observation_rate_pct": (
                 round(observed_count / len(rows) * 100.0, 2) if rows else 0.0
             ),
@@ -1420,6 +1448,7 @@ class StockSelectionAgentRepository:
             "version_counts": dict(sorted(version_counts.items())),
             "market_counts": dict(sorted(market_counts.items())),
             "strategy_counts": dict(sorted(strategy_counts.items())),
+            "run_strategy_counts": dict(sorted(run_strategy_counts.items())),
             "transition_counts": dict(sorted(transition_counts.items())),
             "applied_count": applied_count,
             "applied_rate_pct": (
@@ -1444,6 +1473,13 @@ class StockSelectionAgentRepository:
                 "overlapping_rolling_samples": True,
                 "independent_sample_count_claimed": False,
                 "legacy_runs_without_objective": "unknown",
+                "calibration_shadow_scope_requirement": (
+                    "cross_run_quality.trigger_source=agent_calibration_shadow"
+                    " and cross_run_quality.run_status=completed"
+                    if str(trigger_source or "").strip()
+                    == "agent_calibration_shadow"
+                    else None
+                ),
             },
             "filters": {
                 "trigger_source": trigger_source,

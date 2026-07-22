@@ -34,6 +34,7 @@ from src.repositories.stock_selection_agent_repo import StockSelectionAgentRepos
 from src.repositories.stock_repo import StockRepository
 from src.services.alphasift_service import AlphaSiftService
 from src.services.agent_calibration_evidence_service import (
+    DEFAULT_CALIBRATION_EVIDENCE_WINDOW_DAYS,
     collect_persisted_calibration_evidence,
 )
 from src.services.backtest_service import BacktestService
@@ -2735,6 +2736,15 @@ class VnpyPaperTradingService:
             settings,
             recent_run_context=recent_run_context,
             refresh_missing=calibration_shadow,
+            trigger_source_filter=(run_trigger_source if calibration_shadow else None),
+            run_status_filter=("completed" if calibration_shadow else None),
+            created_from=(
+                datetime.now() - timedelta(
+                    days=DEFAULT_CALIBRATION_EVIDENCE_WINDOW_DAYS
+                )
+                if calibration_shadow
+                else None
+            ),
         )
         recent_run_context["cross_run_quality"] = cross_run_quality
         market_objective = self._build_cross_market_objective(
@@ -6568,6 +6578,9 @@ class VnpyPaperTradingService:
         *,
         recent_run_context: Dict[str, Any],
         refresh_missing: bool = False,
+        trigger_source_filter: Optional[str] = None,
+        run_status_filter: Optional[str] = None,
+        created_from: Optional[datetime] = None,
     ) -> Dict[str, Any]:
         recent_runs = list(recent_run_context.get("runs") or [])
         previous_state = None
@@ -6590,6 +6603,9 @@ class VnpyPaperTradingService:
                 max_decisions=settings.auto_cross_run_max_decisions,
                 previous_state=previous_state,
                 refresh_missing=refresh_missing,
+                trigger_source=trigger_source_filter,
+                run_status=run_status_filter,
+                created_from=created_from,
             )
         except Exception as exc:  # noqa: BLE001 - enabled gate must fail closed.
             logger.warning("Failed to build cross-run Agent quality snapshot: %s", exc)
@@ -13253,6 +13269,7 @@ def build_vnpy_paper_trading_background_tasks(
         evidence = collect_persisted_calibration_evidence(
             service.agent_repo,
             markets=markets,
+            quality_service=StockSelectionAgentBacktestService(service.db),
         )
         evaluation = evidence["evaluation"]
         market_evidence = []

@@ -86,6 +86,7 @@ const calibrationFailureLabels: Record<string, string> = {
   observed_runs_below_threshold: '有效观测不足',
   observation_rate_below_threshold: '观测覆盖率不足',
   mature_samples_below_threshold: '成熟前瞻样本不足',
+  current_forward_quality_unavailable: '当前前瞻质量不可用',
   observation_days_below_threshold: '观察天数不足',
   latest_observation_missing: '缺少最近观测',
   latest_observation_in_future: '最近观测时间异常',
@@ -1178,6 +1179,9 @@ const AgentConsolePage: React.FC = () => {
                       <dt>运行 / 观测</dt>
                       <dd className="mt-1 font-semibold text-foreground">
                         {item.totalRuns} / {item.observedRuns}
+                        {item.unscopedSnapshotCount
+                          ? `（旧快照 ${item.unscopedSnapshotCount}）`
+                          : ''}
                       </dd>
                     </div>
                     <div>
@@ -1190,6 +1194,10 @@ const AgentConsolePage: React.FC = () => {
                       <dt>成熟样本</dt>
                       <dd className="mt-1 font-semibold text-foreground">
                         {item.latestMatureSampleCount}
+                        {item.persistedLatestMatureSampleCount !== undefined
+                        && item.persistedLatestMatureSampleCount !== item.latestMatureSampleCount
+                          ? `（快照 ${item.persistedLatestMatureSampleCount}）`
+                          : ''}
                       </dd>
                     </div>
                     <div>
@@ -1227,12 +1235,19 @@ const AgentConsolePage: React.FC = () => {
                       </td>
                       <td className="px-3 py-2 text-secondary-text">
                         {item.totalRuns} / {item.observedRuns}
+                        {item.unscopedSnapshotCount
+                          ? `（旧快照 ${item.unscopedSnapshotCount}）`
+                          : ''}
                       </td>
                       <td className="px-3 py-2 text-secondary-text">
                         {formatPercent(item.observationRatePct)}
                       </td>
                       <td className="px-3 py-2 text-secondary-text">
                         {item.latestMatureSampleCount}
+                        {item.persistedLatestMatureSampleCount !== undefined
+                        && item.persistedLatestMatureSampleCount !== item.latestMatureSampleCount
+                          ? `（快照 ${item.persistedLatestMatureSampleCount}）`
+                          : ''}
                       </td>
                       <td className="px-3 py-2 text-secondary-text">{item.observationDays}</td>
                       <td className="max-w-md px-3 py-2 text-secondary-text">

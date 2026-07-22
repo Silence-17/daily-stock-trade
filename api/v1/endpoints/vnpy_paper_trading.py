@@ -60,6 +60,7 @@ from src.repositories.portfolio_valuation_health_repo import (
 )
 from src.core import trading_calendar
 from src.services.agent_calibration_evidence_service import (
+    attach_current_forward_quality,
     collect_persisted_calibration_evidence,
 )
 from src.services.alert_service import AlertService
@@ -2671,14 +2672,26 @@ def get_vnpy_paper_agent_return_risk_calibration_trends(
     status: Optional[str] = Query(None, min_length=1, max_length=32),
 ) -> VnpyPaperAgentReturnRiskCalibrationTrendsResponse:
     try:
-        return VnpyPaperAgentReturnRiskCalibrationTrendsResponse.model_validate(
-            _agent_repo().summarize_return_risk_calibration_trends(
+        repository = _agent_repo()
+        summary = repository.summarize_return_risk_calibration_trends(
+            days=days,
+            trigger_source=trigger_source,
+            strategy=strategy,
+            market=market,
+            status=status,
+        )
+        market_value = str(market or "").strip().lower()
+        if market_value and trigger_source:
+            attach_current_forward_quality(
+                {market_value: summary},
+                quality_service=StockSelectionAgentBacktestService(repository.db),
                 days=days,
                 trigger_source=trigger_source,
+                status=str(status or "").strip(),
                 strategy=strategy,
-                market=market,
-                status=status,
             )
+        return VnpyPaperAgentReturnRiskCalibrationTrendsResponse.model_validate(
+            summary
         )
     except Exception as exc:
         raise _internal_error("Summarize Agent return-risk calibration trends failed", exc)
@@ -2693,9 +2706,11 @@ def get_vnpy_paper_agent_return_risk_calibration_trends(
 def get_vnpy_paper_agent_calibration_evidence(
 ) -> VnpyPaperAgentCalibrationEvidenceResponse:
     try:
+        repository = _agent_repo()
         payload = collect_persisted_calibration_evidence(
-            _agent_repo(),
+            repository,
             markets=["cn", "hk", "us"],
+            quality_service=StockSelectionAgentBacktestService(repository.db),
         )
         try:
             payload["alert_delivery"] = _service().get_calibration_alert_delivery(

@@ -585,9 +585,14 @@ const calibrationEvidence = {
         ok: false,
         failures: ['runs_below_threshold', 'mature_samples_below_threshold'],
         totalRuns: 9,
-        observedRuns: 9,
+        observedRuns: 0,
+        unscopedSnapshotCount: 9,
         observationRatePct: 100,
-        latestMatureSampleCount: 0,
+        latestMatureSampleCount: 3,
+        effectiveMatureSampleCount: 3,
+        persistedLatestMatureSampleCount: 0,
+        currentMatureSampleCount: 3,
+        matureSampleSource: 'current_shadow_decisions_and_local_daily_bars',
         observationDays: 2,
       },
       hk: {
@@ -1031,9 +1036,11 @@ describe('AgentConsolePage', () => {
     await waitFor(() => expect(getAgentRun).toHaveBeenCalledWith('ss-agent-test'));
     expect(screen.getByText('今日 Agent 总结')).toBeInTheDocument();
     expect(screen.getByTestId('agent-calibration-evidence')).toHaveTextContent('生产校准证据');
-    expect(screen.getByTestId('agent-calibration-evidence')).toHaveTextContent('9 / 9');
+    expect(screen.getByTestId('agent-calibration-evidence')).toHaveTextContent('9 / 0');
     expect(screen.getByTestId('agent-calibration-evidence')).toHaveTextContent('8 / 8');
     expect(screen.getByTestId('agent-calibration-evidence')).toHaveTextContent('10 / 10');
+    expect(screen.getByTestId('agent-calibration-evidence')).toHaveTextContent('3（快照 0）');
+    expect(screen.getByTestId('agent-calibration-evidence')).toHaveTextContent('旧快照 9');
     expect(screen.getByTestId('agent-calibration-evidence')).toHaveTextContent('成熟前瞻样本不足');
     expect(screen.getByTestId('agent-calibration-alert-delivery')).toHaveTextContent('通知失败');
     expect(screen.getByTestId('agent-calibration-alert-delivery')).toHaveTextContent('feishu #1: 失败 (send_failed)');

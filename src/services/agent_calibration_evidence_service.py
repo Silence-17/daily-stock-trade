@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, Mapping, Optional, Protocol
 
 
@@ -20,6 +20,11 @@ class CalibrationEvidenceRepository(Protocol):
         self,
         **kwargs: Any,
     ) -> Dict[str, Any]:
+        ...
+
+
+class CalibrationForwardQualityService(Protocol):
+    def build_quality_snapshot(self, **kwargs: Any) -> Dict[str, Any]:
         ...
 
 
@@ -41,6 +46,94 @@ def _ratio_pct(value: Any) -> float:
         return max(0.0, min(100.0, float(value or 0.0)))
     except (TypeError, ValueError):
         return 0.0
+
+
+def attach_current_forward_quality(
+    summaries: Mapping[str, Dict[str, Any]],
+    *,
+    quality_service: CalibrationForwardQualityService,
+    days: int,
+    trigger_source: str,
+    status: str,
+    strategy: Optional[str] = None,
+    horizon_days: int = 5,
+    max_decisions: int = 2000,
+) -> None:
+    """Attach a read-only shadow-only quality snapshot to each trend summary."""
+
+    ended_at = datetime.now()
+    started_at = ended_at - timedelta(days=max(1, min(90, int(days or 90))))
+    for market, payload in summaries.items():
+        strategy_value = str(strategy or "").strip()
+        if not strategy_value:
+            strategy_counts = payload.get("run_strategy_counts")
+            if not isinstance(strategy_counts, Mapping):
+                strategy_counts = payload.get("strategy_counts")
+            strategy_counts = (
+                strategy_counts if isinstance(strategy_counts, Mapping) else {}
+            )
+            candidates = sorted(
+                str(name).strip()
+                for name, count in strategy_counts.items()
+                if str(name).strip() and int(count or 0) > 0
+            )
+            if len(candidates) != 1:
+                payload["current_forward_quality"] = {
+                    "available": False,
+                    "reason": (
+                        "strategy_unavailable"
+                        if not candidates
+                        else "multiple_strategies_require_filter"
+                    ),
+                    "strategy_candidates": candidates,
+                    "trigger_source": trigger_source,
+                    "run_status": status,
+                }
+                continue
+            strategy_value = candidates[0]
+        try:
+            quality = quality_service.build_quality_snapshot(
+                strategy=strategy_value,
+                market=market,
+                horizon_days=horizon_days,
+                min_mature_samples=DEFAULT_CALIBRATION_EVIDENCE_MIN_MATURE_SAMPLES,
+                max_decisions=max_decisions,
+                refresh_missing=False,
+                trigger_source=trigger_source,
+                run_status=status,
+                created_from=started_at,
+                created_to=ended_at,
+            )
+            payload["current_forward_quality"] = {
+                "available": True,
+                "reason": "current_shadow_decisions_and_local_daily_bars",
+                "generated_at": quality.get("generated_at"),
+                "strategy": strategy_value,
+                "market": market,
+                "trigger_source": trigger_source,
+                "run_status": status,
+                "window_started_at": started_at.isoformat(timespec="seconds"),
+                "window_ended_at": ended_at.isoformat(timespec="seconds"),
+                "horizon_days": int(quality.get("horizon_days") or horizon_days),
+                "sample_count": int(quality.get("sample_count") or 0),
+                "mature_sample_count": int(quality.get("mature_sample_count") or 0),
+                "state": quality.get("state"),
+                "reason_code": quality.get("reason"),
+                "truncated": bool(quality.get("truncated")),
+                "refresh_missing": False,
+                "creates_agent_runs": False,
+                "places_orders": False,
+            }
+        except Exception as exc:  # noqa: BLE001 - evidence must retain fallback visibility.
+            payload["current_forward_quality"] = {
+                "available": False,
+                "reason": "current_forward_quality_unavailable",
+                "error_type": type(exc).__name__,
+                "strategy": strategy_value,
+                "market": market,
+                "trigger_source": trigger_source,
+                "run_status": status,
+            }
 
 
 def evaluate_calibration_evidence(
@@ -68,8 +161,30 @@ def evaluate_calibration_evidence(
         total = max(0, int(payload.get("total") or 0))
         scanned = max(0, int(payload.get("scanned_count") or 0))
         observed = max(0, int(payload.get("observed_count") or 0))
+        scope_mismatch_count = max(
+            0,
+            int(payload.get("scope_mismatch_count") or 0),
+        )
         observation_rate = _ratio_pct(payload.get("observation_rate_pct"))
-        latest_mature = max(0, int(payload.get("latest_mature_sample_count") or 0))
+        persisted_latest_mature = max(
+            0,
+            int(payload.get("latest_mature_sample_count") or 0),
+        )
+        current_quality = payload.get("current_forward_quality")
+        current_quality = (
+            current_quality if isinstance(current_quality, Mapping) else {}
+        )
+        current_quality_available = bool(current_quality.get("available"))
+        current_mature = (
+            max(0, int(current_quality.get("mature_sample_count") or 0))
+            if current_quality_available
+            else None
+        )
+        effective_mature = (
+            current_mature
+            if current_mature is not None
+            else persisted_latest_mature
+        )
         daily = payload.get("daily") if isinstance(payload.get("daily"), list) else []
         observation_days = len({
             str(item.get("date"))
@@ -109,8 +224,10 @@ def evaluate_calibration_evidence(
             market_failures.append("observed_runs_below_threshold")
         if observation_rate + 1e-12 < min_observation_rate_pct:
             market_failures.append("observation_rate_below_threshold")
-        if latest_mature < min_mature_samples:
+        if effective_mature < min_mature_samples:
             market_failures.append("mature_samples_below_threshold")
+        if current_quality and not current_quality_available:
+            market_failures.append("current_forward_quality_unavailable")
         if observation_days < min_observation_days:
             market_failures.append("observation_days_below_threshold")
         if latest_at is None:
@@ -121,7 +238,14 @@ def evaluate_calibration_evidence(
             market_failures.append("latest_observation_stale")
         if missing_versions:
             market_failures.append("required_versions_missing")
-        if str(latest.get("state") or "").strip().lower() in {"blocked", "unavailable"}:
+        persisted_latest_state = str(latest.get("state") or "").strip().lower() or None
+        current_state = (
+            str(current_quality.get("state") or "").strip().lower() or None
+            if current_quality_available
+            else None
+        )
+        effective_state = current_state or persisted_latest_state
+        if effective_state in {"blocked", "unavailable"}:
             market_failures.append("latest_state_not_deployable")
 
         market_results[market] = {
@@ -129,15 +253,27 @@ def evaluate_calibration_evidence(
             "failures": market_failures,
             "total_runs": total,
             "observed_runs": observed,
+            "unscoped_snapshot_count": scope_mismatch_count,
             "observation_rate_pct": observation_rate,
-            "latest_mature_sample_count": latest_mature,
+            "latest_mature_sample_count": effective_mature,
+            "effective_mature_sample_count": effective_mature,
+            "persisted_latest_mature_sample_count": persisted_latest_mature,
+            "current_mature_sample_count": current_mature,
+            "mature_sample_source": (
+                "current_shadow_decisions_and_local_daily_bars"
+                if current_quality_available
+                else "persisted_agent_run_cross_run_quality_snapshot"
+            ),
+            "current_forward_quality": dict(current_quality),
             "observation_days": observation_days,
             "age_reference_at": age_reference.isoformat(),
             "latest_at": latest_at.isoformat() if latest_at is not None else None,
             "latest_age_hours": (
                 round(latest_age_hours, 3) if latest_age_hours is not None else None
             ),
-            "latest_state": latest.get("state"),
+            "latest_state": effective_state,
+            "persisted_latest_state": persisted_latest_state,
+            "current_state": current_state,
             "version_counts": dict(version_counts),
             "missing_versions": missing_versions,
         }
@@ -169,6 +305,7 @@ def collect_persisted_calibration_evidence(
     days: int = DEFAULT_CALIBRATION_EVIDENCE_WINDOW_DAYS,
     trigger_source: str = "agent_calibration_shadow",
     status: str = "completed",
+    quality_service: Optional[CalibrationForwardQualityService] = None,
 ) -> Dict[str, Any]:
     required_markets = sorted({
         str(item).strip().lower() for item in markets if str(item).strip()
@@ -183,6 +320,14 @@ def collect_persisted_calibration_evidence(
         )
         for market in required_markets
     }
+    if quality_service is not None:
+        attach_current_forward_quality(
+            summaries,
+            quality_service=quality_service,
+            days=days,
+            trigger_source=trigger_source,
+            status=status,
+        )
     evaluation = evaluate_calibration_evidence(
         summaries,
         required_markets=required_markets,
@@ -209,5 +354,11 @@ def collect_persisted_calibration_evidence(
             "places_orders": False,
             "overlapping_rolling_samples": True,
             "independent_sample_count_claimed": False,
+            "effective_mature_sample_source": (
+                "current_shadow_decisions_and_local_daily_bars"
+                if quality_service is not None
+                else "persisted_agent_run_cross_run_quality_snapshot"
+            ),
+            "refreshes_market_data": False,
         },
     }

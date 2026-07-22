@@ -1133,7 +1133,11 @@ describe('vnpyPaperTradingApi', () => {
               total_runs: 9,
               observed_runs: 9,
               observation_rate_pct: 100,
-              latest_mature_sample_count: 0,
+              latest_mature_sample_count: 3,
+              effective_mature_sample_count: 3,
+              persisted_latest_mature_sample_count: 0,
+              current_mature_sample_count: 3,
+              mature_sample_source: 'current_shadow_decisions_and_local_daily_bars',
               observation_days: 2,
             },
           },
@@ -1180,6 +1184,8 @@ describe('vnpyPaperTradingApi', () => {
     );
     expect(result.evaluation.requiredMarkets).toEqual(['cn', 'hk', 'us']);
     expect(result.evaluation.markets.cn.totalRuns).toBe(9);
+    expect(result.evaluation.markets.cn.currentMatureSampleCount).toBe(3);
+    expect(result.evaluation.markets.cn.persistedLatestMatureSampleCount).toBe(0);
     expect(result.methodology.createsAgentRuns).toBe(false);
     expect(result.alertDelivery?.status).toBe('failed');
     expect(result.alertDelivery?.attempts[0].channel).toBe('feishu');

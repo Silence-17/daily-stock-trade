@@ -462,6 +462,35 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         audit = self.service.agent_repo.get_run_detail(result["agent_run_uid"])
         self.assertEqual(audit["diagnostics"]["cross_run_quality"]["state"], "blocked")
 
+    def test_cross_run_quality_snapshot_forwards_calibration_scope(self) -> None:
+        settings = self.service.get_settings()
+        created_from = datetime(2026, 4, 1)
+        quality_service = MagicMock()
+        quality_service.build_quality_snapshot.return_value = {
+            "state": "insufficient_evidence",
+            "reason": "mature_sample_count_below_threshold",
+        }
+
+        with patch(
+            "src.services.vnpy_paper_trading_service.StockSelectionAgentBacktestService",
+            return_value=quality_service,
+        ):
+            result = self.service._cross_run_quality_snapshot(
+                settings,
+                recent_run_context={"runs": []},
+                refresh_missing=True,
+                trigger_source_filter="agent_calibration_shadow",
+                run_status_filter="completed",
+                created_from=created_from,
+            )
+
+        self.assertEqual(result["state"], "insufficient_evidence")
+        call = quality_service.build_quality_snapshot.call_args.kwargs
+        self.assertTrue(call["refresh_missing"])
+        self.assertEqual(call["trigger_source"], "agent_calibration_shadow")
+        self.assertEqual(call["run_status"], "completed")
+        self.assertEqual(call["created_from"], created_from)
+
     def test_cash_order_below_cn_lot_returns_actionable_skip_reason(self) -> None:
         result = self.service.submit_order(
             symbol="600519",
@@ -3979,6 +4008,18 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertEqual(audit["trigger_source"], "agent_calibration_shadow")
         self.assertEqual(audit["max_results"], 2)
         self.assertTrue(build_quality.call_args.kwargs["refresh_missing"])
+        self.assertEqual(
+            build_quality.call_args.kwargs["trigger_source_filter"],
+            "agent_calibration_shadow",
+        )
+        self.assertEqual(
+            build_quality.call_args.kwargs["run_status_filter"],
+            "completed",
+        )
+        self.assertIsInstance(
+            build_quality.call_args.kwargs["created_from"],
+            datetime,
+        )
         record_last_run.assert_not_called()
         persisted = self.service.get_settings()
         self.assertEqual(persisted.auto_market, "cn")
@@ -8677,7 +8718,10 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
             ready_result = monitor["task"]()
 
         self.assertEqual(collect.call_count, 2)
-        collect.assert_called_with(fake_service.agent_repo, markets=["cn", "us"])
+        latest_collect = collect.call_args
+        self.assertEqual(latest_collect.args, (fake_service.agent_repo,))
+        self.assertEqual(latest_collect.kwargs["markets"], ["cn", "us"])
+        self.assertIs(latest_collect.kwargs["quality_service"].db, fake_service.db)
         self.assertTrue(result["accepted"])
         self.assertFalse(result["evidence_ready"])
         self.assertEqual(result["reason"], "calibration_evidence_pending")

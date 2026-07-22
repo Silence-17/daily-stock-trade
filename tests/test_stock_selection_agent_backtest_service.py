@@ -12,7 +12,12 @@ from unittest.mock import patch
 from src.config import Config
 from src.repositories.stock_selection_agent_repo import StockSelectionAgentRepository
 from src.services.stock_selection_agent_backtest_service import StockSelectionAgentBacktestService
-from src.storage import DatabaseManager, StockDaily, StockSelectionAgentDecision
+from src.storage import (
+    DatabaseManager,
+    StockDaily,
+    StockSelectionAgentDecision,
+    StockSelectionAgentRun,
+)
 
 
 class StockSelectionAgentBacktestServiceTestCase(unittest.TestCase):
@@ -52,10 +57,12 @@ class StockSelectionAgentBacktestServiceTestCase(unittest.TestCase):
         created_at: datetime,
         order_result: dict | None = None,
         action: str = "buy",
+        trigger_source: str = "unit_test",
+        run_status: str | None = None,
     ) -> int:
         run = self.repo.create_run(
             run_uid=run_uid,
-            trigger_source="unit_test",
+            trigger_source=trigger_source,
             strategy=strategy,
             market="cn",
         )
@@ -74,6 +81,10 @@ class StockSelectionAgentBacktestServiceTestCase(unittest.TestCase):
             row = session.get(StockSelectionAgentDecision, decision["id"])
             assert row is not None
             row.created_at = created_at
+            if run_status is not None:
+                run_row = session.get(StockSelectionAgentRun, run["id"])
+                assert run_row is not None
+                run_row.status = run_status
             session.commit()
         return int(decision["id"])
 
@@ -245,6 +256,55 @@ class StockSelectionAgentBacktestServiceTestCase(unittest.TestCase):
         self.assertEqual(result["matrix"]["1"]["completed_count"], 0)
         self.assertEqual(result["matrix"]["1"]["unable_reason_counts"], {"invalid_anchor_price": 1})
         self.assertEqual(result["matrix"]["5"]["coverage_pct"], 0.0)
+
+    def test_evaluate_filters_trigger_source_and_completed_runs(self) -> None:
+        anchor = datetime(2024, 1, 1, 10, 0)
+        self._record_decision(
+            run_uid="shadow-completed",
+            strategy="dual_low",
+            symbol="600519",
+            status="skipped",
+            price=100.0,
+            created_at=anchor,
+            action="skip",
+            trigger_source="agent_calibration_shadow",
+            run_status="completed",
+        )
+        self._record_decision(
+            run_uid="auto-completed",
+            strategy="dual_low",
+            symbol="000001",
+            status="filled",
+            price=10.0,
+            created_at=anchor,
+            trigger_source="vnpy_paper_auto",
+            run_status="completed",
+        )
+        self._record_decision(
+            run_uid="shadow-failed",
+            strategy="dual_low",
+            symbol="600000",
+            status="skipped",
+            price=8.0,
+            created_at=anchor,
+            action="skip",
+            trigger_source="agent_calibration_shadow",
+            run_status="failed",
+        )
+
+        result = self.service.evaluate(
+            eval_windows=[5],
+            trigger_source="agent_calibration_shadow",
+            run_status="completed",
+        )
+
+        self.assertEqual(result["total"], 1)
+        self.assertEqual(result["items"][0]["run_uid"], "shadow-completed")
+        self.assertEqual(
+            result["filters"]["trigger_source"],
+            "agent_calibration_shadow",
+        )
+        self.assertEqual(result["filters"]["run_status"], "completed")
 
     def test_refresh_missing_deduplicates_repeated_symbol_decisions(self) -> None:
         earliest_anchor = datetime.now() - timedelta(days=15)

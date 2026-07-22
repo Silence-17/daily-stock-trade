@@ -35,6 +35,10 @@ class StockSelectionAgentBacktestService:
         max_decisions: int = 200,
         previous_state: Optional[str] = None,
         refresh_missing: bool = False,
+        trigger_source: Optional[str] = None,
+        run_status: Optional[str] = None,
+        created_from: Optional[datetime] = None,
+        created_to: Optional[datetime] = None,
     ) -> Dict[str, Any]:
         """Build a deterministic rolling quality state from mature persisted candidates."""
 
@@ -44,6 +48,10 @@ class StockSelectionAgentBacktestService:
         result = self.evaluate(
             strategy=strategy,
             market=market,
+            trigger_source=trigger_source,
+            run_status=run_status,
+            created_from=created_from,
+            created_to=created_to,
             eval_windows=[horizon],
             include_skipped=True,
             max_decisions=max_decisions,
@@ -109,6 +117,10 @@ class StockSelectionAgentBacktestService:
             "changed": bool(previous and previous != state),
             "strategy": strategy,
             "market": market,
+            "trigger_source": trigger_source,
+            "run_status": run_status,
+            "created_from": created_from,
+            "created_to": created_to,
             "selection_quality_state": selection_state,
             "selection_quality_reason": selection_reason,
             "return_risk_objective_state": objective_state,
@@ -263,6 +275,8 @@ class StockSelectionAgentBacktestService:
         *,
         strategy: Optional[str] = None,
         market: Optional[str] = None,
+        trigger_source: Optional[str] = None,
+        run_status: Optional[str] = None,
         created_from: Optional[datetime] = None,
         created_to: Optional[datetime] = None,
         eval_windows: Optional[Iterable[int]] = None,
@@ -281,6 +295,8 @@ class StockSelectionAgentBacktestService:
         source = self.agent_repo.list_forward_evaluation_decisions(
             strategy=strategy,
             market=market,
+            trigger_source=trigger_source,
+            run_status=run_status,
             created_from=created_from,
             created_to=created_to,
             include_skipped=include_skipped,
@@ -430,6 +446,8 @@ class StockSelectionAgentBacktestService:
             "filters": {
                 "strategy": strategy,
                 "market": market,
+                "trigger_source": trigger_source,
+                "run_status": run_status,
                 "created_from": created_from,
                 "created_to": created_to,
                 "include_skipped": bool(include_skipped),

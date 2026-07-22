@@ -911,12 +911,14 @@ class VnpyPaperAgentReturnRiskCalibrationTrendsResponse(BaseModel):
     scanned_count: int = 0
     observed_count: int = 0
     unknown_count: int = 0
+    scope_mismatch_count: int = 0
     observation_rate_pct: float = 0.0
     health: str = "idle"
     state_counts: Dict[str, int] = Field(default_factory=dict)
     version_counts: Dict[str, int] = Field(default_factory=dict)
     market_counts: Dict[str, int] = Field(default_factory=dict)
     strategy_counts: Dict[str, int] = Field(default_factory=dict)
+    run_strategy_counts: Dict[str, int] = Field(default_factory=dict)
     transition_counts: Dict[str, int] = Field(default_factory=dict)
     applied_count: int = 0
     applied_rate_pct: float = 0.0
@@ -927,6 +929,7 @@ class VnpyPaperAgentReturnRiskCalibrationTrendsResponse(BaseModel):
     maximum_utility_pct: Optional[float] = None
     latest_mature_sample_count: int = 0
     max_mature_sample_count: int = 0
+    current_forward_quality: Dict[str, Any] = Field(default_factory=dict)
     latest: Optional[Dict[str, Any]] = None
     groups: List[Dict[str, Any]] = Field(default_factory=list)
     daily: List[Dict[str, Any]] = Field(default_factory=list)

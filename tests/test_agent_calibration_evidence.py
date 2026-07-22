@@ -15,6 +15,7 @@ from scripts.check_agent_calibration_evidence import (
     main,
 )
 from src.services.agent_calibration_evidence_service import (
+    attach_current_forward_quality,
     collect_persisted_calibration_evidence,
 )
 
@@ -186,3 +187,81 @@ def test_shared_collector_reads_each_market_without_write_side_effects() -> None
     assert result["methodology"]["read_only"] is True
     assert result["methodology"]["creates_agent_runs"] is False
     assert result["methodology"]["places_orders"] is False
+
+
+def test_current_shadow_quality_updates_effective_maturity_without_refresh() -> None:
+    summaries = {market: _summary(market) for market in ("cn", "hk", "us")}
+    for payload in summaries.values():
+        payload["latest_mature_sample_count"] = 0
+        payload["strategy_counts"] = {"dual_low": 28}
+
+    class ReadOnlyQualityService:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def build_quality_snapshot(self, **kwargs) -> dict:
+            self.calls.append(kwargs)
+            return {
+                "generated_at": NOW.isoformat(),
+                "state": "healthy",
+                "reason": "forward_quality_thresholds_met",
+                "horizon_days": 5,
+                "sample_count": 28,
+                "mature_sample_count": 24,
+                "truncated": False,
+            }
+
+    quality_service = ReadOnlyQualityService()
+    attach_current_forward_quality(
+        summaries,
+        quality_service=quality_service,
+        days=90,
+        trigger_source="agent_calibration_shadow",
+        status="completed",
+    )
+    result = _evaluate(summaries)
+
+    assert result["ok"] is True
+    assert result["markets"]["cn"]["latest_mature_sample_count"] == 24
+    assert result["markets"]["cn"]["persisted_latest_mature_sample_count"] == 0
+    assert result["markets"]["cn"]["current_mature_sample_count"] == 24
+    assert result["markets"]["cn"]["mature_sample_source"] == (
+        "current_shadow_decisions_and_local_daily_bars"
+    )
+    assert len(quality_service.calls) == 3
+    assert all(call["refresh_missing"] is False for call in quality_service.calls)
+    assert all(
+        call["trigger_source"] == "agent_calibration_shadow"
+        for call in quality_service.calls
+    )
+    assert all(call["run_status"] == "completed" for call in quality_service.calls)
+
+
+def test_current_quality_failure_falls_back_to_persisted_snapshot_safely() -> None:
+    summaries = {market: _summary(market) for market in ("cn", "hk", "us")}
+    for payload in summaries.values():
+        payload["strategy_counts"] = {"dual_low": 28}
+
+    class FailingQualityService:
+        def build_quality_snapshot(self, **kwargs) -> dict:
+            raise RuntimeError("sensitive provider detail")
+
+    attach_current_forward_quality(
+        summaries,
+        quality_service=FailingQualityService(),
+        days=90,
+        trigger_source="agent_calibration_shadow",
+        status="completed",
+    )
+    result = _evaluate(summaries)
+
+    assert result["ok"] is False
+    assert "cn:current_forward_quality_unavailable" in result["failures"]
+    current = result["markets"]["cn"]["current_forward_quality"]
+    assert current["available"] is False
+    assert current["error_type"] == "RuntimeError"
+    assert "sensitive provider detail" not in str(result)
+    assert result["markets"]["cn"]["latest_mature_sample_count"] == 24
+    assert result["markets"]["cn"]["mature_sample_source"] == (
+        "persisted_agent_run_cross_run_quality_snapshot"
+    )

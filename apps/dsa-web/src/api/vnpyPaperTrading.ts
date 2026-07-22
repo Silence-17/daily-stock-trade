@@ -881,12 +881,14 @@ export type VnpyPaperAgentReturnRiskCalibrationTrends = {
   scannedCount: number;
   observedCount: number;
   unknownCount: number;
+  scopeMismatchCount?: number;
   observationRatePct: number;
   health: string;
   stateCounts: Record<string, number>;
   versionCounts: Record<string, number>;
   marketCounts: Record<string, number>;
   strategyCounts: Record<string, number>;
+  runStrategyCounts?: Record<string, number>;
   transitionCounts: Record<string, number>;
   appliedCount: number;
   appliedRatePct: number;
@@ -897,6 +899,7 @@ export type VnpyPaperAgentReturnRiskCalibrationTrends = {
   maximumUtilityPct?: number | null;
   latestMatureSampleCount: number;
   maxMatureSampleCount: number;
+  currentForwardQuality?: Record<string, unknown>;
   latest?: Record<string, unknown> | null;
   groups: VnpyPaperAgentReturnRiskCalibrationGroup[];
   daily: VnpyPaperAgentReturnRiskCalibrationDailyItem[];
@@ -910,8 +913,14 @@ export type VnpyPaperAgentCalibrationMarketEvidence = {
   failures: string[];
   totalRuns: number;
   observedRuns: number;
+  unscopedSnapshotCount?: number;
   observationRatePct: number;
   latestMatureSampleCount: number;
+  effectiveMatureSampleCount?: number;
+  persistedLatestMatureSampleCount?: number;
+  currentMatureSampleCount?: number | null;
+  matureSampleSource?: string;
+  currentForwardQuality?: Record<string, unknown>;
   observationDays: number;
   latestAgeHours?: number | null;
   latestState?: string | null;
@@ -943,6 +952,8 @@ export type VnpyPaperAgentCalibrationEvidence = {
     placesOrders: boolean;
     overlappingRollingSamples: boolean;
     independentSampleCountClaimed: boolean;
+    effectiveMatureSampleSource?: string;
+    refreshesMarketData?: boolean;
   };
   alertDelivery?: {
     status: 'not_recorded' | 'not_attempted' | 'not_configured' | 'suppressed' | 'delivered' | 'failed' | 'unavailable';

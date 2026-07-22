@@ -2798,6 +2798,11 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
         self.assertEqual(calibration_trends["observed_count"], 0)
         self.assertEqual(calibration_trends["unknown_count"], 1)
         self.assertEqual(calibration_trends["health"], "collecting")
+        current_forward_quality = calibration_trends["current_forward_quality"]
+        self.assertTrue(current_forward_quality["available"])
+        self.assertEqual(current_forward_quality["trigger_source"], "unit-test")
+        self.assertEqual(current_forward_quality["run_status"], "completed")
+        self.assertFalse(current_forward_quality["refresh_missing"])
         self.assertTrue(calibration_trends["methodology"]["overlapping_rolling_samples"])
         self.assertFalse(calibration_trends["methodology"]["independent_sample_count_claimed"])
         self.assertEqual(quality_trends["quality_counts"], {"ok": 1})
@@ -3046,6 +3051,7 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
             collect.call_args.kwargs["markets"],
             ["cn", "hk", "us"],
         )
+        self.assertIsNotNone(collect.call_args.kwargs["quality_service"])
 
     def test_calibration_evidence_endpoint_isolates_alert_history_failure(self) -> None:
         payload = {

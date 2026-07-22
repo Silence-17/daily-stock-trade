@@ -137,6 +137,68 @@ class StockSelectionAgentCalibrationTrendsTestCase(unittest.TestCase):
         self.assertEqual(cn_result["latest"]["run_uid"], "guarded-cn")
         self.assertEqual(cn_result["health"], "warning")
 
+    def test_shadow_trends_reject_legacy_unscoped_quality_snapshots(self) -> None:
+        legacy = self.repo.create_run(
+            run_uid="shadow-legacy",
+            trigger_source="agent_calibration_shadow",
+            strategy="dual_low",
+            market="cn",
+            diagnostics={
+                "cross_run_quality": self._quality(
+                    state="healthy",
+                    utility=0.5,
+                    applied=False,
+                    mature_samples=20,
+                )
+            },
+        )
+        scoped_quality = self._quality(
+            state="insufficient_evidence",
+            utility=0.0,
+            applied=False,
+            mature_samples=0,
+        )
+        scoped_quality.update({
+            "trigger_source": "agent_calibration_shadow",
+            "run_status": "completed",
+        })
+        scoped = self.repo.create_run(
+            run_uid="shadow-scoped",
+            trigger_source="agent_calibration_shadow",
+            strategy="dual_low",
+            market="cn",
+            diagnostics={"cross_run_quality": scoped_quality},
+        )
+        for run in (legacy, scoped):
+            self.repo.complete_run(
+                run_id=int(run["id"]),
+                status="completed",
+                candidate_count=0,
+                planned_count=0,
+                submitted_count=0,
+                skipped_count=0,
+            )
+
+        result = self.repo.summarize_return_risk_calibration_trends(
+            days=30,
+            trigger_source="agent_calibration_shadow",
+            market="cn",
+            status="completed",
+        )
+
+        self.assertEqual(result["total"], 2)
+        self.assertEqual(result["observed_count"], 1)
+        self.assertEqual(result["unknown_count"], 1)
+        self.assertEqual(result["scope_mismatch_count"], 1)
+        self.assertEqual(result["run_strategy_counts"], {"dual_low": 2})
+        self.assertEqual(result["strategy_counts"], {"dual_low": 1})
+        self.assertEqual(result["latest"]["run_uid"], "shadow-scoped")
+        self.assertEqual(result["latest_mature_sample_count"], 0)
+        self.assertIn(
+            "trigger_source=agent_calibration_shadow",
+            result["methodology"]["calibration_shadow_scope_requirement"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
