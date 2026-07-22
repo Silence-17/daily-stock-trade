@@ -825,6 +825,8 @@ python main.py --schedule --no-run-immediately
 > 模拟交易页还通过 `GET /api/v1/vnpy-paper/agent-runs/return-risk-calibration-trends` 展示 7/30/90 天长期校准趋势，并随 Agent 策略、市场和状态筛选变化。该视图统计持久化的滚动运行快照及其风险效用，不把彼此重叠的前瞻窗口声明为独立样本；历史 run 缺少目标快照时会标为 `unknown`，不会被推断为健康。
 >
 > 可用 `python scripts/check_agent_calibration_evidence.py --base-url http://127.0.0.1:8000 --required-version candidate-return-risk-v1 --output-json calibration-evidence.json` 对生产校准证据执行只读门禁。默认只统计 `trigger_source=agent_calibration_shadow` 的无下单采样，并分别检查 A 股、港股和美股最近 90 天至少 20 个 completed run、10 个范围有效目标快照、80% 观测率、20 个当前 shadow-only 成熟前瞻样本、5 个观测日及 72 小时内的新鲜证据；也可重复传 `--market` 或调整显式阈值。旧快照若没有明确记录 `trigger_source=agent_calibration_shadow` 和 `run_status=completed` 会归为 unknown；当前成熟值从同一范围的持久化决策和本地日线只读重算，不联网补数。摘要截断、市场过滤不一致、版本缺失、未来/陈旧时间和最新 blocked/unavailable 状态都会非零退出。输出明确标记滚动窗口有重叠且不声称独立样本，脚本不会创建 Agent run、计划或订单。`agent_calibration_shadow` 的 completed 调度事件还会保留每个市场/策略的受限摘要、运行 UID、候选/计划/提交数和 `submits_orders=false`，便于逐组核验零下单不变量。
+
+> 证据 API 与 Agent 控制台同时读取同一持久化 cadence，按市场展示策略、当前是否可采样及下一次可采样时间；该视图不会提前运行 Agent 或缩短采样间隔。
 > 启用 shadow 后，`agent_calibration_evidence` 后台任务还会把首次证据状态及 ready/pending 变化持久化为 `vnpy_paper` 告警，并复用 alert 通知路由。pending 记为 `degraded`，ready 记为 `resolved`；连续相同状态跨轮询、跨重启保持静默。告警链路异常不会改变只读证据任务的完成状态，也不会触发选股或下单。
 > 同一只读证据 API 和 Agent 控制台还展示最近状态告警的渠道投递摘要：告警时间、尝试/成功/失败/可重试数量、逐渠道尝试号与成功或错误码，以及等待、到期、送达、不可重试或次数耗尽状态。已有 `vnpy_paper_auto_retry` 每 5 分钟重试一次可重试失败，最多 3 轮投递；计数持久化并跨重启延续。成功、未配置渠道、限频抑制和不可重试失败不会重发。该恢复路径只重发通知，不运行 Agent、不创建交易计划或订单；告警历史异常也不会阻断同轮订单恢复。告警历史不可用时只把投递状态标为 `unavailable`，不会让证据接口或页面主体失败；该视图能暴露通知渠道配置问题，但不会把失败渠道误报为已修复。
 

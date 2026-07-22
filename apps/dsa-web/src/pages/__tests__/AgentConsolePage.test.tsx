@@ -622,6 +622,38 @@ const calibrationEvidence = {
     overlappingRollingSamples: true,
     independentSampleCountClaimed: false,
   },
+  samplingSchedule: {
+    schemaVersion: 1,
+    generatedAt: '2026-07-22T05:16:23Z',
+    enabled: true,
+    intervalMinutes: 1440,
+    configuredCount: 3,
+    eligibleCount: 0,
+    nextEligibleAt: '2026-07-23T02:57:05Z',
+    items: [
+      {
+        market: 'cn',
+        strategy: 'dual_low',
+        eligible: false,
+        nextEligibleAt: '2026-07-23T02:57:05Z',
+      },
+      {
+        market: 'hk',
+        strategy: 'hk_liquid_momentum',
+        eligible: false,
+        nextEligibleAt: '2026-07-23T03:05:45Z',
+      },
+      {
+        market: 'us',
+        strategy: 'us_large_cap_momentum',
+        eligible: false,
+        nextEligibleAt: '2026-07-23T02:58:21Z',
+      },
+    ],
+    readOnly: true,
+    createsAgentRuns: false,
+    placesOrders: false,
+  },
   alertDelivery: {
     status: 'failed' as const,
     trigger: {
@@ -1041,6 +1073,9 @@ describe('AgentConsolePage', () => {
     expect(screen.getByTestId('agent-calibration-evidence')).toHaveTextContent('10 / 10');
     expect(screen.getByTestId('agent-calibration-evidence')).toHaveTextContent('3（快照 0）');
     expect(screen.getByTestId('agent-calibration-evidence')).toHaveTextContent('旧快照 9');
+    expect(screen.getByTestId('agent-calibration-evidence')).toHaveTextContent('下一次采样');
+    expect(screen.getByTestId('agent-calibration-evidence')).toHaveTextContent('dual_low');
+    expect(screen.getByTestId('agent-calibration-evidence')).toHaveTextContent('hk_liquid_momentum');
     expect(screen.getByTestId('agent-calibration-evidence')).toHaveTextContent('成熟前瞻样本不足');
     expect(screen.getByTestId('agent-calibration-alert-delivery')).toHaveTextContent('通知失败');
     expect(screen.getByTestId('agent-calibration-alert-delivery')).toHaveTextContent('feishu #1: 失败 (send_failed)');

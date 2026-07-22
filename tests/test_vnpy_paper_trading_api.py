@@ -3036,6 +3036,25 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
             "api.v1.endpoints.vnpy_paper_trading.collect_persisted_calibration_evidence",
             return_value=payload,
         ) as collect, patch(
+            "api.v1.endpoints.vnpy_paper_trading.build_calibration_shadow_schedule",
+            return_value={
+                "schema_version": 1,
+                "enabled": True,
+                "interval_minutes": 1440,
+                "configured_count": 3,
+                "eligible_count": 0,
+                "next_eligible_at": "2026-07-23T10:57:05",
+                "items": [{
+                    "market": "cn",
+                    "strategy": "dual_low",
+                    "eligible": False,
+                    "next_eligible_at": "2026-07-23T10:57:05",
+                }],
+                "read_only": True,
+                "creates_agent_runs": False,
+                "places_orders": False,
+            },
+        ) as schedule, patch(
             "api.v1.endpoints.vnpy_paper_trading.AlertService",
         ) as alert_service:
             alert_service.return_value.get_latest_system_event_delivery.return_value = alert_delivery
@@ -3047,6 +3066,11 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
         self.assertFalse(response.json()["evaluation"]["ok"])
         self.assertTrue(response.json()["methodology"]["read_only"])
         self.assertEqual(response.json()["alert_delivery"], alert_delivery)
+        self.assertEqual(
+            response.json()["sampling_schedule"]["next_eligible_at"],
+            "2026-07-23T10:57:05",
+        )
+        schedule.assert_called_once()
         self.assertEqual(
             collect.call_args.kwargs["markets"],
             ["cn", "hk", "us"],

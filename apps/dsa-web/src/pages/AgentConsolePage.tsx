@@ -1067,6 +1067,17 @@ const AgentConsolePage: React.FC = () => {
     attempts: [],
     retryPolicy: undefined,
   };
+  const calibrationSamplingSchedule = calibrationEvidence?.samplingSchedule;
+  const calibrationScheduleForMarket = (market: string) => (
+    calibrationSamplingSchedule?.items.filter((item) => item.market === market) ?? []
+  );
+  const calibrationScheduleText = (market: string) => {
+    const items = calibrationScheduleForMarket(market);
+    if (items.length === 0) return '-';
+    return items.map((item) => (
+      `${item.strategy}：${item.eligible ? '当前可采样' : formatDateTime(item.nextEligibleAt)}`
+    )).join(' / ');
+  };
 
   const renderStatusBadge = (status: string, label?: string) => (
     <span className={`inline-flex items-center rounded-full border px-2 py-1 text-xs ${statusTone(status)}`}>
@@ -1133,6 +1144,9 @@ const AgentConsolePage: React.FC = () => {
                 {calibrationEvidence.windowDays} 天窗口
                 {' · shadow completed run · '}
                 {formatDateTime(calibrationEvidence.generatedAt)}
+                {calibrationSamplingSchedule?.nextEligibleAt
+                  ? ` · 下一次采样 ${formatDateTime(calibrationSamplingSchedule.nextEligibleAt)}`
+                  : ''}
               </p>
             </div>
             <dl className="grid grid-cols-2 gap-x-6 gap-y-2 text-xs text-secondary-text sm:grid-cols-4">
@@ -1204,6 +1218,12 @@ const AgentConsolePage: React.FC = () => {
                       <dt>观察天数</dt>
                       <dd className="mt-1 font-semibold text-foreground">{item.observationDays}</dd>
                     </div>
+                    <div className="col-span-2">
+                      <dt>下一次采样</dt>
+                      <dd className="mt-1 break-words font-semibold text-foreground">
+                        {calibrationScheduleText(market)}
+                      </dd>
+                    </div>
                   </dl>
                   <p className="mt-2 text-xs leading-5 text-secondary-text">
                     {item.ok ? '已达标' : item.failures.map(calibrationFailureLabel).join('、')}
@@ -1221,6 +1241,7 @@ const AgentConsolePage: React.FC = () => {
                   <th className="px-3 py-2 font-semibold">覆盖率</th>
                   <th className="px-3 py-2 font-semibold">成熟样本</th>
                   <th className="px-3 py-2 font-semibold">观察天数</th>
+                  <th className="px-3 py-2 font-semibold">下一次采样</th>
                   <th className="px-3 py-2 font-semibold">当前缺口</th>
                 </tr>
               </thead>
@@ -1250,6 +1271,9 @@ const AgentConsolePage: React.FC = () => {
                           : ''}
                       </td>
                       <td className="px-3 py-2 text-secondary-text">{item.observationDays}</td>
+                      <td className="min-w-52 px-3 py-2 text-secondary-text">
+                        {calibrationScheduleText(market)}
+                      </td>
                       <td className="max-w-md px-3 py-2 text-secondary-text">
                         {item.ok
                           ? '已达标'

@@ -67,7 +67,10 @@ from src.services.alert_service import AlertService
 from src.services.portfolio_service import PortfolioBusyError
 from src.services.runtime_scheduler import RuntimeSchedulerService
 from src.services.stock_selection_agent_backtest_service import StockSelectionAgentBacktestService
-from src.services.vnpy_paper_trading_service import VnpyPaperTradingService
+from src.services.vnpy_paper_trading_service import (
+    VnpyPaperTradingService,
+    build_calibration_shadow_schedule,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -2712,8 +2715,24 @@ def get_vnpy_paper_agent_calibration_evidence(
             markets=["cn", "hk", "us"],
             quality_service=StockSelectionAgentBacktestService(repository.db),
         )
+        service = _service()
         try:
-            payload["alert_delivery"] = _service().get_calibration_alert_delivery(
+            payload["sampling_schedule"] = build_calibration_shadow_schedule(service)
+        except Exception as exc:  # noqa: BLE001 - schedule visibility must not hide evidence.
+            logger.warning("Load Agent calibration sampling schedule failed: %s", exc)
+            payload["sampling_schedule"] = {
+                "schema_version": 1,
+                "enabled": False,
+                "items": [],
+                "status": "unavailable",
+                "reason": "calibration_schedule_unavailable",
+                "error_type": type(exc).__name__,
+                "read_only": True,
+                "creates_agent_runs": False,
+                "places_orders": False,
+            }
+        try:
+            payload["alert_delivery"] = service.get_calibration_alert_delivery(
                 alert_service=AlertService(),
             )
         except Exception as exc:  # noqa: BLE001 - alert visibility must not hide evidence.

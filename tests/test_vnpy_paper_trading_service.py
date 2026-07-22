@@ -30,6 +30,7 @@ from src.services.vnpy_paper_trading_service import (
     LLM_PRE_TRADE_REVIEW_PROMPT_VERSION,
     VnpyPaperTradingService,
     _resolve_auto_alphasift_llm_policy,
+    build_calibration_shadow_schedule,
     build_vnpy_paper_trading_background_tasks,
 )
 from src.storage import DatabaseManager, StockDaily, StockSelectionAgentTradePlan
@@ -8779,6 +8780,43 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertEqual(result["cadence_skipped_count"], 1)
         self.assertEqual(result["cadence_skips"][0]["latest_run_uid"], "recent-shadow-run")
         self.assertGreater(result["cadence_skips"][0]["remaining_seconds"], 0)
+        fake_service.run_auto_trade_once.assert_not_called()
+
+    def test_calibration_shadow_schedule_exposes_each_pair_without_running_agent(self) -> None:
+        fake_service = MagicMock()
+        fake_service.get_settings.return_value = SimpleNamespace(
+            auto_market="cn",
+            auto_strategy="dual_low",
+        )
+        latest_at = datetime.now() - timedelta(hours=1)
+        fake_service.agent_repo.list_recent_runs.side_effect = [
+            [{
+                "run_uid": "shadow-cn",
+                "status": "completed",
+                "created_at": latest_at.isoformat(),
+            }],
+            [],
+        ]
+        env = {
+            "DSA_AGENT_CALIBRATION_SHADOW_ENABLED": "true",
+            "DSA_AGENT_CALIBRATION_SHADOW_PAIRS": "cn:dual_low,us:us_large_cap_momentum",
+            "DSA_AGENT_CALIBRATION_SHADOW_INTERVAL_MINUTES": "1440",
+        }
+
+        with patch.dict(os.environ, env, clear=False):
+            result = build_calibration_shadow_schedule(fake_service)
+
+        self.assertTrue(result["enabled"])
+        self.assertTrue(result["read_only"])
+        self.assertFalse(result["creates_agent_runs"])
+        self.assertFalse(result["places_orders"])
+        self.assertEqual(result["configured_count"], 2)
+        self.assertEqual(result["eligible_count"], 1)
+        self.assertEqual(result["items"][0]["market"], "cn")
+        self.assertFalse(result["items"][0]["eligible"])
+        self.assertIsNotNone(result["items"][0]["next_eligible_at"])
+        self.assertEqual(result["items"][1]["market"], "us")
+        self.assertTrue(result["items"][1]["eligible"])
         fake_service.run_auto_trade_once.assert_not_called()
 
     def test_calibration_shadow_runs_stale_pairs_while_skipping_fresh_pairs(self) -> None:

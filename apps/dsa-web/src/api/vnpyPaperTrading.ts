@@ -955,6 +955,30 @@ export type VnpyPaperAgentCalibrationEvidence = {
     effectiveMatureSampleSource?: string;
     refreshesMarketData?: boolean;
   };
+  samplingSchedule?: {
+    schemaVersion: number;
+    generatedAt?: string | null;
+    enabled: boolean;
+    intervalMinutes?: number;
+    configuredCount?: number;
+    eligibleCount?: number;
+    nextEligibleAt?: string | null;
+    status?: string;
+    reason?: string;
+    items: Array<{
+      market: string;
+      strategy: string;
+      eligible: boolean;
+      reason?: string;
+      latestRunUid?: string | null;
+      latestCreatedAt?: string | null;
+      remainingSeconds?: number;
+      nextEligibleAt?: string | null;
+    }>;
+    readOnly: boolean;
+    createsAgentRuns: boolean;
+    placesOrders: boolean;
+  };
   alertDelivery?: {
     status: 'not_recorded' | 'not_attempted' | 'not_configured' | 'suppressed' | 'delivered' | 'failed' | 'unavailable';
     reason?: string | null;

@@ -13090,6 +13090,48 @@ def _calibration_shadow_cadence(
     }
 
 
+def build_calibration_shadow_schedule(
+    service: VnpyPaperTradingService,
+) -> Dict[str, Any]:
+    """Expose the persisted shadow cadence without creating runs or market requests."""
+
+    settings = service.get_settings()
+    config = _calibration_shadow_config(settings)
+    interval_seconds = int(config["interval_minutes"]) * 60
+    items = []
+    for market, strategy in config["pairs"]:
+        cadence = _calibration_shadow_cadence(
+            service,
+            market=market,
+            strategy=strategy,
+            interval_seconds=interval_seconds,
+        )
+        items.append({
+            "market": market,
+            "strategy": strategy,
+            **cadence,
+        })
+    future_times = sorted(
+        str(item.get("next_eligible_at") or "").strip()
+        for item in items
+        if not item.get("eligible") and item.get("next_eligible_at")
+    )
+    return {
+        "schema_version": 1,
+        "generated_at": _utc_now_iso(),
+        "enabled": bool(config["enabled"]),
+        "interval_minutes": int(config["interval_minutes"]),
+        "configured_count": len(items),
+        "eligible_count": sum(1 for item in items if item.get("eligible")),
+        "next_eligible_at": future_times[0] if future_times else None,
+        "items": items,
+        "invalid_pairs": list(config["invalid_pairs"]),
+        "read_only": True,
+        "creates_agent_runs": False,
+        "places_orders": False,
+    }
+
+
 def build_vnpy_paper_trading_background_tasks(
     *,
     vnpy_main_engine: Optional[Any] = None,
