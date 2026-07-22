@@ -941,11 +941,19 @@ describe('AgentConsolePage', () => {
       benchmarkSymbol: '000300',
       metrics: {
         totalReturnPct: 8,
+        annualizedReturnPct: 12.5,
         benchmarkReturnPct: 3,
         excessReturnPct: 5,
         maxDrawdownPct: -2,
+        calmarRatio: 6.25,
         periodWinRatePct: 50,
         periodCount: 2,
+        winningPeriodCount: 1,
+        negativePeriodCount: 1,
+        periodReturnVolatilityPct: 4.25,
+        periodDownsideDeviationPct: 2.5,
+        periodSharpeRatio: 1.25,
+        periodSortinoRatio: 2.75,
         totalTurnoverPct: 250,
         averageTurnoverPct: 125,
         endingOpenPositionCount: 1,
@@ -1435,6 +1443,15 @@ describe('AgentConsolePage', () => {
     const results = await screen.findByTestId('agent-portfolio-backtest-results');
     expect(results).toHaveTextContent('8.0%');
     expect(results).toHaveTextContent('5.0%');
+    expect(screen.getByTestId('agent-portfolio-risk-metrics')).toHaveTextContent('年化 12.5%');
+    expect(screen.getByTestId('agent-portfolio-risk-metrics')).toHaveTextContent('000300 · 基准 3.0%');
+    expect(screen.getByTestId('agent-portfolio-risk-metrics')).toHaveTextContent('Calmar 6.250');
+    expect(screen.getByTestId('agent-portfolio-risk-metrics')).toHaveTextContent('1/2 个正收益周期');
+    expect(screen.getByTestId('agent-portfolio-risk-metrics')).toHaveTextContent('周期 Sharpe');
+    expect(screen.getByTestId('agent-portfolio-risk-metrics')).toHaveTextContent('1.250');
+    expect(screen.getByTestId('agent-portfolio-risk-metrics')).toHaveTextContent('周期 Sortino');
+    expect(screen.getByTestId('agent-portfolio-risk-metrics')).toHaveTextContent('2.750');
+    expect(screen.getByTestId('agent-portfolio-risk-metrics')).toHaveTextContent('下行偏差 2.5%');
     expect(results).toHaveTextContent('2024-01-05');
     expect(results).toHaveTextContent('125.0%');
     expect(results).toHaveTextContent('延续');

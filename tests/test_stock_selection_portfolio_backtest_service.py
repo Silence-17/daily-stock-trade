@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import os
+import math
+import statistics
 import tempfile
 import unittest
 from datetime import date
@@ -98,6 +100,50 @@ class StockSelectionPortfolioBacktestServiceTestCase(unittest.TestCase):
         self.assertEqual(result["periods"][1]["holdings"][0]["exit_mode"], "final_horizon_close")
         self.assertTrue(result["methodology"]["lookahead_protection"])
         self.assertFalse(result["methodology"]["places_orders"])
+
+    def test_metrics_include_downside_and_drawdown_adjusted_returns(self) -> None:
+        period_returns = [10.0, -5.0, 8.0, -2.0]
+
+        metrics = self.service._metrics(
+            initial_capital=100_000,
+            final_equity=110_000,
+            benchmark_equity=105_000,
+            period_returns=period_returns,
+            first_entry_date=date(2024, 1, 1),
+            last_exit_date=date(2024, 12, 31),
+            equity_points=[100_000, 110_000, 90_000, 110_000],
+            benchmark_available=True,
+        )
+
+        expected_volatility = statistics.stdev(period_returns)
+        expected_downside = math.sqrt((5.0 ** 2 + 2.0 ** 2) / len(period_returns))
+        expected_sortino = statistics.mean(period_returns) / expected_downside * math.sqrt(4)
+        self.assertEqual(metrics["winning_period_count"], 2)
+        self.assertEqual(metrics["negative_period_count"], 2)
+        self.assertAlmostEqual(metrics["period_return_volatility_pct"], expected_volatility, places=6)
+        self.assertAlmostEqual(metrics["period_downside_deviation_pct"], expected_downside, places=6)
+        self.assertAlmostEqual(metrics["period_sortino_ratio"], expected_sortino, places=6)
+        self.assertAlmostEqual(
+            metrics["calmar_ratio"],
+            metrics["annualized_return_pct"] / abs(metrics["max_drawdown_pct"]),
+            places=6,
+        )
+
+    def test_metrics_do_not_report_infinite_downside_ratios(self) -> None:
+        metrics = self.service._metrics(
+            initial_capital=100_000,
+            final_equity=103_000,
+            benchmark_equity=100_000,
+            period_returns=[1.0, 2.0],
+            first_entry_date=date(2024, 1, 1),
+            last_exit_date=date(2024, 2, 1),
+            equity_points=[100_000, 101_000, 103_000],
+            benchmark_available=False,
+        )
+
+        self.assertEqual(metrics["period_downside_deviation_pct"], 0.0)
+        self.assertIsNone(metrics["period_sortino_ratio"])
+        self.assertIsNone(metrics["calmar_ratio"])
 
     def test_missing_bars_reduce_coverage_without_current_price_fallback(self) -> None:
         self.repository.list_dates.return_value = [date(2024, 1, 1)]

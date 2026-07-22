@@ -2142,20 +2142,38 @@ const AgentConsolePage: React.FC = () => {
                   ))}
                 </div>
               ) : null}
-              <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
+              <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-6" data-testid="agent-portfolio-risk-metrics">
                 <StatTile
                   label="组合收益"
                   value={formatPercent(portfolioBacktest.metrics.totalReturnPct)}
-                  hint={`期末 ${formatMoney(portfolioBacktest.finalEquity)} · 现金 ${formatMoney(portfolioBacktest.metrics.endingCash)} · 零碎股补偿 ${formatMoney(portfolioBacktest.metrics.cashInLieuReceived)}`}
+                  hint={`年化 ${formatPercent(portfolioBacktest.metrics.annualizedReturnPct)} · 期末 ${formatMoney(portfolioBacktest.finalEquity)} · 现金 ${formatMoney(portfolioBacktest.metrics.endingCash)}`}
                 />
                 <StatTile
                   label="超额收益"
                   value={formatPercent(portfolioBacktest.metrics.excessReturnPct)}
-                  hint={portfolioBacktest.benchmarkSymbol || '未配置基准'}
+                  hint={portfolioBacktest.benchmarkSymbol
+                    ? `${portfolioBacktest.benchmarkSymbol} · 基准 ${formatPercent(portfolioBacktest.metrics.benchmarkReturnPct)}`
+                    : '未配置基准'}
                 />
                 <StatTile
                   label="最大回撤"
                   value={formatPercent(portfolioBacktest.metrics.maxDrawdownPct)}
+                  hint={`Calmar ${formatNumber(portfolioBacktest.metrics.calmarRatio, 3)}`}
+                />
+                <StatTile
+                  label="周期胜率"
+                  value={formatPercent(portfolioBacktest.metrics.periodWinRatePct)}
+                  hint={`${portfolioBacktest.metrics.winningPeriodCount ?? 0}/${portfolioBacktest.metrics.periodCount} 个正收益周期`}
+                />
+                <StatTile
+                  label="周期 Sharpe"
+                  value={formatNumber(portfolioBacktest.metrics.periodSharpeRatio, 3)}
+                  hint={`波动 ${formatPercent(portfolioBacktest.metrics.periodReturnVolatilityPct)}`}
+                />
+                <StatTile
+                  label="周期 Sortino"
+                  value={formatNumber(portfolioBacktest.metrics.periodSortinoRatio, 3)}
+                  hint={`下行偏差 ${formatPercent(portfolioBacktest.metrics.periodDownsideDeviationPct)}`}
                 />
                 <StatTile
                   label="数据覆盖"
@@ -2174,7 +2192,7 @@ const AgentConsolePage: React.FC = () => {
                     + Number(portfolioBacktest.metrics.totalTaxes || 0)
                     + Number(portfolioBacktest.metrics.totalSlippageCost || 0),
                   )}
-                  hint={`佣金 ${formatMoney(portfolioBacktest.metrics.totalFees)} · 税 ${formatMoney(portfolioBacktest.metrics.totalTaxes)}`}
+                  hint={`佣金 ${formatMoney(portfolioBacktest.metrics.totalFees)} · 税 ${formatMoney(portfolioBacktest.metrics.totalTaxes)} · 零碎股补偿 ${formatMoney(portfolioBacktest.metrics.cashInLieuReceived)}`}
                 />
               </div>
               <div className="overflow-x-auto rounded-lg border border-border">

@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [改进] 历史组合回测新增周期收益波动率、下行偏差、Sortino 和 Calmar 指标，Agent 控制台同步展示年化收益、基准收益、周期胜率及 Sharpe/Sortino 风险调整结果；无下行或无回撤时不返回无穷比率
 - [改进] Agent 控制台新增只读“生产就绪摘要”，并列展示当前 gateway 零连接生产预检与 A 股/港股/美股校准证据；预检接口异常会独立降级，不再隐藏 Agent 历史与校准状态
 - [新功能] 新增只读 `scripts/check_online_agent_production_acceptance.py` 统一生产验收入口，先执行零连接外部 gateway 预检，再并行收集部署态 runtime 与 scheduler 长跑证据，最后汇总 A 股/港股/美股校准门禁；支持原子检查点、中断保留、陈旧阶段文件隔离和单份 production-ready JSON，且不会触发 Agent run 或订单
 - [chore] flake8 与 pytest 默认排除仓库内已忽略的 `.tools` 工具链目录，避免 vn.py 嵌入式 Python 标准库污染本地后端门禁

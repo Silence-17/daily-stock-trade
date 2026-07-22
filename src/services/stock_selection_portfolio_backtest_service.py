@@ -1445,10 +1445,26 @@ class StockSelectionPortfolioBacktestService:
         )
         max_drawdown = cls._max_drawdown(equity_points)
         win_count = sum(value > 0 for value in period_returns)
+        negative_count = sum(value < 0 for value in period_returns)
         std = statistics.stdev(period_returns) if len(period_returns) > 1 else None
+        downside_deviation = (
+            math.sqrt(statistics.mean(min(value, 0.0) ** 2 for value in period_returns))
+            if period_returns
+            else None
+        )
         sharpe = (
             statistics.mean(period_returns) / std * math.sqrt(len(period_returns))
             if std and std > 0
+            else None
+        )
+        sortino = (
+            statistics.mean(period_returns) / downside_deviation * math.sqrt(len(period_returns))
+            if downside_deviation and downside_deviation > 0
+            else None
+        )
+        calmar = (
+            annualized / abs(max_drawdown)
+            if annualized is not None and max_drawdown < 0
             else None
         )
         return {
@@ -1461,9 +1477,14 @@ class StockSelectionPortfolioBacktestService:
             "max_drawdown_pct": round(max_drawdown, 6),
             "period_count": len(period_returns),
             "winning_period_count": win_count,
+            "negative_period_count": negative_count,
             "period_win_rate_pct": round(win_count / len(period_returns) * 100, 4) if period_returns else None,
             "average_period_return_pct": cls._round(cls._mean(period_returns)),
+            "period_return_volatility_pct": cls._round(std),
+            "period_downside_deviation_pct": cls._round(downside_deviation),
             "period_sharpe_ratio": cls._round(sharpe),
+            "period_sortino_ratio": cls._round(sortino),
+            "calmar_ratio": cls._round(calmar),
             "elapsed_calendar_days": elapsed_days,
         }
 

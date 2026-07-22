@@ -314,6 +314,16 @@ export type AlphaSiftPortfolioBacktestResponse = {
     maxDrawdownPct?: number | null;
     periodWinRatePct?: number | null;
     periodCount: number;
+    winningPeriodCount?: number;
+    negativePeriodCount?: number;
+    averagePeriodReturnPct?: number | null;
+    periodReturnVolatilityPct?: number | null;
+    periodDownsideDeviationPct?: number | null;
+    periodSharpeRatio?: number | null;
+    periodSortinoRatio?: number | null;
+    calmarRatio?: number | null;
+    elapsedCalendarDays?: number | null;
+    benchmarkPeriodCount?: number;
     totalTurnoverPct?: number | null;
     averageTurnoverPct?: number | null;
     endingOpenPositionCount?: number;

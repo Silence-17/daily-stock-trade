@@ -350,7 +350,14 @@ describe('alphasiftApi', () => {
         strategy: 'dual_low',
         market: 'cn',
         snapshot_count: 2,
-        metrics: { total_return_pct: 8, excess_return_pct: 5 },
+        metrics: {
+          total_return_pct: 8,
+          excess_return_pct: 5,
+          period_return_volatility_pct: 4.25,
+          period_downside_deviation_pct: 2.5,
+          period_sortino_ratio: 2.75,
+          calmar_ratio: 6.25,
+        },
         periods: [],
       },
     });
@@ -419,6 +426,10 @@ describe('alphasiftApi', () => {
       }],
       include_persisted_corporate_actions: false,
     });
+    expect(result.metrics.periodReturnVolatilityPct).toBe(4.25);
+    expect(result.metrics.periodDownsideDeviationPct).toBe(2.5);
+    expect(result.metrics.periodSortinoRatio).toBe(2.75);
+    expect(result.metrics.calmarRatio).toBe(6.25);
     expect(result.metrics.excessReturnPct).toBe(5);
   });
 
