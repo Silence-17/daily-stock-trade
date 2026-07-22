@@ -24,6 +24,7 @@ except ModuleNotFoundError:
 import src.auth as auth
 from api.app import create_app
 from api.v1.endpoints.vnpy_paper_trading import (
+    _auto_trade_timing_alignment,
     _system_health_payload,
     _with_valuation_health_history,
 )
@@ -1694,6 +1695,39 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
         self.assertEqual(timing_component["status"], "warning")
         self.assertEqual(timing_component["reason"], "next_auto_run_before_window")
         self.assertNotIn("scheduler_not_running", readiness["blockers"])
+
+    def test_timing_alignment_projects_window_for_next_run_date(self) -> None:
+        with patch(
+            "api.v1.endpoints.vnpy_paper_trading.trading_calendar.build_next_trading_window_context",
+            return_value={
+                "available": True,
+                "market": "cn",
+                "session_date": "2026-07-23",
+                "next_session_date": "2026-07-23",
+                "is_market_open_now": True,
+                "current_open_at": "2026-07-23T09:30:00+08:00",
+                "current_close_at": "2026-07-23T15:00:00+08:00",
+            },
+        ) as projected_window:
+            alignment = _auto_trade_timing_alignment(
+                scheduler_status={},
+                auto_trade_task={"next_run_at": "2026-07-23T09:35:00+08:00"},
+                trading_window={
+                    "market": "cn",
+                    "session_date": "2026-07-22",
+                    "is_market_open_now": False,
+                    "next_open_at": "2026-07-22T13:00:00+08:00",
+                    "next_close_at": "2026-07-22T15:00:00+08:00",
+                },
+                auto_trade_enabled=True,
+                time_gate_enforced=True,
+            )
+
+        self.assertEqual(alignment["status"], "ready")
+        self.assertEqual(alignment["reason"], "next_auto_run_in_window")
+        self.assertEqual(alignment["window_session_date"], "2026-07-23")
+        self.assertEqual(alignment["window_open_at"], "2026-07-23T09:30:00+08:00")
+        projected_window.assert_called_once()
 
     def test_task_health_endpoint_summarizes_scheduler_events(self) -> None:
         scheduler = MagicMock()

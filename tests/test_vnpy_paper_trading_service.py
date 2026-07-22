@@ -8940,14 +8940,75 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
                 "next_open_at": next_open.isoformat(),
                 "time_gate_enforced": True,
             },
+        ), patch(
+            "src.services.vnpy_paper_trading_service.trading_calendar.build_next_trading_window_context",
+            return_value={
+                "available": True,
+                "is_market_open_now": False,
+                "next_open_at": next_open.isoformat(),
+            },
         ):
             tasks = build_vnpy_paper_trading_background_tasks()
 
         self.assertEqual(tasks[0]["name"], "vnpy_paper_auto_trade")
         delay = tasks[0]["initial_delay_seconds"]
         self.assertIsInstance(delay, int)
-        self.assertGreaterEqual(delay, 3590)
-        self.assertLessEqual(delay, 3600)
+        self.assertGreaterEqual(delay, 3890)
+        self.assertLessEqual(delay, 3900)
+
+    def test_background_task_builder_moves_daily_run_to_next_session_after_same_day_run(self) -> None:
+        self.service.update_settings(
+            {
+                "enabled": True,
+                "auto_trade_enabled": True,
+                "auto_interval_minutes": 1440,
+                "auto_execution_mode": "paper",
+                "auto_trade_time_gate_enabled": True,
+            }
+        )
+        self.service._record_last_auto_run(
+            {
+                "accepted": True,
+                "market": "cn",
+                "strategy": "dual_low",
+                "candidate_count": 3,
+                "submitted_count": 1,
+            }
+        )
+        market_today = datetime.now(timezone(timedelta(hours=8))).date().isoformat()
+        current_close = datetime.now(timezone.utc) + timedelta(hours=2)
+        next_open = datetime.now(timezone.utc) + timedelta(hours=22)
+
+        with patch(
+            "src.services.vnpy_paper_trading_service.VNPY_PAPER_CONFIG_PATH",
+            self.config_path,
+        ), patch.object(
+            VnpyPaperTradingService,
+            "_trading_window_diagnostics",
+            return_value={
+                "available": True,
+                "market": "cn",
+                "is_trading_day": True,
+                "session_date": market_today,
+                "is_market_open_now": True,
+                "current_close_at": current_close.isoformat(),
+                "time_gate_enforced": True,
+            },
+        ), patch(
+            "src.services.vnpy_paper_trading_service.trading_calendar.build_next_trading_window_context",
+            return_value={
+                "available": True,
+                "is_market_open_now": False,
+                "next_open_at": next_open.isoformat(),
+            },
+        ) as projected_window:
+            tasks = build_vnpy_paper_trading_background_tasks()
+
+        delay = tasks[0]["initial_delay_seconds"]
+        self.assertGreaterEqual(delay, (22 * 60 * 60) + 290)
+        self.assertLessEqual(delay, (22 * 60 * 60) + 300)
+        projection_time = projected_window.call_args.kwargs["current_time"]
+        self.assertGreater(projection_time, current_close)
 
 
 def _install_fake_vnpy_modules() -> dict[str, object]:

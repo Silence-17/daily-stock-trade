@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [修复] 日级自动模拟交易不再按 API 进程启动时刻永久漂移；首次任务在可交易窗口开始后保留 5 分钟启动与选股余量，当天已有正式运行时直接对齐下一交易日，分钟级自定义轮询保持原行为
+- [修复] 自动交易 readiness 按下一次任务自己的日期投影对应交易窗口，避免把次日任务与当日收盘时间比较并误报 `next_auto_run_after_window`
+- [测试] 新增日级任务同日防重复跨重启对齐、开盘缓冲和跨日期交易窗口诊断回归
 - [修复] AlphaSift 自动选股 LLM 熔断的半开恢复探针默认预算由 10 秒调整为与正常请求一致的 45 秒并继续受正常请求预算上限约束，避免渠道健康但结构化候选重排尚未完成时反复超时回到熔断
 - [修复] AlphaSift 经 DashScope OpenAI-compatible 通道调用 Qwen 3 系列做结构化排序时默认关闭思考模式，显式 LiteLLM `extra_body` 仍优先，避免思考 Token 挤占 JSON 生成预算且不影响普通分析调用
 - [修复] AlphaSift LLM 重排默认输出上限由 1024 提高到 3072 tokens，避免当前五候选详细 JSON 在首个对象闭合前截断并被误记为 `no_json_found`；显式 `LLM_MAX_TOKENS` 仍优先

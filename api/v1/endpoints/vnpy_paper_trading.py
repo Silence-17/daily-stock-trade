@@ -57,6 +57,7 @@ from src.repositories.stock_selection_agent_repo import StockSelectionAgentRepos
 from src.repositories.portfolio_valuation_health_repo import (
     PortfolioValuationHealthRepository,
 )
+from src.core import trading_calendar
 from src.services.agent_calibration_evidence_service import (
     collect_persisted_calibration_evidence,
 )
@@ -1026,24 +1027,41 @@ def _auto_trade_timing_alignment(
         next_run_at = auto_trade_task.get("next_run_at") or scheduler_status.get("next_run_at")
     else:
         next_run_at = scheduler_status.get("next_run_at")
-    market_open_now = trading_window.get("is_market_open_now") is True
+    next_run_dt = _parse_alignment_datetime(next_run_at)
+    alignment_window = trading_window
+    market = str(trading_window.get("market") or "").strip().lower()
+    if next_run_dt is not None and market:
+        try:
+            projected_window = trading_calendar.build_next_trading_window_context(
+                market=market,
+                current_time=next_run_dt,
+                trigger_source="vnpy_paper_auto",
+                analysis_intent="auto",
+            )
+        except Exception as exc:  # pragma: no cover - status diagnostics stay readable.
+            logger.warning("Failed to project auto-trade timing alignment: %s", exc)
+        else:
+            if projected_window.get("available") is True:
+                alignment_window = projected_window
+    market_open_now = alignment_window.get("is_market_open_now") is True
     window_open_at = (
-        trading_window.get("current_open_at")
+        alignment_window.get("current_open_at")
         if market_open_now
-        else trading_window.get("next_open_at")
+        else alignment_window.get("next_open_at")
     )
     window_close_at = (
-        trading_window.get("current_close_at")
+        alignment_window.get("current_close_at")
         if market_open_now
-        else trading_window.get("next_close_at")
+        else alignment_window.get("next_close_at")
     )
-    next_run_dt = _parse_alignment_datetime(next_run_at)
     open_dt = _parse_alignment_datetime(window_open_at)
     close_dt = _parse_alignment_datetime(window_close_at)
     payload: Dict[str, Any] = {
         "next_run_at": next_run_at,
         "window_open_at": window_open_at,
         "window_close_at": window_close_at,
+        "window_session_date": alignment_window.get("next_session_date")
+        or alignment_window.get("session_date"),
     }
     if not auto_trade_enabled:
         payload.update({

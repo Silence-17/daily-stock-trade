@@ -23,6 +23,7 @@ from dataclasses import asdict, dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 import numpy as np
 
@@ -104,6 +105,8 @@ DEFAULT_AUTO_ALPHASIFT_LLM_FAILURE_THRESHOLD = 1
 DEFAULT_AUTO_ALPHASIFT_LLM_COOLDOWN_MINUTES = 60
 DEFAULT_AUTO_ALPHASIFT_LLM_PROBE_TIMEOUT_SECONDS = 45
 DEFAULT_AUTO_ALPHASIFT_LLM_PROBE_LEASE_SECONDS = 300
+AUTO_TRADE_DAILY_ALIGNMENT_SECONDS = 24 * 60 * 60
+AUTO_TRADE_WINDOW_START_BUFFER_SECONDS = 5 * 60
 ALLOWED_AUTO_MARKETS = {"cn", "hk", "us", "jp", "kr", "tw"}
 CALIBRATION_SHADOW_ENABLED_ENV = "DSA_AGENT_CALIBRATION_SHADOW_ENABLED"
 CALIBRATION_SHADOW_PAIRS_ENV = "DSA_AGENT_CALIBRATION_SHADOW_PAIRS"
@@ -13353,12 +13356,89 @@ def _auto_trade_initial_delay_seconds(
     except Exception as exc:  # pragma: no cover - diagnostics should already be defensive.
         logger.warning("Failed to align vn.py paper auto trade schedule to trading window: %s", exc)
         return None
-    if window.get("is_market_open_now") is True:
+    now = datetime.now(timezone.utc)
+    interval_seconds = int(settings.auto_interval_minutes) * 60
+    if interval_seconds < AUTO_TRADE_DAILY_ALIGNMENT_SECONDS:
+        if window.get("is_market_open_now") is True:
+            return None
+        next_open = VnpyPaperTradingService._parse_utc_datetime(window.get("next_open_at"))
+        if next_open is None:
+            return None
+        delay = math.ceil((next_open - now).total_seconds())
+        return delay if delay > 0 else None
+
+    target = _next_daily_auto_trade_target(service, settings, window=window, now=now)
+    if target is None:
         return None
-    next_open = VnpyPaperTradingService._parse_utc_datetime(window.get("next_open_at"))
-    if next_open is None:
-        return None
-    delay = math.ceil((next_open - datetime.now(timezone.utc)).total_seconds())
+    delay = math.ceil((target - now).total_seconds())
     if delay <= 0:
         return None
     return delay
+
+
+def _next_daily_auto_trade_target(
+    service: VnpyPaperTradingService,
+    settings: VnpyPaperSettings,
+    *,
+    window: Dict[str, Any],
+    now: datetime,
+) -> Optional[datetime]:
+    probe_at = now + timedelta(seconds=AUTO_TRADE_WINDOW_START_BUFFER_SECONDS)
+    if _last_auto_trade_ran_in_session(service, settings, window):
+        current_close = VnpyPaperTradingService._parse_utc_datetime(
+            window.get("current_close_at") or window.get("next_close_at")
+        )
+        probe_at = (
+            current_close + timedelta(seconds=1)
+            if current_close is not None and current_close >= now
+            else now + timedelta(days=1)
+        )
+
+    projected = trading_calendar.build_next_trading_window_context(
+        market=settings.auto_market,
+        current_time=probe_at,
+        trigger_source="vnpy_paper_auto",
+        analysis_intent="auto",
+    )
+    if projected.get("available") is not True:
+        return None
+    if projected.get("is_market_open_now") is True:
+        session_open = VnpyPaperTradingService._parse_utc_datetime(
+            projected.get("current_open_at") or projected.get("next_open_at")
+        )
+        buffered_open = (
+            session_open + timedelta(seconds=AUTO_TRADE_WINDOW_START_BUFFER_SECONDS)
+            if session_open is not None
+            else probe_at
+        )
+        return max(probe_at, buffered_open)
+    next_open = VnpyPaperTradingService._parse_utc_datetime(projected.get("next_open_at"))
+    if next_open is None:
+        return None
+    return next_open + timedelta(seconds=AUTO_TRADE_WINDOW_START_BUFFER_SECONDS)
+
+
+def _last_auto_trade_ran_in_session(
+    service: VnpyPaperTradingService,
+    settings: VnpyPaperSettings,
+    window: Dict[str, Any],
+) -> bool:
+    if window.get("is_trading_day") is not True:
+        return False
+    session_date = str(window.get("session_date") or "").strip()
+    if not session_date:
+        return False
+    payload = service._read_config_payload()
+    last_run = payload.get("last_auto_run") if isinstance(payload, dict) else None
+    if not isinstance(last_run, dict):
+        return False
+    if str(last_run.get("market") or "").strip().lower() != settings.auto_market:
+        return False
+    ran_at = VnpyPaperTradingService._parse_utc_datetime(last_run.get("ran_at"))
+    timezone_name = trading_calendar.MARKET_TIMEZONE.get(settings.auto_market)
+    if ran_at is None or not timezone_name:
+        return False
+    try:
+        return ran_at.astimezone(ZoneInfo(timezone_name)).date().isoformat() == session_date
+    except (KeyError, ValueError):
+        return False
