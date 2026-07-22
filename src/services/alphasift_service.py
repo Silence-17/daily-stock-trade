@@ -23,6 +23,7 @@ from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
+from urllib.parse import urlparse
 
 from fastapi import HTTPException, Request
 from pydantic import BaseModel, Field
@@ -45,7 +46,7 @@ DSA_PRE_RANK_CONTEXT_MAX_CANDIDATES = 3
 DSA_ALPHASIFT_LLM_CANDIDATE_MULTIPLIER = 2
 DSA_ALPHASIFT_LLM_MAX_CANDIDATES = 12
 DSA_ALPHASIFT_LLM_TIMEOUT_SECONDS = 180
-DSA_ALPHASIFT_LLM_MAX_TOKENS = 1024
+DSA_ALPHASIFT_LLM_MAX_TOKENS = 3072
 DSA_ALPHASIFT_DAILY_FETCH_RETRIES = 3
 DSA_ALPHASIFT_US_UNIVERSE_SOURCE_ENV = "DSA_ALPHASIFT_US_UNIVERSE_SOURCE"
 DSA_ALPHASIFT_HK_TICKERS_ENV = "ALPHASIFT_HK_TICKERS"
@@ -3171,6 +3172,7 @@ class DsaEastMoneyHotspotProvider:
         "白银": "贵金属",
         "贵金属": "贵金属",
     }
+
     def __init__(self) -> None:
         import requests
 
@@ -3996,10 +3998,11 @@ def _build_alphasift_context(
         },
     }
 
+
 @contextmanager
 def _alphasift_litellm_headers(config: Config) -> Iterator[None]:
-    header_routes = _build_alphasift_litellm_header_routes(config)
-    if not header_routes:
+    completion_routes = _build_alphasift_litellm_completion_routes(config)
+    if not completion_routes:
         yield
         return
 
@@ -4017,7 +4020,7 @@ def _alphasift_litellm_headers(config: Config) -> Iterator[None]:
     bridge_completion = getattr(completion, _ALPHASIFT_LITELLM_COMPLETION_ATTR, None)
     if bridge_completion:
         token = _ALPHASIFT_LITELLM_COMPLETION_ROUTES.set(
-            tuple(route.copy() for route in header_routes),
+            tuple(route.copy() for route in completion_routes),
         )
         try:
             yield
@@ -4030,7 +4033,8 @@ def _alphasift_litellm_headers(config: Config) -> Iterator[None]:
     def completion_with_dsa_headers(*args: Any, **kwargs: Any) -> Any:
         routes = _ALPHASIFT_LITELLM_COMPLETION_ROUTES.get()
         if routes:
-            headers = _match_alphasift_litellm_headers(args, kwargs, routes)
+            route = _match_alphasift_litellm_completion_route(args, kwargs, routes)
+            headers = route.get("extra_headers") if route else None
             if headers:
                 existing_headers = kwargs.get("extra_headers")
                 if isinstance(existing_headers, dict):
@@ -4041,6 +4045,14 @@ def _alphasift_litellm_headers(config: Config) -> Iterator[None]:
                 elif existing_headers in (None, ""):
                     kwargs = dict(kwargs)
                     kwargs["extra_headers"] = dict(headers)
+            extra_body = route.get("extra_body") if route else None
+            if isinstance(extra_body, dict) and extra_body:
+                merged_body = dict(extra_body)
+                existing_body = kwargs.get("extra_body")
+                if isinstance(existing_body, dict):
+                    merged_body.update(existing_body)
+                kwargs = dict(kwargs)
+                kwargs["extra_body"] = merged_body
         return original_completion(*args, **kwargs)
 
     setattr(completion_with_dsa_headers, _ALPHASIFT_LITELLM_COMPLETION_ATTR, True)
@@ -4053,7 +4065,7 @@ def _alphasift_litellm_headers(config: Config) -> Iterator[None]:
                 setattr(litellm_module, "completion", completion_with_dsa_headers)
 
     token = _ALPHASIFT_LITELLM_COMPLETION_ROUTES.set(
-        tuple(route.copy() for route in header_routes),
+        tuple(route.copy() for route in completion_routes),
     )
     try:
         yield
@@ -4090,7 +4102,7 @@ def _channel_litellm_model_list(channels: List[Dict[str, Any]]) -> List[Dict[str
     return model_list
 
 
-def _build_alphasift_litellm_header_routes(config: Config) -> List[Dict[str, Any]]:
+def _build_alphasift_litellm_completion_routes(config: Config) -> List[Dict[str, Any]]:
     channels = _normalize_dsa_llm_channels(config)
     model_list = _build_alphasift_litellm_model_list(config, channels)
     routes: List[Dict[str, Any]] = []
@@ -4100,27 +4112,52 @@ def _build_alphasift_litellm_header_routes(config: Config) -> List[Dict[str, Any
         params = entry.get("litellm_params") or {}
         if not isinstance(params, dict):
             continue
-        headers = params.get("extra_headers")
-        if not isinstance(headers, dict) or not headers:
-            continue
         model_names = _dedupe_strings([
             entry.get("model_name"),
             params.get("model"),
         ])
         if not model_names:
             continue
+        headers = params.get("extra_headers")
+        if not isinstance(headers, dict):
+            headers = {}
+        api_base = _env_text(params.get("api_base") or params.get("base_url"))
+        extra_body = params.get("extra_body")
+        if not isinstance(extra_body, dict):
+            extra_body = _default_alphasift_litellm_extra_body(model_names, api_base)
+        if not headers and not extra_body:
+            continue
         routes.append(
             {
                 "models": model_names,
                 "api_key": _env_text(params.get("api_key")),
-                "api_base": _env_text(params.get("api_base") or params.get("base_url")),
+                "api_base": api_base,
                 "extra_headers": dict(headers),
+                "extra_body": dict(extra_body),
             }
         )
     return routes
 
 
-def _match_alphasift_litellm_headers(
+def _default_alphasift_litellm_extra_body(
+    model_names: List[str],
+    api_base: str,
+) -> Dict[str, Any]:
+    try:
+        hostname = (urlparse(api_base).hostname or "").lower()
+    except ValueError:
+        return {}
+    if hostname != "dashscope.aliyuncs.com" and not hostname.endswith(
+        ".dashscope.aliyuncs.com"
+    ):
+        return {}
+    normalized_models = [name.lower().split("/", 1)[-1] for name in model_names]
+    if any(name.startswith("qwen3") for name in normalized_models):
+        return {"enable_thinking": False}
+    return {}
+
+
+def _match_alphasift_litellm_completion_route(
     args: Tuple[Any, ...],
     kwargs: Dict[str, Any],
     routes: List[Dict[str, Any]],
@@ -4142,8 +4179,7 @@ def _match_alphasift_litellm_headers(
         route_api_base = _env_text(route.get("api_base"))
         if route_api_base and api_base and route_api_base != api_base:
             continue
-        headers = route.get("extra_headers")
-        return dict(headers) if isinstance(headers, dict) else {}
+        return dict(route)
     return {}
 
 

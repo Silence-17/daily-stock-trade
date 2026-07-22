@@ -3667,6 +3667,94 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
             getattr(fake_litellm.completion, "_alphasift_litellm_completion_bridge", False),
         )
 
+    def test_screen_disables_dashscope_qwen3_thinking_for_structured_ranking(self) -> None:
+        config = Config(
+            alphasift_enabled=True,
+            alphasift_install_spec=DEFAULT_ALPHASIFT_TEST_SPEC,
+            litellm_model="openai/qwen3.5-plus-2026-04-20",
+            llm_channels=[
+                {
+                    "name": "dashscope",
+                    "protocol": "openai",
+                    "enabled": True,
+                    "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                    "api_keys": ["dsa-dashscope-key"],
+                    "models": ["openai/qwen3.5-plus-2026-04-20"],
+                }
+            ],
+        )
+        completion_calls: list[dict[str, object]] = []
+
+        def completion_impl(**kwargs):
+            completion_calls.append(kwargs)
+            return SimpleNamespace(choices=[])
+
+        fake_litellm = SimpleNamespace(completion=completion_impl)
+
+        def screen_impl(_strategy: str, **_kwargs):
+            fake_litellm.completion(
+                model="openai/qwen3.5-plus-2026-04-20",
+                api_key="dsa-dashscope-key",
+                api_base="https://dashscope.aliyuncs.com/compatible-mode/v1",
+                messages=[{"role": "user", "content": "rank"}],
+            )
+            return {"candidates": []}
+
+        fake_module = _make_adapter_module(screen=MagicMock(side_effect=screen_impl))
+
+        with (
+            patch.dict(sys.modules, {"litellm": fake_litellm}, clear=False),
+            patch("src.services.alphasift_service._import_alphasift", return_value=fake_module),
+        ):
+            payload = self._screen(config, market="cn", strategy="dual_low", max_results=5)
+
+        self.assertEqual(payload["candidate_count"], 0)
+        self.assertEqual(completion_calls[0]["extra_body"], {"enable_thinking": False})
+
+    def test_screen_preserves_explicit_dashscope_thinking_override(self) -> None:
+        config = Config(
+            alphasift_enabled=True,
+            alphasift_install_spec=DEFAULT_ALPHASIFT_TEST_SPEC,
+            litellm_model="openai/qwen3.5-plus-2026-04-20",
+            llm_model_list=[
+                {
+                    "model_name": "openai/qwen3.5-plus-2026-04-20",
+                    "litellm_params": {
+                        "model": "openai/qwen3.5-plus-2026-04-20",
+                        "api_key": "dsa-dashscope-key",
+                        "api_base": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                        "extra_body": {"enable_thinking": True},
+                    },
+                },
+            ],
+        )
+        completion_calls: list[dict[str, object]] = []
+
+        def completion_impl(**kwargs):
+            completion_calls.append(kwargs)
+            return SimpleNamespace(choices=[])
+
+        fake_litellm = SimpleNamespace(completion=completion_impl)
+
+        def screen_impl(_strategy: str, **_kwargs):
+            fake_litellm.completion(
+                model="openai/qwen3.5-plus-2026-04-20",
+                api_key="dsa-dashscope-key",
+                api_base="https://dashscope.aliyuncs.com/compatible-mode/v1",
+                messages=[{"role": "user", "content": "rank"}],
+            )
+            return {"candidates": []}
+
+        fake_module = _make_adapter_module(screen=MagicMock(side_effect=screen_impl))
+
+        with (
+            patch.dict(sys.modules, {"litellm": fake_litellm}, clear=False),
+            patch("src.services.alphasift_service._import_alphasift", return_value=fake_module),
+        ):
+            self._screen(config, market="cn", strategy="dual_low", max_results=5)
+
+        self.assertEqual(completion_calls[0]["extra_body"], {"enable_thinking": True})
+
     def test_screen_bridges_legacy_openai_fields_into_alphasift_runtime_env(self) -> None:
         config = Config(
             alphasift_enabled=True,
@@ -4147,11 +4235,11 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
             payload = self._screen(config, market="cn", strategy="dual_low", max_results=5)
 
         self.assertEqual(captured["timeout"], "180")
-        self.assertEqual(captured["max_tokens"], "1024")
+        self.assertEqual(captured["max_tokens"], "3072")
         context = captured["context"]
         self.assertIsInstance(context, dict)
         self.assertEqual(context["llm"]["timeout_sec"], 180)
-        self.assertEqual(context["llm"]["max_tokens"], 1024)
+        self.assertEqual(context["llm"]["max_tokens"], 3072)
         self.assertEqual(payload["candidate_count"], 0)
 
     def test_screen_preserves_explicit_alphasift_llm_timeout_and_token_limits(self) -> None:

@@ -162,7 +162,7 @@ SNAPSHOT_SOURCE_PRIORITY=tushare,sina,efinance,akshare_em,em_datacenter
 
 # AlphaSift 选股运行期默认值；显式配置时会保留你的值
 LLM_TIMEOUT_SEC=180
-LLM_MAX_TOKENS=1024
+LLM_MAX_TOKENS=3072
 DAILY_FETCH_RETRIES=3
 DAILY_FETCH_MAX_WORKERS=1
 ```

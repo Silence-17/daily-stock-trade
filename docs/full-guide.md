@@ -778,7 +778,8 @@ python main.py --schedule --no-run-immediately
 >
 > 连续失败熔断默认保持锁存并支持手动恢复。需要无人值守恢复时，可在模拟交易页显式开启“熔断冷却后自动恢复”并设置冷却分钟数；打开时间会持久化，冷却到期只放行一轮探测，探测失败会重新熔断。页面和状态接口会显示预计探测时间，自动恢复会写入系统告警审计。
 >
-> 自动 Agent 的 AlphaSift LLM 重排另有独立的跨 run 熔断。默认一次超时、无效结构化输出或明确重排失败后，后续自动 run 在 60 分钟冷却期内直接使用确定性 `screen_score`；冷却到期只允许一个 10 秒半开探测，已有探测执行时并发 run 不会重复调用 LLM。探测占用 5 分钟租约，异常退出后会在租约过期时按失败重新进入冷却。可通过 `VNPY_AUTO_ALPHASIFT_LLM_CIRCUIT_BREAKER_ENABLED`、`VNPY_AUTO_ALPHASIFT_LLM_FAILURE_THRESHOLD`、`VNPY_AUTO_ALPHASIFT_LLM_COOLDOWN_MINUTES` 和 `VNPY_AUTO_ALPHASIFT_LLM_PROBE_TIMEOUT_SEC` 调整。运行诊断与 Agent 时间线会保留熔断前后状态、失败原因和探测结果；该策略不影响手工选股。
+> 自动 Agent 的 AlphaSift LLM 重排另有独立的跨 run 熔断。默认一次超时、无效结构化输出或明确重排失败后，后续自动 run 在 60 分钟冷却期内直接使用确定性 `screen_score`；冷却到期只允许一个 45 秒半开探测（且不超过正常请求预算），已有探测执行时并发 run 不会重复调用 LLM。探测占用 5 分钟租约，异常退出后会在租约过期时按失败重新进入冷却。可通过 `VNPY_AUTO_ALPHASIFT_LLM_CIRCUIT_BREAKER_ENABLED`、`VNPY_AUTO_ALPHASIFT_LLM_FAILURE_THRESHOLD`、`VNPY_AUTO_ALPHASIFT_LLM_COOLDOWN_MINUTES` 和 `VNPY_AUTO_ALPHASIFT_LLM_PROBE_TIMEOUT_SEC` 调整。运行诊断与 Agent 时间线会保留熔断前后状态、失败原因和探测结果；该策略不影响手工选股。
+> 使用 DashScope OpenAI-compatible 通道和 Qwen 3 系列模型时，AlphaSift 结构化候选重排默认关闭模型思考模式，让有限请求预算用于生成完整 JSON；重排输出默认上限为 3072 tokens，可容纳当前五候选合同。显式 LiteLLM `model_list` 的 `extra_body` 和 `LLM_MAX_TOKENS` 设置优先。该请求级调整不影响普通分析或其他模型调用。
 >
 > 模拟交易页可独立开启大盘红绿灯、市场宽度和热点退潮门禁。宽度门禁检查最近持久化 `MarketLightSnapshot.dimensions.breadth.score`；热点退潮门禁比较最近两次快照的 `dimensions.limit.score`，将涨跌停强度回落作为确定性代理。任一门禁启用后，最新快照必须存在、可读取且日期有效；页面可设置 1 至 30 个自然日的新鲜度上限，默认 7 天，未来或超期快照会 fail-closed。命中或证据不可用时只阻断新增买入，原因、快照年龄和完整输入写入 `diagnostics.market_context_risk` 与 Agent 时间线；止损、止盈和其他卖出风险收缩不受影响。该能力基于盘后持久化快照，不代表盘中实时宽度。
 >

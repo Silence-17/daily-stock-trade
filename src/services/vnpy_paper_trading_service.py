@@ -102,7 +102,7 @@ DEFAULT_AUTO_ALPHASIFT_LLM_TIMEOUT_SECONDS = 45
 DEFAULT_AUTO_ALPHASIFT_LLM_MAX_RETRIES = 0
 DEFAULT_AUTO_ALPHASIFT_LLM_FAILURE_THRESHOLD = 1
 DEFAULT_AUTO_ALPHASIFT_LLM_COOLDOWN_MINUTES = 60
-DEFAULT_AUTO_ALPHASIFT_LLM_PROBE_TIMEOUT_SECONDS = 10
+DEFAULT_AUTO_ALPHASIFT_LLM_PROBE_TIMEOUT_SECONDS = 45
 DEFAULT_AUTO_ALPHASIFT_LLM_PROBE_LEASE_SECONDS = 300
 ALLOWED_AUTO_MARKETS = {"cn", "hk", "us", "jp", "kr", "tw"}
 CALIBRATION_SHADOW_ENABLED_ENV = "DSA_AGENT_CALIBRATION_SHADOW_ENABLED"
@@ -2932,6 +2932,17 @@ class VnpyPaperTradingService:
             return result
 
         orders: List[Dict[str, Any]] = self._run_auto_sell_checks(settings, run_id=run_id)
+        same_run_exit_orders = {
+            self._normalize_symbol(item.get("symbol") or ""): item
+            for item in orders
+            if str(item.get("side") or "").strip().lower() == "sell"
+            and (
+                bool(item.get("accepted"))
+                or str(item.get("status") or "").strip().lower() == "planned"
+            )
+            and self._normalize_symbol(item.get("symbol") or "")
+        }
+        run_diagnostics["same_run_exit_symbols"] = sorted(same_run_exit_orders)
 
         if cross_run_quality.get("gate_blocked"):
             finish_timing_stage("preflight")
@@ -3309,6 +3320,36 @@ class VnpyPaperTradingService:
                     order=order,
                     reason="symbol_blacklisted",
                     risk_flags=["symbol_blacklisted"],
+                )
+                continue
+            same_run_exit = same_run_exit_orders.get(symbol)
+            if same_run_exit is not None:
+                reason = "same_run_exit_reentry_blocked"
+                order = self._skipped_order(
+                    symbol=symbol,
+                    side="buy",
+                    reason=reason,
+                    raw={
+                        **candidate,
+                        "same_run_exit": {
+                            "status": same_run_exit.get("status"),
+                            "reason": same_run_exit.get("risk_review", {}).get("reason")
+                            if isinstance(same_run_exit.get("risk_review"), dict)
+                            else None,
+                        },
+                    },
+                )
+                orders.append(order)
+                self._record_agent_decision(
+                    run_id=run_id,
+                    sequence=index,
+                    candidate=candidate,
+                    symbol=symbol,
+                    settings=settings,
+                    action="skip",
+                    order=order,
+                    reason=reason,
+                    risk_flags=[reason],
                 )
                 continue
             risk_reason = self._candidate_pre_trade_risk_reason(candidate, settings)
@@ -6705,6 +6746,11 @@ class VnpyPaperTradingService:
             },
             {
                 "reason": "active_vnpy_order_exists",
+                "action": "skip_candidate",
+                "alert": False,
+            },
+            {
+                "reason": "same_run_exit_reentry_blocked",
                 "action": "skip_candidate",
                 "alert": False,
             },

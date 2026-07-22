@@ -84,7 +84,9 @@
 - Web 选股页可启动筛选任务。
 - DSA 已有 Agent 策略 YAML，用于分析视角和风险判断。
 - AlphaSift 调用期可接入 LLM 重排。
-- 自动 Agent 的 AlphaSift LLM 重排已和手工选股拆分运行预算：自动运行默认单次最多等待 45 秒、不重试无效结构化结果，可通过专用环境变量覆盖；失败立即回退 `screen_score`。跨 run 熔断默认在一次失败后跳过后续 LLM，冷却 60 分钟后只允许一个 10 秒半开探测，成功恢复、失败重新冷却；策略与结果写入 `diagnostics.alphasift_llm_policy` / `alphasift_llm_result` 和运行时间线。真实 gateway 长跑仍需继续验证端到端耗时分布。
+- 自动 Agent 的 AlphaSift LLM 重排已和手工选股拆分运行预算：自动运行默认单次最多等待 45 秒、不重试无效结构化结果，可通过专用环境变量覆盖；失败立即回退 `screen_score`。跨 run 熔断默认在一次失败后跳过后续 LLM，冷却 60 分钟后只允许一个 45 秒半开探测（且不超过正常请求预算），成功恢复、失败重新冷却；策略与结果写入 `diagnostics.alphasift_llm_policy` / `alphasift_llm_result` 和运行时间线。真实 gateway 长跑仍需继续验证端到端耗时分布。
+- DashScope Qwen 3 系列用于 AlphaSift 结构化排序时默认关闭长思考模式，并允许显式 LiteLLM `extra_body` 覆盖；该请求级策略不影响普通分析，避免健康渠道因先生成思考内容而反复耗尽排序预算。
+- AlphaSift LLM 重排默认输出上限已从 1024 提高到 3072 tokens，真实五候选请求返回约 1869 tokens、JSON 完整闭合且覆盖率 100%；显式 `LLM_MAX_TOKENS` 继续优先。
 - 自动 Agent 已持久化计划、前置门禁、AlphaSift 筛选、候选决策/执行和总耗时，成功、数据质量阻断与筛选异常路径都能在 Agent 控制台 `performance` 时间线事件中定位耗时；后续生产样本可据此形成阶段耗时基线和长期告警阈值。
 - AlphaSift 预排序上下文已在请求级回调中强制执行声明的 3 候选上限，并复用同票实时行情构建基础面估值；最终 3 个候选的完整新闻/基础面增强改为有界并发并按排名稳定汇总，消除真实 dry-run 中确认的第三方默认 5 候选、重复行情和串行新闻等待。
 - Python 3.13.14 真实服务的三轮同条件 dry-run 均为 3 候选、0 订单：总耗时从 135.36 秒降至 91.91 秒，AlphaSift 从 127.91 秒降至 83.99 秒；最终日志在 snapshot 与 LLM marker 之间严格只有 3 次候选行情调用。45 秒 LLM 超时已接入跨 run 健康熔断和单探测恢复，后续生产样本用于校准失败阈值与冷却时长。

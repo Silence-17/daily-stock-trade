@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [修复] AlphaSift 自动选股 LLM 熔断的半开恢复探针默认预算由 10 秒调整为与正常请求一致的 45 秒并继续受正常请求预算上限约束，避免渠道健康但结构化候选重排尚未完成时反复超时回到熔断
+- [修复] AlphaSift 经 DashScope OpenAI-compatible 通道调用 Qwen 3 系列做结构化排序时默认关闭思考模式，显式 LiteLLM `extra_body` 仍优先，避免思考 Token 挤占 JSON 生成预算且不影响普通分析调用
+- [修复] AlphaSift LLM 重排默认输出上限由 1024 提高到 3072 tokens，避免当前五候选详细 JSON 在首个对象闭合前截断并被误记为 `no_json_found`；显式 `LLM_MAX_TOKENS` 仍优先
+- [修复] 自动卖出已提交或形成计划的股票禁止在同一 Agent run 中立即回补，以 `same_run_exit_reentry_blocked` 审计，避免止盈、止损或持有期限退出后产生无意义同价换手
+- [测试] 新增 AlphaSift 自动选股 LLM 半开探针默认预算、DashScope Qwen 3 非思考请求、显式覆盖优先级和 3072 token 默认合同回归
+- [测试] 新增自动卖出后同轮候选再次命中时阻止回补的服务回归
+
 - [修复] 内置 DSA_SIM 为每个进程会话和显式状态重置生成唯一委托/成交编号前缀，避免服务重启后从 `DSA_SIM.1` 重新计数导致新成交回调与历史流水冲突；Portfolio 的 vn.py 成交幂等身份同时纳入交易日，允许券商跨日合法复用成交号并保持同日重复回调幂等
 - [测试] 新增 DSA_SIM 跨实例委托/成交编号唯一性和 vn.py 跨交易日复用成交号回归；真实 vn.py Python 环境下网关与 paper service 192 项测试通过
 

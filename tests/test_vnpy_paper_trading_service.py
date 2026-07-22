@@ -119,6 +119,20 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertEqual(policy["state"], "closed")
         self.assertEqual(policy["fallback"], "screen_score")
 
+    def test_auto_alphasift_llm_policy_uses_realistic_probe_budget_by_default(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "VNPY_AUTO_ALPHASIFT_LLM_TIMEOUT_SEC": "45",
+                "VNPY_AUTO_ALPHASIFT_LLM_PROBE_TIMEOUT_SEC": "",
+            },
+            clear=False,
+        ):
+            policy = _resolve_auto_alphasift_llm_policy()
+
+        self.assertEqual(policy["normal_timeout_seconds"], 45)
+        self.assertEqual(policy["probe_timeout_seconds"], 45)
+
     def test_auto_alphasift_llm_circuit_skips_repeated_legacy_failure(self) -> None:
         self.service.update_settings(
             {
@@ -6291,6 +6305,62 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertEqual(audit["trade_plans"][0]["side"], "sell")
         self.assertEqual(audit["trade_plans"][0]["status"], "filled")
         self.assertIsNone(audit["trade_plans"][0]["skip_reason"])
+
+    def test_auto_trade_does_not_rebuy_symbol_exited_in_same_run(self) -> None:
+        self.service.submit_order(
+            symbol="600519",
+            side="buy",
+            market="cn",
+            quantity=100,
+            price=10.0,
+        )
+        self.service.update_settings(
+            {
+                "auto_trade_enabled": True,
+                "auto_trade_time_gate_enabled": False,
+                "auto_sell_enabled": True,
+                "auto_stop_loss_pct": 5,
+                "auto_strategy": "dual_low",
+                "auto_max_results": 1,
+                "auto_cash_per_order": 1200,
+            }
+        )
+        fake_alphasift = MagicMock()
+        fake_alphasift.screen.return_value = {
+            "quality_status": "ok",
+            "candidates": [
+                {"code": "600519", "name": "贵州茅台", "score": 80, "price": 9.0},
+            ],
+            "warnings": [],
+        }
+
+        with patch(
+            "src.services.portfolio_service.PortfolioService._fetch_realtime_position_price",
+            return_value=(9.0, "unit-test"),
+        ), patch(
+            "src.services.vnpy_paper_trading_service.AlphaSiftService",
+            return_value=fake_alphasift,
+        ):
+            result = self.service.run_auto_trade_once()
+
+        self.assertEqual(result["submitted_count"], 1)
+        self.assertEqual(result["skipped_count"], 1)
+        self.assertEqual(
+            [(item["side"], item.get("reason")) for item in result["orders"]],
+            [("sell", None), ("buy", "same_run_exit_reentry_blocked")],
+        )
+        audit = self.service.agent_repo.get_run_detail(result["agent_run_uid"])
+        self.assertIsNotNone(audit)
+        assert audit is not None
+        self.assertEqual(audit["diagnostics"]["same_run_exit_symbols"], ["600519"])
+        self.assertEqual(
+            [(item["action"], item["reason"]) for item in audit["decisions"]],
+            [("sell", "stop_loss_triggered"), ("skip", "same_run_exit_reentry_blocked")],
+        )
+        self.assertEqual(
+            audit["trade_plans"][1]["skip_reason"],
+            "same_run_exit_reentry_blocked",
+        )
 
     def test_auto_trade_stop_loss_can_sell_partial_position(self) -> None:
         self.service.submit_order(
