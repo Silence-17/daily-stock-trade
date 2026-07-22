@@ -226,6 +226,21 @@ python scripts\check_vnpy_scheduler_soak.py `
 
 脚本只调用 `/status` 和 `/task-events` 两个 GET 接口。首次成功读取的事件列表仅作为历史基线，终态、失败和重叠跳过只统计随后新增事件；`--require-task` 同时要求任务在配置比例的成功样本中持续注册，并在本次窗口至少产生一个 `completed`、`skipped` 或 `failed` 终态。验收时长应覆盖自动买入和恢复任务各自至少一个执行周期；若自动买入被关闭，只要求 `vnpy_paper_auto_retry`。指定 `--output-json` 时同样默认每 60 秒原子保存 `running` 检查点，并在结束或中断时写入最终生命周期状态。连接失败、接口错误、循环退出、任务消失、缺少终态、失败或重叠跳过超过上限均返回非零退出码。该脚本不调用写接口，也不触发选股、计划或订单。
 
+外部 gateway 已在 Web/API 进程中连接后，可用统一入口一次收集生产总证据：
+
+```powershell
+python scripts\check_online_agent_production_acceptance.py `
+  --base-url http://127.0.0.1:8000 `
+  --expected-gateway-class "<已安装 gateway 的模块:类名>" `
+  --expected-gateway-name "<运行时 gateway 名称>" `
+  --required-version candidate-return-risk-v1 `
+  --output-json "$env:TEMP\online-agent-production-acceptance.json"
+```
+
+统一入口默认观察 24 小时，以覆盖四个后台任务至少一个周期；runtime 与 scheduler 会并行采样，不把窗口翻倍。它先调用 `/gateway/preflight`，若启动期生产预检开关未启用、不是外部 gateway、配置不完整或连接文件位于仓库内，会在启动长跑前以 `phase=preflight_failed` 非零退出。通过后默认要求窗口内出现 account 和 position 新事件、四个后台任务持续注册且各自产生终态，再执行 CN/HK/US 的 90 天校准门禁并要求 `candidate-return-risk-v1` 目标版本。空仓账户无法证明持仓回报链路，应先在独立模拟账户准备可识别持仓；确需改变事件、任务或版本合同，可重复传 `--require-observed-event`、`--require-task` 或 `--required-version`，一旦显式传值就替代相应默认列表。
+
+总报告原子写入 `--output-json`，阶段检查点放在同目录的隐藏 `.文件名.stages` 目录并嵌入最终 JSON；重复运行会先删除该报告精确对应的旧阶段文件，避免陈旧证据误通过。Ctrl+C 会终止两个观察子进程、保存 `phase=interrupted` 并返回 130。该编排器只调用零连接预检和只读 GET 门禁，不连接 gateway、不触发选股、不创建 Agent run、计划或订单；`production_ready=true` 只有外部通道长跑、scheduler 和自然校准证据全部达标时才会出现。
+
 需要验证完整“在线选股 Agent -> 决策/计划 -> vn.py 模拟回报 -> Portfolio”链路时，先运行默认零下单门禁：
 
 ```powershell

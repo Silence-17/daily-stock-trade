@@ -375,6 +375,7 @@
 - gateway 无下单 soak 验收已支持强制重连矩阵：要求观测到重连尝试、成功和最终 connected；DSA_SIM 断线注入会自动启用并校验该门禁，真实 gateway 仍需部署环境提供长时间证据。
 - 新增部署态 runtime 只读长跑验收器：它直接观察承载 Web/API 的进程，不再用旁路 MainEngine 代替主系统证据；可门禁 API/runtime/连接/四类回调持续可用率、contract、进程/gateway 身份变化及自动重连计数增量与单调性，且不调用任何写接口。
 - 部署态 runtime 与 scheduler 两个只读长跑验收器均支持周期性原子检查点和 `running` / `completed` / `interrupted` 生命周期，长窗口被中断时仍保留最后的真实 API 观测。
+- 新增统一只读生产验收编排器 `scripts/check_online_agent_production_acceptance.py`：先做零连接外部 gateway 预检，再并行运行部署态 runtime 与 scheduler 长跑门禁，最后汇总 A 股/港股/美股生产校准证据。总报告原子保存阶段生命周期、退出码和完整脱敏子报告，启动前仅清理同一报告对应的陈旧阶段文件，Ctrl+C 返回 130 并保留中断证据；编排器自身不连接 gateway、不触发 Agent run、不创建计划或订单。当前 DSA_SIM 实跑按预期在预检阶段非零退出，因此仍不能替代真实账户证据。
 - scheduler 后台任务的启动立即执行语义已按任务名跨重载保留：`vnpy_paper_auto_retry` 在连续注册生命周期只启动扫描一次，普通配置 reconcile 不重复扫描，禁用后重新启用会再次执行；自动交易、自动恢复和事件监控的注册状态彼此隔离。
 - 新增 `scripts/check_online_agent_vnpy_e2e.py`，默认以 dry-run 验证真实在线候选、可追溯决策/计划和账本零变化；显式授权后仅允许内置 DSA_SIM 委托，可校验 run/计划终态、EventEngine 四类回调、成交 ID、Portfolio 资金/持仓变化和临时时段门禁恢复。2026-07-20 真实 API 的 dry-run 与全已有持仓安全跳过各通过一轮，正向成交证据由同日 `600015` 1400 股 @ 6.98 的真实 EventEngine 回写提供。
 - 验收门禁已支持隔离账户正向成交：暂停自动买入、创建干净账本、校验成交后恢复原账户/设置并隐藏测试账本，reset 响应丢失也按账户 ID 差分恢复。真实 run `ss-agent-20260720101013-dd345609` 在临时账户完成 3/3 成交及精确资金/持仓对账，随后恢复原账户 2 和全部运行设置。

@@ -676,6 +676,8 @@ python scripts/check_env.py --config
 
 可选 vn.py runtime 建议使用 Python 3.13 隔离环境。Windows PowerShell 运行 `.\scripts\setup_vnpy_runtime.ps1 -PythonExecutable "python"`；脚本会拒绝上游未声明支持的 Python 3.14，安装 `requirements-vnpy.txt`，并用真实 OrderRequest、EventEngine、MainEngine 和内置即时撮合 gateway smoke 验收。安装验收还会运行显式拒单、重复成交回报去重和三轮在途订单断线重连矩阵，确认 `DsaSimulatedGateway` 保留资金、持仓和订单缓存并且每单只入账一次。该网关无需账户参数即可在 Web 走完整 vn.py 模拟订单/成交回写；运行中的 API 可用 `scripts/check_online_agent_vnpy_e2e.py` 验证在线 Agent 到 DSA_SIM 的决策、计划、成交与账本一致性，默认只做 dry-run，模拟下单必须显式授权，`--isolated-account` 可用临时干净账本完成正向成交后恢复原账户，`--trigger-mode scheduler` 还会证明后台定时任务触发并与持久化任务事件关联。真实通道仍须另装具体 gateway 并使用外部连接参数；API runtime 应开启 `VNPY_PRODUCTION_PREFLIGHT_ENABLED=true`，让启动连接和后续重连在 `connect()` 前拒绝模拟 gateway、仓库内配置和缺失默认键。`scripts/check_vnpy_gateway_soak.py` 会先在子进程执行零连接预检，再用独立 MainEngine 做 gateway 零下单验证，生产验收应同时启用 `--require-external-gateway --require-all-default-keys`。实际 Web/API 主进程则用只读 `scripts/check_vnpy_deployed_runtime_soak.py` 门禁 API/runtime/连接/四类回调注册率、窗口内真实事件增量、handler 失败、contract、外部 gateway 身份、进程变化和重连计数单调性，详见 [vn.py 模拟交易](vnpy-paper-trading.md)。
 
+生产部署可进一步运行 `scripts/check_online_agent_production_acceptance.py --output-json <外部证据文件>`：它先做零连接外部 gateway 预检，再并行运行部署态 runtime 与 scheduler 长跑，最后汇总 CN/HK/US 校准门禁。默认 24 小时，要求启动期生产预检已启用、account/position 新事件、四个后台任务终态和 `candidate-return-risk-v1` 目标版本；报告以原子检查点保留 `running` / `completed` / `interrupted` 状态，且不会连接 gateway、触发 Agent 或下单。只有所有阶段都通过才返回 `production_ready=true`，DSA_SIM 会在预检阶段被明确拒绝。
+
 ### 命令行参数
 
 ```bash

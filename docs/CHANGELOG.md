@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [新功能] 新增只读 `scripts/check_online_agent_production_acceptance.py` 统一生产验收入口，先执行零连接外部 gateway 预检，再并行收集部署态 runtime 与 scheduler 长跑证据，最后汇总 A 股/港股/美股校准门禁；支持原子检查点、中断保留、陈旧阶段文件隔离和单份 production-ready JSON，且不会触发 Agent run 或订单
+- [chore] flake8 与 pytest 默认排除仓库内已忽略的 `.tools` 工具链目录，避免 vn.py 嵌入式 Python 标准库污染本地后端门禁
+
 - [改进] 生产校准证据 API 与 Agent 控制台新增逐市场策略、当前采样资格和下一次可采样时间，直接复用持久化 shadow cadence
 - [改进] 为部署态 vn.py runtime 与 scheduler 长跑门禁增加周期性原子检查点和中断证据保留
 - [改进] 为 vn.py gateway 长跑验收增加周期性原子检查点和明确的证据生命周期状态
