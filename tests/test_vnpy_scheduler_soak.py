@@ -4,7 +4,9 @@
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest.mock import patch
 
+import scripts.check_vnpy_scheduler_soak as scheduler_soak
 from scripts.check_vnpy_scheduler_soak import evaluate_scheduler_soak, main
 
 
@@ -193,26 +195,33 @@ def test_scheduler_soak_cli_reads_http_and_excludes_baseline_failures(tmp_path) 
     worker.start()
     output_path = tmp_path / "scheduler-soak.json"
     try:
-        exit_code = main([
-            "--base-url",
-            f"http://127.0.0.1:{server.server_port}",
-            "--duration-seconds",
-            "1",
-            "--sample-interval-seconds",
-            "0.1",
-            "--request-timeout-seconds",
-            "1",
-            "--min-api-success-ratio",
-            "1",
-            "--min-loop-running-ratio",
-            "1",
-            "--min-task-registration-ratio",
-            "1",
-            "--require-task",
-            "vnpy_paper_auto_retry",
-            "--output-json",
-            str(output_path),
-        ])
+        with patch.object(
+            scheduler_soak,
+            "_write_json_file",
+            wraps=scheduler_soak._write_json_file,
+        ) as write_json:
+            exit_code = main([
+                "--base-url",
+                f"http://127.0.0.1:{server.server_port}",
+                "--duration-seconds",
+                "1",
+                "--sample-interval-seconds",
+                "0.1",
+                "--request-timeout-seconds",
+                "1",
+                "--min-api-success-ratio",
+                "1",
+                "--min-loop-running-ratio",
+                "1",
+                "--min-task-registration-ratio",
+                "1",
+                "--require-task",
+                "vnpy_paper_auto_retry",
+                "--checkpoint-interval-seconds",
+                "0.2",
+                "--output-json",
+                str(output_path),
+            ])
     finally:
         server.shutdown()
         server.server_close()
@@ -220,6 +229,11 @@ def test_scheduler_soak_cli_reads_http_and_excludes_baseline_failures(tmp_path) 
 
     report = json.loads(output_path.read_text(encoding="utf-8"))
     assert exit_code == 0
+    phases = [call.args[0]["phase"] for call in write_json.call_args_list]
+    assert "running" in phases
+    assert phases[-1] == "completed"
+    assert report["phase"] == "completed"
+    assert report["checkpoint"] is False
     assert report["evaluation"]["ok"] is True
     assert report["terminal_counts"] == {"vnpy_paper_auto_retry": 1}
     assert report["failed_counts"] == {}

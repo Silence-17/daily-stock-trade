@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import time
 from collections import Counter
 from datetime import datetime, timezone
@@ -75,6 +76,18 @@ def _event_key(event: Dict[str, Any]) -> tuple[str, str, str, str]:
         str(event.get("status") or ""),
         str(event.get("message") or ""),
     )
+
+
+def _write_json_file(result: Dict[str, Any], output_path: Path) -> None:
+    target = output_path.expanduser()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+    encoded = json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True)
+    try:
+        temporary.write_text(encoded + "\n", encoding="utf-8")
+        temporary.replace(target)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def evaluate_scheduler_soak(
@@ -191,6 +204,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--max-failed-count", type=int, default=0)
     parser.add_argument("--max-overlap-skip-count", type=int, default=0)
+    parser.add_argument(
+        "--checkpoint-interval-seconds",
+        type=float,
+        default=60.0,
+        help="Atomically refresh --output-json during the soak (0 disables it).",
+    )
     parser.add_argument("--output-json", type=Path)
     args = parser.parse_args(argv)
 
@@ -243,6 +262,13 @@ def main(argv: list[str] | None = None) -> int:
         minimum=0,
         maximum=100000,
     )
+    checkpoint_interval = _bounded_float(
+        parser,
+        "--checkpoint-interval-seconds",
+        args.checkpoint_interval_seconds,
+        minimum=0.0,
+        maximum=3600.0,
+    )
 
     started_at = _utc_iso()
     started_monotonic = time.monotonic()
@@ -257,6 +283,43 @@ def main(argv: list[str] | None = None) -> int:
     event_baseline_initialized = False
     error_counts: Counter[str] = Counter()
     interrupted = False
+    next_checkpoint_at = started_monotonic + checkpoint_interval
+
+    def build_result(phase: str, elapsed_seconds: float) -> Dict[str, Any]:
+        evaluation = evaluate_scheduler_soak(
+            duration_completed=elapsed_seconds + 1e-6 >= duration,
+            interrupted=phase == "interrupted",
+            sample_count=sample_count,
+            successful_sample_count=successful_sample_count,
+            loop_running_count=loop_running_count,
+            task_registration_counts=dict(task_registration_counts),
+            terminal_counts=dict(terminal_counts),
+            failed_counts=dict(failed_counts),
+            overlap_skip_counts=dict(overlap_skip_counts),
+            required_tasks=args.require_task,
+            min_api_success_ratio=min_api_ratio,
+            min_loop_running_ratio=min_loop_ratio,
+            min_task_registration_ratio=min_task_ratio,
+            max_failed_count=max_failed,
+            max_overlap_skip_count=max_overlap,
+        )
+        return {
+            "schema_version": 1,
+            "phase": phase,
+            "checkpoint": phase == "running",
+            "started_at": started_at,
+            "finished_at": None if phase == "running" else _utc_iso(),
+            "updated_at": _utc_iso(),
+            "duration_seconds": round(elapsed_seconds, 3),
+            "configured_duration_seconds": duration,
+            "base_url": base_url,
+            "evaluation": evaluation,
+            "task_registration_counts": dict(task_registration_counts),
+            "terminal_counts": dict(terminal_counts),
+            "failed_counts": dict(failed_counts),
+            "overlap_skip_counts": dict(overlap_skip_counts),
+            "error_counts": dict(error_counts),
+        }
 
     try:
         while True:
@@ -317,50 +380,33 @@ def main(argv: list[str] | None = None) -> int:
             except (json.JSONDecodeError, UnicodeDecodeError, ValueError, TypeError):
                 error_counts["invalid_response"] += 1
 
-            remaining = duration - (time.monotonic() - started_monotonic)
+            now = time.monotonic()
+            if (
+                args.output_json is not None
+                and checkpoint_interval > 0
+                and now >= next_checkpoint_at
+            ):
+                _write_json_file(
+                    build_result("running", now - started_monotonic),
+                    args.output_json,
+                )
+                while next_checkpoint_at <= now:
+                    next_checkpoint_at += checkpoint_interval
+            remaining = duration - (now - started_monotonic)
             if remaining > 0:
                 time.sleep(min(interval, remaining))
     except KeyboardInterrupt:
         interrupted = True
 
     elapsed_seconds = time.monotonic() - started_monotonic
-    evaluation = evaluate_scheduler_soak(
-        duration_completed=elapsed_seconds + 1e-6 >= duration,
-        interrupted=interrupted,
-        sample_count=sample_count,
-        successful_sample_count=successful_sample_count,
-        loop_running_count=loop_running_count,
-        task_registration_counts=dict(task_registration_counts),
-        terminal_counts=dict(terminal_counts),
-        failed_counts=dict(failed_counts),
-        overlap_skip_counts=dict(overlap_skip_counts),
-        required_tasks=args.require_task,
-        min_api_success_ratio=min_api_ratio,
-        min_loop_running_ratio=min_loop_ratio,
-        min_task_registration_ratio=min_task_ratio,
-        max_failed_count=max_failed,
-        max_overlap_skip_count=max_overlap,
-    )
-    result = {
-        "schema_version": 1,
-        "started_at": started_at,
-        "finished_at": _utc_iso(),
-        "duration_seconds": round(elapsed_seconds, 3),
-        "configured_duration_seconds": duration,
-        "base_url": base_url,
-        "evaluation": evaluation,
-        "task_registration_counts": dict(task_registration_counts),
-        "terminal_counts": dict(terminal_counts),
-        "failed_counts": dict(failed_counts),
-        "overlap_skip_counts": dict(overlap_skip_counts),
-        "error_counts": dict(error_counts),
-    }
-    encoded = json.dumps(result, ensure_ascii=False, indent=2)
+    result = build_result("interrupted" if interrupted else "completed", elapsed_seconds)
+    encoded = json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True)
     print(encoded)
     if args.output_json is not None:
-        args.output_json.parent.mkdir(parents=True, exist_ok=True)
-        args.output_json.write_text(encoded + "\n", encoding="utf-8")
-    return 0 if evaluation["ok"] else 1
+        _write_json_file(result, args.output_json)
+    if interrupted:
+        return 130
+    return 0 if result["evaluation"]["ok"] else 1
 
 
 if __name__ == "__main__":

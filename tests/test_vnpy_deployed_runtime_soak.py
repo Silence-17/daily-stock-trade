@@ -6,7 +6,9 @@ from __future__ import annotations
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest.mock import patch
 
+import scripts.check_vnpy_deployed_runtime_soak as runtime_soak
 from scripts.check_vnpy_deployed_runtime_soak import (
     EVENT_TYPES,
     evaluate_deployed_runtime_soak,
@@ -197,18 +199,25 @@ def test_deployed_runtime_soak_cli_reads_live_contract(tmp_path) -> None:
     worker.start()
     output_path = tmp_path / "nested" / "runtime-soak.json"
     try:
-        exit_code = main([
-            "--base-url",
-            f"http://127.0.0.1:{server.server_port}",
-            "--duration-seconds",
-            "1",
-            "--sample-interval-seconds",
-            "0.1",
-            "--request-timeout-seconds",
-            "1",
-            "--output-json",
-            str(output_path),
-        ])
+        with patch.object(
+            runtime_soak,
+            "_write_json_file",
+            wraps=runtime_soak._write_json_file,
+        ) as write_json:
+            exit_code = main([
+                "--base-url",
+                f"http://127.0.0.1:{server.server_port}",
+                "--duration-seconds",
+                "1",
+                "--sample-interval-seconds",
+                "0.1",
+                "--request-timeout-seconds",
+                "1",
+                "--checkpoint-interval-seconds",
+                "0.2",
+                "--output-json",
+                str(output_path),
+            ])
     finally:
         server.shutdown()
         server.server_close()
@@ -216,6 +225,11 @@ def test_deployed_runtime_soak_cli_reads_live_contract(tmp_path) -> None:
 
     report = json.loads(output_path.read_text(encoding="utf-8"))
     assert exit_code == 0
+    phases = [call.args[0]["phase"] for call in write_json.call_args_list]
+    assert "running" in phases
+    assert phases[-1] == "completed"
+    assert report["phase"] == "completed"
+    assert report["checkpoint"] is False
     assert report["evaluation"]["ok"] is True
     assert report["gateway"] == {
         "added": True,

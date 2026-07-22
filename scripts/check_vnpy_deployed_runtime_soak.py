@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import time
 from collections import Counter
 from datetime import datetime, timezone
@@ -83,6 +84,18 @@ def _read_status(base_url: str, *, timeout_seconds: float) -> Dict[str, Any]:
 
 def _ratio(count: int, total: int) -> float:
     return round(max(0, int(count or 0)) / total, 6) if total else 0.0
+
+
+def _write_json_file(result: Dict[str, Any], output_path: Path) -> None:
+    target = output_path.expanduser()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+    encoded = json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True)
+    try:
+        temporary.write_text(encoded + "\n", encoding="utf-8")
+        temporary.replace(target)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def evaluate_deployed_runtime_soak(
@@ -360,6 +373,12 @@ def main(argv: list[str] | None = None) -> int:
         default=[],
         help="Require a callback type throughout the soak; defaults to all four types.",
     )
+    parser.add_argument(
+        "--checkpoint-interval-seconds",
+        type=float,
+        default=60.0,
+        help="Atomically refresh --output-json during the soak (0 disables it).",
+    )
     parser.add_argument("--output-json", type=Path)
     args = parser.parse_args(argv)
 
@@ -460,6 +479,13 @@ def main(argv: list[str] | None = None) -> int:
         minimum=0,
         maximum=1000000000,
     )
+    checkpoint_interval = _bounded_float(
+        parser,
+        "--checkpoint-interval-seconds",
+        args.checkpoint_interval_seconds,
+        minimum=0.0,
+        maximum=3600.0,
+    )
     required_event_types = sorted(
         {EVENT_TYPES[name] for name in (args.require_event or sorted(EVENT_TYPES))}
     )
@@ -492,6 +518,70 @@ def main(argv: list[str] | None = None) -> int:
     latest_backend: Dict[str, Any] = {}
     latest_gateway: Dict[str, Any] = {}
     interrupted = False
+    next_checkpoint_at = started_monotonic + checkpoint_interval
+
+    def build_result(phase: str, elapsed_seconds: float) -> Dict[str, Any]:
+        evaluation = evaluate_deployed_runtime_soak(
+            duration_completed=elapsed_seconds + 1e-6 >= duration,
+            interrupted=phase == "interrupted",
+            sample_count=sample_count,
+            successful_sample_count=successful_count,
+            runtime_ready_count=runtime_ready_count,
+            connected_count=connected_count,
+            event_bridge_registered_count=bridge_registered_count,
+            event_type_counts=dict(event_type_counts),
+            required_event_types=required_event_types,
+            backend_identity_observation_count=backend_identity_count,
+            process_change_count=process_change_count,
+            gateway_identity_observation_count=gateway_identity_count,
+            gateway_change_count=gateway_change_count,
+            gateway_expectation_mismatch_count=gateway_expectation_mismatch_count,
+            external_gateway_required=bool(args.require_external_gateway),
+            external_gateway_observation_count=external_gateway_observation_count,
+            incompatible_contract_count=incompatible_contract_count,
+            reconnect_attempt_count=reconnect_deltas["attempt"],
+            reconnect_success_count=reconnect_deltas["success"],
+            reconnect_failure_count=reconnect_deltas["failure"],
+            reconnect_counter_regression_count=reconnect_counter_regression_count,
+            observed_event_counts={
+                name: event_observation_deltas[name] for name in EVENT_TYPES
+            },
+            required_observed_events=required_observed_events,
+            min_observed_event_count=min_observed_event_count,
+            event_observation_counter_regression_count=(
+                event_observation_counter_regression_count
+            ),
+            event_handler_failure_count=event_observation_deltas["handler_failure"],
+            min_api_success_ratio=min_api_ratio,
+            min_runtime_ready_ratio=min_runtime_ratio,
+            min_connected_ratio=min_connected_ratio,
+            min_event_bridge_ratio=min_bridge_ratio,
+            max_process_changes=max_process_changes,
+            max_gateway_changes=max_gateway_changes,
+            min_reconnect_success_count=min_reconnect_successes,
+            max_reconnect_failure_count=max_reconnect_failures,
+            max_event_handler_failures=max_event_handler_failures,
+        )
+        return {
+            "schema_version": 2,
+            "phase": phase,
+            "checkpoint": phase == "running",
+            "started_at": started_at,
+            "finished_at": None if phase == "running" else _utc_iso(),
+            "updated_at": _utc_iso(),
+            "configured_duration_seconds": duration,
+            "observed_duration_seconds": round(elapsed_seconds, 3),
+            "sample_interval_seconds": interval,
+            "base_url": base_url,
+            "gateway": latest_gateway,
+            "backend": latest_backend,
+            "event_type_sample_counts": dict(sorted(event_type_counts.items())),
+            "observed_event_deltas": {
+                name: event_observation_deltas[name] for name in sorted(EVENT_TYPES)
+            },
+            "error_counts": dict(sorted(error_counts.items())),
+            "evaluation": evaluation,
+        }
 
     try:
         while True:
@@ -605,80 +695,33 @@ def main(argv: list[str] | None = None) -> int:
             except (json.JSONDecodeError, UnicodeDecodeError, ValueError, TypeError):
                 error_counts["invalid_response"] += 1
 
-            remaining = duration - (time.monotonic() - started_monotonic)
+            now = time.monotonic()
+            if (
+                args.output_json is not None
+                and checkpoint_interval > 0
+                and now >= next_checkpoint_at
+            ):
+                _write_json_file(
+                    build_result("running", now - started_monotonic),
+                    args.output_json,
+                )
+                while next_checkpoint_at <= now:
+                    next_checkpoint_at += checkpoint_interval
+            remaining = duration - (now - started_monotonic)
             if remaining > 0:
                 time.sleep(min(interval, remaining))
     except KeyboardInterrupt:
         interrupted = True
 
     elapsed = time.monotonic() - started_monotonic
-    evaluation = evaluate_deployed_runtime_soak(
-        duration_completed=elapsed + 1e-6 >= duration,
-        interrupted=interrupted,
-        sample_count=sample_count,
-        successful_sample_count=successful_count,
-        runtime_ready_count=runtime_ready_count,
-        connected_count=connected_count,
-        event_bridge_registered_count=bridge_registered_count,
-        event_type_counts=dict(event_type_counts),
-        required_event_types=required_event_types,
-        backend_identity_observation_count=backend_identity_count,
-        process_change_count=process_change_count,
-        gateway_identity_observation_count=gateway_identity_count,
-        gateway_change_count=gateway_change_count,
-        gateway_expectation_mismatch_count=gateway_expectation_mismatch_count,
-        external_gateway_required=bool(args.require_external_gateway),
-        external_gateway_observation_count=external_gateway_observation_count,
-        incompatible_contract_count=incompatible_contract_count,
-        reconnect_attempt_count=reconnect_deltas["attempt"],
-        reconnect_success_count=reconnect_deltas["success"],
-        reconnect_failure_count=reconnect_deltas["failure"],
-        reconnect_counter_regression_count=reconnect_counter_regression_count,
-        observed_event_counts={
-            name: event_observation_deltas[name] for name in EVENT_TYPES
-        },
-        required_observed_events=required_observed_events,
-        min_observed_event_count=min_observed_event_count,
-        event_observation_counter_regression_count=(
-            event_observation_counter_regression_count
-        ),
-        event_handler_failure_count=event_observation_deltas["handler_failure"],
-        min_api_success_ratio=min_api_ratio,
-        min_runtime_ready_ratio=min_runtime_ratio,
-        min_connected_ratio=min_connected_ratio,
-        min_event_bridge_ratio=min_bridge_ratio,
-        max_process_changes=max_process_changes,
-        max_gateway_changes=max_gateway_changes,
-        min_reconnect_success_count=min_reconnect_successes,
-        max_reconnect_failure_count=max_reconnect_failures,
-        max_event_handler_failures=max_event_handler_failures,
-    )
-    result = {
-        "schema_version": 2,
-        "started_at": started_at,
-        "finished_at": _utc_iso(),
-        "configured_duration_seconds": duration,
-        "observed_duration_seconds": round(elapsed, 3),
-        "sample_interval_seconds": interval,
-        "base_url": base_url,
-        "gateway": latest_gateway,
-        "backend": latest_backend,
-        "event_type_sample_counts": dict(sorted(event_type_counts.items())),
-        "observed_event_deltas": {
-            name: event_observation_deltas[name] for name in sorted(EVENT_TYPES)
-        },
-        "error_counts": dict(sorted(error_counts.items())),
-        "evaluation": evaluation,
-    }
+    result = build_result("interrupted" if interrupted else "completed", elapsed)
     encoded = json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True)
     if args.output_json is not None:
-        output_path = args.output_json.expanduser()
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(encoded + "\n", encoding="utf-8")
+        _write_json_file(result, args.output_json)
     print(encoded)
     if interrupted:
         return 130
-    return 0 if evaluation["ok"] else 1
+    return 0 if result["evaluation"]["ok"] else 1
 
 
 if __name__ == "__main__":
