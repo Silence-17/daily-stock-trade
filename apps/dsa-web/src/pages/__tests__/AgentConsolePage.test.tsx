@@ -10,6 +10,7 @@ const getAgentRun = vi.hoisted(() => vi.fn());
 const getAgentDailySummary = vi.hoisted(() => vi.fn());
 const getAgentDataQualityTrends = vi.hoisted(() => vi.fn());
 const getAgentCalibrationEvidence = vi.hoisted(() => vi.fn());
+const preflightGateway = vi.hoisted(() => vi.fn());
 const getAgentCrossRunQuality = vi.hoisted(() => vi.fn());
 const runAgentBacktest = vi.hoisted(() => vi.fn());
 const generateAgentRunRecap = vi.hoisted(() => vi.fn());
@@ -33,6 +34,7 @@ vi.mock('../../api/vnpyPaperTrading', () => ({
     getAgentDailySummary,
     getAgentDataQualityTrends,
     getAgentCalibrationEvidence,
+    preflightGateway,
     getAgentCrossRunQuality,
     runAgentBacktest,
     generateAgentRunRecap,
@@ -691,6 +693,7 @@ describe('AgentConsolePage', () => {
     getAgentDailySummary.mockReset();
     getAgentDataQualityTrends.mockReset();
     getAgentCalibrationEvidence.mockReset();
+    preflightGateway.mockReset();
     getAgentCrossRunQuality.mockReset();
     runAgentBacktest.mockReset();
     generateAgentRunRecap.mockReset();
@@ -715,6 +718,37 @@ describe('AgentConsolePage', () => {
     getAgentDailySummary.mockResolvedValue(dailySummary);
     getAgentDataQualityTrends.mockResolvedValue(dataQualityTrends);
     getAgentCalibrationEvidence.mockResolvedValue(calibrationEvidence);
+    preflightGateway.mockResolvedValue({
+      schemaVersion: 1,
+      generatedAt: '2026-07-22T05:54:12Z',
+      ok: false,
+      failures: ['builtin_gateway_not_external', 'default_setting_keys_missing'],
+      runtimeAvailable: true,
+      gatewayRegistered: true,
+      externalGateway: false,
+      gatewayClass: 'src.services.vnpy_simulated_gateway:DsaSimulatedGateway',
+      gatewayName: 'DSA_SIM',
+      productionPreflightEnabled: false,
+      settingsProvided: false,
+      settingsValid: true,
+      settingsSource: 'gateway_defaults',
+      settingsErrorType: null,
+      settingsInsideRepository: false,
+      defaultSettingKeyCount: 5,
+      providedKeyCount: 0,
+      missingDefaultKeys: [
+        'duplicate_trade_event_count',
+        'fill_delay_ms',
+        'initial_balance',
+        'preserve_state_on_reconnect',
+        'reject_every_nth_order',
+      ],
+      connectAttempted: false,
+      subscriptionsCreated: false,
+      ordersCreated: false,
+      settingsPathExposed: false,
+      settingsValuesExposed: false,
+    });
     getAgentCrossRunQuality.mockResolvedValue({
       schemaVersion: 3,
       generatedAt: '2026-07-14T10:00:00',
@@ -1065,7 +1099,17 @@ describe('AgentConsolePage', () => {
     await waitFor(() => expect(getAgentDailySummary).toHaveBeenCalledWith(undefined, undefined));
     await waitFor(() => expect(getAgentDataQualityTrends).toHaveBeenCalledWith(30, undefined));
     await waitFor(() => expect(getAgentCalibrationEvidence).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(preflightGateway).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(getAgentRun).toHaveBeenCalledWith('ss-agent-test'));
+    expect(screen.getByTestId('agent-production-readiness')).toHaveTextContent('生产就绪摘要');
+    expect(screen.getByTestId('agent-production-readiness')).toHaveTextContent('待验收');
+    expect(screen.getByTestId('agent-gateway-readiness')).toHaveTextContent('DSA_SIM');
+    expect(screen.getByTestId('agent-gateway-readiness')).toHaveTextContent('内置 DSA_SIM 不能作为生产通道');
+    expect(screen.getByTestId('agent-gateway-readiness')).toHaveTextContent('外部连接参数不完整');
+    expect(screen.getByTestId('agent-gateway-readiness')).toHaveTextContent('启动期生产预检未启用');
+    expect(screen.getByTestId('agent-calibration-readiness')).toHaveTextContent('三市场校准');
+    expect(screen.getByTestId('agent-calibration-readiness')).toHaveTextContent('积累中');
+    expect(screen.getByTestId('agent-production-readiness-grid')).toHaveClass('md:grid-cols-2');
     expect(screen.getByText('今日 Agent 总结')).toBeInTheDocument();
     expect(screen.getByTestId('agent-calibration-evidence')).toHaveTextContent('生产校准证据');
     expect(screen.getByTestId('agent-calibration-evidence')).toHaveTextContent('9 / 0');
@@ -1193,6 +1237,19 @@ describe('AgentConsolePage', () => {
     expect(screen.getByText('prompt=vnpy_paper_pre_trade_review_v2 / eval=candidate_audit_columns_v1')).toBeInTheDocument();
     expect(screen.getAllByText('600519').length).toBeGreaterThan(0);
     expect(screen.getAllByText('position_exists').length).toBeGreaterThan(0);
+  });
+
+  it('isolates production preflight failure from Agent history', async () => {
+    preflightGateway.mockRejectedValueOnce(new Error('preflight unavailable'));
+
+    renderPage();
+
+    await waitFor(() => expect(listAgentRuns).toHaveBeenCalled());
+    expect(await screen.findByText('今日 Agent 总结')).toBeInTheDocument();
+    expect(screen.getByTestId('agent-production-readiness')).toHaveTextContent('状态不完整');
+    expect(screen.getByTestId('agent-gateway-readiness')).toHaveTextContent('生产预检不可用');
+    expect(screen.getByTestId('agent-calibration-readiness')).toHaveTextContent('积累中');
+    expect(screen.queryByText('Agent run 列表加载失败')).not.toBeInTheDocument();
   });
 
   it('generates an optional LLM recap for the selected Agent run', async () => {

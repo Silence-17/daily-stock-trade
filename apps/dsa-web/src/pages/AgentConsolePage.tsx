@@ -2,6 +2,7 @@ import type React from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import {
+  ArrowRight,
   Bot,
   ChartNoAxesCombined,
   CheckCircle2,
@@ -12,6 +13,7 @@ import {
   MessageSquareWarning,
   RefreshCw,
   Search,
+  ServerCog,
   ShieldAlert,
   Sparkles,
   XCircle,
@@ -30,6 +32,7 @@ import {
   type VnpyPaperAgentRunSummary,
   type VnpyPaperAgentTimelineEvent,
   type VnpyPaperAgentTradePlan,
+  type VnpyPaperGatewayPreflightResponse,
 } from '../api/vnpyPaperTrading';
 import {
   alphasiftApi,
@@ -95,8 +98,24 @@ const calibrationFailureLabels: Record<string, string> = {
   latest_state_not_deployable: '最近状态不可部署',
 };
 
+const gatewayPreflightFailureLabels: Record<string, string> = {
+  production_preflight_not_enabled: '启动期生产预检未启用',
+  builtin_gateway_not_external: '内置 DSA_SIM 不能作为生产通道',
+  gateway_not_registered: 'gateway 插件未注册',
+  gateway_import_failed: 'gateway 插件加载失败',
+  settings_not_provided: '未提供外部连接配置',
+  settings_inside_repository: '连接配置不能位于仓库内',
+  settings_invalid: '连接配置格式无效',
+  default_setting_keys_missing: '外部连接参数不完整',
+  production_preflight_unavailable: '生产预检不可用',
+};
+
 function calibrationFailureLabel(value: string): string {
   return calibrationFailureLabels[value] || value;
+}
+
+function gatewayPreflightFailureLabel(value: string): string {
+  return gatewayPreflightFailureLabels[value] || value;
 }
 
 function marketLabel(value: string): string {
@@ -385,6 +404,12 @@ const AgentConsolePage: React.FC = () => {
   const [calibrationEvidence, setCalibrationEvidence] = useState<
     VnpyPaperAgentCalibrationEvidence | null
   >(null);
+  const [gatewayPreflight, setGatewayPreflight] = useState<
+    VnpyPaperGatewayPreflightResponse | null
+  >(null);
+  const [gatewayPreflightState, setGatewayPreflightState] = useState<
+    'idle' | 'loading' | 'available' | 'unavailable'
+  >('idle');
   const [dataQualityDays, setDataQualityDays] = useState<7 | 30 | 90>(30);
   const dataQualityDaysRef = useRef<7 | 30 | 90>(30);
   const [selectedRun, setSelectedRun] = useState<VnpyPaperAgentRunDetail | null>(null);
@@ -452,6 +477,7 @@ const AgentConsolePage: React.FC = () => {
   ) => {
     setLoading(true);
     setError('');
+    setGatewayPreflightState('loading');
     try {
       const filterPayload = buildFilters(nextFilters);
       const [
@@ -460,6 +486,7 @@ const AgentConsolePage: React.FC = () => {
         qualityTrends,
         currentCrossRunQuality,
         currentCalibrationEvidence,
+        currentGatewayPreflight,
       ] = await Promise.all([
         vnpyPaperTradingApi.listAgentRuns(
           AGENT_RUN_PAGE_SIZE,
@@ -473,12 +500,17 @@ const AgentConsolePage: React.FC = () => {
         ).catch(() => null),
         vnpyPaperTradingApi.getAgentCrossRunQuality().catch(() => null),
         vnpyPaperTradingApi.getAgentCalibrationEvidence().catch(() => null),
+        vnpyPaperTradingApi.preflightGateway()
+          .then((value) => ({ value, available: true as const }))
+          .catch(() => ({ value: null, available: false as const })),
       ]);
       setRuns(payload.items);
       setDailySummary(summary);
       setDataQualityTrends(qualityTrends);
       setCrossRunQuality(currentCrossRunQuality);
       setCalibrationEvidence(currentCalibrationEvidence);
+      setGatewayPreflight(currentGatewayPreflight.value);
+      setGatewayPreflightState(currentGatewayPreflight.available ? 'available' : 'unavailable');
       setRunOffset(payload.offset || nextOffset);
       setRunTotal(payload.total ?? payload.items.length);
       const preferred = String(preferredRunUid || '').trim();
@@ -493,6 +525,8 @@ const AgentConsolePage: React.FC = () => {
       setDailySummary(null);
       setDataQualityTrends(null);
       setCalibrationEvidence(null);
+      setGatewayPreflight(null);
+      setGatewayPreflightState('unavailable');
       setSelectedRun(null);
       setRunOffset(0);
       setRunTotal(0);
@@ -1068,6 +1102,24 @@ const AgentConsolePage: React.FC = () => {
     retryPolicy: undefined,
   };
   const calibrationSamplingSchedule = calibrationEvidence?.samplingSchedule;
+  const gatewayPreflightFailures = gatewayPreflightState === 'unavailable'
+    ? ['production_preflight_unavailable']
+    : Array.from(new Set([
+      ...(gatewayPreflight && !gatewayPreflight.productionPreflightEnabled
+        ? ['production_preflight_not_enabled']
+        : []),
+      ...(gatewayPreflight?.failures ?? []),
+    ]));
+  const gatewayProductionReady = Boolean(
+    gatewayPreflight?.ok
+    && gatewayPreflight.externalGateway
+    && gatewayPreflight.productionPreflightEnabled,
+  );
+  const calibrationProductionReady = Boolean(calibrationEvidence?.evaluation.ok);
+  const productionReadinessUnavailable = (
+    gatewayPreflightState === 'unavailable' || !calibrationEvidence
+  );
+  const productionReady = gatewayProductionReady && calibrationProductionReady;
   const calibrationScheduleForMarket = (market: string) => (
     calibrationSamplingSchedule?.items.filter((item) => item.market === market) ?? []
   );
@@ -1127,6 +1179,94 @@ const AgentConsolePage: React.FC = () => {
 
       {error ? <InlineAlert variant="danger" title="Agent 控制台加载失败" message={error} /> : null}
       {success ? <InlineAlert variant="success" title="操作完成" message={success} /> : null}
+
+      {gatewayPreflightState !== 'idle' ? (
+        <section className="border-y border-border py-4" data-testid="agent-production-readiness">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <ShieldAlert className="h-4 w-4 text-cyan" />
+                <h2 className="text-sm font-semibold text-foreground">生产就绪摘要</h2>
+                {renderStatusBadge(
+                  productionReady ? 'passed' : productionReadinessUnavailable ? 'failed' : 'warning',
+                  productionReady ? '已就绪' : productionReadinessUnavailable ? '状态不完整' : '待验收',
+                )}
+              </div>
+              <p className="mt-2 text-xs text-secondary-text">
+                外部通道与生产校准必须同时达标
+              </p>
+            </div>
+            <Button variant="outline" onClick={() => navigate('/paper-trading')}>
+              模拟交易
+              <ArrowRight className="h-4 w-4" />
+            </Button>
+          </div>
+
+          <div className="mt-4 grid gap-4 md:grid-cols-2" data-testid="agent-production-readiness-grid">
+            <div className="min-w-0" data-testid="agent-gateway-readiness">
+              <div className="flex flex-wrap items-center gap-2">
+                <ServerCog className="h-4 w-4 text-cyan" />
+                <h3 className="text-sm font-semibold text-foreground">外部 gateway</h3>
+                {renderStatusBadge(
+                  gatewayProductionReady ? 'passed' : gatewayPreflightState === 'unavailable' ? 'failed' : 'warning',
+                  gatewayProductionReady ? '预检通过' : gatewayPreflightState === 'unavailable' ? '不可用' : '未通过',
+                )}
+              </div>
+              <p className="mt-2 break-words text-xs text-secondary-text">
+                {gatewayPreflight?.gatewayName || '未识别 gateway'}
+                {gatewayPreflight?.gatewayClass ? ` · ${gatewayPreflight.gatewayClass}` : ''}
+              </p>
+              <p className="mt-1 text-xs text-secondary-text">
+                {gatewayPreflight?.externalGateway ? '外部通道' : '非外部通道'}
+                {' · '}
+                {gatewayPreflight?.productionPreflightEnabled ? '启动预检已启用' : '启动预检未启用'}
+                {' · '}
+                配置键 {gatewayPreflight?.providedKeyCount ?? 0}/{gatewayPreflight?.defaultSettingKeyCount ?? 0}
+              </p>
+              <p className="mt-2 break-words text-xs leading-5 text-secondary-text">
+                {gatewayProductionReady
+                  ? '外部 gateway 静态生产合同已达标'
+                  : gatewayPreflightFailures.map(gatewayPreflightFailureLabel).join('、') || '等待生产预检'}
+              </p>
+            </div>
+
+            <div className="min-w-0 border-t border-border pt-4 md:border-l md:border-t-0 md:pl-5 md:pt-0" data-testid="agent-calibration-readiness">
+              <div className="flex flex-wrap items-center gap-2">
+                <ListChecks className="h-4 w-4 text-cyan" />
+                <h3 className="text-sm font-semibold text-foreground">三市场校准</h3>
+                {renderStatusBadge(
+                  calibrationProductionReady ? 'passed' : calibrationEvidence ? 'warning' : 'failed',
+                  calibrationProductionReady ? '证据达标' : calibrationEvidence ? '积累中' : '不可用',
+                )}
+              </div>
+              <p className="mt-2 text-xs text-secondary-text">
+                {calibrationEvidence
+                  ? `${calibrationEvidence.evaluation.requiredMarkets.length} 个市场 · ${calibrationEvidence.windowDays} 天窗口`
+                  : '生产校准证据不可用'}
+              </p>
+              <p className="mt-1 text-xs text-secondary-text">
+                下一次采样 {calibrationSamplingSchedule?.nextEligibleAt
+                  ? formatDateTime(calibrationSamplingSchedule.nextEligibleAt)
+                  : '-'}
+              </p>
+              <p className="mt-2 break-words text-xs leading-5 text-secondary-text">
+                {calibrationProductionReady
+                  ? 'A 股、港股和美股校准证据已达标'
+                  : calibrationEvidence
+                    ? calibrationEvidence.evaluation.failures
+                      .slice(0, 4)
+                      .map((item) => calibrationFailureLabel(item.split(':').at(-1) || item))
+                      .join('、')
+                    : '等待校准证据接口恢复'}
+              </p>
+            </div>
+          </div>
+
+          <p className="mt-4 border-t border-border pt-3 text-xs text-secondary-text">
+            预检未连接 gateway、未订阅行情、未创建订单；校准检查只读取持久化 shadow 证据。
+          </p>
+        </section>
+      ) : null}
 
       {calibrationEvidence ? (
         <section className="border-y border-border py-4" data-testid="agent-calibration-evidence">

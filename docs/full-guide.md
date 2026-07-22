@@ -678,6 +678,8 @@ python scripts/check_env.py --config
 
 生产部署可进一步运行 `scripts/check_online_agent_production_acceptance.py --output-json <外部证据文件>`：它先做零连接外部 gateway 预检，再并行运行部署态 runtime 与 scheduler 长跑，最后汇总 CN/HK/US 校准门禁。默认 24 小时，要求启动期生产预检已启用、account/position 新事件、四个后台任务终态和 `candidate-return-risk-v1` 目标版本；报告以原子检查点保留 `running` / `completed` / `interrupted` 状态，且不会连接 gateway、触发 Agent 或下单。只有所有阶段都通过才返回 `production_ready=true`，DSA_SIM 会在预检阶段被明确拒绝。
 
+Agent 控制台会把当前 runtime 的零连接 gateway 预检和 CN/HK/US 校准证据合并成“生产就绪摘要”。两类请求独立降级；预检接口不可用不会隐藏 Agent 历史或校准状态。摘要不会连接 gateway、订阅行情、运行 Agent 或创建订单，且不替代外部账户长跑验收。
+
 ### 命令行参数
 
 ```bash
