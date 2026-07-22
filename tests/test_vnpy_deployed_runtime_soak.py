@@ -327,3 +327,51 @@ def test_deployed_runtime_soak_cli_proves_external_gateway_event_deltas(
     assert report["evaluation"]["external_gateway_observation_count"] > 0
     assert report["observed_event_deltas"]["account"] >= 2
     assert report["observed_event_deltas"]["position"] >= 2
+
+
+def test_deployed_runtime_soak_cli_persists_interrupted_terminal_state(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    payload = {
+        "diagnostics": {
+            "backend": {
+                "vnpy_paper_contract_version": 3,
+                "process_started_at": "2026-07-20T10:00:00+00:00",
+            },
+            "vnpy_runtime": {
+                "available": True,
+                "mode": "vnpy_runtime",
+                "event_engine_created": True,
+                "main_engine_created": True,
+                "gateway_class": "example:Gateway",
+                "gateway_name": "PAPER",
+                "gateway": {"added": True},
+                "connect": {"connected": True, "status": "connected"},
+                "event_bridge": {
+                    "registered": True,
+                    "event_types": list(EVENT_TYPES.values()),
+                },
+                "auto_reconnect": {},
+            },
+        }
+    }
+    output_path = tmp_path / "interrupted-runtime.json"
+    monkeypatch.setattr(runtime_soak, "_read_status", lambda *_args, **_kwargs: payload)
+    monkeypatch.setattr(
+        runtime_soak.time,
+        "sleep",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(KeyboardInterrupt()),
+    )
+
+    exit_code = main([
+        "--duration-seconds", "10",
+        "--sample-interval-seconds", "1",
+        "--output-json", str(output_path),
+    ])
+
+    report = json.loads(output_path.read_text(encoding="utf-8"))
+    assert exit_code == 130
+    assert report["phase"] == "interrupted"
+    assert report["checkpoint"] is False
+    assert report["evaluation"]["failures"] == ["interrupted"]

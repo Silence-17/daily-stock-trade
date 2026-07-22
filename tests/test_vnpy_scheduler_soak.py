@@ -237,3 +237,33 @@ def test_scheduler_soak_cli_reads_http_and_excludes_baseline_failures(tmp_path) 
     assert report["evaluation"]["ok"] is True
     assert report["terminal_counts"] == {"vnpy_paper_auto_retry": 1}
     assert report["failed_counts"] == {}
+
+
+def test_scheduler_soak_cli_persists_interrupted_terminal_state(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    def read_json(_base_url, path, **_kwargs):
+        if "/status" in path:
+            return {"scheduler": {"loop_running": True, "background_tasks": []}}
+        return {"items": []}
+
+    output_path = tmp_path / "interrupted-scheduler.json"
+    monkeypatch.setattr(scheduler_soak, "_read_json", read_json)
+    monkeypatch.setattr(
+        scheduler_soak.time,
+        "sleep",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(KeyboardInterrupt()),
+    )
+
+    exit_code = main([
+        "--duration-seconds", "10",
+        "--sample-interval-seconds", "1",
+        "--output-json", str(output_path),
+    ])
+
+    report = json.loads(output_path.read_text(encoding="utf-8"))
+    assert exit_code == 130
+    assert report["phase"] == "interrupted"
+    assert report["checkpoint"] is False
+    assert report["evaluation"]["failures"] == ["interrupted"]
