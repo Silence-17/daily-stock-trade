@@ -196,3 +196,150 @@ def test_get_belong_board_parses_slist_and_preserves_extended_fields():
     ]
     assert session.calls[0]["params"]["secid"] == "1.600519"
     assert session.calls[0]["params"]["spt"] == "3"
+
+
+def test_get_main_indices_preserves_eastmoney_provider_as_of():
+    session = _FakeSession(
+        {
+            "data": {
+                "total": 2,
+                "diff": [
+                    {
+                        "f12": "000001",
+                        "f2": 3200.0,
+                        "f3": 0.5,
+                        "f4": 16.0,
+                        "f5": 123456,
+                        "f6": 987654321.0,
+                        "f15": 3210.0,
+                        "f16": 3180.0,
+                        "f17": 3190.0,
+                        "f18": 3184.0,
+                        "f124": 1784788200,
+                        "f297": 20260723,
+                    },
+                    {
+                        "f12": "399006",
+                        "f2": 2100.0,
+                        "f3": -0.2,
+                        "f4": -4.2,
+                        "f5": 654321,
+                        "f6": 123456789.0,
+                        "f15": 2120.0,
+                        "f16": 2080.0,
+                        "f17": 2110.0,
+                        "f18": 2104.2,
+                        "f124": 1784788201,
+                        "f297": 20260723,
+                    },
+                ],
+            }
+        }
+    )
+    fetcher = AStockDataFetcher(session=session, min_interval_seconds=0)
+
+    indices = fetcher.get_main_indices()
+
+    assert indices == [
+        {
+            "code": "sh000001",
+            "name": "上证指数",
+            "current": 3200.0,
+            "change": 16.0,
+            "change_pct": 0.5,
+            "open": 3190.0,
+            "high": 3210.0,
+            "low": 3180.0,
+            "prev_close": 3184.0,
+            "volume": 123456.0,
+            "amount": 987654321.0,
+            "amplitude": None,
+            "provider_timestamp": "2026-07-23T06:30:00+00:00",
+            "data_date": "2026-07-23",
+            "data_granularity": "realtime",
+        },
+        {
+            "code": "sz399006",
+            "name": "创业板指",
+            "current": 2100.0,
+            "change": -4.2,
+            "change_pct": -0.2,
+            "open": 2110.0,
+            "high": 2120.0,
+            "low": 2080.0,
+            "prev_close": 2104.2,
+            "volume": 654321.0,
+            "amount": 123456789.0,
+            "amplitude": None,
+            "provider_timestamp": "2026-07-23T06:30:01+00:00",
+            "data_date": "2026-07-23",
+            "data_granularity": "realtime",
+        },
+    ]
+    assert session.calls[0]["params"]["fs"] == "m:1 s:2,m:0 t:5"
+    assert "f124" in session.calls[0]["params"]["fields"]
+
+
+def test_get_market_stats_requires_complete_response_and_timestamp_coverage():
+    complete_payload = {
+        "data": {
+            "total": 2,
+            "diff": [
+                {
+                    "f12": "600001",
+                    "f14": "测试一号",
+                    "f2": 11.0,
+                    "f18": 10.0,
+                    "f6": 100000000.0,
+                    "f124": 1784788202,
+                    "f297": 20260723,
+                },
+                {
+                    "f12": "000002",
+                    "f14": "测试二号",
+                    "f2": 9.0,
+                    "f18": 10.0,
+                    "f6": 200000000.0,
+                    "f124": 1784788200,
+                    "f297": 20260723,
+                },
+            ],
+        }
+    }
+    complete = AStockDataFetcher(
+        session=_FakeSession(complete_payload),
+        min_interval_seconds=0,
+    ).get_market_stats()
+
+    assert complete["up_count"] == 1
+    assert complete["down_count"] == 1
+    assert complete["flat_count"] == 0
+    assert complete["limit_up_count"] == 1
+    assert complete["limit_down_count"] == 1
+    assert complete["total_amount"] == 3.0
+    assert complete["provider_timestamp"] == "2026-07-23T06:30:00+00:00"
+    assert complete["provider_timestamp_coverage_pct"] == 100.0
+    assert complete["data_date"] == "2026-07-23"
+    assert complete["data_granularity"] == "realtime"
+
+    partial_timestamp_payload = {
+        "data": {
+            "total": 2,
+            "diff": [
+                complete_payload["data"]["diff"][0],
+                {**complete_payload["data"]["diff"][1], "f124": None},
+            ],
+        }
+    }
+    partial = AStockDataFetcher(
+        session=_FakeSession(partial_timestamp_payload),
+        min_interval_seconds=0,
+    ).get_market_stats()
+    assert partial["provider_timestamp"] is None
+    assert partial["provider_timestamp_coverage_pct"] == 50.0
+
+    truncated = AStockDataFetcher(
+        session=_FakeSession({"data": {"total": 3, "diff": complete_payload["data"]["diff"]}}),
+        min_interval_seconds=0,
+    ).get_market_stats()
+    assert truncated is None

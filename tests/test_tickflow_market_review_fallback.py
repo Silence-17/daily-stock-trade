@@ -82,6 +82,33 @@ class TestTickFlowMarketReviewFallback(unittest.TestCase):
         self.assertIsNotNone(data[0]["fetched_at"])
         self.assertEqual(fallback.index_calls, 1)
 
+    def test_manager_prefers_direct_eastmoney_indices_before_akshare(self):
+        manager = DataFetcherManager.__new__(DataFetcherManager)
+        efinance = _DummyFetcher("EfinanceFetcher", indices=None)
+        direct = _DummyFetcher(
+            "AStockDataFetcher",
+            indices=[
+                {
+                    "code": "sh000001",
+                    "provider_timestamp": "2026-07-23T06:30:00+00:00",
+                    "data_granularity": "realtime",
+                }
+            ],
+        )
+        akshare = _DummyFetcher("AkshareFetcher", indices=[{"code": "akshare"}])
+        manager._fetchers = [efinance, direct, akshare]
+        manager._get_tickflow_fetcher = lambda: None
+
+        data = DataFetcherManager.get_main_indices(manager, region="cn")
+
+        self.assertEqual(data[0]["code"], "sh000001")
+        self.assertEqual(data[0]["provider"], "astockdata")
+        self.assertEqual(data[0]["provider_timestamp"], "2026-07-23T06:30:00+00:00")
+        self.assertIsNotNone(data[0]["fetched_at"])
+        self.assertEqual(efinance.index_calls, 1)
+        self.assertEqual(direct.index_calls, 1)
+        self.assertEqual(akshare.index_calls, 0)
+
     def test_manager_falls_back_when_tickflow_indices_missing(self):
         manager = DataFetcherManager.__new__(DataFetcherManager)
         fallback = _DummyFetcher("AkshareFetcher", indices=[{"code": "fallback"}])
@@ -127,6 +154,36 @@ class TestTickFlowMarketReviewFallback(unittest.TestCase):
         self.assertEqual(data["provider"], "akshare")
         self.assertIsNotNone(data["fetched_at"])
         self.assertEqual(fallback.stats_calls, 1)
+
+    def test_manager_prefers_direct_eastmoney_breadth_before_akshare(self):
+        manager = DataFetcherManager.__new__(DataFetcherManager)
+        efinance = _DummyFetcher("EfinanceFetcher", stats=None)
+        direct = _DummyFetcher(
+            "AStockDataFetcher",
+            stats={
+                "up_count": 2,
+                "down_count": 1,
+                "flat_count": 0,
+                "provider_timestamp": "2026-07-23T06:30:00+00:00",
+                "provider_timestamp_coverage_pct": 100.0,
+                "data_granularity": "realtime",
+            },
+        )
+        akshare = _DummyFetcher(
+            "AkshareFetcher",
+            stats={"up_count": 99, "down_count": 0, "flat_count": 0},
+        )
+        manager._fetchers = [efinance, direct, akshare]
+        manager._get_tickflow_fetcher = lambda: None
+
+        data = DataFetcherManager.get_market_stats(manager, purpose="vnpy_paper_intraday_risk")
+
+        self.assertEqual(data["provider"], "astockdata")
+        self.assertEqual(data["provider_timestamp_coverage_pct"], 100.0)
+        self.assertIsNotNone(data["fetched_at"])
+        self.assertEqual(efinance.stats_calls, 1)
+        self.assertEqual(direct.stats_calls, 1)
+        self.assertEqual(akshare.stats_calls, 0)
 
     @patch("src.config.get_config")
     def test_manager_skips_tickflow_without_api_key(self, mock_get_config):

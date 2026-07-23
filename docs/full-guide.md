@@ -794,7 +794,7 @@ python main.py --schedule --no-run-immediately
 >
 > 页面还可独立开启盘中指数/实时宽度和跨市场联动门禁。前者使用本市场方向性主指数的等权平均涨跌幅，A 股追加实时涨跌家数宽度；后者按映射 v1 检查关联市场指数（`cn -> hk,us`、`hk -> cn,us`、`us -> hk`、`jp/kr/tw -> us`），并排除美国 `VIX`。启用后证据为空或取数异常均 fail-closed，全部输入和 reason code 写入同一市场风险诊断。部分 provider 已提供 quote as-of，但跨 provider/交易所仍未同步，跨市场判断使用各源最新可用行情，不代表交易所级时间同步。
 >
-> 指数/宽度 fallback 会附带 provider、抓取时刻和可用的数据日期/粒度。盘中本市场门禁拒绝明确的收盘日线、过期 session 日期，以及非法、未来或超过 15 分钟的 provider 时间；因此 Tushare `index_daily` 不会再被当作盘中实时证据。efinance 的股票、ETF、指数及全市场宽度会把真实更新时间恢复为 UTC，宽度只有在全部有效计数行有时间时才报告最早 as-of 和 100% 覆盖率；AkShare 的新浪/腾讯单票直连也保留 provider 时间，但其批量指数/宽度端点仍标为时间不可验证。严格模式要求宽度覆盖率字段明确等于 100%，不会用本地抓取时刻替代 provider 时间。
+> 指数/宽度 fallback 会附带 provider、抓取时刻和可用的数据日期/粒度。盘中本市场门禁拒绝明确的收盘日线、过期 session 日期，以及非法、未来或超过 15 分钟的 provider 时间；因此 Tushare `index_daily` 不会再被当作盘中实时证据。efinance 的股票、ETF、指数及全市场宽度会把真实更新时间恢复为 UTC，宽度只有在全部有效计数行有时间时才报告最早 as-of 和 100% 覆盖率；若 efinance 不可用，AStockDataFetcher 会在 AkShare 批量端点前直连 EastMoney 原始 `f124/f297`，只接受 API total 与实际行数一致的完整响应。AkShare 的新浪/腾讯单票直连也保留 provider 时间，但其批量指数/宽度端点仍标为时间不可验证。严格模式要求宽度覆盖率字段明确等于 100%，不会用本地抓取时刻替代 provider 时间。
 >
 > Agent 控制台通过 `GET /api/v1/vnpy-paper/agent-runs/data-quality-trends` 展示 7/30/90 天跨 run 数据质量趋势，包括 ok/partial/stale/unavailable/unknown 分布、降级率、警告、source error、逐日结果，以及具体 snapshot/daily 和候选上下文 `quote/fund_flow/news` 来源的健康观测。来源表展示观测数、降级次数/比例、最新状态和最新/最大失败计数；缺少整体质量或来源快照的旧 run 不会被推断为健康。
 >

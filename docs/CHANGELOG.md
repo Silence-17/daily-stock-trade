@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [改进] a-stock-data 风格的 EastMoney 直连适配器新增 A 股主指数与全市场宽度 fallback，读取原始 `f124/f297` 并要求 API total 与返回行完全一致；efinance 不可用时该路径先于 AkShare 批量端点，截断或时间覆盖不足仍 fail-closed
 - [修复] efinance 股票、ETF、指数和市场宽度现保留 EastMoney 真实更新时间并统一为 UTC；宽度仅在全部有效计数行都有时间时报告最早 provider as-of 和 100% 覆盖率，AkShare 新浪/腾讯单票直连也补齐明确 provider 时间
 - [修复] 自动交易盘中严格门禁不再把缺失宽度时间覆盖率的响应默认为完整，只有显式且精确的 100% 覆盖率才能通过 provider 时间校验
 - [修复] vn.py runtime 现可通过官方 CTP Gateway 的交易/行情通道 `login_status` 确认连接，要求所有现有通道均已登录，避免真实 CTP 登录后长期停留在 `connection_unconfirmed`
