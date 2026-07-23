@@ -129,6 +129,26 @@ def test_evaluate_deployed_runtime_soak_requires_external_gateway_identity() -> 
     ]
 
 
+def test_evaluate_deployed_runtime_soak_requires_build_and_public_redaction() -> None:
+    result = _evaluate(
+        expected_build_id="expected-build",
+        build_identity_observation_count=99,
+        build_expectation_mismatch_count=1,
+        public_account_redaction_required=True,
+        public_account_observation_count=0,
+        public_account_redaction_failure_count=1,
+    )
+
+    assert result["ok"] is False
+    assert result["failures"] == [
+        "build_identity_missing",
+        "build_identity_mismatch",
+        "public_account_redaction_unobserved",
+        "public_account_redaction_failed",
+    ]
+    assert result["public_account_forbidden_keys"] == ["account_id", "raw"]
+
+
 def test_evaluate_deployed_runtime_soak_requires_new_events_and_clean_handlers() -> None:
     result = _evaluate(
         observed_event_counts={"account": 0, "position": 2},
@@ -182,6 +202,13 @@ def test_deployed_runtime_soak_cli_reads_live_contract(tmp_path) -> None:
                             "failure_count": 0,
                         },
                     },
+                    "vnpy_sync_state": {
+                        "account": {
+                            "balance": 100000,
+                            "available": 100000,
+                            "currency": "CNY",
+                        }
+                    },
                 }
             }
             encoded = json.dumps(payload).encode("utf-8")
@@ -213,6 +240,9 @@ def test_deployed_runtime_soak_cli_reads_live_contract(tmp_path) -> None:
                 "0.1",
                 "--request-timeout-seconds",
                 "1",
+                "--expected-build-id",
+                "test-build",
+                "--require-public-account-redaction",
                 "--checkpoint-interval-seconds",
                 "0.2",
                 "--output-json",
@@ -238,6 +268,10 @@ def test_deployed_runtime_soak_cli_reads_live_contract(tmp_path) -> None:
         "name": "PAPER",
     }
     assert report["backend"]["build_id"] == "test-build"
+    assert report["evaluation"]["build_identity_observation_count"] > 0
+    assert report["evaluation"]["build_expectation_mismatch_count"] == 0
+    assert report["evaluation"]["public_account_observation_count"] > 0
+    assert report["evaluation"]["public_account_redaction_failure_count"] == 0
 
 
 def test_deployed_runtime_soak_cli_proves_external_gateway_event_deltas(

@@ -26,6 +26,7 @@ BUILTIN_SIMULATED_GATEWAY_CLASS = (
     "src.services.vnpy_simulated_gateway:DsaSimulatedGateway"
 )
 BUILTIN_SIMULATED_GATEWAY_NAME = "DSA_SIM"
+PUBLIC_ACCOUNT_FORBIDDEN_KEYS = frozenset({"account_id", "raw"})
 
 
 def _utc_iso() -> str:
@@ -135,6 +136,12 @@ def evaluate_deployed_runtime_soak(
     min_reconnect_success_count: int,
     max_reconnect_failure_count: int,
     max_event_handler_failures: int,
+    expected_build_id: str = "",
+    build_identity_observation_count: int = 0,
+    build_expectation_mismatch_count: int = 0,
+    public_account_redaction_required: bool = False,
+    public_account_observation_count: int = 0,
+    public_account_redaction_failure_count: int = 0,
 ) -> Dict[str, Any]:
     samples = max(0, int(sample_count or 0))
     successful = max(0, int(successful_sample_count or 0))
@@ -201,6 +208,11 @@ def evaluate_deployed_runtime_soak(
             failures.append("required_event_type_ratio_below_threshold")
         if backend_identity_observation_count < successful:
             failures.append("backend_identity_missing")
+        if expected_build_id:
+            if build_identity_observation_count < successful:
+                failures.append("build_identity_missing")
+            if build_expectation_mismatch_count > 0:
+                failures.append("build_identity_mismatch")
         if gateway_identity_observation_count < successful:
             failures.append("gateway_identity_missing")
         if gateway_expectation_mismatch_count > 0:
@@ -212,6 +224,11 @@ def evaluate_deployed_runtime_soak(
             failures.append("external_gateway_not_confirmed")
         if incompatible_contract_count > 0:
             failures.append("contract_incompatible")
+        if public_account_redaction_required:
+            if public_account_observation_count <= 0:
+                failures.append("public_account_redaction_unobserved")
+            if public_account_redaction_failure_count > 0:
+                failures.append("public_account_redaction_failed")
     if process_change_count > max_process_changes:
         failures.append("process_changes_above_threshold")
     if gateway_change_count > max_gateway_changes:
@@ -247,6 +264,23 @@ def evaluate_deployed_runtime_soak(
         "missing_event_types": missing_event_types,
         "intermittent_event_types": intermittent_event_types,
         "backend_identity_observation_count": backend_identity_observation_count,
+        "expected_build_id": expected_build_id or None,
+        "build_identity_observation_count": max(
+            0, int(build_identity_observation_count or 0)
+        ),
+        "build_expectation_mismatch_count": max(
+            0, int(build_expectation_mismatch_count or 0)
+        ),
+        "public_account_redaction_required": bool(
+            public_account_redaction_required
+        ),
+        "public_account_observation_count": max(
+            0, int(public_account_observation_count or 0)
+        ),
+        "public_account_redaction_failure_count": max(
+            0, int(public_account_redaction_failure_count or 0)
+        ),
+        "public_account_forbidden_keys": sorted(PUBLIC_ACCOUNT_FORBIDDEN_KEYS),
         "process_change_count": max(0, int(process_change_count or 0)),
         "max_process_changes": max_process_changes,
         "gateway_identity_observation_count": gateway_identity_observation_count,
@@ -351,6 +385,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--expected-gateway-class")
     parser.add_argument("--expected-gateway-name")
     parser.add_argument(
+        "--expected-build-id",
+        help="Require every successful status sample to expose this exact build id.",
+    )
+    parser.add_argument(
+        "--require-public-account-redaction",
+        action="store_true",
+        help="Require public vn.py account diagnostics and reject account_id/raw fields.",
+    )
+    parser.add_argument(
         "--require-external-gateway",
         action="store_true",
         help="Reject DSA's built-in simulated gateway as production evidence.",
@@ -451,6 +494,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     expected_gateway_class = str(args.expected_gateway_class or "").strip()
     expected_gateway_name = str(args.expected_gateway_name or "").strip()
+    expected_build_id = str(args.expected_build_id or "").strip()
+    if args.expected_build_id is not None and not expected_build_id:
+        parser.error("--expected-build-id must not be empty")
     min_reconnect_successes = _bounded_int(
         parser,
         "--min-reconnect-success-count",
@@ -500,6 +546,10 @@ def main(argv: list[str] | None = None) -> int:
     bridge_registered_count = 0
     event_type_counts: Counter[str] = Counter()
     backend_identity_count = 0
+    build_identity_count = 0
+    build_expectation_mismatch_count = 0
+    public_account_observation_count = 0
+    public_account_redaction_failure_count = 0
     process_change_count = 0
     gateway_identity_count = 0
     gateway_change_count = 0
@@ -561,6 +611,16 @@ def main(argv: list[str] | None = None) -> int:
             min_reconnect_success_count=min_reconnect_successes,
             max_reconnect_failure_count=max_reconnect_failures,
             max_event_handler_failures=max_event_handler_failures,
+            expected_build_id=expected_build_id,
+            build_identity_observation_count=build_identity_count,
+            build_expectation_mismatch_count=build_expectation_mismatch_count,
+            public_account_redaction_required=bool(
+                args.require_public_account_redaction
+            ),
+            public_account_observation_count=public_account_observation_count,
+            public_account_redaction_failure_count=(
+                public_account_redaction_failure_count
+            ),
         )
         return {
             "schema_version": 2,
@@ -604,6 +664,18 @@ def main(argv: list[str] | None = None) -> int:
                     "python_version": backend.get("python_version"),
                     "process_started_at": backend.get("process_started_at"),
                 }
+                build_id = str(backend.get("build_id") or "").strip()
+                if build_id:
+                    build_identity_count += 1
+                if expected_build_id and build_id != expected_build_id:
+                    build_expectation_mismatch_count += 1
+                sync_state = diagnostics.get("vnpy_sync_state")
+                sync_state = sync_state if isinstance(sync_state, dict) else {}
+                public_account = sync_state.get("account")
+                if isinstance(public_account, dict):
+                    public_account_observation_count += 1
+                    if PUBLIC_ACCOUNT_FORBIDDEN_KEYS.intersection(public_account):
+                        public_account_redaction_failure_count += 1
                 gateway = runtime.get("gateway")
                 gateway = gateway if isinstance(gateway, dict) else {}
                 latest_gateway = {
