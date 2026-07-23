@@ -963,6 +963,8 @@ export type VnpyPaperAgentCalibrationEvidence = {
     configuredCount?: number;
     eligibleCount?: number;
     nextEligibleAt?: string | null;
+    allEligibleAt?: string | null;
+    nextScheduledAt?: string | null;
     status?: string;
     reason?: string;
     items: Array<{

@@ -13124,12 +13124,43 @@ def build_calibration_shadow_schedule(
         "configured_count": len(items),
         "eligible_count": sum(1 for item in items if item.get("eligible")),
         "next_eligible_at": future_times[0] if future_times else None,
+        "all_eligible_at": future_times[-1] if future_times else None,
         "items": items,
         "invalid_pairs": list(config["invalid_pairs"]),
         "read_only": True,
         "creates_agent_runs": False,
         "places_orders": False,
     }
+
+
+def _calibration_shadow_initial_delay_seconds(
+    service: VnpyPaperTradingService,
+    shadow_config: Dict[str, Any],
+) -> int:
+    """Align the first shadow run after every pending pair becomes eligible."""
+
+    startup_delay_seconds = 300
+    interval_seconds = int(shadow_config["interval_minutes"]) * 60
+    remaining_values: List[float] = []
+    try:
+        for market, strategy in shadow_config["pairs"]:
+            cadence = _calibration_shadow_cadence(
+                service,
+                market=market,
+                strategy=strategy,
+                interval_seconds=interval_seconds,
+            )
+            if cadence.get("eligible"):
+                return startup_delay_seconds
+            remaining = cadence.get("remaining_seconds")
+            if remaining is not None:
+                remaining_values.append(max(0.0, float(remaining)))
+    except Exception as exc:  # pragma: no cover - task cadence remains fail-closed.
+        logger.warning("Failed to align calibration shadow schedule: %s", exc)
+        return startup_delay_seconds
+    if not remaining_values:
+        return startup_delay_seconds
+    return max(startup_delay_seconds, math.ceil(max(remaining_values)))
 
 
 def build_vnpy_paper_trading_background_tasks(
@@ -13390,19 +13421,23 @@ def build_vnpy_paper_trading_background_tasks(
             },
         )
     if shadow_config["enabled"] and shadow_config["pairs"]:
+        shadow_initial_delay = _calibration_shadow_initial_delay_seconds(
+            service,
+            shadow_config,
+        )
         tasks.append({
             "task": run_calibration_shadow,
             "interval_seconds": int(shadow_config["interval_minutes"]) * 60,
             "run_immediately": False,
             "name": "agent_calibration_shadow",
-            "initial_delay_seconds": 300,
+            "initial_delay_seconds": shadow_initial_delay,
         })
         tasks.append({
             "task": run_calibration_evidence_monitor,
             "interval_seconds": int(shadow_config["interval_minutes"]) * 60,
             "run_immediately": False,
             "name": "agent_calibration_evidence",
-            "initial_delay_seconds": 600,
+            "initial_delay_seconds": shadow_initial_delay + 300,
         })
     return tasks
 

@@ -1102,6 +1102,11 @@ const AgentConsolePage: React.FC = () => {
     retryPolicy: undefined,
   };
   const calibrationSamplingSchedule = calibrationEvidence?.samplingSchedule;
+  const calibrationBatchEligibleAt = (
+    calibrationSamplingSchedule?.nextScheduledAt
+    || calibrationSamplingSchedule?.allEligibleAt
+    || calibrationSamplingSchedule?.nextEligibleAt
+  );
   const gatewayPreflightFailures = gatewayPreflightState === 'unavailable'
     ? ['production_preflight_unavailable']
     : Array.from(new Set([
@@ -1245,8 +1250,8 @@ const AgentConsolePage: React.FC = () => {
                   : '生产校准证据不可用'}
               </p>
               <p className="mt-1 text-xs text-secondary-text">
-                下一次采样 {calibrationSamplingSchedule?.nextEligibleAt
-                  ? formatDateTime(calibrationSamplingSchedule.nextEligibleAt)
+                下一次整批任务 {calibrationBatchEligibleAt
+                  ? formatDateTime(calibrationBatchEligibleAt)
                   : '-'}
               </p>
               <p className="mt-2 break-words text-xs leading-5 text-secondary-text">
@@ -1284,8 +1289,8 @@ const AgentConsolePage: React.FC = () => {
                 {calibrationEvidence.windowDays} 天窗口
                 {' · shadow completed run · '}
                 {formatDateTime(calibrationEvidence.generatedAt)}
-                {calibrationSamplingSchedule?.nextEligibleAt
-                  ? ` · 下一次采样 ${formatDateTime(calibrationSamplingSchedule.nextEligibleAt)}`
+                {calibrationBatchEligibleAt
+                  ? ` · 下一次整批任务 ${formatDateTime(calibrationBatchEligibleAt)}`
                   : ''}
               </p>
             </div>

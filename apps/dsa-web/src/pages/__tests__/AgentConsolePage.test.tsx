@@ -632,6 +632,8 @@ const calibrationEvidence = {
     configuredCount: 3,
     eligibleCount: 0,
     nextEligibleAt: '2026-07-23T02:57:05Z',
+    allEligibleAt: '2026-07-23T03:05:45Z',
+    nextScheduledAt: '2026-07-23T03:06:13Z',
     items: [
       {
         market: 'cn',
@@ -1125,7 +1127,8 @@ describe('AgentConsolePage', () => {
     expect(screen.getByTestId('agent-calibration-evidence')).toHaveTextContent('10 / 10');
     expect(screen.getByTestId('agent-calibration-evidence')).toHaveTextContent('3（快照 0）');
     expect(screen.getByTestId('agent-calibration-evidence')).toHaveTextContent('旧快照 9');
-    expect(screen.getByTestId('agent-calibration-evidence')).toHaveTextContent('下一次采样');
+    expect(screen.getByTestId('agent-calibration-evidence')).toHaveTextContent('下一次整批任务');
+    expect(screen.getByTestId('agent-calibration-evidence')).toHaveTextContent('11:06');
     expect(screen.getByTestId('agent-calibration-evidence')).toHaveTextContent('dual_low');
     expect(screen.getByTestId('agent-calibration-evidence')).toHaveTextContent('hk_liquid_momentum');
     expect(screen.getByTestId('agent-calibration-evidence')).toHaveTextContent('成熟前瞻样本不足');

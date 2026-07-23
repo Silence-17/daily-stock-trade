@@ -23,6 +23,7 @@ except ModuleNotFoundError:
 
 import src.auth as auth
 from api.app import create_app
+from api.deps import get_runtime_scheduler_service
 from api.v1.endpoints.vnpy_paper_trading import (
     _auto_trade_timing_alignment,
     _system_health_payload,
@@ -3031,35 +3032,52 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
                 "next_retry_at": None,
             },
         }
+        scheduler = MagicMock()
+        scheduler.status.return_value = {
+            "background_tasks": [{
+                "name": "agent_calibration_shadow",
+                "next_run_at": "2026-07-23T11:06:13",
+            }],
+        }
+        self.client.app.dependency_overrides[get_runtime_scheduler_service] = (
+            lambda: scheduler
+        )
 
-        with patch(
-            "api.v1.endpoints.vnpy_paper_trading.collect_persisted_calibration_evidence",
-            return_value=payload,
-        ) as collect, patch(
-            "api.v1.endpoints.vnpy_paper_trading.build_calibration_shadow_schedule",
-            return_value={
-                "schema_version": 1,
-                "enabled": True,
-                "interval_minutes": 1440,
-                "configured_count": 3,
-                "eligible_count": 0,
-                "next_eligible_at": "2026-07-23T10:57:05",
-                "items": [{
-                    "market": "cn",
-                    "strategy": "dual_low",
-                    "eligible": False,
+        try:
+            with patch(
+                "api.v1.endpoints.vnpy_paper_trading.collect_persisted_calibration_evidence",
+                return_value=payload,
+            ) as collect, patch(
+                "api.v1.endpoints.vnpy_paper_trading.build_calibration_shadow_schedule",
+                return_value={
+                    "schema_version": 1,
+                    "enabled": True,
+                    "interval_minutes": 1440,
+                    "configured_count": 3,
+                    "eligible_count": 0,
                     "next_eligible_at": "2026-07-23T10:57:05",
-                }],
-                "read_only": True,
-                "creates_agent_runs": False,
-                "places_orders": False,
-            },
-        ) as schedule, patch(
-            "api.v1.endpoints.vnpy_paper_trading.AlertService",
-        ) as alert_service:
-            alert_service.return_value.get_latest_system_event_delivery.return_value = alert_delivery
-            response = self.client.get(
-                "/api/v1/vnpy-paper/agent-runs/calibration-evidence"
+                    "all_eligible_at": "2026-07-23T11:05:45",
+                    "items": [{
+                        "market": "cn",
+                        "strategy": "dual_low",
+                        "eligible": False,
+                        "next_eligible_at": "2026-07-23T10:57:05",
+                    }],
+                    "read_only": True,
+                    "creates_agent_runs": False,
+                    "places_orders": False,
+                },
+            ) as schedule, patch(
+                "api.v1.endpoints.vnpy_paper_trading.AlertService",
+            ) as alert_service:
+                alert_service.return_value.get_latest_system_event_delivery.return_value = alert_delivery
+                response = self.client.get(
+                    "/api/v1/vnpy-paper/agent-runs/calibration-evidence"
+                )
+        finally:
+            self.client.app.dependency_overrides.pop(
+                get_runtime_scheduler_service,
+                None,
             )
 
         self.assertEqual(response.status_code, 200)
@@ -3069,6 +3087,14 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
         self.assertEqual(
             response.json()["sampling_schedule"]["next_eligible_at"],
             "2026-07-23T10:57:05",
+        )
+        self.assertEqual(
+            response.json()["sampling_schedule"]["all_eligible_at"],
+            "2026-07-23T11:05:45",
+        )
+        self.assertEqual(
+            response.json()["sampling_schedule"]["next_scheduled_at"],
+            "2026-07-23T11:06:13",
         )
         schedule.assert_called_once()
         self.assertEqual(

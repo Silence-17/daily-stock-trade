@@ -8782,6 +8782,52 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertGreater(result["cadence_skips"][0]["remaining_seconds"], 0)
         fake_service.run_auto_trade_once.assert_not_called()
 
+    def test_calibration_shadow_first_run_waits_for_all_persisted_pair_cadences(self) -> None:
+        fake_service = MagicMock()
+        fake_service.get_settings.return_value = SimpleNamespace(
+            enabled=True,
+            auto_trade_enabled=False,
+            auto_interval_minutes=5,
+            auto_strategy="dual_low",
+        )
+        latest_at = datetime.now()
+        fake_service.agent_repo.list_recent_runs.side_effect = [
+            [{
+                "run_uid": "recent-cn-shadow-run",
+                "status": "completed",
+                "created_at": (latest_at - timedelta(hours=2)).isoformat(),
+            }],
+            [{
+                "run_uid": "recent-us-shadow-run",
+                "status": "completed",
+                "created_at": (latest_at - timedelta(hours=1)).isoformat(),
+            }],
+        ]
+        env = {
+            "DSA_AGENT_CALIBRATION_SHADOW_ENABLED": "true",
+            "DSA_AGENT_CALIBRATION_SHADOW_PAIRS": (
+                "cn:dual_low,us:us_large_cap_momentum"
+            ),
+            "DSA_AGENT_CALIBRATION_SHADOW_INTERVAL_MINUTES": "1440",
+        }
+
+        with patch.dict(os.environ, env, clear=False), patch(
+            "src.services.vnpy_paper_trading_service.VnpyPaperTradingService",
+            return_value=fake_service,
+        ):
+            tasks = build_vnpy_paper_trading_background_tasks()
+
+        shadow = next(task for task in tasks if task["name"] == "agent_calibration_shadow")
+        evidence = next(task for task in tasks if task["name"] == "agent_calibration_evidence")
+        # The US sample is newer, so the shared task waits for its later cadence.
+        self.assertGreaterEqual(shadow["initial_delay_seconds"], 22 * 60 * 60)
+        self.assertLessEqual(shadow["initial_delay_seconds"], 23 * 60 * 60)
+        self.assertEqual(
+            evidence["initial_delay_seconds"],
+            shadow["initial_delay_seconds"] + 300,
+        )
+        fake_service.run_auto_trade_once.assert_not_called()
+
     def test_calibration_shadow_schedule_exposes_each_pair_without_running_agent(self) -> None:
         fake_service = MagicMock()
         fake_service.get_settings.return_value = SimpleNamespace(
@@ -8815,6 +8861,10 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertEqual(result["items"][0]["market"], "cn")
         self.assertFalse(result["items"][0]["eligible"])
         self.assertIsNotNone(result["items"][0]["next_eligible_at"])
+        self.assertEqual(
+            result["all_eligible_at"],
+            result["items"][0]["next_eligible_at"],
+        )
         self.assertEqual(result["items"][1]["market"], "us")
         self.assertTrue(result["items"][1]["eligible"])
         fake_service.run_auto_trade_once.assert_not_called()
@@ -8827,19 +8877,23 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
             auto_interval_minutes=5,
             auto_strategy="dual_low",
         )
+        fresh_cn_runs = [{
+            "run_uid": "fresh-cn-shadow",
+            "status": "completed",
+            "created_at": datetime.now().isoformat(),
+        }]
+        stale_us_runs = [{
+            "run_uid": "stale-us-shadow",
+            "status": "completed",
+            "created_at": (
+                datetime.now() - timedelta(hours=23, minutes=57)
+            ).isoformat(),
+        }]
         fake_service.agent_repo.list_recent_runs.side_effect = [
-            [{
-                "run_uid": "fresh-cn-shadow",
-                "status": "completed",
-                "created_at": datetime.now().isoformat(),
-            }],
-            [{
-                "run_uid": "stale-us-shadow",
-                "status": "completed",
-                "created_at": (
-                    datetime.now() - timedelta(hours=23, minutes=57)
-                ).isoformat(),
-            }],
+            fresh_cn_runs,
+            stale_us_runs,
+            fresh_cn_runs,
+            stale_us_runs,
         ]
         fake_service.run_auto_trade_once.return_value = {
             "accepted": True,

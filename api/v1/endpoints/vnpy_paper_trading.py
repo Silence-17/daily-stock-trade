@@ -2707,6 +2707,7 @@ def get_vnpy_paper_agent_return_risk_calibration_trends(
     summary="Evaluate read-only production calibration evidence",
 )
 def get_vnpy_paper_agent_calibration_evidence(
+    scheduler: RuntimeSchedulerService = Depends(get_runtime_scheduler_service),
 ) -> VnpyPaperAgentCalibrationEvidenceResponse:
     try:
         repository = _agent_repo()
@@ -2718,6 +2719,24 @@ def get_vnpy_paper_agent_calibration_evidence(
         service = _service()
         try:
             payload["sampling_schedule"] = build_calibration_shadow_schedule(service)
+            scheduler_status = scheduler.status()
+            background_tasks = (
+                scheduler_status.get("background_tasks")
+                if isinstance(scheduler_status, dict)
+                else []
+            )
+            shadow_task = next(
+                (
+                    item
+                    for item in list(background_tasks or [])
+                    if isinstance(item, dict)
+                    and item.get("name") == "agent_calibration_shadow"
+                ),
+                None,
+            )
+            payload["sampling_schedule"]["next_scheduled_at"] = (
+                shadow_task.get("next_run_at") if shadow_task else None
+            )
         except Exception as exc:  # noqa: BLE001 - schedule visibility must not hide evidence.
             logger.warning("Load Agent calibration sampling schedule failed: %s", exc)
             payload["sampling_schedule"] = {
