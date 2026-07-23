@@ -185,6 +185,8 @@
 
 最终开市成交使用 `scripts/check_vnpy_scheduled_external_acceptance.py` 做只读观察。除关联新的 `vnpy_paper_auto` run、调度事件、外部 Gateway 终态成交和隔离账本现金/持仓变化外，观察器还要求观测前后配置一致且满足受限风险合同：每轮最多 1 只、每日最多 1 笔、每单和每日预算不超过 1000 元、最大持仓数不超过 3、单票/总仓位/权益占比分别不超过 1500 元/5000 元/5%、最低现金不少于 5000 元，并开启失败熔断、阈值不超过 2 且关闭自动恢复。配置即使全程未变化，只要比这些验收边界更宽，也会以 `paper_risk_limits_not_restricted` 失败。实际 run 的候选/决策/计划/提交/成交必须严格为 `1/1/1/1/1`、跳过数必须为 `0`；即使已有一笔成交，额外取消或跳过订单也会以 `scheduled_order_cardinality_not_exactly_one` 失败。脚本始终只发送 GET 请求，不会触发 run、修改设置、下单或撤单。
 
+若在观察窗口内执行计划内 API 版本切换，应在停 API 前先优雅结束旧观察器，避免把预期连接间隙写成最终验收错误。Windows 上可用 `scripts/stop_windows_process_group_gracefully.py`，传观察器实际 Python 子进程 PID、venv wrapper 父 PID、脚本文件名命令片段及确认字 `STOP_PROCESS_GROUP_GRACEFULLY`；工具只发送 `CTRL_BREAK`，要求两个进程都退出并固定报告 `hard_kill_attempted=false`。新 API 通过部署门禁后，再重新启动只读观察器建立新基线。
+
 只读预检可直接运行 `python scripts/check_vnpy_xtp_order_acceptance.py`。脚本默认不下单，也不要求暂停已配置的自动交易；受控订单模式必须显式给出 `--place-order --confirmation XTP_PAPER_ORDER --price <limit>`，强制数量不超过 100 股、名义金额不超过 2000 元、自动交易处于暂停状态且不存在其他活动 XTP 委托，并在超时后调用通用撤单接口。默认还要求当前市场开市；仅做收盘后提交/撤单通路验证时才可显式添加 `--allow-closed-market`。
 
 该工作流固定使用 Windows/Python 3.13 和 `vnpy_xtp==2.2.32.2.3`，原始 secret 只注入生成临时连接文件的单个步骤，文件位于 runner 临时目录并在 `always()` 清理。连接前仍强制外部 Gateway、仓库外文件、完整非空默认键；观测脚本不订阅行情、不调用下单或撤单，只上传保留 14 天的脱敏聚合 JSON。`workflow_dispatch`、main-only 双门禁、固定 Environment、账户会话 concurrency 和账户所有者手工设置 secret 共同构成现有控制边界。此入口只用于中泰 XTP 股票类型测试账号；生产实盘凭据应留在受控部署主机上使用本地命令，不应放入云托管 runner。券商若限制来源 IP、设备或登录时段，GitHub-hosted runner 可能无法作为有效验收主机。
