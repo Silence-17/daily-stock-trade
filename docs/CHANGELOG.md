@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [修复] vn.py 恢复扫描对持续活动且超过 30 分钟的委托自动发起一次撤单，对账刷新不再重置超时计时；撤单处理中保留状态，并从撤单请求时间独立计算终态回报超时
+
 - [测试] vn.py Gateway 长跑工具新增外部网关主动断线恢复模式，仅在显式外部网关门禁与固定确认词同时满足时才允许注入；模拟/外部参数互斥且生产预检仍先于任何连接
 - [测试] 新增外部 vn.py Gateway 定时成交只读观察器，基线隔离新 Agent run、关联后台任务事件，并核对真实成交、账本现金/持仓变化、设置稳定性和 EventEngine 回调健康；HTTP 验收测试强制全程仅使用 GET
 - [新功能] 新增仅允许撤销 EventEngine 已观察活动订单的通用 vn.py 手工委托撤单 API，以及默认只读、显式确认后才允许单笔受限 XTP 测试委托的验收脚本

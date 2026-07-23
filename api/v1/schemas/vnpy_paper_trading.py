@@ -554,6 +554,7 @@ class VnpyPaperTradePlanRecoveryRunResponse(BaseModel):
     skipped: bool = False
     reason: Optional[str] = None
     expired_count: int = 0
+    cancel_requested_count: int = 0
     reconciled_count: int = 0
     protected_count: int = 0
     reconciliation_failed_count: int = 0

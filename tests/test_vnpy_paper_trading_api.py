@@ -2524,7 +2524,7 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
             session.execute(
                 text(
                     f"UPDATE {StockSelectionAgentTradePlan.__tablename__} "
-                    "SET updated_at = :updated_at WHERE id = :id"
+                    "SET created_at = :updated_at, updated_at = :updated_at WHERE id = :id"
                 ),
                 {
                     "updated_at": datetime.now() - timedelta(minutes=45),
@@ -2550,6 +2550,7 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
             "accepted": True,
             "skipped": False,
             "expired_count": 1,
+            "cancel_requested_count": 1,
             "reconciled_count": 2,
             "protected_count": 3,
             "reconciliation_failed_count": 1,
@@ -2573,6 +2574,7 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertEqual(payload["expired_count"], 1)
+        self.assertEqual(payload["cancel_requested_count"], 1)
         self.assertEqual(payload["reconciled_count"], 2)
         self.assertEqual(payload["protected_count"], 3)
         self.assertEqual(payload["reconciliation_failed_count"], 1)

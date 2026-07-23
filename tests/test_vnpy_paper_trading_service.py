@@ -386,7 +386,7 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
             session.execute(
                 text(
                     f"UPDATE {StockSelectionAgentTradePlan.__tablename__} "
-                    "SET updated_at = :updated_at WHERE id = :id"
+                    "SET created_at = :updated_at, updated_at = :updated_at WHERE id = :id"
                 ),
                 {"updated_at": datetime.now() - timedelta(minutes=minutes), "id": int(plan_id)},
             )
@@ -1791,7 +1791,7 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
             session.execute(
                 text(
                     f"UPDATE {StockSelectionAgentTradePlan.__tablename__} "
-                    "SET updated_at = :updated_at WHERE id = :id"
+                    "SET created_at = :updated_at, updated_at = :updated_at WHERE id = :id"
                 ),
                 {
                     "updated_at": datetime.now() - timedelta(minutes=45),
@@ -1847,7 +1847,7 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
             session.execute(
                 text(
                     f"UPDATE {StockSelectionAgentTradePlan.__tablename__} "
-                    "SET updated_at = :updated_at WHERE id = :id"
+                    "SET created_at = :updated_at, updated_at = :updated_at WHERE id = :id"
                 ),
                 {
                     "updated_at": datetime.now() - timedelta(minutes=45),
@@ -5245,6 +5245,89 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertEqual(refreshed["status"], "filled")
         self.assertEqual(refreshed["order_result"]["raw"]["fill_sync"]["trade_count"], 1)
 
+    def test_stale_observed_vnpy_order_is_cancelled_once_then_cancel_times_out(self) -> None:
+        installed = _install_fake_vnpy_modules()
+        main_engine = _FakeMainEngine()
+        main_engine.orders["SIM.STALE"] = SimpleNamespace(
+            vt_orderid="SIM.STALE",
+            status="NOTTRADED",
+            symbol="600519",
+            direction="LONG",
+            exchange="SSE",
+            volume=100,
+            traded=0,
+            price=10,
+        )
+        self.service = VnpyPaperTradingService(
+            data_fetcher_manager=_FakeDataFetcherManager(price=10.0),
+            config_path=self.config_path,
+            vnpy_main_engine=main_engine,
+        )
+        self.service.update_settings({"vnpy_gateway_name": "SIM"})
+        run = self.service.agent_repo.create_run(
+            run_uid="auto-cancel-stale-run",
+            trigger_source="vnpy_paper_auto",
+            strategy="dual_low",
+            market="cn",
+            settings={},
+            diagnostics={},
+        )
+        plan = self.service.agent_repo.record_trade_plan(
+            plan_uid="auto-cancel-stale-plan",
+            run_id=int(run["id"]),
+            decision_id=None,
+            symbol="600519",
+            market="cn",
+            side="buy",
+            status="submitted",
+            execution_mode="vnpy_paper",
+            planned_cash_amount=1000,
+            planned_quantity=100,
+            planned_price=10,
+            submitted_quantity=100,
+            submitted_price=10,
+            order_result={"status": "submitted", "raw": {"vt_orderid": "SIM.STALE"}},
+        )
+        self._age_trade_plan(int(plan["id"]))
+
+        try:
+            cancelled = self.service.expire_stale_vnpy_trade_plans(max_plans=3, scan_limit=10)
+            cancel_pending = self.service.agent_repo.get_trade_plan("auto-cancel-stale-plan")
+            assert cancel_pending is not None
+            cancel_order_result = dict(cancel_pending["order_result"])
+            cancel_raw = dict(cancel_order_result["raw"])
+            cancel_details = dict(cancel_raw["cancel"])
+            cancel_details["requested_at"] = (
+                datetime.now(timezone.utc) - timedelta(minutes=45)
+            ).isoformat()
+            cancel_raw["cancel"] = cancel_details
+            cancel_order_result["raw"] = cancel_raw
+            self.service.agent_repo.update_trade_plan_execution(
+                plan_uid="auto-cancel-stale-plan",
+                status="cancel_requested",
+                submitted_quantity=100,
+                submitted_price=10,
+                trade_id=None,
+                skip_reason=None,
+                order_result=cancel_order_result,
+            )
+            expired = self.service.expire_stale_vnpy_trade_plans(max_plans=3, scan_limit=10)
+            final_plan = self.service.agent_repo.get_trade_plan("auto-cancel-stale-plan")
+        finally:
+            _restore_modules(installed)
+
+        self.assertEqual(cancelled["cancel_requested_count"], 1)
+        self.assertEqual(cancelled["expired_count"], 0)
+        self.assertEqual(cancelled["reconciled_count"], 1)
+        self.assertEqual(len(main_engine.cancel_calls), 1)
+        self.assertEqual(cancel_pending["status"], "cancel_requested")
+        self.assertEqual(expired["cancel_requested_count"], 0)
+        self.assertEqual(expired["expired_count"], 1)
+        self.assertEqual(len(main_engine.cancel_calls), 1)
+        assert final_plan is not None
+        self.assertEqual(final_plan["status"], "failed")
+        self.assertEqual(final_plan["skip_reason"], "vnpy_cancel_timeout")
+
     def test_trade_callback_during_cancel_request_is_not_lost(self) -> None:
         run = self.service.agent_repo.create_run(
             run_uid="cancel-race-run",
@@ -6135,6 +6218,7 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
             row = session.get(StockSelectionAgentTradePlan, 1)
             self.assertIsNotNone(row)
             assert row is not None
+            row.created_at = stale_time
             row.updated_at = stale_time
             session.commit()
 
@@ -6230,6 +6314,7 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
             row = session.get(StockSelectionAgentTradePlan, 1)
             self.assertIsNotNone(row)
             assert row is not None
+            row.created_at = stale_time
             row.updated_at = stale_time
             session.commit()
 

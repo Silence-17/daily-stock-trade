@@ -747,6 +747,7 @@ describe('vnpyPaperTradingApi', () => {
         accepted: true,
         skipped: false,
         expired_count: 1,
+        cancel_requested_count: 1,
         reconciled_count: 2,
         protected_count: 3,
         reconciliation_failed_count: 1,
@@ -770,6 +771,7 @@ describe('vnpyPaperTradingApi', () => {
       },
     );
     expect(result.expiredCount).toBe(1);
+    expect(result.cancelRequestedCount).toBe(1);
     expect(result.reconciledCount).toBe(2);
     expect(result.protectedCount).toBe(3);
     expect(result.reconciliationFailedCount).toBe(1);

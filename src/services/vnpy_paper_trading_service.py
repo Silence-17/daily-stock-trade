@@ -2938,10 +2938,35 @@ class VnpyPaperTradingService:
             )
             return result
 
-        reason = "vnpy_order_waiting_trade_callback" if order_status in {"alltraded", "filled"} else None
+        previous_status = str(plan.get("status") or "").strip().lower()
+        preserve_cancel_request = bool(
+            previous_status == "cancel_requested"
+            and order_status not in {"alltraded", "all_traded", "filled"}
+        )
+        preserve_partial_fill = bool(
+            not preserve_cancel_request
+            and previous_status == "part_filled"
+            and order_status not in {"alltraded", "all_traded", "filled"}
+        )
+        pending_status = (
+            "cancel_requested"
+            if preserve_cancel_request
+            else "part_filled"
+            if preserve_partial_fill
+            else "submitted"
+        )
+        reason = (
+            "vnpy_order_cancel_requested"
+            if preserve_cancel_request
+            else "vnpy_order_partially_filled_waiting_trade_callback"
+            if preserve_partial_fill
+            else "vnpy_order_waiting_trade_callback"
+            if order_status in {"alltraded", "all_traded", "filled"}
+            else None
+        )
         result = {
             "accepted": True,
-            "status": "submitted",
+            "status": pending_status,
             "trade_id": None,
             "account_id": self.get_settings().account_id,
             "symbol": symbol_norm,
@@ -2959,7 +2984,7 @@ class VnpyPaperTradingService:
         }
         self._update_vnpy_plan_from_order_callback(
             plan=plan,
-            status="submitted",
+            status=pending_status,
             reason=reason,
             quantity=submitted_quantity,
             price=submitted_price,
@@ -4715,6 +4740,7 @@ class VnpyPaperTradingService:
                 "skipped": False,
                 "reason": "auto_trade_disabled",
                 "expired_count": int(expiration.get("expired_count") or 0),
+                "cancel_requested_count": int(expiration.get("cancel_requested_count") or 0),
                 "reconciled_count": int(expiration.get("reconciled_count") or 0),
                 "protected_count": int(expiration.get("protected_count") or 0),
                 "reconciliation_failed_count": int(
@@ -4725,7 +4751,7 @@ class VnpyPaperTradingService:
                 "submitted_count": 0,
                 "skipped_count": 0,
                 "failed_count": int(expiration.get("failed_count") or 0),
-                "orders": [],
+                "orders": list(expiration.get("orders") or []),
                 "messages": [
                     *list(expiration.get("messages") or []),
                     "Automatic paper trading is paused; active order recovery remains enabled.",
@@ -4737,6 +4763,7 @@ class VnpyPaperTradingService:
             "skipped": False,
             "reason": None,
             "expired_count": int(expiration.get("expired_count") or 0),
+            "cancel_requested_count": int(expiration.get("cancel_requested_count") or 0),
             "reconciled_count": int(expiration.get("reconciled_count") or 0),
             "protected_count": int(expiration.get("protected_count") or 0),
             "reconciliation_failed_count": int(expiration.get("reconciliation_failed_count") or 0),
@@ -4744,8 +4771,8 @@ class VnpyPaperTradingService:
             "attempted_count": 0,
             "submitted_count": 0,
             "skipped_count": 0,
-            "failed_count": 0,
-            "orders": [],
+            "failed_count": int(expiration.get("failed_count") or 0),
+            "orders": list(expiration.get("orders") or []),
             "messages": list(expiration.get("messages") or []),
         }
         for plan in candidates:
@@ -4826,7 +4853,7 @@ class VnpyPaperTradingService:
         timeout_seconds: int = TRADE_PLAN_ORDER_TIMEOUT_SECONDS,
         reconciliation_grace_seconds: int = TRADE_PLAN_RECONCILIATION_GRACE_SECONDS,
     ) -> Dict[str, Any]:
-        """Reconcile active vn.py plans and expire only unsupported stale orders."""
+        """Reconcile active vn.py plans, cancel stale orders, and expire uncertain terminal states."""
 
         timeout = max(60, int(timeout_seconds or TRADE_PLAN_ORDER_TIMEOUT_SECONDS))
         grace = max(0, min(timeout, int(reconciliation_grace_seconds or 0)))
@@ -4839,10 +4866,12 @@ class VnpyPaperTradingService:
             "accepted": True,
             "scanned_count": len(candidates),
             "expired_count": 0,
+            "cancel_requested_count": 0,
             "reconciled_count": 0,
             "protected_count": 0,
             "reconciliation_failed_count": 0,
             "failed_count": 0,
+            "orders": [],
             "messages": [],
         }
         for plan in candidates[:limit]:
@@ -4868,7 +4897,44 @@ class VnpyPaperTradingService:
                 continue
             if reconciliation.get("supported") and reconciliation.get("observed"):
                 result["reconciled_count"] = int(result["reconciled_count"]) + 1
-                result["protected_count"] = int(result["protected_count"]) + 1
+                plan_uid = str(plan.get("plan_uid") or "")
+                refreshed = self.agent_repo.get_trade_plan(plan_uid)
+                if not isinstance(refreshed, dict):
+                    result["protected_count"] = int(result["protected_count"]) + 1
+                    continue
+                refreshed_status = str(refreshed.get("status") or "").strip().lower()
+                if refreshed_status not in ACTIVE_VNPY_TRADE_PLAN_STATUSES:
+                    result["protected_count"] = int(result["protected_count"]) + 1
+                    continue
+                age_seconds = self._trade_plan_age_seconds(refreshed)
+                if age_seconds is None or age_seconds < timeout:
+                    result["protected_count"] = int(result["protected_count"]) + 1
+                    continue
+                order_status = str(reconciliation.get("order_status") or "").strip().lower()
+                if order_status in {"alltraded", "all_traded", "filled"}:
+                    result["protected_count"] = int(result["protected_count"]) + 1
+                    continue
+                if refreshed_status == "cancel_requested":
+                    try:
+                        self._expire_stale_vnpy_trade_plan(refreshed, timeout_seconds=timeout)
+                        result["expired_count"] = int(result["expired_count"]) + 1
+                    except Exception as exc:  # noqa: BLE001 - timeout scans must not kill scheduler threads.
+                        self._record_vnpy_timeout_scan_failure(result, refreshed, exc)
+                    continue
+                try:
+                    cancel_result = self.cancel_trade_plan(plan_uid)
+                except Exception as exc:  # noqa: BLE001 - cancellation failures must fail closed.
+                    self._record_vnpy_cancel_failure(result, refreshed, exc)
+                    continue
+                result["orders"].append(cancel_result)
+                if cancel_result.get("accepted") and self._trade_plan_status(cancel_result) == "cancel_requested":
+                    result["cancel_requested_count"] = int(result["cancel_requested_count"]) + 1
+                else:
+                    self._record_vnpy_cancel_failure(
+                        result,
+                        refreshed,
+                        RuntimeError(str(cancel_result.get("reason") or "vnpy_cancel_not_accepted")),
+                    )
                 continue
             age_seconds = self._trade_plan_age_seconds(plan)
             if age_seconds is None or age_seconds < timeout:
@@ -4877,20 +4943,11 @@ class VnpyPaperTradingService:
                 self._expire_stale_vnpy_trade_plan(plan, timeout_seconds=timeout)
                 result["expired_count"] = int(result["expired_count"]) + 1
             except Exception as exc:  # noqa: BLE001 - timeout scans must not kill scheduler threads.
-                logger.warning("Expire stale vn.py trade plan failed for %s: %s", plan.get("plan_uid"), exc)
-                result["failed_count"] = int(result["failed_count"]) + 1
-                result["messages"].append(f"vnpy_order_timeout_failed:{plan.get('plan_uid')}")
-                self._record_auto_trade_alert_event(
-                    "vnpy_order_timeout_scan_failed",
-                    status="failed",
-                    reason=str(exc) or "vnpy_order_timeout_scan_failed",
-                    diagnostics={
-                        "plan_uid": plan.get("plan_uid"),
-                        "run_id": plan.get("run_id"),
-                        "symbol": plan.get("symbol"),
-                        "execution_mode": plan.get("execution_mode"),
-                    },
-                )
+                self._record_vnpy_timeout_scan_failure(result, plan, exc)
+        if int(result["cancel_requested_count"]):
+            result["messages"].append(
+                f"cancel_requested_vnpy_orders:{result['cancel_requested_count']}"
+            )
         if int(result["expired_count"]):
             result["messages"].append(f"expired_vnpy_orders:{result['expired_count']}")
         if int(result["reconciled_count"]):
@@ -4900,6 +4957,49 @@ class VnpyPaperTradingService:
                 f"vnpy_order_reconciliation_failed:{result['reconciliation_failed_count']}"
             )
         return result
+
+    def _record_vnpy_cancel_failure(
+        self,
+        result: Dict[str, Any],
+        plan: Dict[str, Any],
+        exc: Exception,
+    ) -> None:
+        logger.warning("Cancel stale vn.py trade plan failed for %s: %s", plan.get("plan_uid"), exc)
+        result["protected_count"] = int(result["protected_count"]) + 1
+        result["failed_count"] = int(result["failed_count"]) + 1
+        result["messages"].append(f"vnpy_order_auto_cancel_failed:{plan.get('plan_uid')}")
+        self._record_auto_trade_alert_event(
+            "vnpy_order_auto_cancel_failed",
+            status="failed",
+            reason=str(exc) or "vnpy_order_auto_cancel_failed",
+            diagnostics={
+                "plan_uid": plan.get("plan_uid"),
+                "run_id": plan.get("run_id"),
+                "symbol": plan.get("symbol"),
+                "execution_mode": plan.get("execution_mode"),
+            },
+        )
+
+    def _record_vnpy_timeout_scan_failure(
+        self,
+        result: Dict[str, Any],
+        plan: Dict[str, Any],
+        exc: Exception,
+    ) -> None:
+        logger.warning("Expire stale vn.py trade plan failed for %s: %s", plan.get("plan_uid"), exc)
+        result["failed_count"] = int(result["failed_count"]) + 1
+        result["messages"].append(f"vnpy_order_timeout_failed:{plan.get('plan_uid')}")
+        self._record_auto_trade_alert_event(
+            "vnpy_order_timeout_scan_failed",
+            status="failed",
+            reason=str(exc) or "vnpy_order_timeout_scan_failed",
+            diagnostics={
+                "plan_uid": plan.get("plan_uid"),
+                "run_id": plan.get("run_id"),
+                "symbol": plan.get("symbol"),
+                "execution_mode": plan.get("execution_mode"),
+            },
+        )
 
     def _reconcile_vnpy_trade_plan(
         self,
@@ -4992,6 +5092,7 @@ class VnpyPaperTradingService:
             "vt_orderid": vt_orderid,
             "order_found": order is not None,
             "trade_count": len(trades),
+            "order_status": order_status or None,
             "status": refreshed.get("status") if isinstance(refreshed, dict) else plan.get("status"),
         }
 
@@ -5076,7 +5177,7 @@ class VnpyPaperTradingService:
             trigger_source="vnpy_paper_auto",
             limit=max(1, min(200, int(scan_limit or TRADE_PLAN_AUTO_RETRY_SCAN_LIMIT))),
         )
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
         candidates: List[Dict[str, Any]] = []
         seen_plan_uids: set[str] = set()
         for run in runs:
@@ -5100,24 +5201,35 @@ class VnpyPaperTradingService:
                     "cancel_requested",
                 }:
                     continue
-                updated_at = self._coerce_local_naive_datetime(plan.get("updated_at") or plan.get("created_at"))
-                if updated_at is None or now - updated_at < timedelta(seconds=minimum_age_seconds):
+                timeout_started_at = self._trade_plan_timeout_started_at(plan)
+                if timeout_started_at is None or now - timeout_started_at < timedelta(seconds=minimum_age_seconds):
                     continue
                 seen_plan_uids.add(plan_uid)
                 candidates.append(plan)
         candidates.sort(
-            key=lambda plan: self._coerce_local_naive_datetime(
-                plan.get("updated_at") or plan.get("created_at")
-            )
+            key=lambda plan: self._trade_plan_timeout_started_at(plan)
             or now
         )
         return candidates
 
-    def _trade_plan_age_seconds(self, plan: Dict[str, Any]) -> Optional[float]:
-        updated_at = self._coerce_local_naive_datetime(plan.get("updated_at") or plan.get("created_at"))
-        if updated_at is None:
+    @classmethod
+    def _trade_plan_timeout_started_at(cls, plan: Dict[str, Any]) -> Optional[datetime]:
+        status = str(plan.get("status") or "").strip().lower()
+        order_result = plan.get("order_result") if isinstance(plan.get("order_result"), dict) else {}
+        raw = order_result.get("raw") if isinstance(order_result.get("raw"), dict) else {}
+        cancel = raw.get("cancel") if isinstance(raw.get("cancel"), dict) else {}
+        if status == "cancel_requested":
+            cancel_requested_at = cls._parse_db_datetime(cancel.get("requested_at"))
+            if cancel_requested_at is not None:
+                return cancel_requested_at
+        return cls._parse_db_datetime(plan.get("created_at") or plan.get("updated_at"))
+
+    @classmethod
+    def _trade_plan_age_seconds(cls, plan: Dict[str, Any]) -> Optional[float]:
+        timeout_started_at = cls._trade_plan_timeout_started_at(plan)
+        if timeout_started_at is None:
             return None
-        return max(0.0, (datetime.now() - updated_at).total_seconds())
+        return max(0.0, (datetime.now(timezone.utc) - timeout_started_at).total_seconds())
 
     def _expire_stale_vnpy_trade_plan(self, plan: Dict[str, Any], *, timeout_seconds: int) -> None:
         plan_uid = str(plan.get("plan_uid") or "").strip()
@@ -8448,10 +8560,10 @@ class VnpyPaperTradingService:
             or str(order_result.get("reason") or "").strip()
             or None
         )
-        updated_at = cls._parse_db_datetime(plan.get("updated_at") or plan.get("created_at"))
+        timeout_started_at = cls._trade_plan_timeout_started_at(plan)
         age_seconds = (
-            max(0, int((now - updated_at).total_seconds()))
-            if updated_at is not None
+            max(0, int((now - timeout_started_at).total_seconds()))
+            if timeout_started_at is not None
             else None
         )
         is_active = status in ACTIVE_VNPY_TRADE_PLAN_STATUSES

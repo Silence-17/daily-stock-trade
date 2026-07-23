@@ -163,7 +163,7 @@
 - 持仓天数已按每页最多 100 条的服务契约读取完整成交与拆股历史，并按公司行动先于同日成交的顺序 FIFO 重放当前未平仓批次；清仓重建仓会重置计时，公司行动历史不可用时不使用不完整证据触发期限卖出。数据质量、账户和市场买入门禁不会吞掉此前已执行的止损卖单，run 的提交/跳过计数与计划、决策终态保持一致。
 - 模拟交易页支持“立即 dry-run”一次性演练，可不保存配置、不开启后台自动交易，临时生成自动选股交易计划和审计记录。
 - 交易计划支持基础失败恢复，`manual_approval`、`paper`、`vnpy_paper` 计划若变为 `failed` 或可恢复的 `skipped`，可在页面重试提交并回写交易计划、候选决策和 run 计数。
-- vn.py 订单状态回写支持部分成交审计和多笔成交累计：`parttraded` / `partial_filled` 会标记 `part_filled`，成交回报按 `vt_tradeid` 幂等写入 Portfolio 并累计数量、加权均价和剩余数量，达到计划数量后才标记 `filled`。超时恢复会先查询 `MainEngine.get_order` / `get_all_trades` 补同步漏失回报；查询异常会保护活跃计划，所有订单/部分成交/撤单超时结果均禁止自动重下单。
+- vn.py 订单状态回写支持部分成交审计和多笔成交累计：`parttraded` / `partial_filled` 会标记 `part_filled`，成交回报按 `vt_tradeid` 幂等写入 Portfolio 并累计数量、加权均价和剩余数量，达到计划数量后才标记 `filled`。超时恢复会先查询 `MainEngine.get_order` / `get_all_trades` 补同步漏失回报；活动委托超过 30 分钟会自动发起一次撤单，撤单请求独立计时且对账刷新不会重置时钟。查询异常会保护活跃计划，所有订单/部分成交/撤单超时结果均禁止自动重下单。
 - `serve-only` / `webui-only` 启动现在只禁用每日分析 daily job，不再压制自动模拟交易后台任务；自动买入开启后可在 Web/API 长运行进程中注册 `vnpy_paper_auto_trade` 和 `vnpy_paper_auto_retry`。
 - Runtime scheduler reconcile 已按任务名复用进程内互斥锁；重载前同名任务未结束时，新代任务以 `task_already_running` 审计跳过，状态与 Web 可识别旧代任务仍在收尾，异常路径也会释放互斥锁。
 

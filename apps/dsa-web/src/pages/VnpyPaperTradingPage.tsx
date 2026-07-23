@@ -2065,7 +2065,7 @@ const VnpyPaperTradingPage: React.FC = () => {
     try {
       const result = await vnpyPaperTradingApi.runTradePlanRecovery(5, 200);
       setSuccess(
-        `恢复扫描完成：对账 ${formatNumber(result.reconciledCount, 0)}，保护 ${formatNumber(result.protectedCount, 0)}，对账异常 ${formatNumber(result.reconciliationFailedCount, 0)}，归档 ${formatNumber(result.expiredCount, 0)}，尝试 ${formatNumber(result.attemptedCount, 0)}，提交 ${formatNumber(result.submittedCount, 0)}`
+        `恢复扫描完成：对账 ${formatNumber(result.reconciledCount, 0)}，保护 ${formatNumber(result.protectedCount, 0)}，对账异常 ${formatNumber(result.reconciliationFailedCount, 0)}，撤单 ${formatNumber(result.cancelRequestedCount, 0)}，归档 ${formatNumber(result.expiredCount, 0)}，尝试 ${formatNumber(result.attemptedCount, 0)}，提交 ${formatNumber(result.submittedCount, 0)}`
       );
       await loadFullStatus();
       await loadPerformance();

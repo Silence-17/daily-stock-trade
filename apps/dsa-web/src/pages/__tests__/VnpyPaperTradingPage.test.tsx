@@ -1280,6 +1280,7 @@ describe('VnpyPaperTradingPage', () => {
       accepted: true,
       skipped: false,
       expiredCount: 1,
+      cancelRequestedCount: 1,
       reconciledCount: 2,
       protectedCount: 3,
       reconciliationFailedCount: 1,
