@@ -13,6 +13,7 @@ def test_vnpy_docker_acceptance_workflow_is_manual_and_fail_closed() -> None:
 
     assert workflow[True] == {"workflow_dispatch": None}
     assert "INCLUDE_VNPY=true" in text
+    assert 'VNPY_GATEWAY_PLUGINS_JSON=[{"package":"vnpy==4.4.0","module":"vnpy"}]' in text
     assert "stock-analysis:default-smoke" in text
     assert "stock-analysis:vnpy-smoke" in text
     assert "VNPY_RUNTIME_ENABLED=true" in text

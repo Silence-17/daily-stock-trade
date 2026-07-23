@@ -3,7 +3,8 @@ param(
     [string]$VenvPath = ".venv-vnpy",
     [switch]$AllowUntestedPython,
     [switch]$SkipProjectDependencies,
-    [string]$AlphaSiftSource = ""
+    [string]$AlphaSiftSource = "",
+    [string]$GatewayPluginsJson = $env:VNPY_GATEWAY_PLUGINS_JSON
 )
 
 $ErrorActionPreference = "Stop"
@@ -83,6 +84,21 @@ if (-not $SkipProjectDependencies) {
 & $venvPython -m pip install @pipNetworkArgs --extra-index-url https://pypi.vnpy.com -r (Join-Path $root "requirements-vnpy.txt")
 if ($LASTEXITCODE -ne 0) {
     throw "Failed to install optional vn.py dependencies."
+}
+$gatewayPlugins = if ([string]::IsNullOrWhiteSpace($GatewayPluginsJson)) { "[]" } else { $GatewayPluginsJson }
+$previousGatewayPlugins = $env:VNPY_GATEWAY_PLUGINS_JSON
+try {
+    $env:VNPY_GATEWAY_PLUGINS_JSON = $gatewayPlugins
+    & $venvPython (Join-Path $root "scripts\vnpy_gateway_plugins.py") --install --verify
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to install or import configured vn.py gateway plugins."
+    }
+} finally {
+    if ($null -eq $previousGatewayPlugins) {
+        Remove-Item Env:VNPY_GATEWAY_PLUGINS_JSON -ErrorAction SilentlyContinue
+    } else {
+        $env:VNPY_GATEWAY_PLUGINS_JSON = $previousGatewayPlugins
+    }
 }
 & $venvPython (Join-Path $root "scripts\check_vnpy_adapter.py") --require-vnpy --fault-matrix --reconnect-cycles 3
 if ($LASTEXITCODE -ne 0) {

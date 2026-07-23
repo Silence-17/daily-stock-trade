@@ -1,10 +1,13 @@
 param(
   [switch]$IncludeVnpy,
-  [switch]$SkipDependencyInstall
+  [switch]$SkipDependencyInstall,
+  [string]$VnpyGatewayPluginsJson = $env:VNPY_GATEWAY_PLUGINS_JSON
 )
 
 $ErrorActionPreference = 'Stop'
 $includeVnpyRuntime = $IncludeVnpy -or ($env:DSA_INCLUDE_VNPY_DESKTOP -eq 'true')
+$gatewayPluginsJson = if ([string]::IsNullOrWhiteSpace($VnpyGatewayPluginsJson)) { '[]' } else { $VnpyGatewayPluginsJson }
+$gatewayPluginModules = @()
 
 Write-Host 'Building React UI (static assets)...'
 Push-Location 'apps\dsa-web'
@@ -66,6 +69,26 @@ if (-not (Test-PythonCode -Python $pythonBin -Code "import alphasift.dsa_adapter
   throw 'alphasift.dsa_adapter is not importable after installing requirements.'
 }
 
+function Invoke-VnpyGatewayPluginHelper {
+  param([string[]]$Arguments)
+
+  $previousManifest = $env:VNPY_GATEWAY_PLUGINS_JSON
+  try {
+    $env:VNPY_GATEWAY_PLUGINS_JSON = $gatewayPluginsJson
+    $output = & $pythonBin "${PSScriptRoot}\vnpy_gateway_plugins.py" @Arguments
+    if ($LASTEXITCODE -ne 0) {
+      throw "vn.py gateway plugin helper failed with exit code $LASTEXITCODE."
+    }
+    return $output
+  } finally {
+    if ($null -eq $previousManifest) {
+      Remove-Item Env:VNPY_GATEWAY_PLUGINS_JSON -ErrorAction SilentlyContinue
+    } else {
+      $env:VNPY_GATEWAY_PLUGINS_JSON = $previousManifest
+    }
+  }
+}
+
 if ($includeVnpyRuntime) {
   Write-Host 'Installing optional vn.py desktop runtime...'
   $versionJson = & $pythonBin -c "import json,sys; print(json.dumps({'major':sys.version_info.major,'minor':sys.version_info.minor,'version':sys.version.split()[0]}))"
@@ -79,9 +102,21 @@ if ($includeVnpyRuntime) {
       throw "pip install -r requirements-vnpy.txt failed with exit code $LASTEXITCODE."
     }
   }
+  $pluginArgs = @()
+  if (-not $SkipDependencyInstall) {
+    $pluginArgs += '--install'
+  }
+  $pluginArgs += '--verify'
+  Invoke-VnpyGatewayPluginHelper -Arguments $pluginArgs | Write-Host
+  $gatewayModulesJson = Invoke-VnpyGatewayPluginHelper -Arguments @('--print-modules-json')
+  foreach ($module in ($gatewayModulesJson | ConvertFrom-Json)) {
+    $gatewayPluginModules += [string]$module
+  }
   if (-not (Test-PythonCode -Python $pythonBin -Code "import vnpy, vnpy.event, vnpy.trader.engine, vnpy.trader.event, vnpy.trader.object")) {
     throw 'vn.py core runtime is not importable in the selected Python environment.'
   }
+} else {
+  Invoke-VnpyGatewayPluginHelper -Arguments @('--assert-empty') | Write-Host
 }
 
 if (Test-Path 'dist\backend') {
@@ -160,6 +195,9 @@ $pyInstallerArgs = @(
 $pyInstallerArgs += $hiddenImportArgs
 if ($includeVnpyRuntime) {
   $pyInstallerArgs += @('--collect-all', 'vnpy', '--collect-all', 'talib')
+  foreach ($module in $gatewayPluginModules) {
+    $pyInstallerArgs += @('--collect-all', $module)
+  }
 }
 $pyInstallerArgs += 'main.py'
 
@@ -198,10 +236,12 @@ try {
 if ($includeVnpyRuntime) {
   Write-Host 'Verifying packaged vn.py runtime importability...'
   $previousVnpyProbe = $env:DSA_PACKAGED_VNPY_IMPORT_PROBE
+  $previousPluginModules = $env:DSA_PACKAGED_VNPY_PLUGIN_MODULES_JSON
   $vnpyProbeStdout = Join-Path $env:TEMP 'dsa-packaged-vnpy-probe.stdout.log'
   $vnpyProbeStderr = Join-Path $env:TEMP 'dsa-packaged-vnpy-probe.stderr.log'
   try {
     $env:DSA_PACKAGED_VNPY_IMPORT_PROBE = '1'
+    $env:DSA_PACKAGED_VNPY_PLUGIN_MODULES_JSON = ConvertTo-Json -InputObject @($gatewayPluginModules) -Compress
     $vnpyProbeProcess = Start-Process -FilePath $packagedEntry -Wait -PassThru `
       -RedirectStandardOutput $vnpyProbeStdout -RedirectStandardError $vnpyProbeStderr
     if ($vnpyProbeProcess.ExitCode -ne 0) {
@@ -214,6 +254,11 @@ if ($includeVnpyRuntime) {
       Remove-Item Env:DSA_PACKAGED_VNPY_IMPORT_PROBE -ErrorAction SilentlyContinue
     } else {
       $env:DSA_PACKAGED_VNPY_IMPORT_PROBE = $previousVnpyProbe
+    }
+    if ($null -eq $previousPluginModules) {
+      Remove-Item Env:DSA_PACKAGED_VNPY_PLUGIN_MODULES_JSON -ErrorAction SilentlyContinue
+    } else {
+      $env:DSA_PACKAGED_VNPY_PLUGIN_MODULES_JSON = $previousPluginModules
     }
   }
 }

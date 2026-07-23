@@ -19,6 +19,7 @@ RUN npm run build
 FROM python:3.11-slim-bookworm
 
 ARG INCLUDE_VNPY=false
+ARG VNPY_GATEWAY_PLUGINS_JSON=[]
 
 # 设置工作目录
 WORKDIR /app
@@ -46,6 +47,7 @@ RUN groupadd -g 1000 dsa && \
 
 # 复制依赖文件
 COPY requirements.txt requirements-vnpy.txt ./
+COPY scripts/vnpy_gateway_plugins.py /tmp/vnpy_gateway_plugins.py
 
 # 安装 Python 依赖
 RUN --mount=type=cache,target=/root/.cache/pip pip install -r requirements.txt
@@ -54,8 +56,9 @@ RUN --mount=type=cache,target=/root/.cache/pip pip install -r requirements.txt
 # installs vn.py only when the operator explicitly requests it.
 RUN --mount=type=cache,target=/root/.cache/pip \
     case "$INCLUDE_VNPY" in \
-      true) pip install --prefer-binary --extra-index-url https://pypi.vnpy.com -r requirements-vnpy.txt ;; \
-      false) ;; \
+      true) pip install --prefer-binary --extra-index-url https://pypi.vnpy.com -r requirements-vnpy.txt && \
+            python /tmp/vnpy_gateway_plugins.py --manifest-json "$VNPY_GATEWAY_PLUGINS_JSON" --install --verify ;; \
+      false) python /tmp/vnpy_gateway_plugins.py --manifest-json "$VNPY_GATEWAY_PLUGINS_JSON" --assert-empty ;; \
       *) echo "INCLUDE_VNPY must be true or false" >&2; exit 2 ;; \
     esac
 
@@ -75,7 +78,8 @@ RUN python -c "import alphasift.dsa_adapter"
 # Validate the optional runtime after application modules are present. This is
 # an import-only gate and does not create accounts, plans, or orders.
 RUN if [ "$INCLUDE_VNPY" = "true" ]; then \
-      python -c "import vnpy, vnpy.event, vnpy.trader.engine, vnpy.trader.event, vnpy.trader.object; from src.services.vnpy_simulated_gateway import DsaSimulatedGateway; print(DsaSimulatedGateway.default_name)"; \
+      python -c "import vnpy, vnpy.event, vnpy.trader.engine, vnpy.trader.event, vnpy.trader.object; from src.services.vnpy_simulated_gateway import DsaSimulatedGateway; print(DsaSimulatedGateway.default_name)" && \
+      python /tmp/vnpy_gateway_plugins.py --manifest-json "$VNPY_GATEWAY_PLUGINS_JSON" --verify; \
     fi
 
 # 确保数据目录存在并授权给 non-root 用户

@@ -59,15 +59,24 @@ def test_optional_desktop_vnpy_bundle_has_frozen_runtime_probe() -> None:
     assert "[switch]$SkipDependencyInstall" in windows_script
     assert "requirements-vnpy.txt" in windows_script
     assert "@('--collect-all', 'vnpy', '--collect-all', 'talib')" in windows_script
+    assert "vnpy_gateway_plugins.py" in windows_script
+    assert "VnpyGatewayPluginsJson" in windows_script
+    assert "DSA_PACKAGED_VNPY_PLUGIN_MODULES_JSON" in windows_script
+    assert "foreach ($module in ($gatewayModulesJson | ConvertFrom-Json))" in windows_script
     assert "DSA_PACKAGED_VNPY_IMPORT_PROBE" in windows_script
     assert "RedirectStandardError $vnpyProbeStderr" in windows_script
     assert "-IncludeVnpy:$IncludeVnpy" in windows_all
     assert "-SkipDependencyInstall:$SkipDependencyInstall" in windows_all
+    assert "-VnpyGatewayPluginsJson $VnpyGatewayPluginsJson" in windows_all
     assert 'INCLUDE_VNPY_DESKTOP="${DSA_INCLUDE_VNPY_DESKTOP:-false}"' in macos_script
     assert 'SKIP_DEPENDENCY_INSTALL="${DSA_SKIP_DESKTOP_DEPENDENCY_INSTALL:-false}"' in macos_script
     assert 'cmd+=("--collect-all" "vnpy" "--collect-all" "talib")' in macos_script
+    assert "vnpy_gateway_plugins.py" in macos_script
+    assert "VNPY_GATEWAY_PLUGINS_JSON" in macos_script
+    assert "DSA_PACKAGED_VNPY_PLUGIN_MODULES_JSON" in macos_script
     assert "DSA_PACKAGED_VNPY_IMPORT_PROBE=1" in macos_script
     assert "DSA_PACKAGED_VNPY_IMPORT_PROBE" in main_py
+    assert "DSA_PACKAGED_VNPY_PLUGIN_MODULES_JSON" in main_py
     assert '_PACKAGED_STDIO_FALLBACKS = []' in main_py
     assert 'if getattr(sys, _stream_name, None) is None:' in main_py
     assert 'open(os.devnull, "w", encoding="utf-8", buffering=1)' in main_py

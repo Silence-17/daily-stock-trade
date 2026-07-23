@@ -70,15 +70,23 @@ if os.getenv("DSA_PACKAGED_VNPY_IMPORT_PROBE") == "1":
     import importlib
     import sys
 
-    packaged_vnpy_modules = (
+    packaged_vnpy_modules = [
         "vnpy",
         "vnpy.event",
         "vnpy.trader.engine",
         "vnpy.trader.event",
         "vnpy.trader.object",
         "src.services.vnpy_simulated_gateway",
-    )
+    ]
     try:
+        plugin_modules = json.loads(
+            os.getenv("DSA_PACKAGED_VNPY_PLUGIN_MODULES_JSON", "[]")
+        )
+        if not isinstance(plugin_modules, list) or not all(
+            isinstance(item, str) and item for item in plugin_modules
+        ):
+            raise ValueError("plugin modules must be a JSON string array")
+        packaged_vnpy_modules.extend(plugin_modules)
         for module_name in packaged_vnpy_modules:
             importlib.import_module(module_name)
     except Exception as exc:

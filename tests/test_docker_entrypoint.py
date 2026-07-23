@@ -44,12 +44,15 @@ def test_dockerfile_has_explicit_optional_vnpy_build_profile() -> None:
     )
 
     assert "ARG INCLUDE_VNPY=false" in dockerfile
+    assert "ARG VNPY_GATEWAY_PLUGINS_JSON=[]" in dockerfile
+    assert "vnpy_gateway_plugins.py" in dockerfile
     assert "COPY requirements.txt requirements-vnpy.txt ./" in dockerfile
     assert "INCLUDE_VNPY must be true or false" in dockerfile
     assert "pip install --prefer-binary --extra-index-url https://pypi.vnpy.com -r requirements-vnpy.txt" in dockerfile
     assert "import vnpy, vnpy.event, vnpy.trader.engine" in dockerfile
     assert "from src.services.vnpy_simulated_gateway import DsaSimulatedGateway" in dockerfile
     assert compose["x-common"]["build"]["args"]["INCLUDE_VNPY"] == "${DSA_INCLUDE_VNPY_DOCKER:-false}"
+    assert compose["x-common"]["build"]["args"]["VNPY_GATEWAY_PLUGINS_JSON"] == "${VNPY_GATEWAY_PLUGINS_JSON:-[]}"
 
 
 def test_docker_entrypoint_repairs_ownership_and_user_permissions() -> None:

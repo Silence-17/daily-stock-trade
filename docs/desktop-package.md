@@ -208,6 +208,10 @@ powershell -ExecutionPolicy Bypass -File scripts\build-backend.ps1 -IncludeVnpy
 
 该档位会安装 `requirements-vnpy.txt`、让 PyInstaller 收集 vn.py 与 TA-Lib 动态子模块，并使用冻结后的 `stock_analysis.exe` 实际导入事件引擎、交易对象和 `DsaSimulatedGateway`；任一导入失败都会阻断构建。无控制台桌面进程缺少标准输出流时会定向到系统空设备，vn.py/Loguru 不会因此阻断 runtime，应用文件日志仍保留。具体券商 gateway 插件仍须另行安装、收集和配置，不会被基础 vn.py 档位猜测加入。
 
+需要把外部 Gateway 插件纳入桌面产物时，设置 `VNPY_GATEWAY_PLUGINS_JSON`，或在 Windows 直接传 `-VnpyGatewayPluginsJson`。清单格式为 `[{"package":"<gateway-package>==<version>","module":"<gateway_module>"}]`；构建会安装并导入插件、为每个模块追加 PyInstaller `--collect-all`，再通过 `DSA_PACKAGED_VNPY_PLUGIN_MODULES_JSON` 对冻结产物逐项导入。声明插件但未开启 vn.py 档位、插件安装失败或冻结后不可导入都会阻断构建。清单不得包含账户凭据或私有索引 URL。
+
+2026-07-23 Windows PowerShell 5 实物验收使用已安装的 `packaging==26.2` 作为非 Gateway 的清单机制样本，验证 JSON 经环境变量传递时不会被原生命令剥离引号，单模块 JSON 数组会扁平化为字符串，并在 PyInstaller 命令中生成 `--collect-all packaging`。最终冻结产物通过 AlphaSift、vn.py 核心与声明模块导入探针、静态资源和策略数量检查。该样本只证明可复现安装/收集/探针机制，不替代具体外部 Gateway 构建和账户连接证据。
+
 2026-07-21 Windows 验收使用 Python 3.13.14 和 `-IncludeVnpy -SkipDependencyInstall`：冻结后端通过真实 HTTP 启动检查，状态接口确认 `mode=vnpy_runtime`、`DSA_SIM` 已连接、四类 EventEngine 回调已注册且调度循环存活；Electron 生成约 220.6 MiB 的 NSIS 安装器，解包目录约 655.0 MiB，内置后端哈希与验收产物一致。该结果只证明内置模拟 gateway 的桌面发布链路，不代表外部券商 gateway 已打包或连接。
 
 - macOS：

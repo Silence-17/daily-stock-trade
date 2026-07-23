@@ -37,6 +37,7 @@ jobs:
           file: docker/Dockerfile
           build-args: |
             INCLUDE_VNPY=true
+            VNPY_GATEWAY_PLUGINS_JSON=[{"package":"vnpy==4.4.0","module":"vnpy"}]
           tags: stock-analysis:vnpy-smoke
           load: true
           cache-from: type=gha,scope=stock-analysis-vnpy-smoke

@@ -11,6 +11,9 @@ log() {
 PYTHON_BIN="${PYTHON_BIN:-}"
 INCLUDE_VNPY_DESKTOP="${DSA_INCLUDE_VNPY_DESKTOP:-false}"
 SKIP_DEPENDENCY_INSTALL="${DSA_SKIP_DESKTOP_DEPENDENCY_INSTALL:-false}"
+VNPY_GATEWAY_PLUGINS_JSON="${VNPY_GATEWAY_PLUGINS_JSON:-[]}"
+gateway_plugin_modules=()
+gateway_plugin_modules_json="[]"
 if [[ -z "${PYTHON_BIN}" ]]; then
   if command -v python3 >/dev/null 2>&1; then
     PYTHON_BIN="python3"
@@ -61,8 +64,17 @@ if [[ "${INCLUDE_VNPY_DESKTOP}" == "true" ]]; then
   }
   if [[ "${SKIP_DEPENDENCY_INSTALL}" != "true" ]]; then
     "${PYTHON_BIN}" -m pip install --prefer-binary --extra-index-url https://pypi.vnpy.com -r "${ROOT_DIR}/requirements-vnpy.txt"
+    "${PYTHON_BIN}" "${SCRIPT_DIR}/vnpy_gateway_plugins.py" --manifest-json "${VNPY_GATEWAY_PLUGINS_JSON}" --install --verify
+  else
+    "${PYTHON_BIN}" "${SCRIPT_DIR}/vnpy_gateway_plugins.py" --manifest-json "${VNPY_GATEWAY_PLUGINS_JSON}" --verify
   fi
+  gateway_plugin_modules_json="$("${PYTHON_BIN}" "${SCRIPT_DIR}/vnpy_gateway_plugins.py" --manifest-json "${VNPY_GATEWAY_PLUGINS_JSON}" --print-modules-json)"
+  while IFS= read -r module; do
+    [[ -n "${module}" ]] && gateway_plugin_modules+=("${module}")
+  done < <("${PYTHON_BIN}" "${SCRIPT_DIR}/vnpy_gateway_plugins.py" --manifest-json "${VNPY_GATEWAY_PLUGINS_JSON}" --print-modules-lines)
   "${PYTHON_BIN}" -c "import vnpy, vnpy.event, vnpy.trader.engine, vnpy.trader.event, vnpy.trader.object"
+else
+  "${PYTHON_BIN}" "${SCRIPT_DIR}/vnpy_gateway_plugins.py" --manifest-json "${VNPY_GATEWAY_PLUGINS_JSON}" --assert-empty
 fi
 
 if [[ -d "${ROOT_DIR}/dist/backend" ]]; then
@@ -135,6 +147,9 @@ cmd=("${PYTHON_BIN}" -m PyInstaller --name stock_analysis --onedir --noconfirm -
 cmd+=("--collect-all" "alphasift")
 if [[ "${INCLUDE_VNPY_DESKTOP}" == "true" ]]; then
   cmd+=("--collect-all" "vnpy" "--collect-all" "talib")
+  for module in "${gateway_plugin_modules[@]}"; do
+    cmd+=("--collect-all" "${module}")
+  done
 fi
 cmd+=("${hidden_import_args[@]}" "main.py")
 
@@ -170,7 +185,7 @@ fi
 
 if [[ "${INCLUDE_VNPY_DESKTOP}" == "true" ]]; then
   log "Verifying packaged vn.py runtime importability..."
-  if DSA_PACKAGED_VNPY_IMPORT_PROBE=1 "${packaged_entry}" >/tmp/vnpy-packaged-import.log 2>&1; then
+  if DSA_PACKAGED_VNPY_IMPORT_PROBE=1 DSA_PACKAGED_VNPY_PLUGIN_MODULES_JSON="${gateway_plugin_modules_json}" "${packaged_entry}" >/tmp/vnpy-packaged-import.log 2>&1; then
     cat /tmp/vnpy-packaged-import.log
   else
     echo "ERROR: packaged backend artifact cannot import the vn.py runtime."

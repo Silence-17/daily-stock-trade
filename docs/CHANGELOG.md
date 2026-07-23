@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [新功能] 新增 `VNPY_GATEWAY_PLUGINS_JSON` 外部 Gateway 插件清单，统一驱动隔离环境、Docker 与 Windows/macOS Desktop 的包安装、模块导入、PyInstaller 收集和冻结后探针；非法/重复/URL/marker 清单、未开启 vn.py、安装失败或产物漏模块均 fail-closed，且账户参数仍保持仓库外置
+- [测试] 新增 Gateway 插件清单解析、参数隔离、pip 失败、模块导入，以及 Docker/桌面打包契约回归；Windows PowerShell 5 实物构建验证 JSON 安全传递、单模块数组扁平化、动态 `--collect-all` 和冻结后声明模块导入
 - [测试] 修复后的部署态 DSA_SIM 通过 300 秒只读 runtime 长跑与独立 Gateway 断线恢复验收：148/148 次部署采样全可用，独立 Gateway 在第 120 秒断线并于第 122 秒自动恢复，最终连接率 99.3333%、重连 1/1 成功且全程零下单；校准门禁仍诚实保留三市场共 15 项长期样本阈值缺口
 - [修复] 校准 shadow 后台任务的首次触发改为等待持久化三市场 cadence 全部可采样，证据监控在其后 5 分钟运行；只读 API 与 Agent 控制台区分单市场资格、整批资格和 runtime 实际任务时间，避免服务注册时刻造成每日采样无谓延迟、同轮遗漏较晚到期市场或页面误报执行时间，同时保留首次部署的 5 分钟启动缓冲与跨重启防重复门禁
 - [改进] 历史组合回测新增周期收益波动率、下行偏差、Sortino 和 Calmar 指标，Agent 控制台同步展示年化收益、基准收益、周期胜率及 Sharpe/Sortino 风险调整结果；无下行或无回撤时不返回无穷比率
