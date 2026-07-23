@@ -2668,7 +2668,15 @@ class VnpyPaperTradingService:
 
         def record_last_run(result: Dict[str, Any]) -> None:
             if not calibration_shadow:
-                self._record_last_auto_run(result)
+                self._record_last_auto_run(
+                    {
+                        **result,
+                        "execution_mode": settings.auto_execution_mode,
+                        "execution_mode_override": override_mode or None,
+                        "ignore_auto_trade_enabled": bool(ignore_auto_trade_enabled),
+                        "trigger_source": run_trigger_source,
+                    }
+                )
 
         def record_run_alert(event_type: str, **kwargs: Any) -> None:
             if not calibration_shadow:
@@ -3958,6 +3966,165 @@ class VnpyPaperTradingService:
             is_retry=True,
         )
 
+    def cancel_vnpy_order(
+        self,
+        *,
+        vt_orderid: str,
+        symbol: Optional[str] = None,
+        market: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Cancel an active gateway order already observed by the event bridge."""
+
+        order_id = str(vt_orderid or "").strip()
+        if not order_id:
+            raise ValueError("vt_orderid is required")
+
+        with self._lock:
+            state = self._read_vnpy_sync_state()
+            orders = state.get("orders") if isinstance(state.get("orders"), dict) else {}
+            observed = orders.get(order_id) if isinstance(orders.get(order_id), dict) else None
+            if observed is None:
+                raise ValueError("vnpy_order_not_observed")
+
+            order_status = self._normalize_vnpy_status(observed.get("status"))
+            if order_status not in {
+                "submitting",
+                "nottraded",
+                "not_traded",
+                "parttraded",
+                "part_traded",
+                "part_filled",
+                "partial_filled",
+            }:
+                raise ValueError("vnpy_order_not_cancelable")
+
+            observed_symbol = self._normalize_symbol(observed.get("symbol") or symbol or "")
+            requested_symbol = self._normalize_symbol(symbol) if symbol else None
+            if requested_symbol and requested_symbol != observed_symbol:
+                raise ValueError("vnpy_order_symbol_mismatch")
+
+            raw = observed.get("raw") if isinstance(observed.get("raw"), dict) else {}
+            settings = self.get_settings()
+            gateway_name = str(settings.vnpy_gateway_name or "").strip()
+            observed_gateway = str(
+                raw.get("gateway_name")
+                or raw.get("gatewayName")
+                or order_id.partition(".")[0]
+                or ""
+            ).strip()
+            if observed_gateway and observed_gateway.lower() != gateway_name.lower():
+                raise ValueError("vnpy_order_gateway_mismatch")
+
+            market_norm = str(market or observed.get("market") or "").strip().lower()
+            if not market_norm:
+                market_norm = self._market_from_vnpy_exchange(raw.get("exchange")) or settings.auto_market or "cn"
+
+            bridge_status = get_vnpy_bridge_status(
+                main_engine=self.vnpy_main_engine,
+                gateway_name=gateway_name,
+            )
+            if not bridge_status.get("available") or not bridge_status.get("cancel_order_supported"):
+                reason = (
+                    "cancel_order_unavailable"
+                    if bridge_status.get("available")
+                    else str(bridge_status.get("reason") or "vnpy_bridge_unavailable")
+                )
+                return self._failed_order(
+                    symbol=observed_symbol,
+                    side=observed.get("side") or "buy",
+                    quantity=_safe_float(observed.get("volume")),
+                    price=_safe_float(observed.get("price")),
+                    reason="vnpy_cancel_unavailable",
+                    message=f"vn.py cancel unavailable: {reason}",
+                    raw={"vnpy_bridge": bridge_status, "vt_orderid": order_id},
+                )
+            if bridge_status.get("connection_confirmed") is False:
+                return self._failed_order(
+                    symbol=observed_symbol,
+                    side=observed.get("side") or "buy",
+                    quantity=_safe_float(observed.get("volume")),
+                    price=_safe_float(observed.get("price")),
+                    reason="vnpy_gateway_disconnected",
+                    message="vn.py gateway reports that it is disconnected.",
+                    raw={"vnpy_bridge": bridge_status, "vt_orderid": order_id},
+                )
+
+            try:
+                cancel_payload = build_vnpy_cancel_request_payload(
+                    vt_orderid=order_id,
+                    symbol=observed_symbol,
+                    market=market_norm,
+                    order_id=raw.get("orderid") or raw.get("order_id"),
+                    exchange=raw.get("exchange"),
+                )
+                submitted = VnpyMainEngineBridge(
+                    main_engine=self.vnpy_main_engine,
+                    gateway_name=gateway_name,
+                ).cancel_order(cancel_payload)
+            except VnpyAdapterError as exc:
+                return self._failed_order(
+                    symbol=observed_symbol,
+                    side=observed.get("side") or "buy",
+                    quantity=_safe_float(observed.get("volume")),
+                    price=_safe_float(observed.get("price")),
+                    reason="vnpy_cancel_failed",
+                    message=str(exc),
+                    raw={"vt_orderid": order_id},
+                )
+            except Exception as exc:  # noqa: BLE001 - gateway cancellation failures must remain visible.
+                logger.warning("Cancel observed vn.py order failed for %s: %s", order_id, exc)
+                return self._failed_order(
+                    symbol=observed_symbol,
+                    side=observed.get("side") or "buy",
+                    quantity=_safe_float(observed.get("volume")),
+                    price=_safe_float(observed.get("price")),
+                    reason="vnpy_cancel_failed",
+                    message=str(exc),
+                    raw={"vt_orderid": order_id, "error_type": type(exc).__name__},
+                )
+
+            requested_at = _utc_now_iso()
+            cancel_details = {
+                "requested_at": requested_at,
+                "cancel_request_payload": submitted.get("cancel_request_payload") or cancel_payload,
+                "raw_result": self._jsonable_event_value(submitted.get("raw_result")),
+            }
+            self._record_vnpy_order_state(
+                order_id,
+                {
+                    **observed,
+                    "status": "cancel_requested",
+                    "raw_status": "cancel_requested",
+                    "raw": {**raw, "cancel": cancel_details},
+                },
+            )
+            quantity = _safe_float(observed.get("volume"))
+            price = _safe_float(observed.get("price"))
+            return {
+                "accepted": True,
+                "status": "cancel_requested",
+                "trade_id": None,
+                "account_id": settings.account_id,
+                "symbol": observed_symbol,
+                "side": observed.get("side") or "buy",
+                "quantity": quantity,
+                "price": price,
+                "cash_amount": (
+                    round(float(quantity) * float(price), 6)
+                    if quantity is not None and price is not None
+                    else None
+                ),
+                "source": "vnpy_main_engine",
+                "message": "vn.py cancel request submitted; waiting for order callback confirmation.",
+                "reason": "vnpy_order_cancel_requested",
+                "raw": {
+                    **raw,
+                    "vt_orderid": order_id,
+                    "gateway_name": submitted.get("gateway_name") or gateway_name,
+                    "cancel": cancel_details,
+                },
+            }
+
     def cancel_trade_plan(self, plan_uid: str) -> Dict[str, Any]:
         """Request cancellation for a submitted vn.py paper trade plan."""
 
@@ -5127,6 +5294,10 @@ class VnpyPaperTradingService:
                 "planned_count": result.get("planned_count", 0),
                 "submitted_count": result.get("submitted_count", 0),
                 "skipped_count": result.get("skipped_count", 0),
+                "execution_mode": result.get("execution_mode"),
+                "execution_mode_override": result.get("execution_mode_override"),
+                "ignore_auto_trade_enabled": bool(result.get("ignore_auto_trade_enabled")),
+                "trigger_source": result.get("trigger_source"),
             }
             self._write_config_payload(payload)
 
@@ -13633,6 +13804,20 @@ def _last_auto_trade_ran_in_session(
     if not isinstance(last_run, dict):
         return False
     if str(last_run.get("market") or "").strip().lower() != settings.auto_market:
+        return False
+    execution_mode = str(last_run.get("execution_mode") or "").strip().lower()
+    if not execution_mode:
+        run_uid = str(last_run.get("agent_run_uid") or "").strip()
+        if run_uid:
+            try:
+                detail = service.agent_repo.get_run_detail(run_uid)
+            except Exception as exc:  # pragma: no cover - persisted metadata remains the primary path.
+                logger.warning("Failed to resolve last auto-run execution mode for %s: %s", run_uid, exc)
+            else:
+                diagnostics = detail.get("diagnostics") if isinstance(detail, dict) else None
+                if isinstance(diagnostics, dict):
+                    execution_mode = str(diagnostics.get("execution_mode") or "").strip().lower()
+    if execution_mode in {"dry_run", "manual_approval"}:
         return False
     ran_at = VnpyPaperTradingService._parse_utc_datetime(last_run.get("ran_at"))
     timezone_name = trading_calendar.MARKET_TIMEZONE.get(settings.auto_market)

@@ -17,6 +17,7 @@
 - 页面提供“暂停自动买入”按钮，确认后会关闭 `auto_trade_enabled` 并触发 runtime scheduler 重新 reconcile，停止后续后台自动买入；已有 `submitted` / `part_filled` / `cancel_requested` 委托仍由恢复任务对账和安全归档，暂停期间不会重提失败计划。暂停后同位置提供“恢复自动买入”按钮，可重新打开后台自动买入并触发 scheduler reconcile。
 - 自动模拟交易支持 `paper`、`vnpy_paper`、`dry_run` 和 `manual_approval` 四种执行模式：`paper` 会写入本地模拟成交，`vnpy_paper` 会把通过风控的买入计划提交给注入的 vn.py `MainEngine` 并记录为 `submitted`，随后可通过 vn.py 成交回报同步入口回写为 `filled`，`dry_run` 只生成交易计划和审计记录，`manual_approval` 会生成待审批交易计划，用户在页面确认后才写入 Portfolio 账本。
 - 交易计划支持受控恢复：`manual_approval`、`paper`、`vnpy_paper` 计划若变为 `failed` 或可恢复的 `skipped`，页面可触发“重试提交”。后端会重新走对应执行路由（`vnpy_paper` 走 vn.py bridge，其余走本地 paper）、现有持仓检查和 retry 次数/冷却控制，并回写交易计划、候选决策和 run 计数。数据质量、行情灯、组合风控等不可恢复跳过原因仍不能通过该入口绕过。`vnpy_paper` 的 `submitted` / `part_filled` 计划可在页面发起“撤单”，后端调用注入的 `MainEngine.cancel_order` 并把计划临时标记为 `cancel_requested`，最终是否撤销仍以后续 vn.py 订单状态回报为准。
+- 已被 EventEngine 观察到的手工 vn.py 委托也可通过 `POST /api/v1/vnpy-paper/orders/{vt_orderid}/cancel` 撤单。请求只接受当前 Gateway 下仍处于提交中、未成交或部分成交状态的已知订单；未知订单、Gateway/股票不匹配、终态订单和重复撤单均 fail closed。接口先标记 `cancel_requested`，最终状态仍以 Gateway 订单回报为准。
 - Web 模拟交易页展示只读“交易计划恢复矩阵”，汇总最近非终态计划的状态、执行模式、活跃提交态、疑似卡住、可撤单、可重试、冷却中和重试超限数量，并列出需要关注的计划。矩阵不自动修改订单，只用于解释哪些计划还在等待 vn.py 回报、哪些可人工重试或撤单。
 - Web 模拟交易页可在确认后手动运行一次“交易计划恢复扫描”，该操作复用后台 `vnpy_paper_auto_retry` 的同一条执行路径：活跃 `submitted` / `part_filled` / `cancel_requested` 计划提交满 60 秒后即可查询注入的 `MainEngine.get_order` / `get_all_trades`，补同步漏失的订单和成交回报；查询到网关证据或查询异常时保护原计划。未满 30 分钟且没有网关证据的计划继续等待，只有超过 30 分钟且没有可用证据时才安全归档，再按 retry 次数、冷却和可恢复原因扫描其他到期计划。`vnpy_order_cancelled`、`vnpy_order_rejected`、`vnpy_order_failed` 以及 `vnpy_order_timeout`、`vnpy_partial_fill_timeout`、`vnpy_cancel_timeout` 均不会自动重下单，避免用户撤单、网关拒单或状态不明时重复委托。响应会返回 `reconciled_count`、`protected_count` 和 `reconciliation_failed_count`，Web 成功提示同步展示这些计数。
 - 页面提供“重置账户”入口，后端会归档当前 `vnpy_paper` 模拟账户、创建新的干净模拟账户并按初始资金写入现金流入；旧账户和旧流水保留在 Portfolio 账本中用于审计，不做硬删除。
@@ -25,7 +26,7 @@
 - 自动模拟成交默认启用交易时段限制；市场非交易日、盘前、午休、盘后或日历未知时不会提交 paper 订单，并记录 `non_trading_day`、`outside_trading_session` 或 `market_phase_unknown`。`dry_run` 和 `manual_approval` 仍允许在任意时间生成计划。
 - 状态接口会返回 `diagnostics.trading_window`；Web 模拟交易页展示“可交易窗口”，可区分当前开市、今日稍后开市、下一交易日、交易日历不可用、时间窗关闭或当前执行模式不强制拦截，并显示对应的下次开盘/收盘时间。
 - 状态接口新增 `diagnostics.auto_trade_readiness`，结构化返回自动交易 readiness：总状态、下一步建议、阻断原因、关注项和本地账本、自动交易开关、runtime scheduler、自动任务、AlphaSift 选股依赖、调度窗口、交易窗口、连续失败熔断、vn.py bridge 等组件状态。`diagnostics.auto_trade_readiness.timing_alignment` 会按自动任务下次触发日期投影对应交易窗口并展示开收盘时间，避免跨日期误报；`window_session_date` 标识本次比较使用的交易日。`diagnostics.alphasift` 会轻量返回自动交易依赖的 AlphaSift 启用状态、可用性、版本和策略数量；异常只写入诊断，不会拖垮本地 paper 状态接口。
-- 启用交易时段门禁时，日级自动交易任务会把首次运行锚定到可交易窗口开始后 5 分钟，为 runtime 启动、行情初始化和在线选股预留时间。服务在窗口中重启且当天尚未运行时，会选择至少 5 分钟后仍可交易的当前或下一段窗口；当天已有正式自动运行时直接对齐下一交易日，避免重启重复下单。小于 24 小时的自定义轮询仍沿用原间隔语义。
+- 启用交易时段门禁时，日级自动交易任务会把首次运行锚定到可交易窗口开始后 5 分钟，为 runtime 启动、行情初始化和在线选股预留时间。服务在窗口中重启且当天尚未运行时，会选择至少 5 分钟后仍可交易的当前或下一段窗口；当天已有正式自动运行时直接对齐下一交易日，避免重启重复下单。临时 `dry_run` 和 `manual_approval` 演练不会被记成正式执行，也不会把下一次真实任务错误推迟一个交易日。小于 24 小时的自定义轮询仍沿用原间隔语义。
 - readiness 还会把配置文件中持久化的 `last_auto_run` 映射为“最近运行结果”，返回运行时间、Agent run id、是否接受/跳过、原始 reason code 和候选/提交计数；统一 `system_health` 与 Web“可用性诊断”复用该组件。成功运行显示 ready，最近跳过或未完成显示非必需 warning，不会仅凭历史结果制造当前硬阻断；因此即使 scheduler task event 已清理或缺失，页面仍能解释上一轮为什么没有交易。
 - 状态接口新增 `diagnostics.system_health`，把本地账本、选股来源、自动化调度、调度窗口、交易窗口、持仓估值、行业归属和 vn.py bridge 合并为跨模块健康视图。`required_blockers` 表示会阻断自动执行的必需组件，`warnings` 表示需要关注但不一定阻断的降级，`disabled` 表示因配置或轻量查询暂未启用的组件。
 - `diagnostics.vnpy_runtime.connect` 会区分连接请求已受理与网关已确认连接：`request_accepted=true` 只表示 `MainEngine.connect()` 已返回，只有网关的 `get_connection_status()`、`get_state_snapshot()` 或公开 `connected` 状态确认后才返回 `connected=true`。连接调用异常记录为 `connect_failed` 且不拖垮 API 启动；无法确认的异步第三方网关显示 warning，明确断开时系统健康 blocked，自动新增委托以 `vnpy_gateway_disconnected` 跳过。状态读取会动态刷新支持状态钩子的网关。
@@ -176,7 +177,11 @@
 
 账户所有者应在[中泰 XTP 官网](https://xtp.zts.com.cn/userInfo)注册并申请“股票类型”测试账号；申请结果会通过注册邮箱提供账号、测试地址/端口和授权码。远端 `vnpy-xtp-paper-acceptance` Environment 已创建并保存一个加密 `VNPY_XTP_CONNECT_SETTINGS_JSON` secret，通过 deployment branch policy 与工作流代码双重限制为 `main`；空且从未运行的旧 CTP Environment 已删除。JSON 必须只包含 `账号`、`密码`、`客户号`、`行情地址`、`行情端口`、`交易地址`、`交易端口`、`行情协议`、`日志级别`、`授权码` 十个键；客户号范围 1..99，端口范围 1..65535，协议为 `TCP|UDP`，日志级别为 `FATAL|ERROR|WARNING|INFO|DEBUG|TRACE`。工作流在 checkout 和安装前完成检查，错误只报告字段名，全部通过后才注册敏感值 mask。随后从 `main` 手工运行 `External vn.py XTP A-share Account Soak`，选择 15 分钟、1 小时或 4 小时窗口；XTP 账户工作流先要求交易/行情双通道连续 connected 60 秒，再按至少 99% 连接率和一个账户回报验收，非空账户可额外要求持仓回报，只有预期窗口内会自然发生断线时才开启重连门禁。
 
-2026-07-23 的 run `30001136306` 已完成首轮真实账号零下单验收：严格预检通过，正式窗口 900 秒，180/180 个样本 connected，最终状态 connected，账户/持仓事件为 240/4320，订单/成交事件为 0。脱敏 artifact 保留 14 天，不含账号、连接值或路径。该结果证明账号连接和回报链路，不等同于自动策略已经向 XTP 提交模拟委托；后者仍需在受控部署运行态单独验收。
+2026-07-23 的 run `30001136306` 已完成首轮真实账号零下单验收：严格预检通过，正式窗口 900 秒，180/180 个样本 connected，最终状态 connected，账户/持仓事件为 240/4320，订单/成交事件为 0。脱敏 artifact 保留 14 天，不含账号、连接值或路径。
+
+同日部署态 Windows/Python 3.13 服务完成 300 秒 XTP 长跑，60/60 次 API、runtime、双通道连接和 EventEngine bridge 采样均通过，新增 74 个账户与 1350 个持仓事件，订单/成交事件为 0。随后在隔离本地账户 `#8` 提交唯一一笔 100 股、470 元的受控 XTP 测试委托；柜台返回 `nottraded`，独立会话撤单后主服务收到 `cancelled`，成交量保持 0，本地现金 100000 元、零持仓和零成交均未变化。一次 `dual_low` dry-run 另生成 1 候选、1 计划、0 提交，证明选股链路不会在演练模式触发 XTP。正式自动执行已切换为 `vnpy_paper`，每次最多 1 只、每单/每日预算 1000 元，并按交易时段门禁对齐到下一交易日 09:35；真实成交回报仍需在开市窗口完成最终验收。
+
+只读预检可直接运行 `python scripts/check_vnpy_xtp_order_acceptance.py`。脚本默认不下单；受控订单模式必须显式给出 `--place-order --confirmation XTP_PAPER_ORDER --price <limit>`，强制数量不超过 100 股、名义金额不超过 2000 元、自动交易处于暂停状态且不存在其他活动 XTP 委托，并在超时后调用通用撤单接口。默认还要求当前市场开市；仅做收盘后提交/撤单通路验证时才可显式添加 `--allow-closed-market`。
 
 该工作流固定使用 Windows/Python 3.13 和 `vnpy_xtp==2.2.32.2.3`，原始 secret 只注入生成临时连接文件的单个步骤，文件位于 runner 临时目录并在 `always()` 清理。连接前仍强制外部 Gateway、仓库外文件、完整非空默认键；观测脚本不订阅行情、不调用下单或撤单，只上传保留 14 天的脱敏聚合 JSON。`workflow_dispatch`、main-only 双门禁、固定 Environment、账户会话 concurrency 和账户所有者手工设置 secret 共同构成现有控制边界。此入口只用于中泰 XTP 股票类型测试账号；生产实盘凭据应留在受控部署主机上使用本地命令，不应放入云托管 runner。券商若限制来源 IP、设备或登录时段，GitHub-hosted runner 可能无法作为有效验收主机。
 

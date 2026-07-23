@@ -37,6 +37,7 @@ from api.v1.schemas.vnpy_paper_trading import (
     VnpyPaperAutoRunResponse,
     VnpyPaperGatewayPreflightResponse,
     VnpyPaperGatewayReconnectResponse,
+    VnpyPaperOrderCancelRequest,
     VnpyPaperOrderRequest,
     VnpyPaperOrderResult,
     VnpyPaperPerformanceResponse,
@@ -2303,6 +2304,32 @@ def submit_vnpy_paper_order(request_obj: Request, request: VnpyPaperOrderRequest
         raise _bad_request(exc)
     except Exception as exc:
         raise _internal_error("Submit vn.py paper order failed", exc)
+
+
+@router.post(
+    "/orders/{vt_orderid}/cancel",
+    response_model=VnpyPaperOrderResult,
+    responses={400: {"model": ErrorResponse}, 409: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
+    summary="Cancel one observed vn.py paper order",
+)
+def cancel_vnpy_paper_order(
+    request_obj: Request,
+    vt_orderid: str = Path(..., min_length=1, max_length=128),
+    request: VnpyPaperOrderCancelRequest = Body(...),
+) -> VnpyPaperOrderResult:
+    try:
+        payload = _service(request_obj).cancel_vnpy_order(
+            vt_orderid=vt_orderid,
+            symbol=request.symbol,
+            market=request.market,
+        )
+        return VnpyPaperOrderResult.model_validate(payload)
+    except PortfolioBusyError as exc:
+        raise _conflict_error(exc)
+    except ValueError as exc:
+        raise _bad_request(exc)
+    except Exception as exc:
+        raise _internal_error("Cancel vn.py paper order failed", exc)
 
 
 @router.post(

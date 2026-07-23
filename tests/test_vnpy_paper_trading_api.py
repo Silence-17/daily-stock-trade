@@ -925,6 +925,84 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
         self.assertEqual(main_engine.calls[0][1], "SIM")
         self.assertEqual(main_engine.calls[0][0].symbol, "600519")
 
+    def test_observed_manual_vnpy_order_can_be_cancelled_once(self) -> None:
+        installed = _install_fake_vnpy_modules()
+        main_engine = _FakeMainEngine()
+        self.client.app.state.vnpy_main_engine = main_engine
+
+        def service_factory(*, vnpy_main_engine=None, vnpy_event_engine=None):
+            return VnpyPaperTradingService(
+                config_path=self.config_path,
+                vnpy_main_engine=vnpy_main_engine,
+                vnpy_event_engine=vnpy_event_engine,
+            )
+
+        try:
+            with patch(
+                "api.v1.endpoints.vnpy_paper_trading.VnpyPaperTradingService",
+                side_effect=service_factory,
+            ):
+                self.client.put(
+                    "/api/v1/vnpy-paper/settings",
+                    json={"vnpy_gateway_name": "SIM"},
+                )
+                submitted = self.client.post(
+                    "/api/v1/vnpy-paper/orders",
+                    json={
+                        "symbol": "600519",
+                        "side": "buy",
+                        "market": "cn",
+                        "quantity": 100,
+                        "price": 10.0,
+                        "execution_route": "vnpy_bridge",
+                    },
+                )
+                observed = self.client.post(
+                    "/api/v1/vnpy-paper/vnpy-events/orders",
+                    json={
+                        "vt_orderid": "SIM.1",
+                        "status": "nottraded",
+                        "symbol": "600519",
+                        "side": "buy",
+                        "market": "cn",
+                        "volume": 100,
+                        "traded": 0,
+                        "price": 10.0,
+                        "raw": {
+                            "gateway_name": "SIM",
+                            "orderid": "1",
+                            "exchange": "SSE",
+                        },
+                    },
+                )
+                cancelled = self.client.post(
+                    "/api/v1/vnpy-paper/orders/SIM.1/cancel",
+                    json={"symbol": "600519", "market": "cn"},
+                )
+                duplicate = self.client.post(
+                    "/api/v1/vnpy-paper/orders/SIM.1/cancel",
+                    json={"symbol": "600519", "market": "cn"},
+                )
+        finally:
+            _restore_modules(installed)
+            delattr(self.client.app.state, "vnpy_main_engine")
+
+        self.assertEqual(submitted.status_code, 200)
+        self.assertEqual(observed.status_code, 200)
+        self.assertEqual(cancelled.status_code, 200)
+        payload = cancelled.json()
+        self.assertTrue(payload["accepted"])
+        self.assertEqual(payload["status"], "cancel_requested")
+        self.assertEqual(payload["reason"], "vnpy_order_cancel_requested")
+        self.assertEqual(payload["raw"]["vt_orderid"], "SIM.1")
+        self.assertEqual(len(main_engine.cancel_calls), 1)
+        cancel_request, gateway_name = main_engine.cancel_calls[0]
+        self.assertEqual(gateway_name, "SIM")
+        self.assertEqual(cancel_request.orderid, "1")
+        self.assertEqual(cancel_request.symbol, "600519")
+        self.assertEqual(duplicate.status_code, 400)
+        self.assertIn("vnpy_order_not_cancelable", duplicate.json()["message"])
+
     def test_vnpy_trade_callback_endpoint_fills_submitted_agent_plan(self) -> None:
         installed = _install_fake_vnpy_modules()
         main_engine = _FakeMainEngine()

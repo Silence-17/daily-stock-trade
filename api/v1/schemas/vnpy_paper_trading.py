@@ -180,6 +180,11 @@ class VnpyPaperOrderRequest(BaseModel):
     execution_route: Literal["local_paper", "vnpy_bridge"] = "local_paper"
 
 
+class VnpyPaperOrderCancelRequest(BaseModel):
+    symbol: Optional[str] = Field(None, min_length=1, max_length=16)
+    market: Optional[Literal["cn", "hk", "us", "jp", "kr", "tw"]] = None
+
+
 class VnpyPaperVnpyTradeCallbackRequest(BaseModel):
     vt_orderid: str = Field(..., min_length=1, max_length=128)
     vt_tradeid: Optional[str] = Field(None, max_length=128)
