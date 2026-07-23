@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [测试] 新增外部 vn.py Gateway 定时成交只读观察器，基线隔离新 Agent run、关联后台任务事件，并核对真实成交、账本现金/持仓变化、设置稳定性和 EventEngine 回调健康；HTTP 验收测试强制全程仅使用 GET
 - [新功能] 新增仅允许撤销 EventEngine 已观察活动订单的通用 vn.py 手工委托撤单 API，以及默认只读、显式确认后才允许单笔受限 XTP 测试委托的验收脚本
 - [修复] XTP 受控验收脚本的默认只读预检不再要求暂停自动交易；显式测试下单仍强制关闭自动交易并保留确认口令、活动订单、交易时段和数量/金额门禁
 - [修复] 日级自动交易调度持久化最近运行的执行模式，`dry_run` 与 `manual_approval` 演练不再被误判为正式执行并跳过下一交易日
