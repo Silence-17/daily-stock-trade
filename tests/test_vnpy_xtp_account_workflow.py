@@ -41,6 +41,7 @@ def test_xtp_account_soak_is_manual_protected_and_serialized() -> None:
     assert "vnpy_xtp==2.2.32.2.3" in text
     assert "VNPY_GATEWAY_CLASS: vnpy_xtp:XtpGateway" in text
     assert "VNPY_GATEWAY_NAME: XTP" in text
+    assert "python -m pip install pytest" in text
     assert "VNPY_PRODUCTION_PREFLIGHT_ENABLED: 'true'" in text
     assert "GITHUB_REF -ne 'refs/heads/main'" in text
     assert "CTP" not in text
