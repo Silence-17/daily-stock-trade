@@ -1,5 +1,6 @@
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -11,9 +12,29 @@ from src.config import DEFAULT_ALPHASIFT_INSTALL_SPEC
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
+def _shell_path(path: Path) -> str:
+    resolved = path.resolve()
+    if os.name != "nt":
+        return str(resolved)
+    drive = resolved.drive.rstrip(":").lower()
+    return f"/{drive}{resolved.as_posix()[2:]}"
+
+
+def _posix_shell() -> str:
+    shell = shutil.which("sh")
+    if shell:
+        return shell
+    git = shutil.which("git")
+    if os.name == "nt" and git:
+        candidate = Path(git).resolve().parents[1] / "bin" / "sh.exe"
+        if candidate.is_file():
+            return str(candidate)
+    raise RuntimeError("A POSIX sh executable is required for entrypoint tests")
+
+
 def test_docker_entrypoint_has_valid_shell_syntax() -> None:
     subprocess.run(
-        ["sh", "-n", str(REPO_ROOT / "docker" / "entrypoint.sh")],
+        [_posix_shell(), "-n", _shell_path(REPO_ROOT / "docker" / "entrypoint.sh")],
         check=True,
     )
 
@@ -193,13 +214,21 @@ def _run_entrypoint_with_fake_tools(
     chown_exit: int,
 ) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
-    env["PATH"] = f"{fakebin}:{env['PATH']}"
-    env["FAKE_LOG_DIR"] = str(log_dir)
+    env["PATH"] = f"{_shell_path(fakebin)}:/usr/bin:/bin"
+    env["FAKE_LOG_DIR"] = _shell_path(log_dir)
     env["GOSU_WRITE_EXIT"] = str(gosu_write_exit)
     env["CHOWN_EXIT"] = str(chown_exit)
 
     return subprocess.run(
-        ["sh", str(REPO_ROOT / "docker" / "entrypoint.sh"), "true"],
+        [
+            _posix_shell(),
+            "-c",
+            'PATH="$1"; export PATH; entrypoint="$2"; shift 2; . "$entrypoint"',
+            "sh",
+            f"{_shell_path(fakebin)}:/usr/bin:/bin",
+            _shell_path(REPO_ROOT / "docker" / "entrypoint.sh"),
+            "true",
+        ],
         check=True,
         capture_output=True,
         text=True,

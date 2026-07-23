@@ -353,8 +353,9 @@ print(json.dumps({{"type": "step_finish", "reason": "stop"}}))
     assert "--attach" not in argv
     assert "--dangerously-skip-permissions" not in argv
     assert probe["prompt"] == "prompt from dsa"
-    assert probe["prompt_mode"] == 0o600
-    assert probe["cwd_mode"] == 0o700
+    if os.name != "nt":
+        assert probe["prompt_mode"] == 0o600
+        assert probe["cwd_mode"] == 0o700
     for tool_name in local_cli_backend_module._OPENCODE_DISABLED_TOOL_NAMES:
         assert opencode_config["tools"][tool_name] is False
     assert opencode_config["tools"]["websearch"] is False

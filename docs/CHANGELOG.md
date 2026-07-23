@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [测试] 修复 Windows 全量回归中的 SQLite 临时库句柄泄漏、系统配置测试环境串扰、Local CLI POSIX 权限断言和 Git Bash Docker entrypoint 路径解析，使相关 391 项测试可按真实执行顺序稳定运行
 - [新功能] 新增 `VNPY_GATEWAY_PLUGINS_JSON` 外部 Gateway 插件清单，统一驱动隔离环境、Docker 与 Windows/macOS Desktop 的包安装、模块导入、PyInstaller 收集和冻结后探针；非法/重复/URL/marker 清单、未开启 vn.py、安装失败或产物漏模块均 fail-closed，且账户参数仍保持仓库外置
 - [测试] 新增 Gateway 插件清单解析、参数隔离、pip 失败、模块导入，以及 Docker/桌面打包契约回归；Windows PowerShell 5 实物构建验证 JSON 安全传递、单模块数组扁平化、动态 `--collect-all` 和冻结后声明模块导入
 - [测试] 修复后的部署态 DSA_SIM 通过 300 秒只读 runtime 长跑与独立 Gateway 断线恢复验收：148/148 次部署采样全可用，独立 Gateway 在第 120 秒断线并于第 122 秒自动恢复，最终连接率 99.3333%、重连 1/1 成功且全程零下单；校准门禁仍诚实保留三市场共 15 项长期样本阈值缺口

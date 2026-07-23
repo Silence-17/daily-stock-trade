@@ -5,6 +5,7 @@ import os
 import sqlite3
 import tempfile
 import threading
+from contextlib import closing
 from datetime import date
 from unittest.mock import patch
 
@@ -22,7 +23,7 @@ class TestStorage(unittest.TestCase):
 
     @staticmethod
     def _list_sqlite_unique_indexes(db_path: str, table_name: str) -> dict[str, list[str]]:
-        with sqlite3.connect(db_path) as conn:
+        with closing(sqlite3.connect(db_path)) as conn, conn:
             rows = conn.execute(f"PRAGMA index_list({table_name})").fetchall()
             unique_indexes = {}
             for row in rows:
@@ -42,7 +43,7 @@ class TestStorage(unittest.TestCase):
         db_path = os.path.join(temp_dir.name, "legacy_intel.sqlite")
 
         try:
-            with sqlite3.connect(db_path) as conn:
+            with closing(sqlite3.connect(db_path)) as conn, conn:
                 conn.execute(
                     """CREATE TABLE intelligence_sources (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -122,7 +123,7 @@ class TestStorage(unittest.TestCase):
                 unique_indexes_after["uix_intel_item_scope"],
                 ["source_id", "url", "scope_type", "scope_value", "market"],
             )
-            with sqlite3.connect(db_path) as conn:
+            with closing(sqlite3.connect(db_path)) as conn, conn:
                 table_count = conn.execute("SELECT COUNT(*) FROM intelligence_items").fetchone()[0]
                 temp_tables = conn.execute(
                     "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'intelligence_items_recreate_tmp_%'"
@@ -154,7 +155,7 @@ class TestStorage(unittest.TestCase):
         temp_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         db_path = os.path.join(temp_dir.name, "legacy_agent_decisions.db")
         try:
-            with sqlite3.connect(db_path) as conn:
+            with closing(sqlite3.connect(db_path)) as conn:
                 conn.execute(
                     """
                     CREATE TABLE stock_selection_agent_decisions (
@@ -168,7 +169,7 @@ class TestStorage(unittest.TestCase):
             db._ensure_stock_selection_agent_schema()
             db._ensure_stock_selection_agent_schema()
 
-            with sqlite3.connect(db_path) as conn:
+            with closing(sqlite3.connect(db_path)) as conn:
                 columns = {
                     row[1]
                     for row in conn.execute(
@@ -858,8 +859,8 @@ class TestStorage(unittest.TestCase):
 
             self.assertEqual(total, 1)
         finally:
-            temp_dir.cleanup()
             DatabaseManager.reset_instance()
+            temp_dir.cleanup()
 
 if __name__ == '__main__':
     unittest.main()
