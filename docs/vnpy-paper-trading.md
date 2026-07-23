@@ -174,9 +174,9 @@
 
 生产预检会把 Gateway `default_setting` 中缺失的字段报告为 `default_setting_keys_missing`，把已提供但为 `null`/空白字符串的字段报告为 `default_setting_values_empty`。两者都会在连接前 fail-closed；API 仅返回字段名，不返回字段值或配置路径。
 
-需要真实 SimNow/模拟账户证据时，可在 GitHub 仓库创建 `vnpy-ctp-paper-acceptance` Environment，建议启用 required reviewer，并添加 `VNPY_CTP_CONNECT_SETTINGS_JSON` Environment secret。其值必须是包含 `用户名`、`密码`、`经纪商代码`、`交易服务器`、`行情服务器`、`产品名称`、`授权编码`、`柜台环境` 八个非空字段的 JSON 对象。随后手工运行 `External vn.py CTP Account Soak` 工作流，选择 15 分钟、1 小时或 4 小时窗口；默认要求连接率至少 99% 和窗口内至少一个账户回报，非空账户可额外要求持仓回报，只有预期窗口内会自然发生断线时才开启重连门禁。
+远端仓库已创建 `vnpy-ctp-paper-acceptance` Environment，并通过 deployment branch policy 只允许 `main`；工作流自身也会再次检查 `GITHUB_REF=refs/heads/main`。当前 GitHub 计费方案明确不支持 required reviewer 和 wait timer，因此这两项不能被误报为已启用，Environment 当前保持 0 secret。需要真实 SimNow/模拟账户证据时，由账户所有者在该 Environment 手工添加 `VNPY_CTP_CONNECT_SETTINGS_JSON` secret；其值必须是包含 `用户名`、`密码`、`经纪商代码`、`交易服务器`、`行情服务器`、`产品名称`、`授权编码`、`柜台环境` 八个非空字段的 JSON 对象。随后从 `main` 手工运行 `External vn.py CTP Account Soak`，选择 15 分钟、1 小时或 4 小时窗口；默认要求连接率至少 99% 和窗口内至少一个账户回报，非空账户可额外要求持仓回报，只有预期窗口内会自然发生断线时才开启重连门禁。
 
-该工作流固定使用 Windows/Python 3.13 和 `vnpy_ctp==6.7.11.4`，原始 secret 只注入生成临时连接文件的单个步骤，文件位于 runner 临时目录并在 `always()` 清理。连接前仍强制外部 Gateway、仓库外文件、完整非空默认键；观测脚本不订阅行情、不调用下单或撤单，只上传保留 14 天的脱敏聚合 JSON。GitHub Environment 在配置 required reviewer 后会在批准前阻止 job 访问环境 secret。此入口仅用于隔离的 SimNow/券商模拟账户；生产实盘凭据应留在受控部署主机上使用本地命令，不应放入云托管 runner。券商若限制来源 IP 或登录时段，GitHub-hosted runner 可能无法作为有效验收主机。
+该工作流固定使用 Windows/Python 3.13 和 `vnpy_ctp==6.7.11.4`，原始 secret 只注入生成临时连接文件的单个步骤，文件位于 runner 临时目录并在 `always()` 清理。连接前仍强制外部 Gateway、仓库外文件、完整非空默认键；观测脚本不订阅行情、不调用下单或撤单，只上传保留 14 天的脱敏聚合 JSON。由于当前方案没有 reviewer 审批能力，`workflow_dispatch`、main-only 双门禁、固定 Environment、账户会话 concurrency 和账户所有者手工设置 secret 共同构成现有控制边界。此入口仅用于隔离的 SimNow/券商模拟账户；生产实盘凭据应留在受控部署主机上使用本地命令，不应放入云托管 runner。券商若限制来源 IP 或登录时段，GitHub-hosted runner 可能无法作为有效验收主机。
 
 真实 gateway 配置完成后，可在不下单的情况下做长跑连接验收：
 

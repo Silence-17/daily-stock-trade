@@ -293,7 +293,7 @@
 - 部署态 runtime soak 已升级为 schema v2：EventEngine bridge 持续记录不含载荷的分类观测/处理/失败计数和最后观测时间，API 每次读取动态刷新；门禁可要求准确 gateway 类/名称、明确排除 `DsaSimulatedGateway` / `DSA_SIM`、检查窗口内账户/持仓/订单/成交事件增量、计数器回退和 handler 失败。真实 API 基础门禁已 10/10 采样通过；同一 DSA_SIM 进程在生产参数下按预期以身份不匹配、非外部 gateway 和账户事件无增量非零退出。该契约防止把“回调已注册”误报为“真实通道已有回报”，实际外部 gateway 长窗口证据仍待部署执行。
 - vn.py runtime 已区分 `MainEngine.connect()` 请求受理与网关确认连接，连接异常不会拖垮 API 启动；支持状态钩子的网关会动态刷新连接状态，无法确认时健康状态 warning，明确断开时 blocked 且新增委托 fail-closed。
 - 官方 CTP Gateway 已补齐标准通道连接确认：运行时读取交易/行情 API 的布尔 `login_status`，全部现有通道登录才确认 connected，任一通道掉线即回到 disconnected；真实 `vnpy_ctp.CtpGateway` 原生对象结构已通过无网络回归。
-- 新增仅手工触发的 `External vn.py CTP Account Soak`：绑定 `vnpy-ctp-paper-acceptance` Environment、串行化账户会话，仅在临时文件步骤读取 JSON secret，严格预检后零下单观测账户/可选持仓与自然重连事件，上传 14 天脱敏证据并始终清理连接文件。工作流尚未配置或使用外部账户，不构成真实连接证据。
+- 新增仅手工触发的 `External vn.py CTP Account Soak`：绑定 `vnpy-ctp-paper-acceptance` Environment、串行化账户会话，仅在临时文件步骤读取 JSON secret，严格预检后零下单观测账户/可选持仓与自然重连事件，上传 14 天脱敏证据并始终清理连接文件。远端 Environment 已创建、保持 0 secret，并由 GitHub branch policy 与 workflow 双重限制为 `main`；当前计费方案不支持 required reviewer/wait timer，不能宣称已有审批。工作流尚未使用外部账户，不构成真实连接证据。
 - vn.py runtime 已新增默认关闭的冷却自动重连监控：只恢复明确失败/断开的连接，每次重读外部参数文件，在已受理异步连接的可配置确认宽限期内避免误重连，并对连续失败执行有上限指数退避、恢复后复位；状态和统一系统健康保留线程、宽限期、基础/当前/最大间隔、连续失败、次数、时间、结果与下次检查审计。
 - vn.py runtime 已新增一次性安全手动重连 API 和 Web 入口：后台自动重连关闭时也可使用，已连接、确认中或宽限期内不会重复登录；操作只恢复连接并返回审计，不触发 Agent run、交易计划或订单。
 - 自动/手动重连的首次失败、退避封顶和恢复已通过独立队列写入现有告警历史并复用通知路由；重复失败去重、恢复 resolved、关闭排空和凭据脱敏已有确定性测试。
@@ -310,7 +310,7 @@
 需要做：
 
 - 明确是否必须接 vn.py；如果只做模拟交易，本地账本已能满足 MVP。
-- 若必须接入真实通道，为 `vnpy-ctp-paper-acceptance` Environment 配置隔离 SimNow/券商模拟账户 JSON 和审批规则，运行手工账户 soak；生产实盘凭据只允许在受控部署主机使用非仓库连接文件本地验收。
+- 若必须接入真实通道，由账户所有者为现有 `vnpy-ctp-paper-acceptance` Environment 手工配置隔离 SimNow/券商模拟账户 JSON，从 `main` 运行账户 soak；当前方案没有 reviewer 审批能力，生产实盘凭据仍只允许在受控部署主机使用非仓库连接文件本地验收。
 - 继续扩展 vn.py adapter 层：已完成 DSA 委托 -> vn.py `OrderRequest` / `CancelRequest` 基础映射、可选 `MainEngine.send_order` / `cancel_order` 调用、订单/成交/账户/持仓回写 API、注入式 EventEngine attach 和 opt-in runtime bootstrap，下一步需要真实 gateway 连接、长时间运行和异常恢复验收。
 - 内置 vn.py 模拟撮合方案已完成；继续增加真实 gateway 长跑验收。
 

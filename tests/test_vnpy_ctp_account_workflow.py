@@ -33,6 +33,7 @@ def test_ctp_account_soak_is_manual_protected_and_serialized() -> None:
     assert text.count("secrets.VNPY_CTP_CONNECT_SETTINGS_JSON") == 1
     assert "vnpy_ctp==6.7.11.4" in text
     assert "VNPY_PRODUCTION_PREFLIGHT_ENABLED: 'true'" in text
+    assert "GITHUB_REF -ne 'refs/heads/main'" in text
 
 
 def test_ctp_account_soak_is_external_no_order_and_sanitized() -> None:

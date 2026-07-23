@@ -57,6 +57,13 @@ jobs:
       VNPY_AUTO_RECONNECT_CONFIRMATION_GRACE_SECONDS: '60'
       VNPY_SOAK_REPORT: ${{ github.workspace }}\vnpy-ctp-account-soak.json
     steps:
+      - name: Require main branch
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF -ne 'refs/heads/main') {
+            throw 'Credentialed CTP acceptance is restricted to the main branch.'
+          }
+
       - name: Checkout
         uses: actions/checkout@v5
 
