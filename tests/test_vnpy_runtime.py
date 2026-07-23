@@ -439,6 +439,45 @@ class VnpyRuntimeTestCase(unittest.TestCase):
         self.assertEqual(connect["confirmation_source"], "unavailable")
         handle.close()
 
+    def test_ctp_style_channel_logins_require_every_available_channel(self) -> None:
+        installed = _install_fake_vnpy_runtime_modules()
+        try:
+            handle = bootstrap_vnpy_runtime(
+                settings=VnpyRuntimeSettings(
+                    enabled=True,
+                    gateway_class="fake_vnpy_gateway:CtpStyleGateway",
+                    gateway_name="CTP_STYLE",
+                    connect_on_start=True,
+                    auto_attach_events=False,
+                )
+            )
+            gateway = handle.main_engine.get_gateway("CTP_STYLE")
+
+            initial = handle.refresh_diagnostics()["connect"]
+            self.assertFalse(initial["connected"])
+            self.assertEqual(initial["status"], "disconnected")
+            self.assertEqual(
+                initial["confirmation_source"],
+                "gateway.channel_login_status",
+            )
+
+            gateway.td_api.login_status = True
+            trading_only = handle.refresh_diagnostics()["connect"]
+            self.assertFalse(trading_only["connected"])
+
+            gateway.md_api.login_status = True
+            connected = handle.refresh_diagnostics()["connect"]
+            self.assertTrue(connected["connected"])
+            self.assertEqual(connected["status"], "connected")
+
+            gateway.md_api.login_status = False
+            disconnected = handle.refresh_diagnostics()["connect"]
+            self.assertFalse(disconnected["connected"])
+            self.assertEqual(disconnected["status"], "disconnected")
+        finally:
+            handle.close()
+            _restore_modules(installed)
+
     def test_bootstrap_connect_failure_degrades_without_raising(self) -> None:
         installed = _install_fake_vnpy_runtime_modules()
         try:
@@ -975,6 +1014,16 @@ def _install_fake_vnpy_runtime_modules() -> dict[str, object]:
         def connect(self, setting):
             return None
 
+    class CtpStyleGateway:
+        connect_without_settings = True
+
+        def __init__(self):
+            self.td_api = types.SimpleNamespace(login_status=False)
+            self.md_api = types.SimpleNamespace(login_status=False)
+
+        def connect(self, setting):
+            return None
+
     class FailingGateway:
         connect_without_settings = True
 
@@ -1012,6 +1061,7 @@ def _install_fake_vnpy_runtime_modules() -> dict[str, object]:
     gateway_module.SimGateway = SimGateway
     gateway_module.StrictGateway = StrictGateway
     gateway_module.UnknownGateway = UnknownGateway
+    gateway_module.CtpStyleGateway = CtpStyleGateway
     gateway_module.FailingGateway = FailingGateway
     gateway_module.SlowGateway = SlowGateway
     gateway_module.RecoveringGateway = RecoveringGateway

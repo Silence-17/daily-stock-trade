@@ -292,6 +292,8 @@
 - 新增通用零下单 gateway 长跑验收器：读取外部 `VNPY_*` 配置，统计连接样本、状态切换、四类事件和自动重连结果，以最低连接率/必需事件作非零退出门禁，且输出不含连接路径或参数内容；`DSA_SIM` 单次断线验证已观察到自动恢复，真实账户仍待执行长窗口验收。
 - 部署态 runtime soak 已升级为 schema v2：EventEngine bridge 持续记录不含载荷的分类观测/处理/失败计数和最后观测时间，API 每次读取动态刷新；门禁可要求准确 gateway 类/名称、明确排除 `DsaSimulatedGateway` / `DSA_SIM`、检查窗口内账户/持仓/订单/成交事件增量、计数器回退和 handler 失败。真实 API 基础门禁已 10/10 采样通过；同一 DSA_SIM 进程在生产参数下按预期以身份不匹配、非外部 gateway 和账户事件无增量非零退出。该契约防止把“回调已注册”误报为“真实通道已有回报”，实际外部 gateway 长窗口证据仍待部署执行。
 - vn.py runtime 已区分 `MainEngine.connect()` 请求受理与网关确认连接，连接异常不会拖垮 API 启动；支持状态钩子的网关会动态刷新连接状态，无法确认时健康状态 warning，明确断开时 blocked 且新增委托 fail-closed。
+- 官方 CTP Gateway 已补齐标准通道连接确认：运行时读取交易/行情 API 的布尔 `login_status`，全部现有通道登录才确认 connected，任一通道掉线即回到 disconnected；真实 `vnpy_ctp.CtpGateway` 原生对象结构已通过无网络回归。
+- 新增仅手工触发的 `External vn.py CTP Account Soak`：绑定 `vnpy-ctp-paper-acceptance` Environment、串行化账户会话，仅在临时文件步骤读取 JSON secret，严格预检后零下单观测账户/可选持仓与自然重连事件，上传 14 天脱敏证据并始终清理连接文件。工作流尚未配置或使用外部账户，不构成真实连接证据。
 - vn.py runtime 已新增默认关闭的冷却自动重连监控：只恢复明确失败/断开的连接，每次重读外部参数文件，在已受理异步连接的可配置确认宽限期内避免误重连，并对连续失败执行有上限指数退避、恢复后复位；状态和统一系统健康保留线程、宽限期、基础/当前/最大间隔、连续失败、次数、时间、结果与下次检查审计。
 - vn.py runtime 已新增一次性安全手动重连 API 和 Web 入口：后台自动重连关闭时也可使用，已连接、确认中或宽限期内不会重复登录；操作只恢复连接并返回审计，不触发 Agent run、交易计划或订单。
 - 自动/手动重连的首次失败、退避封顶和恢复已通过独立队列写入现有告警历史并复用通知路由；重复失败去重、恢复 resolved、关闭排空和凭据脱敏已有确定性测试。
@@ -300,7 +302,7 @@
 未完成：
 
 - 系统默认 Python 3.14.6 未安装 vn.py，继续保持本地 paper fallback；完整 vn.py 能力使用已验证的 Python 3.13.14 隔离环境。
-- 已有 opt-in Gateway add/connect bootstrap、连接确认和冷却自动重连；官方 CTP Gateway 已安装、注册并通过无凭据冻结打包验收，但尚未配置外部账户。真实连接参数、broker/SimNow 回报和长期事件订阅稳定性仍未验证。
+- 已有 opt-in Gateway add/connect bootstrap、官方 CTP 双通道登录确认和冷却自动重连；CTP Gateway 已安装、注册并通过无凭据冻结打包验收，受保护账户长跑工作流也已就绪，但尚未配置外部账户。真实连接参数、broker/SimNow 回报和长期事件订阅稳定性仍未验证。
 - 已能调用注入或启动期创建的 `MainEngine.send_order`，并支持订单状态、成交、账户和持仓回报通过 API 手动/外部同步；注入或启动期创建的 EventEngine 可自动 attach 回调，但真实 gateway 连接仍未验收。
 - `vnpy_paper` 当前覆盖买入委托提交、自动按比例卖出提交、主动撤单请求、订单/成交状态回写、多笔成交累计、MainEngine 漏回报对账、对账异常保护、提交态/部分成交/撤单请求超时安全归档和活跃委托防重复；内置模拟 gateway 的重连、缓存保留和延迟成交去重已完成，真实 gateway 的长运行、重连和迟到回报验收仍未完成。
 - 安装脚本已处理 Python 版本、GUI/数值依赖、LiteLLM wheel 和受限 pip 缓存；Windows Desktop 已完成 opt-in vn.py 冻结后端、NSIS 体积和真实启动验收。Linux Docker 手动验收工作流也已完成默认/可选镜像实物构建、API 启动、runtime/连接/四回调/调度门禁和体积差值记录：run `29772471589` 全部通过，默认镜像 1,459,313,565 字节，可选 vn.py 镜像 2,229,015,999 字节，标准依赖净增 769,702,434 字节。
@@ -308,7 +310,7 @@
 需要做：
 
 - 明确是否必须接 vn.py；如果只做模拟交易，本地账本已能满足 MVP。
-- 若必须接入真实通道，基于已验证的 Python 3.13 runtime 安装对应 gateway 插件，并使用非仓库连接参数文件完成模拟账户验收。
+- 若必须接入真实通道，为 `vnpy-ctp-paper-acceptance` Environment 配置隔离 SimNow/券商模拟账户 JSON 和审批规则，运行手工账户 soak；生产实盘凭据只允许在受控部署主机使用非仓库连接文件本地验收。
 - 继续扩展 vn.py adapter 层：已完成 DSA 委托 -> vn.py `OrderRequest` / `CancelRequest` 基础映射、可选 `MainEngine.send_order` / `cancel_order` 调用、订单/成交/账户/持仓回写 API、注入式 EventEngine attach 和 opt-in runtime bootstrap，下一步需要真实 gateway 连接、长时间运行和异常恢复验收。
 - 内置 vn.py 模拟撮合方案已完成；继续增加真实 gateway 长跑验收。
 
@@ -464,6 +466,7 @@
 - 接 vn.py EventEngine / Gateway 或 paper adapter；当前已完成 `OrderRequest` / `CancelRequest` payload 映射、adapter 诊断、可选注入式 `MainEngine.send_order` / `cancel_order` 调用、订单/成交/账户/持仓回写 API、注入式 EventEngine attach 和 opt-in runtime bootstrap，并在 Python 3.13 隔离环境完成 EventEngine/MainEngine 启停验收。
 - 映射订单、成交、账户、持仓；当前订单请求、提交态、订单状态回写、成交入账、账户/持仓诊断快照、注入式 EventEngine 回调和启动期 add/connect 入口已有基础桥接，真实 Gateway 运行态未完成。
 - 零连接 gateway 预检已完成：可校验插件加载、注册名称、连接 JSON 结构、默认键及必需键非空，且生产门禁拒绝内置 `DSA_SIM` 与仓库内敏感配置；官方 CTP 插件已完成实物验收，下一步需由部署方提供脱离仓库的账户配置，再执行连接及长跑验收。
+- 官方 CTP 的双通道登录状态已接入通用 runtime 确认器；受保护的模拟账户长跑 workflow 已固化外部预检、账户事件、可选持仓/自然重连、脱敏 artifact 与临时凭据清理合同，尚缺真实 Environment secret 和成功 run 证据。
 - 独立 gateway soak 已默认串联预检并升级为 schema v3：预检不通过时在创建 MainEngine 前以 `connection_attempted=false` 退出，生产模式强制外部 gateway、仓库外配置和完整默认键；长跑时长已排除关闭耗时，避免验收窗口虚增。
 - 独立 gateway soak 在指定输出文件时会周期性原子落盘脱敏检查点，并用 `running` / `completed` / `interrupted` 区分证据生命周期；真实账户长跑即使被主机或进程中断也能保留最后有效观测。
 - API runtime 新增默认关闭的生产预检开关，启用后启动连接、自动重连和手动重连统一 fail-closed；静态配置失败不会调用 gateway、不会启动重连循环，API 与脱敏诊断保持可用。真实 vn.py 4.4 对 DSA_SIM 的启动/手动重连均已验证为零连接、零订单、零成交。

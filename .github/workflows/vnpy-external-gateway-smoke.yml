@@ -69,6 +69,10 @@ jobs:
           print(json.dumps(result, ensure_ascii=False, indent=2))
           '@ | python -
 
+      - name: Verify CTP connection-state contract
+        shell: pwsh
+        run: python -m pytest tests/test_vnpy_ctp_runtime.py -q -p no:cacheprovider
+
       - name: Build and probe frozen backend with CTP
         shell: pwsh
         run: |

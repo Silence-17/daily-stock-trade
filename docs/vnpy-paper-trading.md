@@ -170,7 +170,13 @@
 
 首个实物外部插件样本是 Windows/Python 3.13 的官方 `vnpy_ctp==6.7.11.4`：清单使用 `[{"package":"vnpy_ctp==6.7.11.4","module":"vnpy_ctp"}]`，Gateway 设置为 `VNPY_GATEWAY_CLASS=vnpy_ctp:CtpGateway`、`VNPY_GATEWAY_NAME=CTP`。本地零连接验收已真实导入原生 wheel、向 MainEngine 注册 `CtpGateway`，识别 8 个默认连接字段，并确认未连接、未订阅、未下单；缺少仓库外连接 JSON 时按预期只返回 `connect_settings_required`。手动工作流 `.github/workflows/vnpy-external-gateway-smoke.yml` 会重复安装、零连接注册和冻结后导入探针，不读取 Secrets。该 PyPI 版本当前只提供 CPython 3.13 Windows x64 wheel；Linux/macOS 需按上游文档准备编译器和原生库，不能把 Windows 证据外推为跨平台可用。SimNow 或券商账号必须由部署方自行申请，本仓库不提供、生成或保存账户参数。
 
+运行时现在会读取官方 CTP Gateway 的 `td_api.login_status` 与 `md_api.login_status`：只有交易和行情两个现有通道都登录才确认 `connected`，任一通道未登录或掉线都会保持/切换为 `disconnected`。原有 Gateway 状态钩子和 `gateway.connected` 仍优先，无法识别的插件继续返回 `connection_unconfirmed`，不会用 `connect()` 未抛异常冒充登录成功。
+
 生产预检会把 Gateway `default_setting` 中缺失的字段报告为 `default_setting_keys_missing`，把已提供但为 `null`/空白字符串的字段报告为 `default_setting_values_empty`。两者都会在连接前 fail-closed；API 仅返回字段名，不返回字段值或配置路径。
+
+需要真实 SimNow/模拟账户证据时，可在 GitHub 仓库创建 `vnpy-ctp-paper-acceptance` Environment，建议启用 required reviewer，并添加 `VNPY_CTP_CONNECT_SETTINGS_JSON` Environment secret。其值必须是包含 `用户名`、`密码`、`经纪商代码`、`交易服务器`、`行情服务器`、`产品名称`、`授权编码`、`柜台环境` 八个非空字段的 JSON 对象。随后手工运行 `External vn.py CTP Account Soak` 工作流，选择 15 分钟、1 小时或 4 小时窗口；默认要求连接率至少 99% 和窗口内至少一个账户回报，非空账户可额外要求持仓回报，只有预期窗口内会自然发生断线时才开启重连门禁。
+
+该工作流固定使用 Windows/Python 3.13 和 `vnpy_ctp==6.7.11.4`，原始 secret 只注入生成临时连接文件的单个步骤，文件位于 runner 临时目录并在 `always()` 清理。连接前仍强制外部 Gateway、仓库外文件、完整非空默认键；观测脚本不订阅行情、不调用下单或撤单，只上传保留 14 天的脱敏聚合 JSON。GitHub Environment 在配置 required reviewer 后会在批准前阻止 job 访问环境 secret。此入口仅用于隔离的 SimNow/券商模拟账户；生产实盘凭据应留在受控部署主机上使用本地命令，不应放入云托管 runner。券商若限制来源 IP 或登录时段，GitHub-hosted runner 可能无法作为有效验收主机。
 
 真实 gateway 配置完成后，可在不下单的情况下做长跑连接验收：
 

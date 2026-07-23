@@ -1,0 +1,178 @@
+name: External vn.py CTP Account Soak
+
+on:
+  workflow_dispatch:
+    inputs:
+      duration_seconds:
+        description: Credentialed no-order observation window
+        required: true
+        default: '3600'
+        type: choice
+        options:
+          - '900'
+          - '3600'
+          - '14400'
+      min_connected_ratio:
+        description: Minimum confirmed connection ratio
+        required: true
+        default: '0.99'
+        type: choice
+        options:
+          - '0.99'
+          - '0.995'
+      require_position_event:
+        description: Require a position callback for a non-empty account
+        required: true
+        default: false
+        type: boolean
+      require_reconnect:
+        description: Require a naturally observed reconnect in this window
+        required: true
+        default: false
+        type: boolean
+
+concurrency:
+  group: vnpy-ctp-paper-account-${{ github.repository }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  ctp-account-soak:
+    runs-on: windows-2022
+    timeout-minutes: 300
+    environment: vnpy-ctp-paper-acceptance
+    env:
+      VNPY_GATEWAY_PLUGINS_JSON: '[{"package":"vnpy_ctp==6.7.11.4","module":"vnpy_ctp"}]'
+      VNPY_RUNTIME_ENABLED: 'true'
+      VNPY_GATEWAY_CLASS: vnpy_ctp:CtpGateway
+      VNPY_GATEWAY_NAME: CTP
+      VNPY_CONNECT_ON_START: 'true'
+      VNPY_PRODUCTION_PREFLIGHT_ENABLED: 'true'
+      VNPY_AUTO_ATTACH_EVENTS: 'false'
+      VNPY_AUTO_RECONNECT_ENABLED: 'true'
+      VNPY_AUTO_RECONNECT_INTERVAL_SECONDS: '15'
+      VNPY_AUTO_RECONNECT_MAX_INTERVAL_SECONDS: '60'
+      VNPY_AUTO_RECONNECT_CONFIRMATION_GRACE_SECONDS: '60'
+      VNPY_SOAK_REPORT: ${{ github.workspace }}\vnpy-ctp-account-soak.json
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+
+      - name: Install application and CTP runtime
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r requirements-vnpy.txt
+          python scripts/vnpy_gateway_plugins.py --install --verify
+
+      - name: Materialize protected connection settings
+        shell: pwsh
+        env:
+          VNPY_CTP_CONNECT_SETTINGS_JSON: ${{ secrets.VNPY_CTP_CONNECT_SETTINGS_JSON }}
+        run: |
+          $raw = $env:VNPY_CTP_CONNECT_SETTINGS_JSON
+          if ([string]::IsNullOrWhiteSpace($raw)) {
+            throw 'Environment secret VNPY_CTP_CONNECT_SETTINGS_JSON is required.'
+          }
+          try {
+            $settings = $raw | ConvertFrom-Json -AsHashtable
+          } catch {
+            throw 'Environment secret VNPY_CTP_CONNECT_SETTINGS_JSON must be valid JSON.'
+          }
+          if (-not ($settings -is [System.Collections.IDictionary]) -or $settings.Count -eq 0) {
+            throw 'Environment secret VNPY_CTP_CONNECT_SETTINGS_JSON must be a non-empty object.'
+          }
+          foreach ($value in $settings.Values) {
+            if ($value -is [string] -and -not [string]::IsNullOrWhiteSpace($value)) {
+              Write-Output "::add-mask::$value"
+            }
+          }
+          $settingsPath = Join-Path $env:RUNNER_TEMP 'vnpy-ctp-connect.json'
+          [System.IO.File]::WriteAllText(
+            $settingsPath,
+            $raw,
+            [System.Text.UTF8Encoding]::new($false)
+          )
+          "VNPY_CONNECT_SETTINGS_PATH=$settingsPath" | Out-File `
+            -FilePath $env:GITHUB_ENV `
+            -Encoding utf8 `
+            -Append
+
+      - name: Verify official CTP connection-state contract
+        shell: pwsh
+        run: python -m pytest tests/test_vnpy_ctp_runtime.py -q -p no:cacheprovider
+
+      - name: Run credentialed no-order CTP soak
+        shell: pwsh
+        run: |
+          $arguments = @(
+            'scripts/check_vnpy_gateway_soak.py',
+            '--duration-seconds', '${{ inputs.duration_seconds }}',
+            '--sample-interval-seconds', '5',
+            '--startup-grace-seconds', '120',
+            '--min-connected-ratio', '${{ inputs.min_connected_ratio }}',
+            '--require-external-gateway',
+            '--require-all-default-keys',
+            '--require-event', 'account',
+            '--checkpoint-interval-seconds', '60',
+            '--output-json', $env:VNPY_SOAK_REPORT
+          )
+          if ('${{ inputs.require_position_event }}' -eq 'true') {
+            $arguments += @('--require-event', 'position')
+          }
+          if ('${{ inputs.require_reconnect }}' -eq 'true') {
+            $arguments += '--require-reconnect'
+          }
+          & python @arguments
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+      - name: Summarize sanitized evidence
+        if: always() && hashFiles('vnpy-ctp-account-soak.json') != ''
+        shell: pwsh
+        run: |
+          $report = Get-Content -LiteralPath $env:VNPY_SOAK_REPORT -Raw | ConvertFrom-Json
+          @(
+            "### External CTP account soak",
+            "- Phase: ``$($report.phase)``",
+            "- Passed: ``$($report.ok)``",
+            "- Gateway: ``$($report.gateway.class)`` / ``$($report.gateway.name)``",
+            "- Connected ratio: ``$($report.evaluation.connected_ratio)``",
+            "- Account events: ``$($report.event_counts.account)``",
+            "- Position events: ``$($report.event_counts.position)``",
+            "- Reconnect attempts/successes: ``$($report.evaluation.reconnect_attempt_count)`` / ``$($report.evaluation.reconnect_success_count)``"
+          ) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+
+      - name: Upload sanitized soak evidence
+        if: always() && hashFiles('vnpy-ctp-account-soak.json') != ''
+        uses: actions/upload-artifact@v6
+        with:
+          name: vnpy-ctp-account-soak-${{ github.run_number }}
+          path: ${{ env.VNPY_SOAK_REPORT }}
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Remove connection settings
+        if: always()
+        shell: pwsh
+        run: |
+          if (-not [string]::IsNullOrWhiteSpace($env:VNPY_CONNECT_SETTINGS_PATH)) {
+            $runnerRoot = [System.IO.Path]::GetFullPath($env:RUNNER_TEMP)
+            $settingsPath = [System.IO.Path]::GetFullPath($env:VNPY_CONNECT_SETTINGS_PATH)
+            if (-not $settingsPath.StartsWith(
+              $runnerRoot + [System.IO.Path]::DirectorySeparatorChar,
+              [System.StringComparison]::OrdinalIgnoreCase
+            )) {
+              throw 'Refusing to remove a settings file outside RUNNER_TEMP.'
+            }
+            Remove-Item -LiteralPath $settingsPath -Force -ErrorAction SilentlyContinue
+          }

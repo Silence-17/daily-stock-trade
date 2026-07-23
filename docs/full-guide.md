@@ -647,6 +647,8 @@ Compose 可使用 `DSA_INCLUDE_VNPY_DOCKER=true docker compose -f docker/docker-
 
 Windows/Python 3.13 已验证官方 `vnpy_ctp==6.7.11.4`，配置为 `VNPY_GATEWAY_CLASS=vnpy_ctp:CtpGateway`、`VNPY_GATEWAY_NAME=CTP`。无凭据验收只证明插件安装、MainEngine 注册和冻结产物可导入；缺少仓库外连接 JSON 时必须返回 `connect_settings_required`，默认字段存在但值为空时返回 `default_setting_values_empty`，均不会尝试连接。该版本当前仅有 CPython 3.13 Windows x64 预编译 wheel，Linux/macOS 仍需遵循上游源码编译要求。
 
+官方 CTP 的连接确认已兼容交易与行情通道 `login_status`，两者均登录才报告 connected。手工工作流 `External vn.py CTP Account Soak` 可从受保护的 `vnpy-ctp-paper-acceptance` Environment secret 创建 runner 临时配置，执行严格预检和零下单账户长跑并上传 14 天脱敏证据；仅应用于隔离的 SimNow/券商模拟账户，生产实盘凭据应在受控部署主机本地验收。完整安全边界与设置方法见 [vn.py 模拟交易说明](vnpy-paper-trading.md)。
+
 仓库提供手动工作流 `.github/workflows/vnpy-docker-smoke.yml`，它不会发布镜像或读取券商凭据，会构建默认/可选镜像并启动可选镜像门禁健康状态、DSA_SIM 连接、四类事件桥、handler 失败和调度循环。2026-07-21 Linux 验收中，默认镜像为 1,459,313,565 字节，可选 vn.py 镜像为 2,229,015,999 字节，净增 769,702,434 字节；该增量保留 vn.py 4.4.0 声明的 PySide6 与分析依赖，不使用 `--no-deps` 私自裁剪标准运行时。
 
 ---
