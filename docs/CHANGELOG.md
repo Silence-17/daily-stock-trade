@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [改进] 新增严格校验端口、监听 PID、wrapper 父 PID、Uvicorn 命令和确认词的 Windows 优雅停机工具；仅发送 CTRL_BREAK 并验证两进程与端口退出，超时也不会升级为强杀
 - [修复] FastAPI 启动中途失败时仍按调度器、vn.py runtime 的顺序释放资源；pytest 默认禁用外部 vn.py 连接，避免本机 XTP 配置被普通生命周期测试误触发
 - [修复] vn.py 恢复扫描对持续活动且超过 30 分钟的委托自动发起一次撤单，对账刷新不再重置超时计时；撤单处理中保留状态，并从撤单请求时间独立计算终态回报超时
 

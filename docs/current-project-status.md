@@ -565,6 +565,9 @@ The readiness and system health status are `warning` because the current time is
 - External gateway disconnect-injection guard validation on 2026-07-23
   - `scripts/check_vnpy_gateway_soak.py` now supports an explicit external-gateway disconnect point, but only when `--require-external-gateway` and the exact `CONFIRM_EXTERNAL_GATEWAY_DISCONNECT` token are both present. Simulated and external injection flags are mutually exclusive, production preflight still runs before connection, and reports distinguish simulated from external injection failures.
   - The mode is intended for an isolated after-hours process with zero order APIs. It must not share a broker client identifier with the deployed API. Live XTP injection remains pending until the current four-hour read-only soak is complete; the deployed API will not be restarted merely to make this evidence pass.
+- Guarded Windows Uvicorn shutdown validation on 2026-07-23
+  - `scripts/stop_windows_uvicorn_gracefully.py` requires the exact listener PID, wrapper parent PID, port, `server:app` command fragment, and `STOP_UVICORN_GRACEFULLY` confirmation before broadcasting `CTRL_BREAK_EVENT`. PID/command drift, multiple listeners, helper attachment failure, unsupported platforms, and timeout fail closed. The script never escalates to a hard kill.
+  - Two hidden-console integration probes on ports 8014 and 8015 both returned `ok=true` in about one second. The listener and wrapper exited, the port was released, Uvicorn logged `Shutting down`, `Application shutdown complete`, and `Finished server process`, and the result retained `hard_kill_attempted=false`. The helper's expected Windows `0xC000013A` control-event exit is not treated as target failure.
 
 ## Unfinished Goals
 

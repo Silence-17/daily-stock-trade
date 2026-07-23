@@ -206,7 +206,20 @@
 
 该命令读取现有 `VNPY_*` 环境配置，并默认先在独立子进程运行零连接预检；只有预检通过才会创建 MainEngine 并连接 gateway。`--require-external-gateway` 会拒绝内置 DSA_SIM 和仓库内连接文件，`--require-all-default-keys` 会要求连接 JSON 覆盖 gateway 声明的全部默认键。预检失败的 schema v3 报告固定返回 `connection_attempted=false`。进入长跑后，脚本禁用 DSA 业务事件桥，只注册只读事件计数器，不创建 Agent run、交易计划或订单；观测时长只计算采样窗口，不包含 runtime 关闭耗时。指定 `--output-json` 后会默认每 60 秒原子覆盖一次脱敏检查点，可用 `--checkpoint-interval-seconds` 调整或以 `0` 关闭；`phase=running` 和 `checkpoint=true` 表示尚未完成，最终报告会写成 `completed` 或 `interrupted`。连接率、从未确认连接、运行时不可用、时长未完成及任一 `--require-event` 缺失都会返回非零退出码。`--require-reconnect` 只适合预期验收窗口内会发生重连的场景，会强制要求至少一次重连尝试、至少一次重连成功且结束时保持 connected；未计划故障注入的稳定性长跑可省略。对内置 `DsaSimulatedGateway` 使用 `--simulated-disconnect-at-seconds <秒数>` 时会自动启用相同门禁，并额外要求断线确实已注入。空仓账户不一定产生 position 事件，因此只在明确有持仓时要求 `--require-event position`；order/trade 也只应在独立模拟账户已有外部活动时要求。schema v3 JSON 仅包含脱敏预检结果、gateway 类/名称、聚合连接状态、事件计数和重连统计，不包含连接文件路径或参数内容。
 
-预检默认最多运行 120 秒，可用 `--preflight-timeout-seconds` 在 5 至 600 秒内调整；超时同样按预检失败处理且不会创建 MainEngine。上述脚本会创建独立 MainEngine，适合验证 gateway 插件本身，但不能证明承载 Web/API 的服务进程持续健康；部分真实通道还会限制同账户重复登录。API 已按部署配置启动后，应优先另开终端运行下面的只读主进程验收：
+预检默认最多运行 120 秒，可用 `--preflight-timeout-seconds` 在 5 至 600 秒内调整；超时同样按预检失败处理且不会创建 MainEngine。上述脚本会创建独立 MainEngine，适合验证 gateway 插件本身，但不能证明承载 Web/API 的服务进程持续健康；部分真实通道还会限制同账户重复登录。API 已按部署配置启动后，应优先另开终端运行后文的只读主进程验收；进行计划内版本切换时，先按以下方式优雅关闭旧进程。
+
+Windows 上切换已部署的 Uvicorn 进程时，可先用 `Get-NetTCPConnection -LocalPort <端口> -State Listen` 和 `Get-CimInstance Win32_Process` 记录真正监听进程及其 venv wrapper 父进程，再运行以下严格停机工具：
+
+```powershell
+python scripts\stop_windows_uvicorn_gracefully.py `
+  --port 8000 `
+  --expected-listener-pid <listener-pid> `
+  --expected-parent-pid <wrapper-pid> `
+  --timeout-seconds 30 `
+  --confirmation STOP_UVICORN_GRACEFULLY
+```
+
+脚本只在端口唯一监听者、listener/parent PID 关系以及两条命令行中的 `uvicorn`、`server:app` 和端口全部匹配时，才通过独立 helper 向目标控制台发送 `CTRL_BREAK_EVENT`。成功必须同时证明 listener 与 parent 均退出、监听记录消失且端口关闭；结果固定声明 `hard_kill_attempted=false`。目标控制台会同时结束 helper，因此底层 helper 可能返回 Windows `0xC000013A`，脚本会继续以目标进程和端口状态判定。超时或任一身份漂移都非零退出，且不会自动调用强杀。
 
 ```powershell
 python scripts\check_vnpy_deployed_runtime_soak.py `
