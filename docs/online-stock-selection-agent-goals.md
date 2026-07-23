@@ -290,7 +290,7 @@
 - 内置 `DsaSimulatedGateway` 已支持默认保留状态的断线重连：资金、持仓、订单和计数器保持连续，在途延迟订单会恢复并恰好成交一次；`check_vnpy_adapter.py --require-vnpy --reconnect-cycles 3` 已验证三轮缓存保留、成交去重和编号唯一性，安装脚本默认执行该验收。
 - 内置 gateway 新增默认关闭的确定性拒单与重复成交事件注入，安装验收的 `--fault-matrix` 已通过真实 MainEngine/EventEngine 证明拒单无成交、重复 `vt_tradeid` 仅保留一笔；同时修复 vn.py 中文原生状态映射，以及 `send_order()` 内同步终态早于 Agent 计划落库时的提交后即时对账竞态。
 - 新增通用零下单 gateway 长跑验收器：读取外部 `VNPY_*` 配置，统计连接样本、状态切换、四类事件和自动重连结果，以最低连接率/必需事件作非零退出门禁，且输出不含连接路径或参数内容；`DSA_SIM` 单次断线验证已观察到自动恢复，真实账户仍待执行长窗口验收。
-- 部署态 runtime soak 已升级为 schema v2：EventEngine bridge 持续记录不含载荷的分类观测/处理/失败计数和最后观测时间，API 每次读取动态刷新；门禁可要求准确 gateway 类/名称、明确排除 `DsaSimulatedGateway` / `DSA_SIM`、检查窗口内账户/持仓/订单/成交事件增量、计数器回退和 handler 失败。真实 API 基础门禁已 10/10 采样通过；同一 DSA_SIM 进程在生产参数下按预期以身份不匹配、非外部 gateway 和账户事件无增量非零退出。该契约防止把“回调已注册”误报为“真实通道已有回报”，实际外部 gateway 长窗口证据仍待部署执行。
+- 部署态 runtime soak 已升级为 schema v2：EventEngine bridge 持续记录不含载荷的分类观测/处理/失败计数和最后观测时间，API 每次读取动态刷新；门禁可要求准确 gateway 类/名称、明确排除 `DsaSimulatedGateway` / `DSA_SIM`、检查窗口内账户/持仓/订单/成交事件增量、计数器回退和 handler 失败。部署态 XTP 在修复并重启后完成 900 秒门禁：179/179 样本成功，API/runtime/连接/EventEngine 注册率均为 100%，账户/持仓事件增量 224/4027，订单/成交事件 0，错误、handler 失败、计数回退、重连失败、进程和 Gateway 变化均为 0。该结果证明主 Web/API 进程的外部 Gateway 稳定订阅，不替代尚未发生的交易时段自动成交和主动异常恢复证据。
 - vn.py runtime 已区分 `MainEngine.connect()` 请求受理与网关确认连接，连接异常不会拖垮 API 启动；支持状态钩子的网关会动态刷新连接状态，无法确认时健康状态 warning，明确断开时 blocked 且新增委托 fail-closed。
 - XTP Gateway 已补齐标准通道连接确认：runtime 与订单桥都读取交易/行情 API 的布尔 `login_status`，两个通道都登录才确认 connected，任一通道掉线即回到 disconnected；真实 `vnpy_xtp.XtpGateway` 原生对象结构和 SSE/SZSE 声明已通过无网络回归。
 - 新增仅手工触发的 `External vn.py XTP A-share Account Soak`：绑定 `vnpy-xtp-paper-acceptance` Environment、串行化账户会话，仅在临时文件步骤读取 JSON secret，严格校验十字段、客户号/端口和枚举后零下单观测账户/可选持仓与自然重连事件，上传 14 天脱敏证据并始终清理连接文件。run `30001136306` 已通过 15 分钟真实账号验收：连续稳定 60 秒后开始计量，180/180 connected、账户/持仓事件 240/4320、订单/成交事件 0。
@@ -302,23 +302,23 @@
 未完成：
 
 - 系统默认 Python 3.14.6 未安装 vn.py，继续保持本地 paper fallback；完整 vn.py 能力使用已验证的 Python 3.13.14 隔离环境。
-- 已有 opt-in Gateway add/connect bootstrap、XTP 双通道登录确认和冷却自动重连；受保护 A 股测试账号已完成严格预检、真实双通道登录、账户/持仓回报和 15 分钟 100% 连接率验收。部署态 API 接入、受控模拟委托、1/4 小时稳定性与主动异常恢复仍未验证。
-- 已能调用注入或启动期创建的 `MainEngine.send_order`，并支持订单状态、成交、账户和持仓回报通过 API 手动/外部同步；注入或启动期创建的 EventEngine 可自动 attach 回调，但真实 gateway 连接仍未验收。
+- 已有 opt-in Gateway add/connect bootstrap、XTP 双通道登录确认和冷却自动重连；受保护 A 股测试账号已完成严格预检、真实双通道登录、账户/持仓回报、远端与部署态各 15 分钟 100% 连接率验收。部署态 API 接入和受控提交/撤单已完成；仍缺交易时段自动成交、主动断线恢复和 1/4 小时长窗口。
+- 已能调用启动期创建的真实 XTP `MainEngine.send_order`，EventEngine 自动 attach 订单、成交、账户和持仓回报；手工 bridge 委托的隔离账户归属会跨重启持久化，分笔成交按交易日和 `vt_tradeid` 幂等入账，未知、身份不匹配和超量回报 fail closed。真实 gateway 已确认连接，尚待交易时段成交回报验证。
 - `vnpy_paper` 当前覆盖买入委托提交、自动按比例卖出提交、主动撤单请求、订单/成交状态回写、多笔成交累计、MainEngine 漏回报对账、对账异常保护、提交态/部分成交/撤单请求超时安全归档和活跃委托防重复；内置模拟 gateway 的重连、缓存保留和延迟成交去重已完成，真实 gateway 的长运行、重连和迟到回报验收仍未完成。
 - 安装脚本已处理 Python 版本、GUI/数值依赖、LiteLLM wheel 和受限 pip 缓存；Windows Desktop 已完成 opt-in vn.py 冻结后端、NSIS 体积和真实启动验收。Linux Docker 手动验收工作流也已完成默认/可选镜像实物构建、API 启动、runtime/连接/四回调/调度门禁和体积差值记录：run `29772471589` 全部通过，默认镜像 1,459,313,565 字节，可选 vn.py 镜像 2,229,015,999 字节，标准依赖净增 769,702,434 字节。
 
 需要做：
 
 - 明确是否必须接 vn.py；如果只做模拟交易，本地账本已能满足 MVP。
-- 若必须接入外部 A 股通道，由账户所有者在中泰 XTP 官网申请“股票类型”测试账号，为 `vnpy-xtp-paper-acceptance` Environment 手工配置 XTP JSON，再从 `main` 运行账户 soak；生产实盘凭据仍只允许在受控部署主机使用非仓库连接文件本地验收。
-- 继续扩展 vn.py adapter 层：已完成 DSA 委托 -> vn.py `OrderRequest` / `CancelRequest` 基础映射、可选 `MainEngine.send_order` / `cancel_order` 调用、订单/成交/账户/持仓回写 API、注入式 EventEngine attach 和 opt-in runtime bootstrap，下一步需要真实 gateway 连接、长时间运行和异常恢复验收。
+- 外部 A 股测试通道已接入中泰 XTP，账号参数只保存在受控部署主机的仓库外文件和 GitHub Environment secret；生产实盘凭据仍不得进入仓库或普通日志。
+- 继续扩展真实验收：观察 2026-07-24 09:35 自动选股任务的 XTP 订单/成交和隔离账本变化，再补主动断线恢复与 1/4 小时长窗口；不得通过额外测试单或放宽风控制造成证据。
 - 内置 vn.py 模拟撮合方案已完成；继续增加真实 gateway 长跑验收。
 
 验收标准：
 
 - 未安装 vn.py 时系统仍可使用本地 paper 模式。
 - 安装 vn.py 后状态显示 `vnpy_available=true`，`diagnostics.vnpy_adapter.order_request_supported=true`，并能通过真实 vn.py 环境 adapter smoke test。
-- vn.py 模式下订单、成交、账户和持仓能同步回 DSA 页面；当前完成提交态审计、成交入账、订单状态回写、账户/持仓诊断快照、注入式 EventEngine attach 和启动期 runtime bootstrap，尚未满足真实 gateway 运行态验收标准。
+- vn.py 模式下订单、成交、账户和持仓能同步回 DSA 页面；当前真实 XTP 已完成连接、账户/持仓回报、受控订单状态、撤单和跨重启手工成交入账合同，尚缺交易时段自动订单的真实成交回报。
 
 ## Goal 7：Web 产品化与审计
 
@@ -476,7 +476,7 @@
 
 Windows Desktop 的 opt-in vn.py 打包已完成实物验收：Python 3.13.14 冻结产物成功导入 vn.py/TA-Lib/内置 gateway，并在无控制台启动下返回健康状态、确认 `DSA_SIM` 连接和四类 EventEngine 回调；Electron 产出 220.6 MiB NSIS 安装器，安装包内后端哈希与已验收产物一致。Linux Docker 也已通过手动 Actions 工作流完成双镜像构建、运行态健康/连接/事件桥/调度门禁和体积增量验收。macOS 脚本已同步相同的依赖、收集与冻结探针契约，但因当前为 Windows 环境未执行 macOS 实物构建。
 
-未完成程度：当前约 8% 未完成，主要集中在真实 gateway、真实账户连接、真实回报与长时间订阅/恢复验收。
+未完成程度：当前约 3% 未完成，集中在交易时段自动成交回报、主动异常恢复和 1/4 小时真实 Gateway 长窗口。
 
 ## 明确不属于当前目标的事项
 
