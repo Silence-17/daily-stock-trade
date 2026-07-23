@@ -51,6 +51,32 @@ def _connection_status(diagnostics: Dict[str, Any]) -> str:
     return "unknown"
 
 
+def _wait_for_stable_connection(
+    runtime_handle: Any,
+    *,
+    grace_seconds: float,
+    stability_seconds: float,
+    monotonic: Any = time.monotonic,
+    sleep: Any = time.sleep,
+) -> bool:
+    deadline = monotonic() + grace_seconds
+    connected_since: float | None = None
+    while True:
+        now = monotonic()
+        diagnostics = runtime_handle.refresh_diagnostics()
+        if _connection_status(diagnostics) == "connected":
+            if connected_since is None:
+                connected_since = now
+            if now - connected_since + 1e-12 >= stability_seconds:
+                return True
+        else:
+            connected_since = None
+        remaining = deadline - now
+        if remaining <= 0:
+            return False
+        sleep(min(0.2, max(0.01, remaining)))
+
+
 def evaluate_soak(
     *,
     runtime_available: bool,
@@ -274,6 +300,7 @@ def _build_soak_result(
     observed_duration: float,
     sample_interval: float,
     startup_grace: float,
+    startup_stability: float,
     sample_counts: Counter[str],
     transitions: list[Dict[str, Any]],
     event_counts: Counter[str],
@@ -320,6 +347,7 @@ def _build_soak_result(
         "observed_duration_seconds": round(observed_duration, 3),
         "sample_interval_seconds": sample_interval,
         "startup_grace_seconds": startup_grace,
+        "startup_stability_seconds": startup_stability,
         "sample_counts": dict(sorted(sample_counts.items())),
         "transitions": transitions[:200],
         "event_counts": {
@@ -336,6 +364,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--duration-seconds", type=float, default=300.0)
     parser.add_argument("--sample-interval-seconds", type=float, default=5.0)
     parser.add_argument("--startup-grace-seconds", type=float, default=30.0)
+    parser.add_argument("--startup-stability-seconds", type=float, default=0.0)
     parser.add_argument("--min-connected-ratio", type=float, default=0.99)
     parser.add_argument(
         "--require-event",
@@ -391,6 +420,17 @@ def main(argv: list[str] | None = None) -> int:
         minimum=0.0,
         maximum=600.0,
     )
+    startup_stability = _bounded_float(
+        parser,
+        "--startup-stability-seconds",
+        args.startup_stability_seconds,
+        minimum=0.0,
+        maximum=600.0,
+    )
+    if startup_stability > startup_grace:
+        parser.error(
+            "--startup-stability-seconds cannot exceed --startup-grace-seconds"
+        )
     min_ratio = _bounded_float(
         parser, "--min-connected-ratio", args.min_connected_ratio, minimum=0.0, maximum=1.0
     )
@@ -484,12 +524,11 @@ def main(argv: list[str] | None = None) -> int:
             )
 
         if runtime_ready:
-            grace_deadline = time.monotonic() + startup_grace
-            while time.monotonic() < grace_deadline:
-                diagnostics = runtime_handle.refresh_diagnostics()
-                if _connection_status(diagnostics) == "connected":
-                    break
-                time.sleep(min(0.2, max(0.01, grace_deadline - time.monotonic())))
+            _wait_for_stable_connection(
+                runtime_handle,
+                grace_seconds=startup_grace,
+                stability_seconds=startup_stability,
+            )
 
             measurement_started = time.monotonic()
             measurement_deadline = measurement_started + duration
@@ -534,6 +573,7 @@ def main(argv: list[str] | None = None) -> int:
                         observed_duration=max(0.0, now - measurement_started),
                         sample_interval=interval,
                         startup_grace=startup_grace,
+                        startup_stability=startup_stability,
                         sample_counts=sample_counts,
                         transitions=transitions,
                         event_counts=event_counts,
@@ -575,6 +615,7 @@ def main(argv: list[str] | None = None) -> int:
         observed_duration=observed_duration,
         sample_interval=interval,
         startup_grace=startup_grace,
+        startup_stability=startup_stability,
         sample_counts=sample_counts,
         transitions=transitions,
         event_counts=event_counts,

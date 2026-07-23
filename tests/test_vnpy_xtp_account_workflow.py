@@ -107,6 +107,7 @@ def test_xtp_account_soak_is_external_no_order_and_sanitized() -> None:
 
     assert "--require-external-gateway" in text
     assert "--require-all-default-keys" in text
+    assert "--startup-stability-seconds', '60" in text
     assert "--require-event', 'account" in text
     assert "tests/test_vnpy_xtp_runtime.py" in text
     assert "actions/upload-artifact@v6" in text

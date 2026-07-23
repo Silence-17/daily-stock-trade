@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 - [修复] vn.py Gateway 长跑验收的零连接预检改用自动清理的专用 JSON 结果文件，XTP Windows 账户 workflow 显式启用 Python UTF-8 输出，不再把插件启动信息或中文字段报告误判为预检失败
+- [改进] XTP A 股账户长跑在连续 60 秒确认交易/行情双通道连接后才开始稳定性计量，过滤登录收敛期抖动但仍保持 99% 连接率门禁
 - [修复] 外部模拟账户目标由期货 CTP/SimNow 改为中泰 XTP A 股测试账户；订单桥新增交易/行情双通道 `login_status` 确认，避免 XTP 登录后仍被误判为连接未知
 - [修复] 跨市场联动门禁现校验关联实时指数的 provider 时间，缺失、失效或最大时间偏差超过 120 秒时 fail-closed；已收盘 session bar 明确不参与同步计算
 - [改进] a-stock-data 风格的 EastMoney 直连适配器新增 A 股主指数与全市场宽度 fallback，读取原始 `f124/f297` 并要求 API total 与返回行完全一致；efinance 不可用时该路径先于 AkShare 批量端点，截断或时间覆盖不足仍 fail-closed

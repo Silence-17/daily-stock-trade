@@ -16,9 +16,34 @@ from scripts.check_vnpy_gateway_soak import (
     _build_soak_result,
     _run_gateway_preflight,
     _safe_runtime_summary,
+    _wait_for_stable_connection,
     _write_json_file,
     evaluate_soak,
 )
+
+
+def test_startup_wait_requires_continuous_connected_stability() -> None:
+    statuses = iter(
+        ["connected", "disconnected", "connected", "connected", "connected"]
+    )
+    clock = [0.0]
+    runtime_handle = SimpleNamespace(
+        refresh_diagnostics=lambda: {
+            "available": True,
+            "connect": {"status": next(statuses)},
+        }
+    )
+
+    stable = _wait_for_stable_connection(
+        runtime_handle,
+        grace_seconds=2.0,
+        stability_seconds=0.4,
+        monotonic=lambda: clock[0],
+        sleep=lambda seconds: clock.__setitem__(0, clock[0] + seconds),
+    )
+
+    assert stable is True
+    assert round(clock[0], 3) == 0.8
 
 
 def test_evaluate_soak_accepts_connected_runtime_and_required_events() -> None:
@@ -251,6 +276,7 @@ def test_running_checkpoint_is_explicitly_incomplete_and_sanitized() -> None:
         observed_duration=120.0,
         sample_interval=5.0,
         startup_grace=30.0,
+        startup_stability=10.0,
         sample_counts=gateway_soak.Counter({"connected": 24}),
         transitions=[{"elapsed_seconds": 0.0, "from": None, "to": "connected"}],
         event_counts=gateway_soak.Counter({"account": 2}),
@@ -273,6 +299,7 @@ def test_running_checkpoint_is_explicitly_incomplete_and_sanitized() -> None:
     assert result["ok"] is False
     assert result["evaluation"]["failures"] == ["duration_incomplete"]
     assert result["event_counts"]["account"] == 2
+    assert result["startup_stability_seconds"] == 10.0
 
 
 def test_json_checkpoint_replaces_atomically(tmp_path) -> None:

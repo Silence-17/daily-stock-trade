@@ -202,6 +202,7 @@ jobs:
             '--duration-seconds', '${{ inputs.duration_seconds }}',
             '--sample-interval-seconds', '5',
             '--startup-grace-seconds', '120',
+            '--startup-stability-seconds', '60',
             '--min-connected-ratio', '${{ inputs.min_connected_ratio }}',
             '--require-external-gateway',
             '--require-all-default-keys',
