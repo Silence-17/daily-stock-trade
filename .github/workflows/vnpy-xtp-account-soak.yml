@@ -1,4 +1,4 @@
-name: External vn.py CTP Account Soak
+name: External vn.py XTP A-share Account Soak
 
 on:
   workflow_dispatch:
@@ -32,22 +32,22 @@ on:
         type: boolean
 
 concurrency:
-  group: vnpy-ctp-paper-account-${{ github.repository }}
+  group: vnpy-xtp-paper-account-${{ github.repository }}
   cancel-in-progress: false
 
 permissions:
   contents: read
 
 jobs:
-  ctp-account-soak:
+  xtp-account-soak:
     runs-on: windows-2022
     timeout-minutes: 300
-    environment: vnpy-ctp-paper-acceptance
+    environment: vnpy-xtp-paper-acceptance
     env:
-      VNPY_GATEWAY_PLUGINS_JSON: '[{"package":"vnpy_ctp==6.7.11.4","module":"vnpy_ctp"}]'
+      VNPY_GATEWAY_PLUGINS_JSON: '[{"package":"vnpy_xtp==2.2.32.2.3","module":"vnpy_xtp"}]'
       VNPY_RUNTIME_ENABLED: 'true'
-      VNPY_GATEWAY_CLASS: vnpy_ctp:CtpGateway
-      VNPY_GATEWAY_NAME: CTP
+      VNPY_GATEWAY_CLASS: vnpy_xtp:XtpGateway
+      VNPY_GATEWAY_NAME: XTP
       VNPY_CONNECT_ON_START: 'true'
       VNPY_PRODUCTION_PREFLIGHT_ENABLED: 'true'
       VNPY_AUTO_ATTACH_EVENTS: 'false'
@@ -55,50 +55,53 @@ jobs:
       VNPY_AUTO_RECONNECT_INTERVAL_SECONDS: '15'
       VNPY_AUTO_RECONNECT_MAX_INTERVAL_SECONDS: '60'
       VNPY_AUTO_RECONNECT_CONFIRMATION_GRACE_SECONDS: '60'
-      VNPY_SOAK_REPORT: ${{ github.workspace }}\vnpy-ctp-account-soak.json
+      VNPY_SOAK_REPORT: ${{ github.workspace }}\vnpy-xtp-account-soak.json
     steps:
       - name: Require main branch
         shell: pwsh
         run: |
           if ($env:GITHUB_REF -ne 'refs/heads/main') {
-            throw 'Credentialed CTP acceptance is restricted to the main branch.'
+            throw 'Credentialed XTP acceptance is restricted to the main branch.'
           }
 
       - name: Materialize protected connection settings
         shell: pwsh
         env:
-          VNPY_CTP_CONNECT_SETTINGS_JSON: ${{ secrets.VNPY_CTP_CONNECT_SETTINGS_JSON }}
+          VNPY_XTP_CONNECT_SETTINGS_JSON: ${{ secrets.VNPY_XTP_CONNECT_SETTINGS_JSON }}
         run: |
-          $raw = $env:VNPY_CTP_CONNECT_SETTINGS_JSON
+          $raw = $env:VNPY_XTP_CONNECT_SETTINGS_JSON
           if ([string]::IsNullOrWhiteSpace($raw)) {
-            throw 'Environment secret VNPY_CTP_CONNECT_SETTINGS_JSON is required.'
+            throw 'Environment secret VNPY_XTP_CONNECT_SETTINGS_JSON is required.'
           }
           try {
             $settings = $raw | ConvertFrom-Json -AsHashtable
           } catch {
-            throw 'Environment secret VNPY_CTP_CONNECT_SETTINGS_JSON must be valid JSON.'
+            throw 'Environment secret VNPY_XTP_CONNECT_SETTINGS_JSON must be valid JSON.'
           }
           if (-not ($settings -is [System.Collections.IDictionary]) -or $settings.Count -eq 0) {
-            throw 'Environment secret VNPY_CTP_CONNECT_SETTINGS_JSON must be a non-empty object.'
+            throw 'Environment secret VNPY_XTP_CONNECT_SETTINGS_JSON must be a non-empty object.'
           }
           $requiredKeys = @(
-            '用户名',
+            '账号',
             '密码',
-            '经纪商代码',
-            '交易服务器',
-            '行情服务器',
-            '产品名称',
-            '授权编码',
-            '柜台环境'
+            '客户号',
+            '行情地址',
+            '行情端口',
+            '交易地址',
+            '交易端口',
+            '行情协议',
+            '日志级别',
+            '授权码'
           )
+          $stringKeys = @('账号', '密码', '行情地址', '交易地址', '授权码')
           $missingKeys = @(
             $requiredKeys | Where-Object { -not $settings.Contains($_) }
           )
           $unexpectedKeys = @(
             $settings.Keys | Where-Object { $_ -notin $requiredKeys }
           )
-          $invalidValueKeys = @(
-            $requiredKeys | Where-Object {
+          $invalidStringKeys = @(
+            $stringKeys | Where-Object {
               $settings.Contains($_) -and (
                 -not ($settings[$_] -is [string]) -or
                 [string]::IsNullOrWhiteSpace([string]$settings[$_]) -or
@@ -106,18 +109,59 @@ jobs:
               )
             }
           )
-          if ($missingKeys.Count -gt 0 -or $unexpectedKeys.Count -gt 0 -or $invalidValueKeys.Count -gt 0) {
+          $invalidIntegerKeys = @()
+          foreach ($rule in @(
+            @{ Key = '客户号'; Min = 1; Max = 99 },
+            @{ Key = '行情端口'; Min = 1; Max = 65535 },
+            @{ Key = '交易端口'; Min = 1; Max = 65535 }
+          )) {
+            if (-not $settings.Contains($rule.Key)) {
+              continue
+            }
+            $numberText = [string]$settings[$rule.Key]
+            $number = 0L
+            if (
+              $numberText -notmatch '^[0-9]+$' -or
+              -not [long]::TryParse($numberText, [ref]$number) -or
+              $number -lt $rule.Min -or
+              $number -gt $rule.Max
+            ) {
+              $invalidIntegerKeys += $rule.Key
+            }
+          }
+          $invalidEnumKeys = @()
+          if (
+            $settings.Contains('行情协议') -and
+            $settings['行情协议'] -cnotin @('TCP', 'UDP')
+          ) {
+            $invalidEnumKeys += '行情协议'
+          }
+          if (
+            $settings.Contains('日志级别') -and
+            $settings['日志级别'] -cnotin @('FATAL', 'ERROR', 'WARNING', 'INFO', 'DEBUG', 'TRACE')
+          ) {
+            $invalidEnumKeys += '日志级别'
+          }
+          if (
+            $missingKeys.Count -gt 0 -or
+            $unexpectedKeys.Count -gt 0 -or
+            $invalidStringKeys.Count -gt 0 -or
+            $invalidIntegerKeys.Count -gt 0 -or
+            $invalidEnumKeys.Count -gt 0
+          ) {
             throw @(
-              'CTP settings schema mismatch.',
+              'XTP settings schema mismatch.',
               "missing_keys=$($missingKeys -join ',')",
               "unexpected_keys=$($unexpectedKeys -join ',')",
-              "invalid_value_keys=$($invalidValueKeys -join ',')"
+              "invalid_string_keys=$($invalidStringKeys -join ',')",
+              "invalid_integer_keys=$($invalidIntegerKeys -join ',')",
+              "invalid_enum_keys=$($invalidEnumKeys -join ',')"
             ) -join ' '
           }
-          foreach ($value in $settings.Values) {
-            Write-Output "::add-mask::$value"
+          foreach ($key in @('账号', '密码', '行情地址', '交易地址', '授权码')) {
+            Write-Output "::add-mask::$($settings[$key])"
           }
-          $settingsPath = Join-Path $env:RUNNER_TEMP 'vnpy-ctp-connect.json'
+          $settingsPath = Join-Path $env:RUNNER_TEMP 'vnpy-xtp-connect.json'
           [System.IO.File]::WriteAllText(
             $settingsPath,
             $raw,
@@ -137,18 +181,18 @@ jobs:
           python-version: '3.13'
           cache: pip
 
-      - name: Install application and CTP runtime
+      - name: Install application and XTP runtime
         shell: pwsh
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt -r requirements-vnpy.txt
           python scripts/vnpy_gateway_plugins.py --install --verify
 
-      - name: Verify official CTP connection-state contract
+      - name: Verify official XTP A-share connection-state contract
         shell: pwsh
-        run: python -m pytest tests/test_vnpy_ctp_runtime.py -q -p no:cacheprovider
+        run: python -m pytest tests/test_vnpy_xtp_runtime.py -q -p no:cacheprovider
 
-      - name: Run credentialed no-order CTP soak
+      - name: Run credentialed no-order XTP soak
         shell: pwsh
         run: |
           $arguments = @(
@@ -175,12 +219,12 @@ jobs:
           }
 
       - name: Summarize sanitized evidence
-        if: always() && hashFiles('vnpy-ctp-account-soak.json') != ''
+        if: always() && hashFiles('vnpy-xtp-account-soak.json') != ''
         shell: pwsh
         run: |
           $report = Get-Content -LiteralPath $env:VNPY_SOAK_REPORT -Raw | ConvertFrom-Json
           @(
-            "### External CTP account soak",
+            "### External XTP A-share account soak",
             "- Phase: ``$($report.phase)``",
             "- Passed: ``$($report.ok)``",
             "- Gateway: ``$($report.gateway.class)`` / ``$($report.gateway.name)``",
@@ -191,10 +235,10 @@ jobs:
           ) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
 
       - name: Upload sanitized soak evidence
-        if: always() && hashFiles('vnpy-ctp-account-soak.json') != ''
+        if: always() && hashFiles('vnpy-xtp-account-soak.json') != ''
         uses: actions/upload-artifact@v6
         with:
-          name: vnpy-ctp-account-soak-${{ github.run_number }}
+          name: vnpy-xtp-account-soak-${{ github.run_number }}
           path: ${{ env.VNPY_SOAK_REPORT }}
           if-no-files-found: error
           retention-days: 14
@@ -205,7 +249,7 @@ jobs:
         run: |
           $runnerRoot = [System.IO.Path]::GetFullPath($env:RUNNER_TEMP)
           $candidatePath = if ([string]::IsNullOrWhiteSpace($env:VNPY_CONNECT_SETTINGS_PATH)) {
-            Join-Path $runnerRoot 'vnpy-ctp-connect.json'
+            Join-Path $runnerRoot 'vnpy-xtp-connect.json'
           } else {
             $env:VNPY_CONNECT_SETTINGS_PATH
           }

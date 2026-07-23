@@ -10,15 +10,16 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "vnpy-external-gateway-smoke.yml"
 
 
-def test_external_gateway_workflow_is_manual_zero_connect_ctp_acceptance() -> None:
+def test_external_gateway_workflow_is_manual_zero_connect_xtp_acceptance() -> None:
     text = WORKFLOW.read_text(encoding="utf-8")
     workflow = yaml.safe_load(text)
 
     assert workflow[True] == {"workflow_dispatch": None}
     assert workflow["permissions"] == {"contents": "read"}
-    assert "vnpy_ctp==6.7.11.4" in text
-    assert 'gateway_class="vnpy_ctp:CtpGateway"' in text
-    assert 'gateway_name="CTP"' in text
+    assert "vnpy_xtp==2.2.32.2.3" in text
+    assert 'gateway_class="vnpy_xtp:XtpGateway"' in text
+    assert 'gateway_name="XTP"' in text
+    assert "tests/test_vnpy_xtp_runtime.py" in text
     assert "settings_path=None" in text
     assert 'result["evaluation"]["failures"] == ["connect_settings_required"]' in text
     assert '"connect_called": False' in text

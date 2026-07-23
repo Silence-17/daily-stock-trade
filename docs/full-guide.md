@@ -645,9 +645,9 @@ docker run --rm stock-analysis:vnpy python -c "import vnpy; from src.services.vn
 
 Compose 可使用 `DSA_INCLUDE_VNPY_DOCKER=true docker compose -f docker/docker-compose.yml build`。构建会安装独立的 `requirements-vnpy.txt`，并在镜像层内真实导入 vn.py 事件/交易模块和内置 gateway；导入失败会中止构建。外部插件可通过 `VNPY_GATEWAY_PLUGINS_JSON='[{"package":"<gateway-package>==<version>","module":"<gateway_module>"}]'` 统一声明，本地安装、Docker 和 Desktop 构建都会安装并验证模块，Desktop 还会收集模块并执行冻结后导入探针。清单拒绝 URL、marker 和重复/非法项，且不得包含凭据；账户连接 JSON 仍须位于仓库外。生产验收必须使用外部 gateway 长跑门禁，不能把 `DSA_SIM` 当作真实账户证据。
 
-Windows/Python 3.13 已验证官方 `vnpy_ctp==6.7.11.4`，配置为 `VNPY_GATEWAY_CLASS=vnpy_ctp:CtpGateway`、`VNPY_GATEWAY_NAME=CTP`。无凭据验收只证明插件安装、MainEngine 注册和冻结产物可导入；缺少仓库外连接 JSON 时必须返回 `connect_settings_required`，默认字段存在但值为空时返回 `default_setting_values_empty`，均不会尝试连接。该版本当前仅有 CPython 3.13 Windows x64 预编译 wheel，Linux/macOS 仍需遵循上游源码编译要求。
+外部账户目标使用 A 股中泰 XTP，而不是期货 CTP/SimNow。Windows/Python 3.13 已验证官方 `vnpy_xtp==2.2.32.2.3`，配置为 `VNPY_GATEWAY_CLASS=vnpy_xtp:XtpGateway`、`VNPY_GATEWAY_NAME=XTP`，原生声明 SSE/SZSE。无凭据验收只证明插件安装、MainEngine 注册、双通道状态和冻结产物可导入；缺少仓库外连接 JSON 时必须返回 `connect_settings_required`，默认字段存在但值为空时返回 `default_setting_values_empty`，均不会尝试连接。
 
-官方 CTP 的连接确认已兼容交易与行情通道 `login_status`，两者均登录才报告 connected。远端 `vnpy-ctp-paper-acceptance` Environment 已创建、保持 0 secret，并以 GitHub policy 与 workflow 双重限制为 `main`；当前计费方案不支持 reviewer/wait timer。账户所有者可手工添加隔离模拟账户 secret 后运行 `External vn.py CTP Account Soak`；工作流会在安装依赖前严格检查八个官方字段均为非空字符串且不存在多余键，再执行零下单长跑并上传 14 天脱敏证据。生产实盘凭据应在受控部署主机本地验收。完整安全边界与设置方法见 [vn.py 模拟交易说明](vnpy-paper-trading.md)。
+XTP 的交易与行情 API 都通过 `login_status` 确认，两个通道均登录才报告 connected。账户所有者从中泰 XTP 官网申请“股票类型”测试账户后，在 `vnpy-xtp-paper-acceptance` Environment 添加 `VNPY_XTP_CONNECT_SETTINGS_JSON`，再从 `main` 运行 `External vn.py XTP A-share Account Soak`。工作流在安装前验证十个官方字段、客户号/端口范围和行情协议/日志枚举，再执行零下单长跑并保留 14 天脱敏证据。生产实盘凭据仍只能在受控部署主机验收。完整安全边界与设置方法见 [vn.py 模拟交易说明](vnpy-paper-trading.md)。
 
 仓库提供手动工作流 `.github/workflows/vnpy-docker-smoke.yml`，它不会发布镜像或读取券商凭据，会构建默认/可选镜像并启动可选镜像门禁健康状态、DSA_SIM 连接、四类事件桥、handler 失败和调度循环。2026-07-21 Linux 验收中，默认镜像为 1,459,313,565 字节，可选 vn.py 镜像为 2,229,015,999 字节，净增 769,702,434 字节；该增量保留 vn.py 4.4.0 声明的 PySide6 与分析依赖，不使用 `--no-deps` 私自裁剪标准运行时。
 

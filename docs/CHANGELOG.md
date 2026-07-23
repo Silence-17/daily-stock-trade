@@ -9,16 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-- [修复] CTP 账户长跑工作流在 checkout 和依赖安装前校验 secret 的八个官方字段、非空无换行字符串值和多余键，错误只报告字段名；全部验证通过后才注册 GitHub mask，避免凭据配置错误触发高成本安装或未验证值污染 workflow command
+- [修复] 外部模拟账户目标由期货 CTP/SimNow 改为中泰 XTP A 股测试账户；订单桥新增交易/行情双通道 `login_status` 确认，避免 XTP 登录后仍被误判为连接未知
 - [修复] 跨市场联动门禁现校验关联实时指数的 provider 时间，缺失、失效或最大时间偏差超过 120 秒时 fail-closed；已收盘 session bar 明确不参与同步计算
 - [改进] a-stock-data 风格的 EastMoney 直连适配器新增 A 股主指数与全市场宽度 fallback，读取原始 `f124/f297` 并要求 API total 与返回行完全一致；efinance 不可用时该路径先于 AkShare 批量端点，截断或时间覆盖不足仍 fail-closed
 - [修复] efinance 股票、ETF、指数和市场宽度现保留 EastMoney 真实更新时间并统一为 UTC；宽度仅在全部有效计数行都有时间时报告最早 provider as-of 和 100% 覆盖率，AkShare 新浪/腾讯单票直连也补齐明确 provider 时间
 - [修复] 自动交易盘中严格门禁不再把缺失宽度时间覆盖率的响应默认为完整，只有显式且精确的 100% 覆盖率才能通过 provider 时间校验
-- [修复] vn.py runtime 现可通过官方 CTP Gateway 的交易/行情通道 `login_status` 确认连接，要求所有现有通道均已登录，避免真实 CTP 登录后长期停留在 `connection_unconfirmed`
-- [测试] 新增受 GitHub Environment 保护的 CTP 模拟账户零下单长跑工作流，临时注入连接 JSON、严格预检、按账户/可选持仓事件验收并上传 14 天脱敏证据；原始 secret 不进入安装、观测或上传步骤
-- [chore] GitHub 已创建 `vnpy-ctp-paper-acceptance` Environment 并仅允许 `main` 分支，工作流同步增加代码侧 main 硬门禁；当前计费方案不支持 required reviewer/wait timer，环境仍保持 0 secret
+- [测试] 新增受 GitHub Environment 保护的 XTP A 股测试账户零下单长跑工作流，安装前严格校验 10 字段、客户号/端口范围和协议/日志枚举，按账户/可选持仓事件验收并上传 14 天脱敏证据；原始 secret 不进入安装、观测或上传步骤
+- [chore] GitHub 账户验收 Environment 改为 `vnpy-xtp-paper-acceptance` 并仅允许 `main` 分支；废弃的无 secret、无运行 CTP Environment 和账户工作流不再作为项目目标
 - [修复] vn.py 生产预检现在把 Gateway 默认连接字段中的 `null` 和空白字符串作为 `default_setting_values_empty` 在 connect 前阻断，并只暴露空字段名而不泄露配置值或路径
-- [测试] 新增官方 `vnpy_ctp==6.7.11.4` Windows/Python 3.13 无凭据验收工作流，覆盖真实插件安装、MainEngine 零连接注册、连接缺失 fail-closed 和 CTP 原生模块冻结后导入探针
+- [测试] 外部 Gateway 无凭据验收样本改为官方 `vnpy_xtp==2.2.32.2.3` Windows/Python 3.13，覆盖 SSE/SZSE 声明、MainEngine 零连接注册、连接缺失 fail-closed、双通道连接状态和冻结后导入探针
 - [测试] 修复 Windows 全量回归中的 SQLite 临时库句柄泄漏、系统配置测试环境串扰、Local CLI POSIX 权限断言和 Git Bash Docker entrypoint 路径解析，使相关 391 项测试可按真实执行顺序稳定运行
 - [新功能] 新增 `VNPY_GATEWAY_PLUGINS_JSON` 外部 Gateway 插件清单，统一驱动隔离环境、Docker 与 Windows/macOS Desktop 的包安装、模块导入、PyInstaller 收集和冻结后探针；非法/重复/URL/marker 清单、未开启 vn.py、安装失败或产物漏模块均 fail-closed，且账户参数仍保持仓库外置
 - [测试] 新增 Gateway 插件清单解析、参数隔离、pip 失败、模块导入，以及 Docker/桌面打包契约回归；Windows PowerShell 5 实物构建验证 JSON 安全传递、单模块数组扁平化、动态 `--collect-all` 和冻结后声明模块导入

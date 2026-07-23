@@ -11,11 +11,11 @@ permissions:
   contents: read
 
 jobs:
-  windows-ctp-zero-connect:
+  windows-xtp-zero-connect:
     runs-on: windows-2022
     timeout-minutes: 60
     env:
-      VNPY_GATEWAY_PLUGINS_JSON: '[{"package":"vnpy_ctp==6.7.11.4","module":"vnpy_ctp"}]'
+      VNPY_GATEWAY_PLUGINS_JSON: '[{"package":"vnpy_xtp==2.2.32.2.3","module":"vnpy_xtp"}]'
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -40,7 +40,7 @@ jobs:
           python -m pip install -r requirements.txt -r requirements-vnpy.txt
           python scripts/vnpy_gateway_plugins.py --install --verify
 
-      - name: Verify real CTP registration without connecting
+      - name: Verify real XTP registration without connecting
         shell: pwsh
         run: |
           @'
@@ -49,8 +49,8 @@ jobs:
           from scripts.check_vnpy_gateway_preflight import inspect_preflight
 
           result = inspect_preflight(
-              gateway_class="vnpy_ctp:CtpGateway",
-              gateway_name="CTP",
+              gateway_class="vnpy_xtp:XtpGateway",
+              gateway_name="XTP",
               settings_path=None,
               require_external_gateway=True,
           )
@@ -69,11 +69,11 @@ jobs:
           print(json.dumps(result, ensure_ascii=False, indent=2))
           '@ | python -
 
-      - name: Verify CTP connection-state contract
+      - name: Verify XTP A-share connection-state contract
         shell: pwsh
-        run: python -m pytest tests/test_vnpy_ctp_runtime.py -q -p no:cacheprovider
+        run: python -m pytest tests/test_vnpy_xtp_runtime.py -q -p no:cacheprovider
 
-      - name: Build and probe frozen backend with CTP
+      - name: Build and probe frozen backend with XTP
         shell: pwsh
         run: |
           .\scripts\build-backend.ps1 `

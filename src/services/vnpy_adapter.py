@@ -183,6 +183,14 @@ def _gateway_connection_confirmation(gateway: Any) -> Tuple[Optional[bool], str]
     connected = getattr(gateway, "connected", None)
     if isinstance(connected, bool):
         return connected, "gateway.connected"
+    channel_login_states = []
+    for channel_name in ("td_api", "md_api"):
+        channel = getattr(gateway, channel_name, None)
+        login_status = getattr(channel, "login_status", None)
+        if isinstance(login_status, bool):
+            channel_login_states.append(login_status)
+    if channel_login_states:
+        return all(channel_login_states), "gateway.channel_login_status"
     return None, "unavailable"
 
 

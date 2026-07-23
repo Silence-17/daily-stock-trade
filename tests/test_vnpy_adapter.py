@@ -165,6 +165,35 @@ class VnpyAdapterTestCase(unittest.TestCase):
         self.assertTrue(recovered["connection_confirmed"])
         self.assertEqual(recovered["connection_status"], "connected")
 
+    def test_bridge_status_reads_gateway_channel_login_state(self) -> None:
+        installed = _install_fake_vnpy_modules()
+        main_engine = _FakeMainEngine()
+        main_engine.gateway = types.SimpleNamespace(
+            td_api=types.SimpleNamespace(login_status=True),
+            md_api=types.SimpleNamespace(login_status=False),
+        )
+        try:
+            disconnected = get_vnpy_bridge_status(
+                main_engine=main_engine,
+                gateway_name="XTP",
+            )
+            main_engine.gateway.md_api.login_status = True
+            connected = get_vnpy_bridge_status(
+                main_engine=main_engine,
+                gateway_name="XTP",
+            )
+        finally:
+            _restore_modules(installed)
+
+        self.assertFalse(disconnected["connection_confirmed"])
+        self.assertEqual(disconnected["connection_status"], "disconnected")
+        self.assertEqual(
+            disconnected["connection_confirmation_source"],
+            "gateway.channel_login_status",
+        )
+        self.assertTrue(connected["connection_confirmed"])
+        self.assertEqual(connected["connection_status"], "connected")
+
     def test_main_engine_bridge_submits_order_request(self) -> None:
         installed = _install_fake_vnpy_modules()
         main_engine = _FakeMainEngine()
