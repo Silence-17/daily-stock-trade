@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [修复] FastAPI 启动中途失败时仍按调度器、vn.py runtime 的顺序释放资源；pytest 默认禁用外部 vn.py 连接，避免本机 XTP 配置被普通生命周期测试误触发
 - [修复] vn.py 恢复扫描对持续活动且超过 30 分钟的委托自动发起一次撤单，对账刷新不再重置超时计时；撤单处理中保留状态，并从撤单请求时间独立计算终态回报超时
 
 - [测试] vn.py Gateway 长跑工具新增外部网关主动断线恢复模式，仅在显式外部网关门禁与固定确认词同时满足时才允许注入；模拟/外部参数互斥且生产预检仍先于任何连接

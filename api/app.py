@@ -281,49 +281,49 @@ async def app_lifespan(app: FastAPI):
     os.environ.pop(RUNTIME_SCHEDULER_ARGS_ENV, None)
     from src.config import get_config
 
-    source_health_recovery = DataFetcherManager.configure_provider_source_health_persistence(
-        getattr(get_config(), "database_path", "./data/stock_analysis.db")
-    )
-    app.state.realtime_source_health_recovery = source_health_recovery
-    runtime_scheduler_service = RuntimeSchedulerService(
-        owns_schedule=runtime_owns_schedule,
-        force_enabled=runtime_force_enabled,
-        daily_schedule_disabled=runtime_disable_daily,
-        run_immediately_in_background=True,
-        schedule_args_overrides=runtime_scheduler_args,
-        task_event_repository=RuntimeSchedulerRepository(),
-    )
-    app.state.runtime_scheduler_service = runtime_scheduler_service
-    vnpy_runtime = bootstrap_vnpy_runtime(
-        event_sink=_record_vnpy_runtime_connection_event,
-    )
-    app.state.vnpy_runtime_handle = vnpy_runtime
-    app.state.vnpy_runtime_diagnostics = vnpy_runtime.diagnostics
-    if vnpy_runtime.main_engine is not None:
-        app.state.vnpy_main_engine = vnpy_runtime.main_engine
-    if vnpy_runtime.event_engine is not None:
-        app.state.vnpy_event_engine = vnpy_runtime.event_engine
-    if vnpy_runtime.event_bridge is not None:
-        app.state.vnpy_paper_event_bridge = vnpy_runtime.event_bridge
-    bind_vnpy_runtime = getattr(
-        app.state.runtime_scheduler_service,
-        "set_vnpy_runtime_engines",
-        None,
-    )
-    if callable(bind_vnpy_runtime):
-        bind_vnpy_runtime(
-            main_engine=vnpy_runtime.main_engine,
-            event_engine=vnpy_runtime.event_engine,
-        )
-    if not runtime_suppress_start:
-        app.state.runtime_scheduler_service.reconcile_from_config(
-            run_immediately=runtime_run_immediately,
-        )
-    app.state.system_config_service = SystemConfigService(
-        runtime_scheduler=app.state.runtime_scheduler_service,
-    )
-    _schedule_stock_index_background_refresh(app, "startup")
     try:
+        source_health_recovery = DataFetcherManager.configure_provider_source_health_persistence(
+            getattr(get_config(), "database_path", "./data/stock_analysis.db")
+        )
+        app.state.realtime_source_health_recovery = source_health_recovery
+        runtime_scheduler_service = RuntimeSchedulerService(
+            owns_schedule=runtime_owns_schedule,
+            force_enabled=runtime_force_enabled,
+            daily_schedule_disabled=runtime_disable_daily,
+            run_immediately_in_background=True,
+            schedule_args_overrides=runtime_scheduler_args,
+            task_event_repository=RuntimeSchedulerRepository(),
+        )
+        app.state.runtime_scheduler_service = runtime_scheduler_service
+        vnpy_runtime = bootstrap_vnpy_runtime(
+            event_sink=_record_vnpy_runtime_connection_event,
+        )
+        app.state.vnpy_runtime_handle = vnpy_runtime
+        app.state.vnpy_runtime_diagnostics = vnpy_runtime.diagnostics
+        if vnpy_runtime.main_engine is not None:
+            app.state.vnpy_main_engine = vnpy_runtime.main_engine
+        if vnpy_runtime.event_engine is not None:
+            app.state.vnpy_event_engine = vnpy_runtime.event_engine
+        if vnpy_runtime.event_bridge is not None:
+            app.state.vnpy_paper_event_bridge = vnpy_runtime.event_bridge
+        bind_vnpy_runtime = getattr(
+            app.state.runtime_scheduler_service,
+            "set_vnpy_runtime_engines",
+            None,
+        )
+        if callable(bind_vnpy_runtime):
+            bind_vnpy_runtime(
+                main_engine=vnpy_runtime.main_engine,
+                event_engine=vnpy_runtime.event_engine,
+            )
+        if not runtime_suppress_start:
+            app.state.runtime_scheduler_service.reconcile_from_config(
+                run_immediately=runtime_run_immediately,
+            )
+        app.state.system_config_service = SystemConfigService(
+            runtime_scheduler=app.state.runtime_scheduler_service,
+        )
+        _schedule_stock_index_background_refresh(app, "startup")
         yield
     finally:
         refresh_task = getattr(app.state, "stock_index_refresh_task", None)

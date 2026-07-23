@@ -16,12 +16,21 @@ from warnings import warn
 import anyio.to_thread
 import fastapi.testclient
 import httpx
+import pytest
 import starlette.testclient
 from anyio._backends import _asyncio
 
 T = TypeVar("T")
 
 _original_call_soon_threadsafe = asyncio.BaseEventLoop.call_soon_threadsafe
+
+
+@pytest.fixture(autouse=True)
+def _disable_external_vnpy_runtime(monkeypatch):
+    """Keep ordinary tests from opening a configured live gateway session."""
+
+    monkeypatch.setenv("VNPY_RUNTIME_ENABLED", "false")
+    monkeypatch.setenv("VNPY_CONNECT_ON_START", "false")
 
 
 async def _shutdown_default_executor_inline(

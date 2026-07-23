@@ -32,6 +32,16 @@ from src.services.runtime_scheduler import (
 _MISSING_MODULE = object()
 
 
+def _disabled_vnpy_runtime_handle() -> SimpleNamespace:
+    return SimpleNamespace(
+        main_engine=None,
+        event_engine=None,
+        event_bridge=None,
+        diagnostics={"enabled": False, "reason": "disabled"},
+        close=lambda: None,
+    )
+
+
 @contextmanager
 def _patched_sys_module(name: str, module):
     """Replace one module key without rolling back unrelated lazy imports."""
@@ -1214,6 +1224,9 @@ class RuntimeSchedulerServiceTestCase(unittest.TestCase):
         ), patch("api.app.RuntimeSchedulerService", FakeRuntimeSchedulerService), patch(
             "api.app.SystemConfigService",
             FakeSystemConfigService,
+        ), patch(
+            "api.app.bootstrap_vnpy_runtime",
+            return_value=_disabled_vnpy_runtime_handle(),
         ), patch("api.app._schedule_stock_index_background_refresh"):
             app = create_app(static_dir=Path(temp_dir))
             with TestClient(app):
@@ -1263,6 +1276,9 @@ class RuntimeSchedulerServiceTestCase(unittest.TestCase):
         ), patch("api.app.RuntimeSchedulerService", FakeRuntimeSchedulerService), patch(
             "api.app.SystemConfigService",
             FakeSystemConfigService,
+        ), patch(
+            "api.app.bootstrap_vnpy_runtime",
+            return_value=_disabled_vnpy_runtime_handle(),
         ), patch("api.app._schedule_stock_index_background_refresh"):
             app = create_app(static_dir=Path(temp_dir))
             with TestClient(app):
@@ -1342,6 +1358,64 @@ class RuntimeSchedulerServiceTestCase(unittest.TestCase):
         ])
         self.assertIsNone(os.getenv(RUNTIME_SCHEDULER_DISABLE_DAILY_ENV))
 
+    def test_lifespan_cleans_runtime_when_later_startup_initialization_fails(self) -> None:
+        from api.app import create_app
+
+        events = []
+        main_engine = object()
+        event_engine = object()
+
+        class FakeRuntimeSchedulerService:
+            def __init__(self, **_kwargs):
+                events.append(("init",))
+
+            def reconcile_from_config(self, **_kwargs):
+                events.append(("reconcile",))
+
+            def set_vnpy_runtime_engines(self, **_kwargs):
+                events.append(("bind_vnpy",))
+
+            def stop(self):
+                events.append(("stop",))
+
+        class FailingSystemConfigService:
+            def __init__(self, **_kwargs):
+                events.append(("system_config_failed",))
+                raise RuntimeError("startup initialization failed")
+
+        with tempfile.TemporaryDirectory() as temp_dir, patch(
+            "src.config.get_config",
+            return_value=SimpleNamespace(schedule_run_immediately=False),
+        ), patch(
+            "api.app.RuntimeSchedulerService",
+            FakeRuntimeSchedulerService,
+        ), patch(
+            "api.app.SystemConfigService",
+            FailingSystemConfigService,
+        ), patch(
+            "api.app.bootstrap_vnpy_runtime",
+            return_value=SimpleNamespace(
+                main_engine=main_engine,
+                event_engine=event_engine,
+                event_bridge=None,
+                diagnostics={},
+                close=lambda: events.append(("runtime_close",)),
+            ),
+        ), patch("api.app._schedule_stock_index_background_refresh"):
+            app = create_app(static_dir=Path(temp_dir))
+            with self.assertRaisesRegex(RuntimeError, "startup initialization failed"):
+                with TestClient(app):
+                    pass
+
+        self.assertEqual(events, [
+            ("init",),
+            ("bind_vnpy",),
+            ("reconcile",),
+            ("system_config_failed",),
+            ("stop",),
+            ("runtime_close",),
+        ])
+
     def test_lifespan_suppresses_initial_start_without_losing_runtime_ownership(self) -> None:
         from api.app import create_app
 
@@ -1380,6 +1454,9 @@ class RuntimeSchedulerServiceTestCase(unittest.TestCase):
         ), patch("api.app.RuntimeSchedulerService", FakeRuntimeSchedulerService), patch(
             "api.app.SystemConfigService",
             FakeSystemConfigService,
+        ), patch(
+            "api.app.bootstrap_vnpy_runtime",
+            return_value=_disabled_vnpy_runtime_handle(),
         ), patch("api.app._schedule_stock_index_background_refresh"):
             app = create_app(static_dir=Path(temp_dir))
             with TestClient(app):
@@ -1438,6 +1515,9 @@ class RuntimeSchedulerServiceTestCase(unittest.TestCase):
         ), patch("api.app.RuntimeSchedulerService", FakeRuntimeSchedulerService), patch(
             "api.app.SystemConfigService",
             FakeSystemConfigService,
+        ), patch(
+            "api.app.bootstrap_vnpy_runtime",
+            return_value=_disabled_vnpy_runtime_handle(),
         ), patch("api.app._schedule_stock_index_background_refresh"):
             app = create_app(static_dir=Path(temp_dir))
             with TestClient(app):
@@ -1480,6 +1560,9 @@ class RuntimeSchedulerServiceTestCase(unittest.TestCase):
         ), patch("api.app.RuntimeSchedulerService", FakeRuntimeSchedulerService), patch(
             "api.app.SystemConfigService",
             FakeSystemConfigService,
+        ), patch(
+            "api.app.bootstrap_vnpy_runtime",
+            return_value=_disabled_vnpy_runtime_handle(),
         ), patch("api.app._schedule_stock_index_background_refresh"):
             os.environ.pop(CLI_SCHEDULER_OWNER_ENV, None)
             os.environ.pop(RUNTIME_SCHEDULER_FORCE_ENABLED_ENV, None)
