@@ -2,7 +2,7 @@
 
 本文档记录“在线选股 Agent + 自动化选股 + 自动模拟交易”的目标状态、当前完成度和待完成事项。
 
-截至 2026-07-23，本系统已经具备 AlphaSift 在线选股、本地 A 股模拟交易账本、Web 入口、定时自动买入、可交易窗口诊断、跨模块系统健康视图、关键异常 alert 路由通知、vn.py 提交态审计、内置即时撮合 gateway、成交回报同步入口、规则 Agent 买入前二次复核、默认关闭的 LLM 动态计划、默认关闭的 LLM 买入前复核、基础复核质量摘要、手动可选 LLM 复盘、Agent run 人工验收反馈，以及可分别验证手动触发和后台调度触发的在线 Agent -> DSA_SIM 验收门禁。Agent 控制台已把外部 gateway 零连接预检与三市场校准证据集中为只读生产就绪摘要。A 股、美股和港股均已有可执行策略；真实 US/HK shadow 均完成 3 候选、1 计划、0 下单。外部账户目标已从期货 CTP/SimNow 改为官方 `vnpy_xtp==2.2.32.2.3` 和中泰 XTP 股票类型测试账号；XTP 插件已完成安装、SSE/SZSE 声明、双通道状态和零连接结构验收。尚未达到的目标包括外部 XTP 测试账户连接与长跑，以及生产样本下多模型、多市场长期校准。
+截至 2026-07-23，本系统已经具备 AlphaSift 在线选股、本地 A 股模拟交易账本、Web 入口、定时自动买入、可交易窗口诊断、跨模块系统健康视图、关键异常 alert 路由通知、vn.py 提交态审计、内置即时撮合 gateway、成交回报同步入口、规则 Agent 买入前二次复核、默认关闭的 LLM 动态计划、默认关闭的 LLM 买入前复核、基础复核质量摘要、手动可选 LLM 复盘、Agent run 人工验收反馈，以及可分别验证手动触发和后台调度触发的在线 Agent -> DSA_SIM 验收门禁。Agent 控制台已把外部 gateway 零连接预检与三市场校准证据集中为只读生产就绪摘要。A 股、美股和港股均已有可执行策略；真实 US/HK shadow 均完成 3 候选、1 计划、0 下单。外部账户目标已从期货 CTP/SimNow 改为官方 `vnpy_xtp==2.2.32.2.3` 和中泰 XTP 股票类型测试账号；受保护账号已完成 15 分钟零下单验收，180/180 次双通道连接确认通过，并收到 240 个账户与 4320 个持仓事件。尚未达到的目标包括部署态 XTP 受控模拟委托、1/4 小时长跑，以及生产样本下多模型、多市场长期校准。
 
 ## 目标状态
 
@@ -293,7 +293,7 @@
 - 部署态 runtime soak 已升级为 schema v2：EventEngine bridge 持续记录不含载荷的分类观测/处理/失败计数和最后观测时间，API 每次读取动态刷新；门禁可要求准确 gateway 类/名称、明确排除 `DsaSimulatedGateway` / `DSA_SIM`、检查窗口内账户/持仓/订单/成交事件增量、计数器回退和 handler 失败。真实 API 基础门禁已 10/10 采样通过；同一 DSA_SIM 进程在生产参数下按预期以身份不匹配、非外部 gateway 和账户事件无增量非零退出。该契约防止把“回调已注册”误报为“真实通道已有回报”，实际外部 gateway 长窗口证据仍待部署执行。
 - vn.py runtime 已区分 `MainEngine.connect()` 请求受理与网关确认连接，连接异常不会拖垮 API 启动；支持状态钩子的网关会动态刷新连接状态，无法确认时健康状态 warning，明确断开时 blocked 且新增委托 fail-closed。
 - XTP Gateway 已补齐标准通道连接确认：runtime 与订单桥都读取交易/行情 API 的布尔 `login_status`，两个通道都登录才确认 connected，任一通道掉线即回到 disconnected；真实 `vnpy_xtp.XtpGateway` 原生对象结构和 SSE/SZSE 声明已通过无网络回归。
-- 新增仅手工触发的 `External vn.py XTP A-share Account Soak`：绑定 `vnpy-xtp-paper-acceptance` Environment、串行化账户会话，仅在临时文件步骤读取 JSON secret，严格校验十字段、客户号/端口和枚举后零下单观测账户/可选持仓与自然重连事件，上传 14 天脱敏证据并始终清理连接文件。工作流尚未使用外部账户，不构成真实连接证据。
+- 新增仅手工触发的 `External vn.py XTP A-share Account Soak`：绑定 `vnpy-xtp-paper-acceptance` Environment、串行化账户会话，仅在临时文件步骤读取 JSON secret，严格校验十字段、客户号/端口和枚举后零下单观测账户/可选持仓与自然重连事件，上传 14 天脱敏证据并始终清理连接文件。run `30001136306` 已通过 15 分钟真实账号验收：连续稳定 60 秒后开始计量，180/180 connected、账户/持仓事件 240/4320、订单/成交事件 0。
 - vn.py runtime 已新增默认关闭的冷却自动重连监控：只恢复明确失败/断开的连接，每次重读外部参数文件，在已受理异步连接的可配置确认宽限期内避免误重连，并对连续失败执行有上限指数退避、恢复后复位；状态和统一系统健康保留线程、宽限期、基础/当前/最大间隔、连续失败、次数、时间、结果与下次检查审计。
 - vn.py runtime 已新增一次性安全手动重连 API 和 Web 入口：后台自动重连关闭时也可使用，已连接、确认中或宽限期内不会重复登录；操作只恢复连接并返回审计，不触发 Agent run、交易计划或订单。
 - 自动/手动重连的首次失败、退避封顶和恢复已通过独立队列写入现有告警历史并复用通知路由；重复失败去重、恢复 resolved、关闭排空和凭据脱敏已有确定性测试。
@@ -302,7 +302,7 @@
 未完成：
 
 - 系统默认 Python 3.14.6 未安装 vn.py，继续保持本地 paper fallback；完整 vn.py 能力使用已验证的 Python 3.13.14 隔离环境。
-- 已有 opt-in Gateway add/connect bootstrap、XTP 双通道登录确认和冷却自动重连；XTP Gateway 已安装、注册并通过无凭据结构验收，受保护 A 股账户长跑工作流也已就绪，但尚未配置外部账户。真实 XTP 连接参数、账户/持仓回报和长期事件订阅稳定性仍未验证。
+- 已有 opt-in Gateway add/connect bootstrap、XTP 双通道登录确认和冷却自动重连；受保护 A 股测试账号已完成严格预检、真实双通道登录、账户/持仓回报和 15 分钟 100% 连接率验收。部署态 API 接入、受控模拟委托、1/4 小时稳定性与主动异常恢复仍未验证。
 - 已能调用注入或启动期创建的 `MainEngine.send_order`，并支持订单状态、成交、账户和持仓回报通过 API 手动/外部同步；注入或启动期创建的 EventEngine 可自动 attach 回调，但真实 gateway 连接仍未验收。
 - `vnpy_paper` 当前覆盖买入委托提交、自动按比例卖出提交、主动撤单请求、订单/成交状态回写、多笔成交累计、MainEngine 漏回报对账、对账异常保护、提交态/部分成交/撤单请求超时安全归档和活跃委托防重复；内置模拟 gateway 的重连、缓存保留和延迟成交去重已完成，真实 gateway 的长运行、重连和迟到回报验收仍未完成。
 - 安装脚本已处理 Python 版本、GUI/数值依赖、LiteLLM wheel 和受限 pip 缓存；Windows Desktop 已完成 opt-in vn.py 冻结后端、NSIS 体积和真实启动验收。Linux Docker 手动验收工作流也已完成默认/可选镜像实物构建、API 启动、runtime/连接/四回调/调度门禁和体积差值记录：run `29772471589` 全部通过，默认镜像 1,459,313,565 字节，可选 vn.py 镜像 2,229,015,999 字节，标准依赖净增 769,702,434 字节。
@@ -466,7 +466,7 @@
 - 接 vn.py EventEngine / Gateway 或 paper adapter；当前已完成 `OrderRequest` / `CancelRequest` payload 映射、adapter 诊断、可选注入式 `MainEngine.send_order` / `cancel_order` 调用、订单/成交/账户/持仓回写 API、注入式 EventEngine attach 和 opt-in runtime bootstrap，并在 Python 3.13 隔离环境完成 EventEngine/MainEngine 启停验收。
 - 映射订单、成交、账户、持仓；当前订单请求、提交态、订单状态回写、成交入账、账户/持仓诊断快照、注入式 EventEngine 回调和启动期 add/connect 入口已有基础桥接，真实 Gateway 运行态未完成。
 - 零连接 gateway 预检已完成：可校验插件加载、注册名称、连接 JSON 结构、默认键及必需键非空，且生产门禁拒绝内置 `DSA_SIM` 与仓库内敏感配置；官方 XTP A 股插件已完成实物安装和结构验收，下一步需由账户所有者提供脱离仓库的股票类型测试账户配置，再执行连接及长跑验收。
-- XTP 的双通道登录状态已接入 runtime 与订单桥确认器；受保护的 A 股测试账户长跑 workflow 已固化外部预检、账户事件、可选持仓/自然重连、脱敏 artifact 与临时凭据清理合同，尚缺真实 Environment secret 和成功 run 证据。
+- XTP 的双通道登录状态已接入 runtime 与订单桥确认器；受保护的 A 股测试账户长跑 workflow 已固化外部预检、连续稳定启动门禁、账户事件、可选持仓/自然重连、脱敏 artifact 与临时凭据清理合同，并已有 Environment secret 与成功 run `30001136306` 证据。
 - 独立 gateway soak 已默认串联预检并升级为 schema v3：预检不通过时在创建 MainEngine 前以 `connection_attempted=false` 退出，生产模式强制外部 gateway、仓库外配置和完整默认键；长跑时长已排除关闭耗时，避免验收窗口虚增。
 - 独立 gateway soak 在指定输出文件时会周期性原子落盘脱敏检查点，并用 `running` / `completed` / `interrupted` 区分证据生命周期；真实账户长跑即使被主机或进程中断也能保留最后有效观测。
 - API runtime 新增默认关闭的生产预检开关，启用后启动连接、自动重连和手动重连统一 fail-closed；静态配置失败不会调用 gateway、不会启动重连循环，API 与脱敏诊断保持可用。真实 vn.py 4.4 对 DSA_SIM 的启动/手动重连均已验证为零连接、零订单、零成交。

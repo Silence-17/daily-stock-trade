@@ -174,7 +174,9 @@
 
 生产预检会把 Gateway `default_setting` 中缺失的字段报告为 `default_setting_keys_missing`，把已提供但为 `null`/空白字符串的字段报告为 `default_setting_values_empty`。两者都会在连接前 fail-closed；API 仅返回字段名，不返回字段值或配置路径。
 
-账户所有者应在[中泰 XTP 官网](https://xtp.zts.com.cn/userInfo)注册并申请“股票类型”测试账号；申请结果会通过注册邮箱提供账号、测试地址/端口和授权码。远端 `vnpy-xtp-paper-acceptance` Environment 已创建，当前为 0 secret，并通过 deployment branch policy 与工作流代码双重限制为 `main`；空且从未运行的旧 CTP Environment 已删除。取得账号后，在该 Environment 手工添加 `VNPY_XTP_CONNECT_SETTINGS_JSON` secret。JSON 必须只包含 `账号`、`密码`、`客户号`、`行情地址`、`行情端口`、`交易地址`、`交易端口`、`行情协议`、`日志级别`、`授权码` 十个键；客户号范围 1..99，端口范围 1..65535，协议为 `TCP|UDP`，日志级别为 `FATAL|ERROR|WARNING|INFO|DEBUG|TRACE`。工作流在 checkout 和安装前完成检查，错误只报告字段名，全部通过后才注册敏感值 mask。随后从 `main` 手工运行 `External vn.py XTP A-share Account Soak`，选择 15 分钟、1 小时或 4 小时窗口；默认要求连接率至少 99% 和窗口内至少一个账户回报，非空账户可额外要求持仓回报，只有预期窗口内会自然发生断线时才开启重连门禁。
+账户所有者应在[中泰 XTP 官网](https://xtp.zts.com.cn/userInfo)注册并申请“股票类型”测试账号；申请结果会通过注册邮箱提供账号、测试地址/端口和授权码。远端 `vnpy-xtp-paper-acceptance` Environment 已创建并保存一个加密 `VNPY_XTP_CONNECT_SETTINGS_JSON` secret，通过 deployment branch policy 与工作流代码双重限制为 `main`；空且从未运行的旧 CTP Environment 已删除。JSON 必须只包含 `账号`、`密码`、`客户号`、`行情地址`、`行情端口`、`交易地址`、`交易端口`、`行情协议`、`日志级别`、`授权码` 十个键；客户号范围 1..99，端口范围 1..65535，协议为 `TCP|UDP`，日志级别为 `FATAL|ERROR|WARNING|INFO|DEBUG|TRACE`。工作流在 checkout 和安装前完成检查，错误只报告字段名，全部通过后才注册敏感值 mask。随后从 `main` 手工运行 `External vn.py XTP A-share Account Soak`，选择 15 分钟、1 小时或 4 小时窗口；XTP 账户工作流先要求交易/行情双通道连续 connected 60 秒，再按至少 99% 连接率和一个账户回报验收，非空账户可额外要求持仓回报，只有预期窗口内会自然发生断线时才开启重连门禁。
+
+2026-07-23 的 run `30001136306` 已完成首轮真实账号零下单验收：严格预检通过，正式窗口 900 秒，180/180 个样本 connected，最终状态 connected，账户/持仓事件为 240/4320，订单/成交事件为 0。脱敏 artifact 保留 14 天，不含账号、连接值或路径。该结果证明账号连接和回报链路，不等同于自动策略已经向 XTP 提交模拟委托；后者仍需在受控部署运行态单独验收。
 
 该工作流固定使用 Windows/Python 3.13 和 `vnpy_xtp==2.2.32.2.3`，原始 secret 只注入生成临时连接文件的单个步骤，文件位于 runner 临时目录并在 `always()` 清理。连接前仍强制外部 Gateway、仓库外文件、完整非空默认键；观测脚本不订阅行情、不调用下单或撤单，只上传保留 14 天的脱敏聚合 JSON。`workflow_dispatch`、main-only 双门禁、固定 Environment、账户会话 concurrency 和账户所有者手工设置 secret 共同构成现有控制边界。此入口只用于中泰 XTP 股票类型测试账号；生产实盘凭据应留在受控部署主机上使用本地命令，不应放入云托管 runner。券商若限制来源 IP、设备或登录时段，GitHub-hosted runner 可能无法作为有效验收主机。
 
