@@ -1454,6 +1454,64 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertEqual(portfolio_event["status"], "changed")
         self.assertEqual(portfolio_event["details"], audit["portfolio_change"])
 
+    def test_auto_trade_cn_selects_affordable_candidate_from_execution_pool(self) -> None:
+        self.service.update_settings(
+            {
+                "auto_trade_enabled": True,
+                "auto_trade_time_gate_enabled": False,
+                "auto_execution_mode": "paper",
+                "auto_market": "cn",
+                "auto_strategy": "dual_low",
+                "auto_cash_per_order": 1000,
+                "auto_max_results": 1,
+            }
+        )
+        fake_alphasift = MagicMock()
+        fake_alphasift.screen.return_value = {
+            "quality_status": "ok",
+            "candidates": [
+                {
+                    "rank": 1,
+                    "code": "000001",
+                    "score": 81.66,
+                    "price": 11.08,
+                    "data_quality": "ok",
+                },
+                {
+                    "rank": 2,
+                    "code": "600016",
+                    "score": 81.10,
+                    "price": 3.53,
+                    "data_quality": "ok",
+                },
+            ],
+            "warnings": [],
+            "source_errors": [],
+        }
+
+        with patch(
+            "src.services.vnpy_paper_trading_service.AlphaSiftService",
+            return_value=fake_alphasift,
+        ):
+            result = self.service.run_auto_trade_once()
+
+        self.assertEqual(fake_alphasift.screen.call_args.kwargs["max_results"], 5)
+        self.assertEqual(result["candidate_count"], 1)
+        self.assertEqual(result["submitted_count"], 1)
+        self.assertEqual(result["skipped_count"], 0)
+        self.assertEqual(result["orders"][0]["symbol"], "600016")
+        self.assertEqual(result["orders"][0]["quantity"], 200.0)
+        audit = self.service.agent_repo.get_run_detail(result["agent_run_uid"])
+        assert audit is not None
+        selection = audit["diagnostics"]["execution_candidate_selection"]
+        self.assertTrue(selection["applied"])
+        self.assertEqual(selection["screened_count"], 2)
+        self.assertEqual(selection["selected_count"], 1)
+        self.assertEqual(selection["excluded_count"], 1)
+        self.assertEqual(selection["excluded"][0]["symbol"], "000001")
+        self.assertEqual(selection["excluded"][0]["reason"], "cash_below_min_lot")
+        self.assertEqual(audit["decisions"][0]["symbol"], "600016")
+
     def test_auto_trade_hk_fails_closed_without_current_fx_rate(self) -> None:
         self.service.update_settings(
             {

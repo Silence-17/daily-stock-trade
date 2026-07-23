@@ -88,6 +88,7 @@ TRADE_PLAN_RECONCILIATION_GRACE_SECONDS = 60
 STATUS_SNAPSHOT_CACHE_TTL_SECONDS = 10
 RETRYABLE_TRADE_PLAN_EXECUTION_MODES = {"manual_approval", "paper", "vnpy_paper"}
 AUTO_RETRY_TRADE_PLAN_EXECUTION_MODES = {"paper", "vnpy_paper"}
+AUTO_EXECUTION_CANDIDATE_POOL_EXTRA = 4
 ALPHASIFT_FALLBACK_STRATEGIES = (
     "dual_low",
     "quality_value",
@@ -3469,10 +3470,12 @@ class VnpyPaperTradingService:
             logger.warning("Failed to load AlphaSift source-health trends: %s", exc)
         finish_timing_stage("preflight")
         try:
+            screen_candidate_limit = self._auto_screen_candidate_limit(settings)
+            run_diagnostics["screen_candidate_limit"] = screen_candidate_limit
             screen = AlphaSiftService(config=config).screen(
                 strategy=settings.auto_strategy,
                 market=settings.auto_market,
-                max_results=settings.auto_max_results,
+                max_results=screen_candidate_limit,
                 source_health_trends=source_health_trends,
                 use_llm=bool(alphasift_llm_policy["use_llm"]),
                 llm_timeout_seconds=int(alphasift_llm_policy["timeout_seconds"]),
@@ -3517,7 +3520,14 @@ class VnpyPaperTradingService:
         )
         run_diagnostics["alphasift_llm_result"] = alphasift_llm_result
         run_diagnostics["llm_parse_errors"] = list(screen.get("llm_parse_errors") or [])
-        candidates = list(screen.get("candidates") or [])
+        screened_candidates = list(screen.get("candidates") or [])
+        currency_budget = self._auto_order_currency_budget(settings)
+        candidates, candidate_selection = self._select_executable_auto_candidates(
+            settings=settings,
+            candidates=screened_candidates,
+            currency_budget=currency_budget,
+        )
+        run_diagnostics["execution_candidate_selection"] = candidate_selection
         data_quality = self._screen_data_quality(screen, candidates)
         data_quality.update(self._screen_data_quality_score(screen, candidates, data_quality))
         quality_score = _safe_float(data_quality.get("score"))
@@ -3630,7 +3640,6 @@ class VnpyPaperTradingService:
             record_last_run(result)
             return result
 
-        currency_budget = self._auto_order_currency_budget(settings)
         run_diagnostics["currency_budget"] = currency_budget
         currency_budget_reason = None if currency_budget.get("available") else "fx_rate_unavailable"
         exposure_state = self._position_exposure_state(settings)
@@ -6450,6 +6459,76 @@ class VnpyPaperTradingService:
         except Exception as exc:
             logger.warning("Failed to resolve vn.py paper cash: %s", exc)
         return 0.0
+
+    @staticmethod
+    def _auto_screen_candidate_limit(settings: VnpyPaperSettings) -> int:
+        configured_limit = max(1, min(50, int(settings.auto_max_results or 1)))
+        should_expand = (
+            configured_limit == 1
+            and settings.auto_market == "cn"
+            and settings.auto_execution_mode in AUTO_RETRY_TRADE_PLAN_EXECUTION_MODES
+            and not settings.auto_score_weighted_allocation_enabled
+        )
+        if not should_expand:
+            return configured_limit
+        return min(50, configured_limit + AUTO_EXECUTION_CANDIDATE_POOL_EXTRA)
+
+    def _select_executable_auto_candidates(
+        self,
+        *,
+        settings: VnpyPaperSettings,
+        candidates: List[Any],
+        currency_budget: Dict[str, Any],
+    ) -> Tuple[List[Any], Dict[str, Any]]:
+        configured_limit = max(1, min(50, int(settings.auto_max_results or 1)))
+        selection_applied = (
+            configured_limit == 1
+            and settings.auto_market == "cn"
+            and settings.auto_execution_mode in AUTO_RETRY_TRADE_PLAN_EXECUTION_MODES
+            and not settings.auto_score_weighted_allocation_enabled
+            and bool(currency_budget.get("available"))
+        )
+        selected: List[Any] = []
+        excluded: List[Dict[str, Any]] = []
+        quote_cash_amount = _safe_float(currency_budget.get("quote_cash_amount"))
+
+        for source_rank, candidate in enumerate(candidates, start=1):
+            if selection_applied and isinstance(candidate, dict):
+                price = _safe_float(candidate.get("price"))
+                if price is not None and price > 0 and quote_cash_amount is not None:
+                    quantity = self._resolve_order_quantity(
+                        market=settings.auto_market,
+                        side="buy",
+                        quantity=None,
+                        cash_amount=quote_cash_amount,
+                        price=price,
+                    )
+                    if quantity <= 0:
+                        excluded.append(
+                            {
+                                "source_rank": source_rank,
+                                "symbol": self._normalize_symbol(
+                                    candidate.get("code") or candidate.get("symbol") or ""
+                                ) or None,
+                                "price": round(price, 6),
+                                "min_lot_notional": round(price * 100.0, 6),
+                                "reason": "cash_below_min_lot",
+                            }
+                        )
+                        continue
+            selected.append(candidate)
+            if len(selected) >= configured_limit:
+                break
+
+        diagnostics = {
+            "applied": selection_applied,
+            "configured_limit": configured_limit,
+            "screened_count": len(candidates),
+            "selected_count": len(selected),
+            "excluded_count": len(excluded),
+            "excluded": excluded,
+        }
+        return selected, diagnostics
 
     def _auto_order_currency_budget(self, settings: VnpyPaperSettings) -> Dict[str, Any]:
         account = self.ensure_account(settings=settings)
