@@ -3087,6 +3087,137 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertTrue(
             all(item["indices"][0]["data_granularity"] == "session_bar" for item in evidence)
         )
+        self.assertEqual(
+            diagnostics["cross_market"]["quote_time_alignment"]["status"],
+            "not_applicable",
+        )
+
+    def test_cross_market_gate_rejects_realtime_quotes_without_provider_time(self) -> None:
+        manager = MagicMock()
+        manager.get_main_indices.side_effect = lambda region: [
+            {
+                "code": "HSI" if region == "hk" else "SPX",
+                "change_pct": -0.2,
+                "provider": "example",
+                "data_granularity": "realtime",
+            }
+        ]
+        self.service.data_fetcher_manager = manager
+        settings = replace(
+            self.service.get_settings(),
+            auto_cross_market_gate_enabled=True,
+        )
+
+        reason, diagnostics = self.service._market_context_pre_trade_risk(settings)
+
+        self.assertEqual(reason, "cross_market_context_unavailable")
+        self.assertEqual(
+            diagnostics["cross_market"]["quote_time_alignment"]["reason"],
+            "realtime_provider_timestamp_unavailable",
+        )
+
+    def test_cross_market_gate_rejects_realtime_quotes_beyond_time_skew(self) -> None:
+        now = datetime.now(timezone.utc)
+        manager = MagicMock()
+        manager.get_main_indices.side_effect = lambda region: [
+            {
+                "code": "HSI" if region == "hk" else "SPX",
+                "change_pct": -0.2,
+                "provider": "example",
+                "provider_timestamp": (
+                    now if region == "hk" else now - timedelta(minutes=3)
+                ).isoformat(),
+                "data_granularity": "realtime",
+            }
+        ]
+        self.service.data_fetcher_manager = manager
+        settings = replace(
+            self.service.get_settings(),
+            auto_cross_market_gate_enabled=True,
+        )
+
+        reason, diagnostics = self.service._market_context_pre_trade_risk(settings)
+
+        self.assertEqual(reason, "cross_market_context_unavailable")
+        alignment = diagnostics["cross_market"]["quote_time_alignment"]
+        self.assertEqual(alignment["reason"], "realtime_quote_skew_exceeded")
+        self.assertGreater(alignment["observed_skew_seconds"], alignment["max_skew_seconds"])
+
+    def test_cross_market_gate_accepts_realtime_quotes_within_time_skew(self) -> None:
+        now = datetime.now(timezone.utc)
+        manager = MagicMock()
+        manager.get_main_indices.side_effect = lambda region: [
+            {
+                "code": "HSI" if region == "hk" else "SPX",
+                "change_pct": -0.2,
+                "provider": "example",
+                "provider_timestamp": (
+                    now if region == "hk" else now - timedelta(seconds=60)
+                ).isoformat(),
+                "data_granularity": "realtime",
+            }
+        ]
+        self.service.data_fetcher_manager = manager
+        settings = replace(
+            self.service.get_settings(),
+            auto_cross_market_gate_enabled=True,
+        )
+
+        reason, diagnostics = self.service._market_context_pre_trade_risk(settings)
+
+        self.assertIsNone(reason)
+        alignment = diagnostics["cross_market"]["quote_time_alignment"]
+        self.assertEqual(alignment["status"], "bounded")
+        self.assertEqual(alignment["observed_skew_seconds"], 60)
+
+    def test_auto_trade_audits_cross_market_realtime_time_alignment_in_timeline(self) -> None:
+        self.service.update_settings(
+            {
+                "auto_trade_enabled": True,
+                "auto_strategy": "dual_low",
+                "auto_market": "cn",
+                "auto_max_results": 1,
+                "auto_cash_per_order": 1200,
+                "auto_trade_time_gate_enabled": False,
+                "auto_cross_market_gate_enabled": True,
+            }
+        )
+        now = datetime.now(timezone.utc)
+        manager = MagicMock()
+        manager.get_main_indices.side_effect = lambda region: [
+            {
+                "code": "HSI" if region == "hk" else "SPX",
+                "change_pct": -0.2,
+                "provider": "example",
+                "provider_timestamp": (
+                    now if region == "hk" else now - timedelta(minutes=3)
+                ).isoformat(),
+                "data_granularity": "realtime",
+            }
+        ]
+        fake_alphasift = MagicMock()
+        fake_alphasift.screen.return_value = {
+            "candidates": [{"code": "600519", "name": "贵州茅台", "score": 80, "price": 10.0}],
+            "warnings": [],
+        }
+        self.service.data_fetcher_manager = manager
+
+        with patch(
+            "src.services.vnpy_paper_trading_service.AlphaSiftService",
+            return_value=fake_alphasift,
+        ):
+            result = self.service.run_auto_trade_once()
+
+        self.assertEqual(result["skipped_count"], 1)
+        self.assertEqual(result["orders"][0]["reason"], "cross_market_context_unavailable")
+        audit = self.service.agent_repo.get_run_detail(result["agent_run_uid"])
+        assert audit is not None
+        timeline = next(
+            item for item in audit["timeline"] if item["stage"] == "market_context_risk"
+        )
+        self.assertIn("quote_time_status=unavailable", timeline["message"])
+        self.assertIn("quote_time_skew=180", timeline["message"])
+        self.assertIn("quote_time_max_skew=120", timeline["message"])
 
     def test_cross_market_gate_blocks_when_one_linked_market_breaks_threshold(self) -> None:
         manager = MagicMock()

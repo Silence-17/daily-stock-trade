@@ -792,7 +792,7 @@ python main.py --schedule --no-run-immediately
 >
 > 模拟交易页可独立开启大盘红绿灯、市场宽度和热点退潮门禁。宽度门禁检查最近持久化 `MarketLightSnapshot.dimensions.breadth.score`；热点退潮门禁比较最近两次快照的 `dimensions.limit.score`，将涨跌停强度回落作为确定性代理。任一门禁启用后，最新快照必须存在、可读取且日期有效；页面可设置 1 至 30 个自然日的新鲜度上限，默认 7 天，未来或超期快照会 fail-closed。命中或证据不可用时只阻断新增买入，原因、快照年龄和完整输入写入 `diagnostics.market_context_risk` 与 Agent 时间线；止损、止盈和其他卖出风险收缩不受影响。该能力基于盘后持久化快照，不代表盘中实时宽度。
 >
-> 页面还可独立开启盘中指数/实时宽度和跨市场联动门禁。前者使用本市场方向性主指数的等权平均涨跌幅，A 股追加实时涨跌家数宽度；后者按映射 v1 检查关联市场指数（`cn -> hk,us`、`hk -> cn,us`、`us -> hk`、`jp/kr/tw -> us`），并排除美国 `VIX`。启用后证据为空或取数异常均 fail-closed，全部输入和 reason code 写入同一市场风险诊断。部分 provider 已提供 quote as-of，但跨 provider/交易所仍未同步，跨市场判断使用各源最新可用行情，不代表交易所级时间同步。
+> 页面还可独立开启盘中指数/实时宽度和跨市场联动门禁。前者使用本市场方向性主指数的等权平均涨跌幅，A 股追加实时涨跌家数宽度；后者按映射 v1 检查关联市场指数（`cn -> hk,us`、`hk -> cn,us`、`us -> hk`、`jp/kr/tw -> us`），并排除美国 `VIX`。启用后证据为空或取数异常均 fail-closed，全部输入和 reason code 写入同一市场风险诊断。所有标为实时的关联指数必须有新鲜 provider as-of，且彼此最大偏差不超过 120 秒；已收盘 `session_bar` 不参与该同步边界，只作为非同步背景。
 >
 > 指数/宽度 fallback 会附带 provider、抓取时刻和可用的数据日期/粒度。盘中本市场门禁拒绝明确的收盘日线、过期 session 日期，以及非法、未来或超过 15 分钟的 provider 时间；因此 Tushare `index_daily` 不会再被当作盘中实时证据。efinance 的股票、ETF、指数及全市场宽度会把真实更新时间恢复为 UTC，宽度只有在全部有效计数行有时间时才报告最早 as-of 和 100% 覆盖率；若 efinance 不可用，AStockDataFetcher 会在 AkShare 批量端点前直连 EastMoney 原始 `f124/f297`，只接受 API total 与实际行数一致的完整响应。AkShare 的新浪/腾讯单票直连也保留 provider 时间，但其批量指数/宽度端点仍标为时间不可验证。严格模式要求宽度覆盖率字段明确等于 100%，不会用本地抓取时刻替代 provider 时间。
 >

@@ -138,6 +138,7 @@ NON_DIRECTIONAL_MARKET_INDEX_CODES = {"VIX"}
 AUTO_MARKET_EVIDENCE_TIMEOUT_SECONDS = 15.0
 AUTO_MARKET_EVIDENCE_MAX_WORKERS = 4
 AUTO_MARKET_PROVIDER_TIMESTAMP_MAX_AGE_SECONDS = 15 * 60
+AUTO_CROSS_MARKET_REALTIME_MAX_SKEW_SECONDS = 120
 LLM_DYNAMIC_AGENT_PLAN_PROMPT_VERSION = "vnpy_paper_dynamic_agent_plan_v3"
 LLM_DYNAMIC_AGENT_PLAN_EVALUATOR_VERSION = "dynamic_plan_guardrails_v1"
 LLM_PRE_TRADE_REVIEW_PROMPT_VERSION = "vnpy_paper_pre_trade_review_v1"
@@ -10783,6 +10784,96 @@ class VnpyPaperTradingService:
             "require_provider_timestamp": require_provider_timestamp,
         }
 
+    @staticmethod
+    def _cross_market_realtime_time_alignment(
+        evidence: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Verify that linked realtime quotes are fresh and close in provider time.
+
+        Closed-session bars are intentionally excluded: they express the latest
+        completed session and must not be presented as synchronized intraday data.
+        """
+        realtime_indices = [
+            {
+                "market": str(item.get("market") or "").strip().lower() or None,
+                **index,
+            }
+            for item in evidence
+            if isinstance(item, dict)
+            for index in list(item.get("indices") or [])
+            if isinstance(index, dict)
+            and str(index.get("data_granularity") or "").strip().lower() == "realtime"
+        ]
+        if not realtime_indices:
+            return {
+                "status": "not_applicable",
+                "reason": "no_realtime_quotes",
+                "realtime_index_count": 0,
+                "max_skew_seconds": AUTO_CROSS_MARKET_REALTIME_MAX_SKEW_SECONDS,
+            }
+
+        invalid_indices = [
+            {
+                "market": item.get("market"),
+                "code": item.get("code"),
+                "provider_timestamp": item.get("provider_timestamp"),
+                "provider_timestamp_status": item.get("provider_timestamp_status"),
+            }
+            for item in realtime_indices
+            if item.get("provider_timestamp_status") != "fresh"
+        ]
+        if invalid_indices:
+            return {
+                "status": "unavailable",
+                "reason": "realtime_provider_timestamp_unavailable",
+                "realtime_index_count": len(realtime_indices),
+                "max_skew_seconds": AUTO_CROSS_MARKET_REALTIME_MAX_SKEW_SECONDS,
+                "invalid_indices": invalid_indices,
+            }
+
+        timestamps: List[datetime] = []
+        for item in realtime_indices:
+            raw_timestamp = str(item.get("provider_timestamp") or "").strip()
+            try:
+                parsed = datetime.fromisoformat(
+                    raw_timestamp[:-1] + "+00:00"
+                    if raw_timestamp.endswith("Z")
+                    else raw_timestamp
+                )
+                if parsed.tzinfo is None:
+                    raise ValueError("provider timestamp has no timezone")
+                timestamps.append(parsed.astimezone(timezone.utc))
+            except (TypeError, ValueError):
+                return {
+                    "status": "unavailable",
+                    "reason": "realtime_provider_timestamp_invalid",
+                    "realtime_index_count": len(realtime_indices),
+                    "max_skew_seconds": AUTO_CROSS_MARKET_REALTIME_MAX_SKEW_SECONDS,
+                    "invalid_indices": [
+                        {
+                            "market": item.get("market"),
+                            "code": item.get("code"),
+                            "provider_timestamp": item.get("provider_timestamp"),
+                        }
+                    ],
+                }
+
+        skew_seconds = int((max(timestamps) - min(timestamps)).total_seconds())
+        alignment = {
+            "status": "bounded",
+            "reason": "realtime_quotes_within_skew",
+            "realtime_index_count": len(realtime_indices),
+            "max_skew_seconds": AUTO_CROSS_MARKET_REALTIME_MAX_SKEW_SECONDS,
+            "observed_skew_seconds": skew_seconds,
+        }
+        if skew_seconds > AUTO_CROSS_MARKET_REALTIME_MAX_SKEW_SECONDS:
+            return {
+                **alignment,
+                "status": "unavailable",
+                "reason": "realtime_quote_skew_exceeded",
+            }
+        return alignment
+
     def _market_context_pre_trade_risk(
         self,
         settings: VnpyPaperSettings,
@@ -10920,6 +11011,18 @@ class VnpyPaperTradingService:
             ):
                 reason = "cross_market_context_unavailable"
                 diagnostics.update({"status": "unavailable", "reason": reason})
+                return reason, diagnostics
+            time_alignment = self._cross_market_realtime_time_alignment(linked_evidence)
+            diagnostics["cross_market"]["quote_time_alignment"] = time_alignment
+            if time_alignment["status"] == "unavailable":
+                reason = "cross_market_context_unavailable"
+                diagnostics.update(
+                    {
+                        "status": "unavailable",
+                        "reason": reason,
+                        "evidence_reason": time_alignment["reason"],
+                    }
+                )
                 return reason, diagnostics
             blocked_markets = [
                 str(item.get("market") or "")

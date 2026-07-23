@@ -1792,6 +1792,11 @@ class StockSelectionAgentRepository:
                 if isinstance(market_context_risk.get("cross_market"), dict)
                 else {}
             )
+            quote_time_alignment = (
+                cross_market.get("quote_time_alignment")
+                if isinstance(cross_market.get("quote_time_alignment"), dict)
+                else {}
+            )
             timeline.append(
                 {
                     "stage": "market_context_risk",
@@ -1805,6 +1810,9 @@ class StockSelectionAgentRepository:
                         + f", intraday_index={intraday_index.get('aggregate_change_pct')}"
                         + f", intraday_breadth={intraday_breadth.get('score')}"
                         + f", linked_blocked={cross_market.get('blocked_markets')}"
+                        + f", quote_time_status={quote_time_alignment.get('status')}"
+                        + f", quote_time_skew={quote_time_alignment.get('observed_skew_seconds')}"
+                        + f", quote_time_max_skew={quote_time_alignment.get('max_skew_seconds')}"
                     ),
                     "timestamp": started_at,
                     "details": dict(market_context_risk),
