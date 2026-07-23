@@ -9,6 +9,8 @@ from subprocess import CompletedProcess
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import pytest
+
 import scripts.check_vnpy_gateway_soak as gateway_soak
 from src.services.vnpy_runtime import VnpyRuntimeSettings
 
@@ -146,6 +148,115 @@ def test_evaluate_soak_reports_each_reconnect_acceptance_failure() -> None:
         "reconnect_not_confirmed",
         "connection_not_restored",
     ]
+
+
+def test_evaluate_soak_labels_missing_external_disconnect() -> None:
+    result = evaluate_soak(
+        runtime_available=True,
+        duration_completed=True,
+        interrupted=False,
+        sample_counts={"connected": 10},
+        event_counts={},
+        required_events=[],
+        min_connected_ratio=1.0,
+        disconnect_injection_required=True,
+        disconnect_injected=False,
+        disconnect_mode="external",
+    )
+
+    assert "external_disconnect_not_injected" in result["failures"]
+    assert "simulated_disconnect_not_injected" not in result["failures"]
+
+
+@pytest.mark.parametrize(
+    ("arguments", "message"),
+    [
+        (
+            ["--external-disconnect-at-seconds", "1"],
+            "requires --require-external-gateway",
+        ),
+        (
+            [
+                "--external-disconnect-at-seconds",
+                "1",
+                "--require-external-gateway",
+            ],
+            "requires the exact confirmation token",
+        ),
+        (
+            [
+                "--simulated-disconnect-at-seconds",
+                "1",
+                "--external-disconnect-at-seconds",
+                "1",
+            ],
+            "mutually exclusive",
+        ),
+    ],
+)
+def test_external_disconnect_cli_fails_closed_before_preflight(
+    monkeypatch,
+    capsys,
+    arguments,
+    message,
+) -> None:
+    settings = VnpyRuntimeSettings(
+        enabled=True,
+        gateway_class="vendor_xtp:XtpGateway",
+        gateway_name="XTP",
+        connect_on_start=True,
+    )
+    monkeypatch.setattr(gateway_soak, "load_vnpy_runtime_settings", lambda: settings)
+    preflight = Mock(side_effect=AssertionError("must fail before preflight"))
+    monkeypatch.setattr(gateway_soak, "_run_gateway_preflight", preflight)
+
+    with pytest.raises(SystemExit) as exc_info:
+        gateway_soak.main(["--duration-seconds", "1", *arguments])
+
+    assert exc_info.value.code == 2
+    assert message in capsys.readouterr().err
+    assert preflight.call_count == 0
+
+
+def test_external_disconnect_cli_accepts_all_explicit_guards_before_preflight(
+    monkeypatch,
+    capsys,
+) -> None:
+    settings = VnpyRuntimeSettings(
+        enabled=True,
+        gateway_class="vendor_xtp:XtpGateway",
+        gateway_name="XTP",
+        connect_on_start=True,
+    )
+    monkeypatch.setattr(gateway_soak, "load_vnpy_runtime_settings", lambda: settings)
+    preflight = Mock(
+        return_value={
+            "ok": False,
+            "evaluation": {"failures": ["test_preflight_stop"]},
+        }
+    )
+    monkeypatch.setattr(gateway_soak, "_run_gateway_preflight", preflight)
+    bootstrap = Mock(side_effect=AssertionError("preflight must stop connection"))
+    monkeypatch.setattr(gateway_soak, "bootstrap_vnpy_runtime", bootstrap)
+
+    exit_code = gateway_soak.main(
+        [
+            "--duration-seconds",
+            "1",
+            "--external-disconnect-at-seconds",
+            "1",
+            "--external-disconnect-confirmation",
+            gateway_soak.EXTERNAL_DISCONNECT_CONFIRMATION,
+            "--require-external-gateway",
+        ]
+    )
+    report = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 1
+    assert report["connection_attempted"] is False
+    assert report["evaluation"]["preflight_failures"] == ["test_preflight_stop"]
+    assert preflight.call_count == 1
+    assert bootstrap.call_count == 0
 
 
 def test_safe_runtime_summary_omits_connection_path_and_message() -> None:

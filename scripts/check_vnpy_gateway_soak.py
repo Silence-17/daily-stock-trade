@@ -28,6 +28,7 @@ from src.services.vnpy_runtime import (  # noqa: E402
 )
 
 EVENT_NAMES = ("order", "trade", "account", "position")
+EXTERNAL_DISCONNECT_CONFIRMATION = "CONFIRM_EXTERNAL_GATEWAY_DISCONNECT"
 PREFLIGHT_SCRIPT = ROOT / "scripts" / "check_vnpy_gateway_preflight.py"
 
 
@@ -89,6 +90,7 @@ def evaluate_soak(
     require_reconnect: bool = False,
     disconnect_injection_required: bool = False,
     disconnect_injected: bool = False,
+    disconnect_mode: str = "simulated",
     reconnect_attempt_count: int = 0,
     reconnect_success_count: int = 0,
     final_connection_status: str = "unknown",
@@ -114,7 +116,11 @@ def evaluate_soak(
     if missing_events:
         failures.append("required_events_missing")
     if disconnect_injection_required and not disconnect_injected:
-        failures.append("simulated_disconnect_not_injected")
+        failures.append(
+            "external_disconnect_not_injected"
+            if disconnect_mode == "external"
+            else "simulated_disconnect_not_injected"
+        )
     if require_reconnect:
         if reconnect_attempt_count <= 0:
             failures.append("reconnect_not_attempted")
@@ -134,6 +140,7 @@ def evaluate_soak(
         "require_reconnect": require_reconnect,
         "disconnect_injection_required": disconnect_injection_required,
         "disconnect_injected": disconnect_injected,
+        "disconnect_mode": disconnect_mode,
         "reconnect_attempt_count": max(0, int(reconnect_attempt_count or 0)),
         "reconnect_success_count": max(0, int(reconnect_success_count or 0)),
         "final_connection_status": final_connection_status,
@@ -305,6 +312,7 @@ def _build_soak_result(
     transitions: list[Dict[str, Any]],
     event_counts: Counter[str],
     disconnect_injected: bool,
+    disconnect_mode: str = "none",
     runtime_summary: Dict[str, Any],
     required_events: Iterable[str],
     min_connected_ratio: float,
@@ -325,6 +333,7 @@ def _build_soak_result(
         require_reconnect=require_reconnect,
         disconnect_injection_required=disconnect_injection_required,
         disconnect_injected=disconnect_injected,
+        disconnect_mode=disconnect_mode,
         reconnect_attempt_count=int(reconnect_summary["attempt_count"]),
         reconnect_success_count=int(reconnect_summary["success_count"]),
         final_connection_status=str(runtime_summary["connection_status"]),
@@ -354,6 +363,7 @@ def _build_soak_result(
             name: int(event_counts.get(name) or 0) for name in EVENT_NAMES
         },
         "disconnect_injected": disconnect_injected,
+        "disconnect_mode": disconnect_mode,
         "runtime": runtime_summary,
         "evaluation": evaluation,
     }
@@ -378,6 +388,20 @@ def main(argv: list[str] | None = None) -> int:
         type=float,
         default=0.0,
         help="Explicit DsaSimulatedGateway-only disconnect injection (0 disables it).",
+    )
+    parser.add_argument(
+        "--external-disconnect-at-seconds",
+        type=float,
+        default=0.0,
+        help="Explicit external-gateway disconnect injection (0 disables it).",
+    )
+    parser.add_argument(
+        "--external-disconnect-confirmation",
+        default="",
+        help=(
+            "Required exact confirmation token for external disconnect injection: "
+            f"{EXTERNAL_DISCONNECT_CONFIRMATION}"
+        ),
     )
     parser.add_argument(
         "--require-reconnect",
@@ -441,6 +465,13 @@ def main(argv: list[str] | None = None) -> int:
         minimum=0.0,
         maximum=86400.0,
     )
+    external_disconnect_at = _bounded_float(
+        parser,
+        "--external-disconnect-at-seconds",
+        args.external_disconnect_at_seconds,
+        minimum=0.0,
+        maximum=86400.0,
+    )
     preflight_timeout = _bounded_float(
         parser,
         "--preflight-timeout-seconds",
@@ -458,12 +489,43 @@ def main(argv: list[str] | None = None) -> int:
 
     loaded_settings = load_vnpy_runtime_settings()
     settings = replace(loaded_settings, auto_attach_events=False)
-    if disconnect_at > 0 and not str(settings.gateway_class or "").endswith(
+    if disconnect_at > 0 and external_disconnect_at > 0:
+        parser.error("simulated and external disconnect injection are mutually exclusive")
+    external_gateway = not str(settings.gateway_class or "").endswith(
         ":DsaSimulatedGateway"
-    ):
+    )
+    if disconnect_at > 0 and external_gateway:
         parser.error(
             "--simulated-disconnect-at-seconds is only valid for DsaSimulatedGateway"
         )
+    if external_disconnect_at > 0:
+        if not external_gateway:
+            parser.error(
+                "--external-disconnect-at-seconds requires an external gateway"
+            )
+        if not args.require_external_gateway:
+            parser.error(
+                "external disconnect injection requires --require-external-gateway"
+            )
+        if (
+            str(args.external_disconnect_confirmation or "").strip()
+            != EXTERNAL_DISCONNECT_CONFIRMATION
+        ):
+            parser.error(
+                "external disconnect injection requires the exact confirmation token"
+            )
+    elif str(args.external_disconnect_confirmation or "").strip():
+        parser.error(
+            "--external-disconnect-confirmation requires external disconnect injection"
+        )
+    disconnect_at = external_disconnect_at or disconnect_at
+    disconnect_mode = (
+        "external"
+        if external_disconnect_at > 0
+        else "simulated"
+        if disconnect_at > 0
+        else "none"
+    )
 
     started_at = _utc_iso()
     preflight = _run_gateway_preflight(
@@ -578,6 +640,7 @@ def main(argv: list[str] | None = None) -> int:
                         transitions=transitions,
                         event_counts=event_counts,
                         disconnect_injected=disconnect_injected,
+                        disconnect_mode=disconnect_mode,
                         runtime_summary=checkpoint_runtime,
                         required_events=args.require_event,
                         min_connected_ratio=min_ratio,
@@ -620,6 +683,7 @@ def main(argv: list[str] | None = None) -> int:
         transitions=transitions,
         event_counts=event_counts,
         disconnect_injected=disconnect_injected,
+        disconnect_mode=disconnect_mode,
         runtime_summary=runtime_summary,
         required_events=args.require_event,
         min_connected_ratio=min_ratio,
