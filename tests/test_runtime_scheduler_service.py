@@ -1326,7 +1326,7 @@ class RuntimeSchedulerServiceTestCase(unittest.TestCase):
                 event_engine=event_engine,
                 event_bridge=None,
                 diagnostics={},
-                close=lambda: None,
+                close=lambda: events.append(("runtime_close",)),
             ),
         ), patch("api.app._schedule_stock_index_background_refresh"):
             app = create_app(static_dir=Path(temp_dir))
@@ -1338,6 +1338,7 @@ class RuntimeSchedulerServiceTestCase(unittest.TestCase):
             ("bind_vnpy", main_engine, event_engine),
             ("reconcile", False, False),
             ("stop",),
+            ("runtime_close",),
         ])
         self.assertIsNone(os.getenv(RUNTIME_SCHEDULER_DISABLE_DAILY_ENV))
 
