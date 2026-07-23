@@ -1,5 +1,8 @@
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+import subprocess
+import sys
 import threading
 
 from scripts.check_vnpy_scheduled_external_acceptance import (
@@ -122,6 +125,24 @@ def test_evaluate_external_scheduled_acceptance_proves_correlated_fill():
     assert result["position_deltas"] == {"600000": 100.0}
     assert result["scheduler_event_correlated"] is True
     assert result["external_gateway_preflight_ok"] is True
+
+
+def test_script_entrypoint_can_load_shared_verifier():
+    script = (
+        Path(__file__).resolve().parents[1]
+        / "scripts"
+        / "check_vnpy_scheduled_external_acceptance.py"
+    )
+    completed = subprocess.run(
+        [sys.executable, str(script), "--help"],
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=10,
+    )
+
+    assert completed.returncode == 0
+    assert "Observe one scheduled Agent run" in completed.stdout
 
 
 def test_evaluate_external_scheduled_acceptance_rejects_simulated_gateway_and_handler_failure():

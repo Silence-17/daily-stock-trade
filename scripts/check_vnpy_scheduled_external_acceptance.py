@@ -19,13 +19,22 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, urlopen
 
-from scripts.check_online_agent_vnpy_e2e import (
-    _agent_run_uids,
-    _matching_scheduler_event,
-    _run_is_terminal_and_coherent,
-    _runtime_view,
-    evaluate_acceptance,
-)
+if __package__:
+    from scripts.check_online_agent_vnpy_e2e import (
+        _agent_run_uids,
+        _matching_scheduler_event,
+        _run_is_terminal_and_coherent,
+        _runtime_view,
+        evaluate_acceptance,
+    )
+else:
+    from check_online_agent_vnpy_e2e import (
+        _agent_run_uids,
+        _matching_scheduler_event,
+        _run_is_terminal_and_coherent,
+        _runtime_view,
+        evaluate_acceptance,
+    )
 
 
 def _utc_iso() -> str:
