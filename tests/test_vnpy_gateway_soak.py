@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from subprocess import CompletedProcess
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -151,13 +152,20 @@ def test_safe_runtime_summary_omits_connection_path_and_message() -> None:
 def test_preflight_subprocess_uses_environment_without_exposing_settings_path(
     monkeypatch,
 ) -> None:
-    completed = CompletedProcess(
-        args=[],
-        returncode=0,
-        stdout=json.dumps({"ok": True, "evaluation": {"failures": []}}),
-        stderr="",
-    )
-    run = Mock(return_value=completed)
+    def invoke(command, **_kwargs):
+        output_index = command.index("--output-json") + 1
+        Path(command[output_index]).write_text(
+            json.dumps({"ok": True, "evaluation": {"failures": []}}),
+            encoding="utf-8",
+        )
+        return CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout="plugin startup banner\n",
+            stderr="",
+        )
+
+    run = Mock(side_effect=invoke)
     monkeypatch.setattr(gateway_soak.subprocess, "run", run)
 
     result = _run_gateway_preflight(
@@ -171,6 +179,7 @@ def test_preflight_subprocess_uses_environment_without_exposing_settings_path(
     assert result["exit_code"] == 0
     assert "--require-external-gateway" in command
     assert "--require-all-default-keys" in command
+    assert "--output-json" in command
     assert all("settings" not in argument.lower() for argument in command)
     assert run.call_args.kwargs["timeout"] == 45.0
 

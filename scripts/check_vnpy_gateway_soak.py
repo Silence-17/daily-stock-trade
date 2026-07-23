@@ -9,6 +9,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
 from collections import Counter
 from dataclasses import replace
@@ -200,31 +201,34 @@ def _run_gateway_preflight(
         command.append("--require-external-gateway")
     if require_all_default_keys:
         command.append("--require-all-default-keys")
-    try:
-        completed = subprocess.run(
-            command,
-            check=False,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout_seconds,
-        )
-    except Exception as exc:  # noqa: BLE001 - report only the error type.
-        return {
-            "ok": False,
-            "error_type": type(exc).__name__,
-            "failures": ["preflight_process_failed"],
-        }
-    try:
-        payload = json.loads(completed.stdout)
-    except (TypeError, json.JSONDecodeError):
-        return {
-            "ok": False,
-            "error_type": "PreflightOutputInvalid",
-            "exit_code": int(completed.returncode),
-            "failures": ["preflight_output_invalid"],
-        }
+    with tempfile.TemporaryDirectory(prefix="dsa-vnpy-preflight-") as temp_dir:
+        output_path = Path(temp_dir) / "result.json"
+        command.extend(["--output-json", str(output_path)])
+        try:
+            completed = subprocess.run(
+                command,
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout_seconds,
+            )
+        except Exception as exc:  # noqa: BLE001 - report only the error type.
+            return {
+                "ok": False,
+                "error_type": type(exc).__name__,
+                "failures": ["preflight_process_failed"],
+            }
+        try:
+            payload = json.loads(output_path.read_text(encoding="utf-8"))
+        except (OSError, TypeError, json.JSONDecodeError):
+            return {
+                "ok": False,
+                "error_type": "PreflightOutputInvalid",
+                "exit_code": int(completed.returncode),
+                "failures": ["preflight_output_invalid"],
+            }
     if not isinstance(payload, dict):
         return {
             "ok": False,
