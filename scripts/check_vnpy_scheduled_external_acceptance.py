@@ -156,6 +156,13 @@ def _number_at_least(value: Any, minimum: float) -> bool:
         return False
 
 
+def _nonnegative_int(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
 def _restricted_risk_settings(settings: Dict[str, Any]) -> bool:
     return bool(
         settings.get("auto_max_results") == 1
@@ -241,6 +248,22 @@ def evaluate_external_scheduled_acceptance(
         else {}
     )
     run_trigger = str(run_detail.get("trigger_source") or "")
+    scheduled_cardinality = {
+        "candidate_count": _nonnegative_int(base.get("candidate_count")),
+        "decision_count": _nonnegative_int(base.get("decision_count")),
+        "trade_plan_count": _nonnegative_int(base.get("trade_plan_count")),
+        "submitted_count": _nonnegative_int(run_detail.get("submitted_count")),
+        "filled_plan_count": _nonnegative_int(base.get("filled_plan_count")),
+        "skipped_count": _nonnegative_int(run_detail.get("skipped_count")),
+    }
+    scheduled_cardinality_ready = scheduled_cardinality == {
+        "candidate_count": 1,
+        "decision_count": 1,
+        "trade_plan_count": 1,
+        "submitted_count": 1,
+        "filled_plan_count": 1,
+        "skipped_count": 0,
+    }
 
     if not before_settings["enabled"] or not after_settings["enabled"]:
         failures.append("paper_trading_disabled")
@@ -262,6 +285,8 @@ def evaluate_external_scheduled_acceptance(
     after_risk_ready = _restricted_risk_settings(after_settings)
     if not before_risk_ready or not after_risk_ready:
         failures.append("paper_risk_limits_not_restricted")
+    if not scheduled_cardinality_ready:
+        failures.append("scheduled_order_cardinality_not_exactly_one")
     if task is None:
         failures.append("auto_trade_task_not_registered")
     if run_trigger != "vnpy_paper_auto":
@@ -298,6 +323,8 @@ def evaluate_external_scheduled_acceptance(
         "settings_unchanged": before_settings == after_settings,
         "risk_limits_ready": before_risk_ready and after_risk_ready,
         "risk_settings": after_settings,
+        "scheduled_cardinality_ready": scheduled_cardinality_ready,
+        "scheduled_cardinality": scheduled_cardinality,
         "auto_trade_task_registered": task is not None,
     }
 

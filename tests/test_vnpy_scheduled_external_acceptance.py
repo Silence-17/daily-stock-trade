@@ -207,6 +207,50 @@ def test_evaluate_external_scheduled_acceptance_rejects_unrestricted_risk_limits
     assert "paper_risk_limits_not_restricted" in result["failures"]
 
 
+def test_evaluate_external_scheduled_acceptance_rejects_a_second_terminal_order():
+    run_detail = _run_detail()
+    run_detail["candidate_count"] = 2
+    run_detail["submitted_count"] = 2
+    run_detail["decisions"].append(
+        {
+            "id": 12,
+            "symbol": "600001",
+            "action": "buy",
+            "status": "canceled",
+            "reason": "canceled",
+            "trade_id": None,
+        }
+    )
+    run_detail["trade_plans"].append(
+        {
+            "id": 22,
+            "decision_id": 12,
+            "symbol": "600001",
+            "status": "canceled",
+            "trade_id": None,
+        }
+    )
+
+    result = evaluate_external_scheduled_acceptance(
+        run_uid="scheduled-run",
+        run_detail=run_detail,
+        scheduler_event=_event(),
+        before_status=_status(),
+        after_status=_status(
+            cash=99000.0,
+            positions=[{"symbol": "600000", "quantity": 100}],
+        ),
+        min_candidates=1,
+        max_failed_plans=0,
+    )
+
+    assert result["ok"] is False
+    assert result["filled_plan_count"] == 1
+    assert result["scheduled_cardinality_ready"] is False
+    assert result["scheduled_cardinality"]["trade_plan_count"] == 2
+    assert "scheduled_order_cardinality_not_exactly_one" in result["failures"]
+
+
 def test_cli_observes_scheduler_fill_using_get_requests_only(tmp_path):
     before = _status()
     after = _status(

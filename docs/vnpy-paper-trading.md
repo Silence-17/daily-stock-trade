@@ -183,7 +183,7 @@
 
 同日部署态 Windows/Python 3.13 服务完成 300 秒 XTP 长跑，60/60 次 API、runtime、双通道连接和 EventEngine bridge 采样均通过，新增 74 个账户与 1350 个持仓事件，订单/成交事件为 0。随后在隔离本地账户 `#8` 提交唯一一笔 100 股、470 元的受控 XTP 测试委托；柜台返回 `nottraded`，独立会话撤单后主服务收到 `cancelled`，成交量保持 0，本地现金 100000 元、零持仓和零成交均未变化。一次 `dual_low` dry-run 另生成 1 候选、1 计划、0 提交，证明选股链路不会在演练模式触发 XTP。正式自动执行已切换为 `vnpy_paper`，每次最多 1 只、每单/每日预算 1000 元，并按交易时段门禁对齐到下一交易日 09:35；真实成交回报仍需在开市窗口完成最终验收。
 
-最终开市成交使用 `scripts/check_vnpy_scheduled_external_acceptance.py` 做只读观察。除关联新的 `vnpy_paper_auto` run、调度事件、外部 Gateway 终态成交和隔离账本现金/持仓变化外，观察器还要求观测前后配置一致且满足受限风险合同：每轮最多 1 只、每日最多 1 笔、每单和每日预算不超过 1000 元、最大持仓数不超过 3、单票/总仓位/权益占比分别不超过 1500 元/5000 元/5%、最低现金不少于 5000 元，并开启失败熔断、阈值不超过 2 且关闭自动恢复。配置即使全程未变化，只要比这些验收边界更宽，也会以 `paper_risk_limits_not_restricted` 失败；脚本始终只发送 GET 请求，不会触发 run、修改设置、下单或撤单。
+最终开市成交使用 `scripts/check_vnpy_scheduled_external_acceptance.py` 做只读观察。除关联新的 `vnpy_paper_auto` run、调度事件、外部 Gateway 终态成交和隔离账本现金/持仓变化外，观察器还要求观测前后配置一致且满足受限风险合同：每轮最多 1 只、每日最多 1 笔、每单和每日预算不超过 1000 元、最大持仓数不超过 3、单票/总仓位/权益占比分别不超过 1500 元/5000 元/5%、最低现金不少于 5000 元，并开启失败熔断、阈值不超过 2 且关闭自动恢复。配置即使全程未变化，只要比这些验收边界更宽，也会以 `paper_risk_limits_not_restricted` 失败。实际 run 的候选/决策/计划/提交/成交必须严格为 `1/1/1/1/1`、跳过数必须为 `0`；即使已有一笔成交，额外取消或跳过订单也会以 `scheduled_order_cardinality_not_exactly_one` 失败。脚本始终只发送 GET 请求，不会触发 run、修改设置、下单或撤单。
 
 只读预检可直接运行 `python scripts/check_vnpy_xtp_order_acceptance.py`。脚本默认不下单，也不要求暂停已配置的自动交易；受控订单模式必须显式给出 `--place-order --confirmation XTP_PAPER_ORDER --price <limit>`，强制数量不超过 100 股、名义金额不超过 2000 元、自动交易处于暂停状态且不存在其他活动 XTP 委托，并在超时后调用通用撤单接口。默认还要求当前市场开市；仅做收盘后提交/撤单通路验证时才可显式添加 `--allow-closed-market`。
 
