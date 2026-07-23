@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - [新功能] 新增仅允许撤销 EventEngine 已观察活动订单的通用 vn.py 手工委托撤单 API，以及默认只读、显式确认后才允许单笔受限 XTP 测试委托的验收脚本
 - [修复] 日级自动交易调度持久化最近运行的执行模式，`dry_run` 与 `manual_approval` 演练不再被误判为正式执行并跳过下一交易日
+- [修复] 手工 vn.py bridge 委托持久化隔离账户归属并支持跨重启分笔成交回写、幂等去重和乱序状态保护；未知、身份不匹配或超量回报继续 fail closed
 - [测试] 部署态中泰 XTP 完成 300 秒 60/60 连通长跑、100 股受控提交/撤单和隔离账本零成交一致性验收；正式自动任务已按每日 1 笔和 1000 元预算对齐下一交易日 09:35
 
 - [修复] vn.py Gateway 长跑验收的零连接预检改用自动清理的专用 JSON 结果文件，XTP Windows 账户 workflow 显式启用 Python UTF-8 输出，不再把插件启动信息或中文字段报告误判为预检失败

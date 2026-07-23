@@ -2082,6 +2082,38 @@ class VnpyPaperTradingService:
                 message=str(exc),
                 raw={"error_type": type(exc).__name__, **(raw or {})},
             )
+        if str(source or "").strip().lower() == "manual":
+            now = _utc_now_iso()
+            self._record_vnpy_order_state(
+                str(submitted["vt_orderid"]),
+                {
+                    "vt_orderid": str(submitted["vt_orderid"]),
+                    "status": "submitted",
+                    "managed_submission": {
+                        "version": 1,
+                        "kind": "manual",
+                        "account_id": account_id,
+                        "symbol": symbol,
+                        "side": side,
+                        "market": str(market or "cn").strip().lower(),
+                        "quantity": round(float(quantity), 8),
+                        "price": round(float(price), 8),
+                        "cash_amount": round(float(cash_amount), 6),
+                        "gateway_name": str(submitted.get("gateway_name") or "").strip(),
+                        "order_request_payload": submitted.get("order_request_payload") or {},
+                        "created_at": now,
+                        "fill_sync": {
+                            "target_quantity": round(float(quantity), 8),
+                            "cumulative_quantity": 0.0,
+                            "cumulative_notional": 0.0,
+                            "remaining_quantity": round(float(quantity), 8),
+                            "trade_count": 0,
+                            "trades": [],
+                            "updated_at": now,
+                        },
+                    },
+                },
+            )
         return {
             "accepted": True,
             "status": "submitted",
@@ -2127,14 +2159,19 @@ class VnpyPaperTradingService:
 
         plan = self.agent_repo.find_trade_plan_by_vnpy_order_id(order_id)
         if plan is None:
-            return self._failed_order(
+            return self._sync_managed_manual_vnpy_trade_callback(
+                vt_orderid=order_id,
+                vt_tradeid=vt_tradeid,
                 symbol=symbol,
-                side=side or "buy",
+                side=side,
+                market=market,
                 quantity=quantity,
                 price=price,
-                reason="vnpy_trade_plan_not_found",
-                message=f"No submitted vn.py trade plan found for {order_id}.",
-                raw={"vt_orderid": order_id, **(raw or {})},
+                trade_date=trade_date,
+                fee=fee,
+                tax=tax,
+                currency=currency,
+                raw=raw,
             )
 
         symbol_norm = self._normalize_symbol(symbol or plan.get("symbol") or "")
@@ -2346,6 +2383,320 @@ class VnpyPaperTradingService:
             self.agent_repo.refresh_run_trade_counts(run_id)
         return result
 
+    def _sync_managed_manual_vnpy_trade_callback(
+        self,
+        *,
+        vt_orderid: str,
+        vt_tradeid: Optional[str],
+        symbol: Optional[str],
+        side: Optional[str],
+        market: Optional[str],
+        quantity: Optional[float],
+        price: Optional[float],
+        trade_date: Optional[Any],
+        fee: float,
+        tax: float,
+        currency: Optional[str],
+        raw: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Book a callback only when it belongs to a locally submitted manual order."""
+
+        with self._lock:
+            order_state, managed = self._managed_manual_vnpy_submission(vt_orderid)
+            if managed is None:
+                return self._failed_order(
+                    symbol=symbol,
+                    side=side or "buy",
+                    quantity=quantity,
+                    price=price,
+                    reason="vnpy_trade_plan_not_found",
+                    message=f"No submitted vn.py trade plan found for {vt_orderid}.",
+                    raw={"vt_orderid": vt_orderid, **(raw or {})},
+                )
+
+            symbol_norm = self._normalize_symbol(str(managed.get("symbol") or ""))
+            side_norm = str(managed.get("side") or "").strip().lower()
+            market_norm = str(managed.get("market") or "cn").strip().lower()
+            mismatch = self._managed_manual_callback_mismatch(
+                managed=managed,
+                symbol=symbol,
+                side=side,
+                market=market,
+            )
+            if mismatch:
+                return self._failed_order(
+                    symbol=symbol_norm,
+                    side=side_norm or "buy",
+                    quantity=quantity,
+                    price=price,
+                    reason="vnpy_manual_callback_mismatch",
+                    message=f"vn.py callback does not match the managed manual order: {mismatch}.",
+                    raw={"vt_orderid": vt_orderid, "mismatch": mismatch, **(raw or {})},
+                )
+
+            account_id = _safe_int(managed.get("account_id"))
+            trade_quantity = _safe_float(quantity)
+            trade_price = _safe_float(price)
+            if (
+                account_id is None
+                or not symbol_norm
+                or side_norm not in {"buy", "sell"}
+                or trade_quantity is None
+                or trade_quantity <= 0
+                or trade_price is None
+                or trade_price <= 0
+            ):
+                return self._failed_order(
+                    symbol=symbol_norm,
+                    side=side_norm or "buy",
+                    quantity=trade_quantity,
+                    price=trade_price,
+                    reason="vnpy_trade_payload_invalid",
+                    message="vn.py trade callback requires a managed account and positive quantity and price.",
+                    raw={"vt_orderid": vt_orderid, **(raw or {})},
+                )
+
+            trade_day = self._coerce_trade_date(trade_date)
+            trade_ref = str(vt_tradeid or "").strip() or (
+                f"{vt_orderid}:{trade_quantity}:{trade_price}:{trade_day.isoformat()}"
+            )
+            trade_identity = f"{trade_day.isoformat()}:{trade_ref}"
+            fill_sync = (
+                managed.get("fill_sync")
+                if isinstance(managed.get("fill_sync"), dict)
+                else {}
+            )
+            synced_trades = [
+                item
+                for item in list(fill_sync.get("trades") or [])
+                if isinstance(item, dict)
+            ]
+            synced_refs = {
+                str(item.get("trade_ref") or item.get("vt_tradeid") or "").strip()
+                for item in synced_trades
+                if str(item.get("trade_ref") or item.get("vt_tradeid") or "").strip()
+            }
+            if trade_ref in synced_refs:
+                last_trade = next(
+                    (
+                        item
+                        for item in reversed(synced_trades)
+                        if str(item.get("trade_ref") or item.get("vt_tradeid") or "").strip()
+                        == trade_ref
+                    ),
+                    {},
+                )
+                return {
+                    "accepted": True,
+                    "status": str(order_state.get("status") or "filled"),
+                    "trade_id": _safe_int(last_trade.get("local_trade_id")),
+                    "account_id": account_id,
+                    "symbol": symbol_norm,
+                    "side": side_norm,
+                    "quantity": _safe_float(fill_sync.get("cumulative_quantity")),
+                    "price": _safe_float(fill_sync.get("average_price")),
+                    "cash_amount": _safe_float(fill_sync.get("cumulative_notional")),
+                    "source": "vnpy_main_engine",
+                    "message": "vn.py manual trade callback already synced.",
+                    "reason": None,
+                    "raw": {
+                        "vt_orderid": vt_orderid,
+                        "vt_tradeid": str(vt_tradeid or "").strip() or None,
+                        "duplicate_callback": True,
+                        "fill_sync": fill_sync,
+                        **(raw or {}),
+                    },
+                }
+
+            previous_quantity = _safe_float(fill_sync.get("cumulative_quantity")) or 0.0
+            previous_notional = _safe_float(fill_sync.get("cumulative_notional")) or 0.0
+            target_quantity = _safe_float(managed.get("quantity")) or trade_quantity
+            cumulative_quantity = previous_quantity + trade_quantity
+            if cumulative_quantity > target_quantity + PAPER_EPS:
+                return self._failed_order(
+                    symbol=symbol_norm,
+                    side=side_norm,
+                    quantity=trade_quantity,
+                    price=trade_price,
+                    reason="vnpy_manual_fill_exceeds_order_quantity",
+                    message="vn.py callback quantity exceeds the locally managed manual order quantity.",
+                    raw={
+                        "vt_orderid": vt_orderid,
+                        "target_quantity": target_quantity,
+                        "previous_quantity": previous_quantity,
+                        **(raw or {}),
+                    },
+                )
+
+            fee_value = _safe_float(fee) or 0.0
+            tax_value = _safe_float(tax) or 0.0
+            trade_uid = f"vnpy-trade-{self._dedup_hash(trade_identity)}"
+            try:
+                created = self.portfolio.record_trade(
+                    account_id=account_id,
+                    symbol=symbol_norm,
+                    trade_date=trade_day,
+                    side=side_norm,
+                    quantity=trade_quantity,
+                    price=trade_price,
+                    fee=fee_value,
+                    tax=tax_value,
+                    market=market_norm,
+                    currency=currency or self._currency_for_market(market_norm),
+                    trade_uid=trade_uid,
+                    dedup_hash=self._dedup_hash(f"vnpy-trade:{trade_identity}"),
+                    note=self._build_trade_note(
+                        source="vnpy_manual_callback",
+                        note=f"vn.py manual callback vt_orderid={vt_orderid}",
+                        price_source="callback",
+                    ),
+                )
+            except PortfolioConflictError:
+                return {
+                    "accepted": True,
+                    "status": str(order_state.get("status") or "submitted"),
+                    "trade_id": None,
+                    "account_id": account_id,
+                    "symbol": symbol_norm,
+                    "side": side_norm,
+                    "quantity": previous_quantity,
+                    "price": _safe_float(fill_sync.get("average_price")),
+                    "cash_amount": previous_notional,
+                    "source": "vnpy_main_engine",
+                    "message": "Duplicate vn.py manual trade callback was ignored.",
+                    "reason": None,
+                    "raw": {
+                        "vt_orderid": vt_orderid,
+                        "vt_tradeid": str(vt_tradeid or "").strip() or None,
+                        "duplicate_callback": True,
+                        "fill_sync": fill_sync,
+                        **(raw or {}),
+                    },
+                }
+            except PortfolioOversellError as exc:
+                return self._failed_order(
+                    symbol=symbol_norm,
+                    side=side_norm,
+                    quantity=trade_quantity,
+                    price=trade_price,
+                    reason="vnpy_trade_sync_oversell",
+                    message=str(exc),
+                    raw={"vt_orderid": vt_orderid, **(raw or {})},
+                )
+            except ValueError as exc:
+                return self._failed_order(
+                    symbol=symbol_norm,
+                    side=side_norm,
+                    quantity=trade_quantity,
+                    price=trade_price,
+                    reason="vnpy_manual_account_unavailable",
+                    message=str(exc),
+                    raw={"vt_orderid": vt_orderid, **(raw or {})},
+                )
+
+            cash_amount = round(trade_quantity * trade_price, 6)
+            cumulative_notional = previous_notional + cash_amount
+            average_price = cumulative_notional / cumulative_quantity
+            next_status = (
+                "filled"
+                if cumulative_quantity + PAPER_EPS >= target_quantity
+                else "part_filled"
+            )
+            synced_trades.append(
+                {
+                    "trade_ref": trade_ref,
+                    "vt_tradeid": str(vt_tradeid or "").strip() or None,
+                    "local_trade_id": int(created["id"]),
+                    "quantity": round(trade_quantity, 8),
+                    "price": round(trade_price, 8),
+                    "trade_date": trade_day.isoformat(),
+                }
+            )
+            fill_sync_payload = {
+                "target_quantity": round(target_quantity, 8),
+                "cumulative_quantity": round(cumulative_quantity, 8),
+                "cumulative_notional": round(cumulative_notional, 6),
+                "average_price": round(average_price, 8),
+                "remaining_quantity": round(
+                    max(0.0, target_quantity - cumulative_quantity),
+                    8,
+                ),
+                "trade_count": len(synced_trades),
+                "trades": synced_trades,
+                "updated_at": _utc_now_iso(),
+            }
+            managed_next = {**managed, "fill_sync": fill_sync_payload}
+            self._record_vnpy_order_state(
+                vt_orderid,
+                {
+                    "status": next_status,
+                    "managed_submission": managed_next,
+                    "last_trade_callback": {
+                        "vt_tradeid": str(vt_tradeid or "").strip() or None,
+                        "quantity": round(trade_quantity, 8),
+                        "price": round(trade_price, 8),
+                        "trade_date": trade_day.isoformat(),
+                    },
+                },
+            )
+            self._invalidate_status_snapshot_cache(account_id)
+            return {
+                "accepted": True,
+                "status": next_status,
+                "trade_id": int(created["id"]),
+                "account_id": account_id,
+                "symbol": symbol_norm,
+                "side": side_norm,
+                "quantity": round(cumulative_quantity, 8),
+                "price": round(average_price, 8),
+                "cash_amount": round(cumulative_notional, 6),
+                "source": "vnpy_main_engine",
+                "message": (
+                    "vn.py manual trade callback completed the local paper fill."
+                    if next_status == "filled"
+                    else "vn.py manual partial fill synced; waiting for remaining fills."
+                ),
+                "reason": None if next_status == "filled" else "vnpy_trade_partially_filled",
+                "raw": {
+                    "vt_orderid": vt_orderid,
+                    "vt_tradeid": str(vt_tradeid or "").strip() or None,
+                    "fill_sync": fill_sync_payload,
+                    "callback": raw or {},
+                },
+            }
+
+    def _managed_manual_vnpy_submission(
+        self,
+        vt_orderid: str,
+    ) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
+        state = self._read_vnpy_sync_state()
+        orders = state.get("orders") if isinstance(state.get("orders"), dict) else {}
+        order_state = orders.get(str(vt_orderid))
+        if not isinstance(order_state, dict):
+            return {}, None
+        managed = order_state.get("managed_submission")
+        if not isinstance(managed, dict) or managed.get("kind") != "manual":
+            return order_state, None
+        return order_state, dict(managed)
+
+    def _managed_manual_callback_mismatch(
+        self,
+        *,
+        managed: Dict[str, Any],
+        symbol: Optional[str],
+        side: Optional[str],
+        market: Optional[str],
+    ) -> Optional[str]:
+        if symbol is not None and self._normalize_symbol(str(symbol)) != self._normalize_symbol(
+            str(managed.get("symbol") or "")
+        ):
+            return "symbol"
+        if side is not None and str(side).strip().lower() != str(managed.get("side") or "").strip().lower():
+            return "side"
+        if market is not None and str(market).strip().lower() != str(managed.get("market") or "").strip().lower():
+            return "market"
+        return None
+
     def sync_vnpy_order_callback(
         self,
         *,
@@ -2370,6 +2721,23 @@ class VnpyPaperTradingService:
             raise ValueError("status is required")
 
         plan = self.agent_repo.find_trade_plan_by_vnpy_order_id(order_id)
+        _existing_order_state, managed = self._managed_manual_vnpy_submission(order_id)
+        managed_fill_sync = (
+            managed.get("fill_sync")
+            if isinstance(managed, dict) and isinstance(managed.get("fill_sync"), dict)
+            else {}
+        )
+        managed_filled = _safe_float(managed_fill_sync.get("cumulative_quantity")) or 0.0
+        managed_target = (
+            _safe_float(managed_fill_sync.get("target_quantity"))
+            or _safe_float(managed.get("quantity") if isinstance(managed, dict) else None)
+            or 0.0
+        )
+        if managed_filled > PAPER_EPS:
+            if managed_target > PAPER_EPS and managed_filled + PAPER_EPS >= managed_target:
+                order_status = "filled"
+            elif self._vnpy_order_failure_reason(order_status) is None:
+                order_status = "part_filled"
         state_payload = {
             "vt_orderid": order_id,
             "status": order_status,
@@ -2386,6 +2754,51 @@ class VnpyPaperTradingService:
         self._record_vnpy_order_state(order_id, state_payload)
 
         if plan is None:
+            if managed is not None:
+                mismatch = self._managed_manual_callback_mismatch(
+                    managed=managed,
+                    symbol=symbol,
+                    side=side,
+                    market=market,
+                )
+                if mismatch:
+                    return self._failed_order(
+                        symbol=str(managed.get("symbol") or symbol or ""),
+                        side=str(managed.get("side") or side or "buy"),
+                        quantity=_safe_float(volume) or _safe_float(traded),
+                        price=price,
+                        reason="vnpy_manual_callback_mismatch",
+                        message=(
+                            "vn.py callback does not match the managed manual order: "
+                            f"{mismatch}."
+                        ),
+                        raw={
+                            "vt_orderid": order_id,
+                            "vnpy_order_status": order_status,
+                            "mismatch": mismatch,
+                            **(raw or {}),
+                        },
+                    )
+                return {
+                    "accepted": True,
+                    "status": order_status,
+                    "trade_id": None,
+                    "account_id": _safe_int(managed.get("account_id")),
+                    "symbol": managed.get("symbol"),
+                    "side": managed.get("side"),
+                    "quantity": _safe_float(volume) or _safe_float(managed.get("quantity")),
+                    "price": _safe_float(price) or _safe_float(managed.get("price")),
+                    "cash_amount": _safe_float(managed.get("cash_amount")),
+                    "source": "vnpy_main_engine",
+                    "message": "vn.py manual order callback synced.",
+                    "reason": self._vnpy_order_failure_reason(order_status),
+                    "raw": {
+                        "vt_orderid": order_id,
+                        "vnpy_order_status": order_status,
+                        "traded": _safe_float(traded),
+                        **(raw or {}),
+                    },
+                }
             return self._failed_order(
                 symbol=symbol,
                 side=side or "buy",
@@ -5185,7 +5598,15 @@ class VnpyPaperTradingService:
             state = payload.get("vnpy_sync_state") if isinstance(payload.get("vnpy_sync_state"), dict) else {}
             orders = state.get("orders") if isinstance(state.get("orders"), dict) else {}
             now = _utc_now_iso()
-            orders[str(vt_orderid)] = {**order_state, "updated_at": now}
+            previous = orders.get(str(vt_orderid))
+            previous = previous if isinstance(previous, dict) else {}
+            next_state = {**order_state, "updated_at": now}
+            if (
+                "managed_submission" not in next_state
+                and isinstance(previous.get("managed_submission"), dict)
+            ):
+                next_state["managed_submission"] = previous["managed_submission"]
+            orders[str(vt_orderid)] = next_state
             trimmed = sorted(
                 orders.items(),
                 key=lambda item: str(item[1].get("updated_at") if isinstance(item[1], dict) else ""),
