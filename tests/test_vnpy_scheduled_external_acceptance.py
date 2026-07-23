@@ -22,6 +22,18 @@ def _status(*, cash=100000.0, positions=None, handler_failures=0):
             "auto_strategy": "dual_low",
             "account_id": 8,
             "vnpy_gateway_name": "XTP",
+            "auto_max_results": 1,
+            "auto_cash_per_order": 1000.0,
+            "auto_daily_max_orders": 1,
+            "auto_daily_budget": 1000.0,
+            "auto_max_positions": 3,
+            "auto_max_single_position_value": 1500.0,
+            "auto_max_total_position_value": 5000.0,
+            "auto_max_total_position_pct": 5.0,
+            "auto_min_cash_balance": 5000.0,
+            "auto_failure_fuse_enabled": True,
+            "auto_failure_fuse_threshold": 2,
+            "auto_failure_fuse_auto_recovery_enabled": False,
         },
         "account": {"id": 8},
         "snapshot": {
@@ -168,6 +180,31 @@ def test_evaluate_external_scheduled_acceptance_rejects_simulated_gateway_and_ha
     assert result["ok"] is False
     assert "external_gateway_not_observed" in result["failures"]
     assert "event_handler_failure_observed" in result["failures"]
+
+
+def test_evaluate_external_scheduled_acceptance_rejects_unrestricted_risk_limits():
+    before = _status()
+    after = _status(
+        cash=99000.0,
+        positions=[{"symbol": "600000", "quantity": 100}],
+    )
+    before["settings"]["auto_daily_max_orders"] = 10
+    after["settings"]["auto_daily_max_orders"] = 10
+
+    result = evaluate_external_scheduled_acceptance(
+        run_uid="scheduled-run",
+        run_detail=_run_detail(),
+        scheduler_event=_event(),
+        before_status=before,
+        after_status=after,
+        min_candidates=1,
+        max_failed_plans=0,
+    )
+
+    assert result["ok"] is False
+    assert result["settings_unchanged"] is True
+    assert result["risk_limits_ready"] is False
+    assert "paper_risk_limits_not_restricted" in result["failures"]
 
 
 def test_cli_observes_scheduler_fill_using_get_requests_only(tmp_path):

@@ -121,7 +121,60 @@ def _settings_view(status: Dict[str, Any]) -> Dict[str, Any]:
         "auto_strategy": str(settings.get("auto_strategy") or ""),
         "account_id": settings.get("account_id"),
         "gateway_name": str(settings.get("vnpy_gateway_name") or ""),
+        "auto_max_results": settings.get("auto_max_results"),
+        "auto_cash_per_order": settings.get("auto_cash_per_order"),
+        "auto_daily_max_orders": settings.get("auto_daily_max_orders"),
+        "auto_daily_budget": settings.get("auto_daily_budget"),
+        "auto_max_positions": settings.get("auto_max_positions"),
+        "auto_max_single_position_value": settings.get(
+            "auto_max_single_position_value"
+        ),
+        "auto_max_total_position_value": settings.get(
+            "auto_max_total_position_value"
+        ),
+        "auto_max_total_position_pct": settings.get("auto_max_total_position_pct"),
+        "auto_min_cash_balance": settings.get("auto_min_cash_balance"),
+        "auto_failure_fuse_enabled": settings.get("auto_failure_fuse_enabled") is True,
+        "auto_failure_fuse_threshold": settings.get("auto_failure_fuse_threshold"),
+        "auto_failure_fuse_auto_recovery_enabled": (
+            settings.get("auto_failure_fuse_auto_recovery_enabled") is True
+        ),
     }
+
+
+def _number_at_most(value: Any, maximum: float) -> bool:
+    try:
+        return float(value) <= maximum
+    except (TypeError, ValueError):
+        return False
+
+
+def _number_at_least(value: Any, minimum: float) -> bool:
+    try:
+        return float(value) >= minimum
+    except (TypeError, ValueError):
+        return False
+
+
+def _restricted_risk_settings(settings: Dict[str, Any]) -> bool:
+    return bool(
+        settings.get("auto_max_results") == 1
+        and _number_at_most(settings.get("auto_cash_per_order"), 1000.0)
+        and settings.get("auto_daily_max_orders") == 1
+        and _number_at_most(settings.get("auto_daily_budget"), 1000.0)
+        and _number_at_most(settings.get("auto_max_positions"), 3.0)
+        and _number_at_most(
+            settings.get("auto_max_single_position_value"), 1500.0
+        )
+        and _number_at_most(
+            settings.get("auto_max_total_position_value"), 5000.0
+        )
+        and _number_at_most(settings.get("auto_max_total_position_pct"), 5.0)
+        and _number_at_least(settings.get("auto_min_cash_balance"), 5000.0)
+        and settings.get("auto_failure_fuse_enabled") is True
+        and _number_at_most(settings.get("auto_failure_fuse_threshold"), 2.0)
+        and settings.get("auto_failure_fuse_auto_recovery_enabled") is False
+    )
 
 
 def _production_preflight(status: Dict[str, Any]) -> Dict[str, Any]:
@@ -205,6 +258,10 @@ def evaluate_external_scheduled_acceptance(
         failures.append("trading_time_gate_disabled")
     if before_settings != after_settings:
         failures.append("paper_settings_changed_during_observation")
+    before_risk_ready = _restricted_risk_settings(before_settings)
+    after_risk_ready = _restricted_risk_settings(after_settings)
+    if not before_risk_ready or not after_risk_ready:
+        failures.append("paper_risk_limits_not_restricted")
     if task is None:
         failures.append("auto_trade_task_not_registered")
     if run_trigger != "vnpy_paper_auto":
@@ -239,6 +296,8 @@ def evaluate_external_scheduled_acceptance(
             after_handler_failures - before_handler_failures
         ),
         "settings_unchanged": before_settings == after_settings,
+        "risk_limits_ready": before_risk_ready and after_risk_ready,
+        "risk_settings": after_settings,
         "auto_trade_task_registered": task is not None,
     }
 
