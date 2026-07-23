@@ -325,6 +325,40 @@ class VnpyRuntimeTestCase(unittest.TestCase):
             self.assertNotIn(str(settings_path), json.dumps(preflight))
             handle.close()
 
+    def test_production_preflight_rejects_empty_external_gateway_values(self) -> None:
+        installed = _install_fake_vnpy_runtime_modules()
+        with tempfile.TemporaryDirectory() as tmp:
+            settings_path = Path(tmp) / "broker.json"
+            settings_path.write_text(
+                json.dumps({"userid": "paper", "password": "  "}),
+                encoding="utf-8",
+            )
+            try:
+                handle = bootstrap_vnpy_runtime(
+                    settings=VnpyRuntimeSettings(
+                        enabled=True,
+                        gateway_class="fake_vnpy_gateway:StrictGateway",
+                        gateway_name="STRICT",
+                        connect_settings_path=str(settings_path),
+                        connect_on_start=True,
+                        production_preflight_enabled=True,
+                        auto_attach_events=False,
+                    )
+                )
+            finally:
+                _restore_modules(installed)
+
+            self.assertEqual(handle.main_engine.connects, [])
+            preflight = handle.run_production_preflight()
+            self.assertFalse(preflight["ok"])
+            self.assertEqual(
+                preflight["failures"],
+                ["default_setting_values_empty"],
+            )
+            self.assertEqual(preflight["empty_default_keys"], ["password"])
+            self.assertNotIn(str(settings_path), json.dumps(preflight))
+            handle.close()
+
     def test_production_preflight_sanitizes_settings_read_failure(self) -> None:
         installed = _install_fake_vnpy_runtime_modules()
         with tempfile.TemporaryDirectory() as tmp:

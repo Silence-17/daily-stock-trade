@@ -27,6 +27,7 @@ def test_preflight_accepts_registered_external_gateway_contract() -> None:
         settings_valid=True,
         settings_inside_repository=False,
         missing_default_keys=[],
+        empty_default_keys=[],
         require_external_gateway=True,
         require_settings_outside_repository=True,
         require_all_default_keys=True,
@@ -47,6 +48,7 @@ def test_preflight_rejects_builtin_and_unsafe_or_incomplete_settings() -> None:
         settings_valid=True,
         settings_inside_repository=True,
         missing_default_keys=["password", "userid"],
+        empty_default_keys=["broker"],
         require_external_gateway=True,
         require_settings_outside_repository=True,
         require_all_default_keys=True,
@@ -57,6 +59,7 @@ def test_preflight_rejects_builtin_and_unsafe_or_incomplete_settings() -> None:
         "builtin_gateway_not_external",
         "connect_settings_inside_repository",
         "default_setting_keys_missing",
+        "default_setting_values_empty",
     ]
 
 

@@ -1,0 +1,78 @@
+name: External vn.py Gateway Smoke
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: vnpy-external-gateway-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  windows-ctp-zero-connect:
+    runs-on: windows-2022
+    timeout-minutes: 60
+    env:
+      VNPY_GATEWAY_PLUGINS_JSON: '[{"package":"vnpy_ctp==6.7.11.4","module":"vnpy_ctp"}]'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: apps/dsa-web/package-lock.json
+
+      - name: Install application and vn.py runtime
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r requirements-vnpy.txt
+          python scripts/vnpy_gateway_plugins.py --install --verify
+
+      - name: Verify real CTP registration without connecting
+        shell: pwsh
+        run: |
+          @'
+          import json
+
+          from scripts.check_vnpy_gateway_preflight import inspect_preflight
+
+          result = inspect_preflight(
+              gateway_class="vnpy_ctp:CtpGateway",
+              gateway_name="CTP",
+              settings_path=None,
+              require_external_gateway=True,
+          )
+          assert result["gateway"]["registered"] is True, result
+          assert result["gateway"]["external"] is True, result
+          assert result["runtime"]["available"] is True, result
+          assert result["evaluation"]["failures"] == ["connect_settings_required"], result
+          assert result["safety"] == {
+              "connect_called": False,
+              "network_calls": False,
+              "orders_created": False,
+              "subscriptions_created": False,
+              "settings_values_exposed": False,
+              "settings_path_exposed": False,
+          }, result
+          print(json.dumps(result, ensure_ascii=False, indent=2))
+          '@ | python -
+
+      - name: Build and probe frozen backend with CTP
+        shell: pwsh
+        run: |
+          .\scripts\build-backend.ps1 `
+            -IncludeVnpy `
+            -SkipDependencyInstall `
+            -VnpyGatewayPluginsJson $env:VNPY_GATEWAY_PLUGINS_JSON

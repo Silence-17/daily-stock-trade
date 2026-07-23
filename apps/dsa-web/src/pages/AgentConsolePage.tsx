@@ -107,6 +107,7 @@ const gatewayPreflightFailureLabels: Record<string, string> = {
   settings_inside_repository: '连接配置不能位于仓库内',
   settings_invalid: '连接配置格式无效',
   default_setting_keys_missing: '外部连接参数不完整',
+  default_setting_values_empty: '外部连接参数存在空值',
   production_preflight_unavailable: '生产预检不可用',
 };
 

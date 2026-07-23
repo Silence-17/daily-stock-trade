@@ -484,6 +484,7 @@ class VnpyPaperGatewayPreflightResponse(BaseModel):
     default_setting_key_count: int = 0
     provided_key_count: int = 0
     missing_default_keys: List[str] = Field(default_factory=list)
+    empty_default_keys: List[str] = Field(default_factory=list)
     connect_attempted: bool = False
     subscriptions_created: bool = False
     orders_created: bool = False

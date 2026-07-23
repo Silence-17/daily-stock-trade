@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [修复] vn.py 生产预检现在把 Gateway 默认连接字段中的 `null` 和空白字符串作为 `default_setting_values_empty` 在 connect 前阻断，并只暴露空字段名而不泄露配置值或路径
+- [测试] 新增官方 `vnpy_ctp==6.7.11.4` Windows/Python 3.13 无凭据验收工作流，覆盖真实插件安装、MainEngine 零连接注册、连接缺失 fail-closed 和 CTP 原生模块冻结后导入探针
 - [测试] 修复 Windows 全量回归中的 SQLite 临时库句柄泄漏、系统配置测试环境串扰、Local CLI POSIX 权限断言和 Git Bash Docker entrypoint 路径解析，使相关 391 项测试可按真实执行顺序稳定运行
 - [新功能] 新增 `VNPY_GATEWAY_PLUGINS_JSON` 外部 Gateway 插件清单，统一驱动隔离环境、Docker 与 Windows/macOS Desktop 的包安装、模块导入、PyInstaller 收集和冻结后探针；非法/重复/URL/marker 清单、未开启 vn.py、安装失败或产物漏模块均 fail-closed，且账户参数仍保持仓库外置
 - [测试] 新增 Gateway 插件清单解析、参数隔离、pip 失败、模块导入，以及 Docker/桌面打包契约回归；Windows PowerShell 5 实物构建验证 JSON 安全传递、单模块数组扁平化、动态 `--collect-all` 和冻结后声明模块导入

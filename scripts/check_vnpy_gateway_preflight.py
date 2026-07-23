@@ -37,6 +37,7 @@ def evaluate_preflight(
     settings_valid: bool,
     settings_inside_repository: bool,
     missing_default_keys: Iterable[str],
+    empty_default_keys: Iterable[str],
     require_external_gateway: bool,
     require_settings_outside_repository: bool,
     require_all_default_keys: bool,
@@ -65,6 +66,9 @@ def evaluate_preflight(
     missing = sorted({str(item) for item in missing_default_keys if str(item)})
     if require_all_default_keys and missing:
         failures.append("default_setting_keys_missing")
+    empty = sorted({str(item) for item in empty_default_keys if str(item)})
+    if require_all_default_keys and empty:
+        failures.append("default_setting_values_empty")
     return {
         "ok": not failures,
         "failures": failures,
@@ -135,6 +139,7 @@ def inspect_preflight(
         for key, value in (payload or {}).items()
         if value is None or (isinstance(value, str) and not value.strip())
     )
+    empty_default_keys = sorted(set(expected_keys) & set(empty_keys))
     connect_without_settings = bool(
         getattr(gateway, "connect_without_settings", False)
     ) if gateway is not None else False
@@ -156,6 +161,7 @@ def inspect_preflight(
         settings_valid=bool(settings_diagnostics["valid"]),
         settings_inside_repository=bool(settings_diagnostics["inside_repository"]),
         missing_default_keys=missing_keys,
+        empty_default_keys=empty_default_keys,
         require_external_gateway=require_external_gateway,
         require_settings_outside_repository=outside_required,
         require_all_default_keys=require_all_default_keys,
@@ -165,7 +171,9 @@ def inspect_preflight(
         warnings.append("default_setting_keys_missing")
     if unknown_keys:
         warnings.append("unknown_setting_keys")
-    if empty_keys:
+    if empty_default_keys and not require_all_default_keys:
+        warnings.append("default_setting_values_empty")
+    if sorted(set(empty_keys) - set(empty_default_keys)):
         warnings.append("empty_setting_values")
     return {
         "schema_version": 1,
@@ -186,6 +194,7 @@ def inspect_preflight(
             "missing_default_keys": missing_keys,
             "unknown_keys": unknown_keys,
             "empty_value_keys": empty_keys,
+            "empty_default_keys": empty_default_keys,
         },
         "runtime": {
             "available": runtime_available,

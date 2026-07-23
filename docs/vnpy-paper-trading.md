@@ -168,6 +168,10 @@
 
 外部 Gateway 插件可通过统一的 `VNPY_GATEWAY_PLUGINS_JSON` 清单安装和验证，例如 `[{"package":"<gateway-package>==<version>","module":"<gateway_module>"}]`。每项必须同时声明 pip 注册表 requirement 和可导入的顶层模块；安装器拒绝 URL、环境 marker、重复包/模块、未知键和非法模块名，并把每个 requirement 作为独立 pip 参数执行，不拼接 shell 命令。`scripts/setup_vnpy_runtime.ps1`、Docker 可选 vn.py 镜像及 Windows/macOS Desktop 冻结构建复用同一清单。清单只描述公开包和模块，不能包含私有索引凭据；Gateway 账户参数仍必须放入仓库外的 `VNPY_CONNECT_SETTINGS_PATH` JSON。
 
+首个实物外部插件样本是 Windows/Python 3.13 的官方 `vnpy_ctp==6.7.11.4`：清单使用 `[{"package":"vnpy_ctp==6.7.11.4","module":"vnpy_ctp"}]`，Gateway 设置为 `VNPY_GATEWAY_CLASS=vnpy_ctp:CtpGateway`、`VNPY_GATEWAY_NAME=CTP`。本地零连接验收已真实导入原生 wheel、向 MainEngine 注册 `CtpGateway`，识别 8 个默认连接字段，并确认未连接、未订阅、未下单；缺少仓库外连接 JSON 时按预期只返回 `connect_settings_required`。手动工作流 `.github/workflows/vnpy-external-gateway-smoke.yml` 会重复安装、零连接注册和冻结后导入探针，不读取 Secrets。该 PyPI 版本当前只提供 CPython 3.13 Windows x64 wheel；Linux/macOS 需按上游文档准备编译器和原生库，不能把 Windows 证据外推为跨平台可用。SimNow 或券商账号必须由部署方自行申请，本仓库不提供、生成或保存账户参数。
+
+生产预检会把 Gateway `default_setting` 中缺失的字段报告为 `default_setting_keys_missing`，把已提供但为 `null`/空白字符串的字段报告为 `default_setting_values_empty`。两者都会在连接前 fail-closed；API 仅返回字段名，不返回字段值或配置路径。
+
 真实 gateway 配置完成后，可在不下单的情况下做长跑连接验收：
 
 ```powershell

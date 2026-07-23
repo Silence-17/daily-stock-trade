@@ -840,6 +840,7 @@ export type VnpyPaperGatewayPreflightResponse = {
   defaultSettingKeyCount: number;
   providedKeyCount: number;
   missingDefaultKeys: string[];
+  emptyDefaultKeys: string[];
   connectAttempted: boolean;
   subscriptionsCreated: boolean;
   ordersCreated: boolean;

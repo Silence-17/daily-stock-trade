@@ -841,6 +841,11 @@ def _evaluate_production_connect_preflight(
     expected_keys = sorted(str(key) for key in default_setting)
     provided_keys = sorted(str(key) for key in payload)
     missing_keys = sorted(set(expected_keys) - set(provided_keys))
+    empty_keys = sorted(
+        key
+        for key in expected_keys
+        if key in payload and _is_empty_connect_setting(payload[key])
+    )
     settings_inside_repository = bool(
         settings_path is not None and _is_within_repository(settings_path)
     )
@@ -853,6 +858,8 @@ def _evaluate_production_connect_preflight(
         failures.append("connect_settings_inside_repository")
     if missing_keys:
         failures.append("default_setting_keys_missing")
+    if empty_keys:
+        failures.append("default_setting_values_empty")
     return {
         "enabled": True,
         "ok": not failures,
@@ -867,9 +874,14 @@ def _evaluate_production_connect_preflight(
         "default_setting_key_count": len(expected_keys),
         "provided_key_count": len(provided_keys),
         "missing_default_keys": missing_keys,
+        "empty_default_keys": empty_keys,
         "settings_path_exposed": False,
         "settings_values_exposed": False,
     }
+
+
+def _is_empty_connect_setting(value: Any) -> bool:
+    return value is None or (isinstance(value, str) and not value.strip())
 
 
 def _run_loaded_runtime_production_preflight(
