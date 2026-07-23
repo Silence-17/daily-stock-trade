@@ -1185,7 +1185,9 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
         self.assertEqual(detail["decisions"][0]["status"], "failed")
 
         sync_state = status_resp.json()["diagnostics"]["vnpy_sync_state"]
-        self.assertEqual(sync_state["account"]["account_id"], "SIM.ACC")
+        self.assertEqual(sync_state["account"]["available"], 99000.0)
+        self.assertNotIn("account_id", sync_state["account"])
+        self.assertNotIn("raw", sync_state["account"])
         self.assertEqual(sync_state["position_count"], 1)
         self.assertEqual(sync_state["positions"][0]["symbol"], "600519")
         self.assertEqual(sync_state["recent_orders"][0]["status"], "rejected")

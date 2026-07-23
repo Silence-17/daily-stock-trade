@@ -5686,6 +5686,24 @@ class VnpyPaperTradingService:
     def _vnpy_sync_state_summary(self) -> Dict[str, Any]:
         state = self._read_vnpy_sync_state()
         orders = state.get("orders") if isinstance(state.get("orders"), dict) else {}
+        account = state.get("account") if isinstance(state.get("account"), dict) else None
+        public_account = (
+            {
+                key: account.get(key)
+                for key in (
+                    "balance",
+                    "available",
+                    "frozen",
+                    "margin",
+                    "close_profit",
+                    "holding_profit",
+                    "currency",
+                    "updated_at",
+                )
+            }
+            if account is not None
+            else None
+        )
         recent_orders = sorted(
             [item for item in orders.values() if isinstance(item, dict)],
             key=lambda item: str(item.get("updated_at") or ""),
@@ -5693,7 +5711,7 @@ class VnpyPaperTradingService:
         )[:20]
         return {
             "updated_at": state.get("updated_at"),
-            "account": state.get("account") if isinstance(state.get("account"), dict) else None,
+            "account": public_account,
             "positions": state.get("positions") if isinstance(state.get("positions"), list) else [],
             "position_count": len(state.get("positions") or []) if isinstance(state.get("positions"), list) else 0,
             "recent_orders": recent_orders,

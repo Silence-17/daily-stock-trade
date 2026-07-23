@@ -5712,7 +5712,7 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertEqual(audit["trade_plans"][0]["skip_reason"], "vnpy_order_rejected")
         self.assertEqual(audit["decisions"][0]["status"], "failed")
 
-    def test_vnpy_account_and_position_callbacks_are_exposed_in_status_diagnostics(self) -> None:
+    def test_vnpy_account_status_diagnostics_redact_external_account_identity(self) -> None:
         account_sync = self.service.sync_vnpy_account_callback(
             account_id="SIM.ACC",
             balance=100000,
@@ -5740,11 +5740,14 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertTrue(account_sync["accepted"])
         self.assertTrue(position_sync["accepted"])
         sync_state = status["diagnostics"]["vnpy_sync_state"]
-        self.assertEqual(sync_state["account"]["account_id"], "SIM.ACC")
         self.assertEqual(sync_state["account"]["available"], 99000.0)
+        self.assertNotIn("account_id", sync_state["account"])
+        self.assertNotIn("raw", sync_state["account"])
         self.assertEqual(sync_state["position_count"], 1)
         self.assertEqual(sync_state["positions"][0]["symbol"], "600519")
         self.assertEqual(sync_state["positions"][0]["vt_symbol"], "600519.SSE")
+        persisted_state = self.service._read_vnpy_sync_state()
+        self.assertEqual(persisted_state["account"]["account_id"], "SIM.ACC")
 
     def test_vnpy_event_engine_bridge_updates_submitted_plan_from_order_event(self) -> None:
         installed = _install_fake_vnpy_modules()
