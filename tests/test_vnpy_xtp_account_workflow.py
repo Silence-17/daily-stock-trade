@@ -20,6 +20,7 @@ def test_xtp_account_soak_is_manual_protected_and_serialized() -> None:
     job = workflow["jobs"]["xtp-account-soak"]
     assert job["environment"] == "vnpy-xtp-paper-acceptance"
     assert job["runs-on"] == "windows-2022"
+    assert job["env"]["PYTHONUTF8"] == "1"
     assert "VNPY_XTP_CONNECT_SETTINGS_JSON" not in job["env"]
     materialize = next(
         step

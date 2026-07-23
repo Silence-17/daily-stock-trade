@@ -44,6 +44,7 @@ jobs:
     timeout-minutes: 300
     environment: vnpy-xtp-paper-acceptance
     env:
+      PYTHONUTF8: '1'
       VNPY_GATEWAY_PLUGINS_JSON: '[{"package":"vnpy_xtp==2.2.32.2.3","module":"vnpy_xtp"}]'
       VNPY_RUNTIME_ENABLED: 'true'
       VNPY_GATEWAY_CLASS: vnpy_xtp:XtpGateway
