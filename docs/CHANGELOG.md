@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [修复] efinance 股票、ETF、指数和市场宽度现保留 EastMoney 真实更新时间并统一为 UTC；宽度仅在全部有效计数行都有时间时报告最早 provider as-of 和 100% 覆盖率，AkShare 新浪/腾讯单票直连也补齐明确 provider 时间
+- [修复] 自动交易盘中严格门禁不再把缺失宽度时间覆盖率的响应默认为完整，只有显式且精确的 100% 覆盖率才能通过 provider 时间校验
 - [修复] vn.py runtime 现可通过官方 CTP Gateway 的交易/行情通道 `login_status` 确认连接，要求所有现有通道均已登录，避免真实 CTP 登录后长期停留在 `connection_unconfirmed`
 - [测试] 新增受 GitHub Environment 保护的 CTP 模拟账户零下单长跑工作流，临时注入连接 JSON、严格预检、按账户/可选持仓事件验收并上传 14 天脱敏证据；原始 secret 不进入安装、观测或上传步骤
 - [chore] GitHub 已创建 `vnpy-ctp-paper-acceptance` Environment 并仅允许 `main` 分支，工作流同步增加代码侧 main 硬门禁；当前计费方案不支持 required reviewer/wait timer，环境仍保持 0 secret

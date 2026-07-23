@@ -27,7 +27,7 @@ import re
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List, Tuple
 
 import pandas as pd
@@ -70,6 +70,90 @@ from .realtime_types import (
     get_realtime_circuit_breaker,
     safe_float, safe_int  # 使用统一的类型转换函数
 )
+
+
+def _normalize_efinance_provider_timestamp(value: Any) -> Optional[str]:
+    """Restore efinance's provider quote time as an absolute UTC timestamp."""
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        return None
+
+    try:
+        if isinstance(value, datetime):
+            parsed = value
+        elif isinstance(value, (int, float)):
+            epoch = float(value)
+            if epoch > 10_000_000_000:
+                epoch /= 1000
+            parsed = datetime.fromtimestamp(epoch, tz=timezone.utc)
+        else:
+            text = str(value).strip()
+            if not text or text in {"-", "--", "0"}:
+                return None
+            if re.fullmatch(r"\d{10}(?:\.\d+)?|\d{13}", text):
+                epoch = float(text)
+                if epoch > 10_000_000_000:
+                    epoch /= 1000
+                parsed = datetime.fromtimestamp(epoch, tz=timezone.utc)
+            else:
+                parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+
+        if parsed.tzinfo is None:
+            # efinance creates this value with datetime.fromtimestamp(), so the
+            # naive text is in the current host timezone rather than Shanghai
+            # time unconditionally (for example, GitHub runners may use UTC).
+            local_timezone = datetime.now().astimezone().tzinfo
+            if local_timezone is None:
+                return None
+            parsed = parsed.replace(tzinfo=local_timezone)
+        return parsed.astimezone(timezone.utc).isoformat()
+    except (OverflowError, OSError, TypeError, ValueError):
+        return None
+
+
+def _extract_efinance_provider_timestamp(row: Any) -> Optional[str]:
+    """Read either the raw or formatted efinance quote-time column."""
+    if not hasattr(row, "get"):
+        return None
+    for column in ("更新时间戳", "更新时间", "provider_timestamp"):
+        timestamp = _normalize_efinance_provider_timestamp(row.get(column))
+        if timestamp:
+            return timestamp
+    return None
+
+
+def _normalize_efinance_data_date(value: Any) -> Optional[str]:
+    """Normalize EastMoney's latest trading-date field without inferring one."""
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        return None
+    text = str(value).strip()
+    if not text or text in {"-", "--", "0"}:
+        return None
+    try:
+        if re.fullmatch(r"\d{8}", text):
+            return datetime.strptime(text, "%Y%m%d").date().isoformat()
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).date().isoformat()
+    except ValueError:
+        return None
+
+
+def _extract_efinance_data_date(row: Any) -> Optional[str]:
+    if not hasattr(row, "get"):
+        return None
+    for column in ("最新交易日", "data_date"):
+        data_date = _normalize_efinance_data_date(row.get(column))
+        if data_date:
+            return data_date
+    return None
 
 
 # 保留旧的类型别名，用于向后兼容
@@ -710,6 +794,7 @@ class EfinanceFetcher(BaseFetcher):
                 code=stock_code,
                 name=str(row.get(name_col, '')),
                 source=RealtimeSource.EFINANCE,
+                provider_timestamp=_extract_efinance_provider_timestamp(row),
                 price=safe_float(row.get(price_col)),
                 change_pct=safe_float(row.get(pct_col)),
                 change_amount=safe_float(row.get(chg_col)),
@@ -811,6 +896,7 @@ class EfinanceFetcher(BaseFetcher):
                 code=target_code,
                 name=str(row.get(name_col, '')),
                 source=RealtimeSource.EFINANCE,
+                provider_timestamp=_extract_efinance_provider_timestamp(row),
                 price=safe_float(row.get(price_col)),
                 change_pct=safe_float(row.get(pct_col)),
                 change_amount=safe_float(row.get(chg_col)),
@@ -910,6 +996,8 @@ class EfinanceFetcher(BaseFetcher):
                     'amount': safe_float(item.get(amt_col, 0)),
                     'amplitude': safe_float(item.get(amp_col, 0)),
                     'data_granularity': 'realtime',
+                    'provider_timestamp': _extract_efinance_provider_timestamp(item),
+                    'data_date': _extract_efinance_data_date(item),
                 })
 
             if results:
@@ -994,9 +1082,32 @@ class EfinanceFetcher(BaseFetcher):
         up_count = 0
         down_count = 0
         flat_count = 0
+        valid_rows = 0
+        provider_timestamps: List[str] = []
+        provider_time_col = next(
+            (c for c in ['更新时间戳', '更新时间', 'provider_timestamp'] if c in df.columns),
+            None,
+        )
+        data_date_col = next(
+            (c for c in ['最新交易日', 'data_date'] if c in df.columns),
+            None,
+        )
 
-        for code, name, current_price, pre_close, amount in zip(
-            df[code_col], df[name_col], df[close_col], df[pre_close_col], df[amount_col]
+        provider_time_values = (
+            df[provider_time_col]
+            if provider_time_col
+            else [None] * len(df)
+        )
+        data_date_values = df[data_date_col] if data_date_col else [None] * len(df)
+        data_dates: List[str] = []
+        for code, name, current_price, pre_close, amount, provider_time, data_date_value in zip(
+            df[code_col],
+            df[name_col],
+            df[close_col],
+            df[pre_close_col],
+            df[amount_col],
+            provider_time_values,
+            data_date_values,
         ):
             
             # 停牌过滤 efinance 的停牌数据有时候会缺失价格显示为 '-'，em 显示为none
@@ -1006,6 +1117,13 @@ class EfinanceFetcher(BaseFetcher):
             # em、efinance 为str 需要转换为float
             current_price = float(current_price)
             pre_close = float(pre_close)
+            valid_rows += 1
+            provider_timestamp = _normalize_efinance_provider_timestamp(provider_time)
+            if provider_timestamp:
+                provider_timestamps.append(provider_timestamp)
+            data_date = _normalize_efinance_data_date(data_date_value)
+            if data_date:
+                data_dates.append(data_date)
             
             # 获取去除前缀的纯数字代码
             pure_code = normalize_stock_code(str(code)) 
@@ -1052,6 +1170,22 @@ class EfinanceFetcher(BaseFetcher):
             'limit_up_count': limit_up_count,
             'limit_down_count': limit_down_count,
             'total_amount': 0.0,
+            'provider_timestamp': (
+                min(provider_timestamps)
+                if valid_rows and len(provider_timestamps) == valid_rows
+                else None
+            ),
+            'provider_timestamp_coverage_pct': (
+                round(len(provider_timestamps) / valid_rows * 100, 6)
+                if valid_rows
+                else 0.0
+            ),
+            'data_date': (
+                data_dates[0]
+                if valid_rows and len(data_dates) == valid_rows and len(set(data_dates)) == 1
+                else None
+            ),
+            'data_granularity': 'realtime',
         }
         
         # 成交额统计

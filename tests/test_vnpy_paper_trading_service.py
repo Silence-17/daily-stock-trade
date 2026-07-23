@@ -2972,6 +2972,40 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
             "breadth_provider_timestamp_required",
         )
 
+    def test_intraday_market_gate_requires_explicit_complete_breadth_timestamp_coverage(self) -> None:
+        now_iso = datetime.now(timezone.utc).isoformat()
+        manager = MagicMock()
+        manager.get_main_indices.return_value = [
+            {
+                "code": "sh000001",
+                "change_pct": 0.5,
+                "provider_timestamp": now_iso,
+                "data_granularity": "realtime",
+            }
+        ]
+        manager.get_market_stats.return_value = {
+            "up_count": 3000,
+            "down_count": 1000,
+            "flat_count": 100,
+            "provider_timestamp": now_iso,
+        }
+        self.service.data_fetcher_manager = manager
+        settings = replace(
+            self.service.get_settings(),
+            auto_intraday_market_gate_enabled=True,
+        )
+
+        reason, diagnostics = self.service._market_context_pre_trade_risk(settings)
+
+        self.assertEqual(reason, "intraday_market_breadth_unavailable")
+        breadth = diagnostics["intraday_market"]["breadth"]
+        self.assertEqual(breadth["provider_timestamp_status"], "fresh")
+        self.assertIsNone(breadth["provider_timestamp_coverage_pct"])
+        self.assertEqual(
+            breadth["evidence_reason"],
+            "breadth_provider_timestamp_required",
+        )
+
     def test_intraday_market_gate_rejects_explicit_end_of_day_index_fallback(self) -> None:
         manager = MagicMock()
         manager.get_main_indices.return_value = [

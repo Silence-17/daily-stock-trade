@@ -29,8 +29,9 @@ import os
 import random
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List, Tuple
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import requests
@@ -64,6 +65,28 @@ TENCENT_REALTIME_ENDPOINT = "qt.gtimg.cn/q"
 _AKSHARE_HISTORY_CALL_TIMEOUT = 30.0
 _AKSHARE_TIMEOUT_PROCESS_JOIN_GRACE = 1.0
 _AKSHARE_TIMEOUT_PROCESS_START_METHOD = "spawn"
+
+
+def _normalize_cn_quote_timestamp(value: Any) -> Optional[str]:
+    """Normalize an explicit Sina/Tencent A-share quote time to UTC."""
+    text = str(value or "").strip()
+    if not text or text in {"-", "--", "0"}:
+        return None
+    for timestamp_format in (
+        "%Y%m%d%H%M%S",
+        "%Y/%m/%d %H:%M:%S",
+        "%Y-%m-%d %H:%M:%S",
+    ):
+        try:
+            return (
+                datetime.strptime(text, timestamp_format)
+                .replace(tzinfo=ZoneInfo("Asia/Shanghai"))
+                .astimezone(timezone.utc)
+                .isoformat()
+            )
+        except ValueError:
+            continue
+    return None
 
 
 # User-Agent 池，用于随机轮换
@@ -1167,6 +1190,9 @@ class AkshareFetcher(BaseFetcher):
                 code=stock_code,
                 name=fields[0],
                 source=RealtimeSource.AKSHARE_SINA,
+                provider_timestamp=_normalize_cn_quote_timestamp(
+                    f"{fields[30]} {fields[31]}"
+                ),
                 price=price,
                 change_pct=change_pct,
                 change_amount=change_amount,
@@ -1312,6 +1338,7 @@ class AkshareFetcher(BaseFetcher):
                 code=stock_code,
                 name=fields[1] if len(fields) > 1 else "",
                 source=RealtimeSource.TENCENT,
+                provider_timestamp=_normalize_cn_quote_timestamp(fields[30]),
                 price=safe_float(fields[3]),
                 change_pct=safe_float(fields[32]),
                 change_amount=safe_float(fields[31]) if len(fields) > 31 else None,

@@ -10728,8 +10728,8 @@ class VnpyPaperTradingService:
             except (TypeError, ValueError):
                 provider_timestamp_status = "invalid"
         timestamp_coverage_incomplete = (
-            provider_timestamp_coverage_pct is not None
-            and provider_timestamp_coverage_pct < 100.0
+            provider_timestamp_coverage_pct is None
+            or abs(provider_timestamp_coverage_pct - 100.0) > 1e-6
         )
         if require_provider_timestamp and (
             provider_timestamp_status != "fresh" or timestamp_coverage_incomplete
