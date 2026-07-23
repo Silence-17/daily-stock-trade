@@ -182,7 +182,7 @@
 
 同日部署态 Windows/Python 3.13 服务完成 300 秒 XTP 长跑，60/60 次 API、runtime、双通道连接和 EventEngine bridge 采样均通过，新增 74 个账户与 1350 个持仓事件，订单/成交事件为 0。随后在隔离本地账户 `#8` 提交唯一一笔 100 股、470 元的受控 XTP 测试委托；柜台返回 `nottraded`，独立会话撤单后主服务收到 `cancelled`，成交量保持 0，本地现金 100000 元、零持仓和零成交均未变化。一次 `dual_low` dry-run 另生成 1 候选、1 计划、0 提交，证明选股链路不会在演练模式触发 XTP。正式自动执行已切换为 `vnpy_paper`，每次最多 1 只、每单/每日预算 1000 元，并按交易时段门禁对齐到下一交易日 09:35；真实成交回报仍需在开市窗口完成最终验收。
 
-只读预检可直接运行 `python scripts/check_vnpy_xtp_order_acceptance.py`。脚本默认不下单；受控订单模式必须显式给出 `--place-order --confirmation XTP_PAPER_ORDER --price <limit>`，强制数量不超过 100 股、名义金额不超过 2000 元、自动交易处于暂停状态且不存在其他活动 XTP 委托，并在超时后调用通用撤单接口。默认还要求当前市场开市；仅做收盘后提交/撤单通路验证时才可显式添加 `--allow-closed-market`。
+只读预检可直接运行 `python scripts/check_vnpy_xtp_order_acceptance.py`。脚本默认不下单，也不要求暂停已配置的自动交易；受控订单模式必须显式给出 `--place-order --confirmation XTP_PAPER_ORDER --price <limit>`，强制数量不超过 100 股、名义金额不超过 2000 元、自动交易处于暂停状态且不存在其他活动 XTP 委托，并在超时后调用通用撤单接口。默认还要求当前市场开市；仅做收盘后提交/撤单通路验证时才可显式添加 `--allow-closed-market`。
 
 该工作流固定使用 Windows/Python 3.13 和 `vnpy_xtp==2.2.32.2.3`，原始 secret 只注入生成临时连接文件的单个步骤，文件位于 runner 临时目录并在 `always()` 清理。连接前仍强制外部 Gateway、仓库外文件、完整非空默认键；观测脚本不订阅行情、不调用下单或撤单，只上传保留 14 天的脱敏聚合 JSON。`workflow_dispatch`、main-only 双门禁、固定 Environment、账户会话 concurrency 和账户所有者手工设置 secret 共同构成现有控制边界。此入口只用于中泰 XTP 股票类型测试账号；生产实盘凭据应留在受控部署主机上使用本地命令，不应放入云托管 runner。券商若限制来源 IP、设备或登录时段，GitHub-hosted runner 可能无法作为有效验收主机。
 

@@ -11,9 +11,12 @@ from scripts.check_vnpy_xtp_order_acceptance import (
 )
 
 
-def _status(*, market_open=True, active_orders=None):
+def _status(*, market_open=True, active_orders=None, auto_trade_enabled=False):
     return {
-        "settings": {"auto_trade_enabled": False, "vnpy_gateway_name": "XTP"},
+        "settings": {
+            "auto_trade_enabled": auto_trade_enabled,
+            "vnpy_gateway_name": "XTP",
+        },
         "account": {"id": 8},
         "snapshot": {
             "total_cash": 100000.0,
@@ -51,13 +54,21 @@ def _args(**overrides):
 
 def test_preflight_only_never_places_order():
     client = MagicMock()
-    client.get_status.return_value = _status()
+    client.get_status.return_value = _status(auto_trade_enabled=True)
 
     report = run_acceptance(_args(), client)
 
     assert report["status"] == "preflight_passed"
     assert report["places_orders"] is False
+    assert report["auto_trade_enabled"] is True
     client.request.assert_not_called()
+
+
+def test_order_acceptance_requires_auto_trade_to_be_disabled():
+    args = _args(place_order=True, confirmation=CONFIRMATION, price=4.7)
+
+    with pytest.raises(AcceptanceError, match="auto_trade_must_be_disabled_during_acceptance"):
+        validate_preconditions(_status(auto_trade_enabled=True), args)
 
 
 @pytest.mark.parametrize(

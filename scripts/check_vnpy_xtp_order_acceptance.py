@@ -148,7 +148,7 @@ def validate_preconditions(status: Dict[str, Any], args: argparse.Namespace) -> 
     if not _external_preflight_ok(status):
         failures.append("external_gateway_preflight_failed")
     settings = status.get("settings") if isinstance(status.get("settings"), dict) else {}
-    if settings.get("auto_trade_enabled") is True:
+    if args.place_order and settings.get("auto_trade_enabled") is True:
         failures.append("auto_trade_must_be_disabled_during_acceptance")
     if _active_xtp_orders(status):
         failures.append("active_xtp_order_already_exists")
@@ -198,6 +198,7 @@ def run_acceptance(args: argparse.Namespace, client: ApiClient) -> Dict[str, Any
         "connection_confirmed": _connection_confirmed(before),
         "external_preflight_ok": _external_preflight_ok(before),
         "places_orders": bool(args.place_order),
+        "auto_trade_enabled": bool((before.get("settings") or {}).get("auto_trade_enabled")),
         "limits": {"max_quantity": MAX_QUANTITY, "max_notional": MAX_NOTIONAL},
         "before": _local_ledger_summary(before),
     }
