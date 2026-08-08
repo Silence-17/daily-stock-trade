@@ -3,6 +3,7 @@
 
 import importlib.util
 import json
+import os
 import sys
 import unittest
 from types import SimpleNamespace
@@ -67,12 +68,27 @@ class TestTushareFetcherInit(unittest.TestCase):
     def test_init_builds_http_client_when_token_present(self) -> None:
         config = SimpleNamespace(tushare_token="demo-token")
 
-        with patch("data_provider.tushare_fetcher.get_config", return_value=config):
+        with (
+            patch.dict(os.environ, {"TUSHARE_PRIORITY": ""}),
+            patch("data_provider.tushare_fetcher.get_config", return_value=config),
+        ):
             fetcher = TushareFetcher()
 
         self.assertIsInstance(fetcher._api, _TushareHttpClient)
         self.assertTrue(fetcher.is_available())
         self.assertEqual(fetcher.priority, -1)
+
+    def test_explicit_priority_overrides_token_auto_promotion(self) -> None:
+        config = SimpleNamespace(tushare_token="demo-token")
+
+        with (
+            patch.dict(os.environ, {"TUSHARE_PRIORITY": "2"}),
+            patch("data_provider.tushare_fetcher.get_config", return_value=config),
+        ):
+            fetcher = TushareFetcher()
+
+        self.assertTrue(fetcher.is_available())
+        self.assertEqual(fetcher.priority, 2)
 
 
 if __name__ == "__main__":

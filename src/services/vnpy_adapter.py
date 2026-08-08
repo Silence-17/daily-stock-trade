@@ -22,6 +22,7 @@ class VnpyAdapterError(ValueError):
 
 _SSE_PREFIXES = ("5", "6", "9")
 _SZSE_PREFIXES = ("0", "2", "3")
+_BSE_PREFIXES = ("920",)
 _EXCHANGE_ALIASES = {
     "SH": "SSE",
     "SSE": "SSE",
@@ -29,6 +30,9 @@ _EXCHANGE_ALIASES = {
     "SZ": "SZSE",
     "SZSE": "SZSE",
     "XSHE": "SZSE",
+    "BJ": "BSE",
+    "BSE": "BSE",
+    "XBSE": "BSE",
     "HK": "SEHK",
     "HKEX": "SEHK",
     "SEHK": "SEHK",
@@ -84,11 +88,16 @@ def get_vnpy_adapter_status() -> Dict[str, Any]:
                 "symbol",
                 "exchange",
             ],
-            "supported_exchanges": ["SSE", "SZSE", "SEHK", "SMART"],
+            "supported_exchanges": ["SSE", "SZSE", "BSE", "SEHK", "SMART"],
             "supported_directions": {"buy": "LONG", "sell": "SHORT"},
             "supported_order_types": ["LIMIT", "MARKET"],
             "stock_offset": "NONE",
             "cn_buy_lot_size": 100,
+            "cn_regular_buy_lot_size": 100,
+            "cn_star_min_buy_quantity": 200,
+            "cn_star_buy_increment": 1,
+            "cn_bse_min_buy_quantity": 100,
+            "cn_bse_buy_increment": 1,
         },
     }
 
@@ -121,6 +130,7 @@ def get_vnpy_bridge_status(
     available = bool(main_engine is not None and send_order_supported and gateway_configured and order_request_supported)
     connection_confirmed: Optional[bool] = None
     connection_confirmation_source = "unavailable"
+    matching_diagnostics: Optional[Dict[str, Any]] = None
     if main_engine is not None and gateway_configured:
         get_gateway = getattr(main_engine, "get_gateway", None)
         gateway = get_gateway(str(gateway_name).strip()) if callable(get_gateway) else None
@@ -128,6 +138,8 @@ def get_vnpy_bridge_status(
             connection_confirmed, connection_confirmation_source = (
                 _gateway_connection_confirmation(gateway)
             )
+            if str(gateway_name or "").strip().upper() == "DSA_SIM":
+                matching_diagnostics = _gateway_matching_diagnostics(gateway)
     reason = None
     if not available:
         if main_engine is None:
@@ -164,6 +176,45 @@ def get_vnpy_bridge_status(
             else "unknown"
         ),
         "connection_confirmation_source": connection_confirmation_source,
+        "matching": matching_diagnostics,
+    }
+
+
+def _gateway_matching_diagnostics(gateway: Any) -> Dict[str, Any]:
+    get_state_snapshot = getattr(gateway, "get_state_snapshot", None)
+    if not callable(get_state_snapshot):
+        return {"available": False, "reason": "state_snapshot_unavailable"}
+    try:
+        state = get_state_snapshot()
+    except Exception as exc:  # noqa: BLE001 - diagnostics must remain read-only.
+        return {
+            "available": False,
+            "reason": "state_snapshot_failed",
+            "error_type": type(exc).__name__,
+        }
+    matching = state.get("matching") if isinstance(state, dict) else None
+    if not isinstance(matching, dict):
+        return {"available": False, "reason": "matching_state_unavailable"}
+    mode = str(matching.get("mode") or "").strip().lower()
+    return {
+        "available": bool(mode),
+        "reason": None if mode else "matching_mode_unavailable",
+        "mode": mode or None,
+        "fill_delay_seconds": _safe_nonnegative_float(
+            matching.get("fill_delay_seconds")
+        ),
+        "min_provider_span_seconds": _safe_nonnegative_float(
+            matching.get("min_provider_span_seconds")
+        ),
+        "max_provider_span_seconds": _safe_nonnegative_float(
+            matching.get("max_provider_span_seconds")
+        ),
+        "spread_source": (
+            str(matching.get("spread_source") or "").strip() or None
+        ),
+        "pending_baseline_count": _safe_nonnegative_int(
+            matching.get("pending_baseline_count")
+        ),
     }
 
 
@@ -436,6 +487,7 @@ def build_vnpy_order_request_payload(
 
     price_value = _safe_positive_float(price)
     volume = _resolve_volume(
+        symbol=normalized_symbol,
         market=market,
         side=side_norm,
         quantity=quantity,
@@ -542,7 +594,7 @@ def normalize_vnpy_symbol(symbol: str, *, market: str = "cn") -> Tuple[str, str]
         raise VnpyAdapterError("symbol is required")
 
     cleaned = raw_symbol.replace("_", ".").replace("-", ".")
-    prefix_match = re.match(r"^(SH|SZ|HK|US)([A-Z0-9.]+)$", cleaned)
+    prefix_match = re.match(r"^(SH|SZ|BJ|BSE|HK|US)([A-Z0-9.]+)$", cleaned)
     suffix_match = re.match(r"^([A-Z0-9]+)\.([A-Z]+)$", cleaned)
     if prefix_match:
         exchange = _EXCHANGE_ALIASES.get(prefix_match.group(1), prefix_match.group(1))
@@ -634,6 +686,8 @@ def _enum_member(enum_cls: Any, name: str) -> Any:
 def _infer_exchange(symbol: str, market: str) -> str:
     market_norm = str(market or "").strip().lower()
     if market_norm == "cn":
+        if symbol.startswith(_BSE_PREFIXES):
+            return "BSE"
         if symbol.startswith(_SSE_PREFIXES):
             return "SSE"
         if symbol.startswith(_SZSE_PREFIXES):
@@ -648,6 +702,7 @@ def _infer_exchange(symbol: str, market: str) -> str:
 
 def _resolve_volume(
     *,
+    symbol: str,
     market: str,
     side: str,
     quantity: Optional[float],
@@ -662,7 +717,14 @@ def _resolve_volume(
         quantity_value = cash_value / price
 
     if str(market or "").strip().lower() == "cn" and side == "buy":
-        quantity_value = math.floor(quantity_value / 100.0) * 100.0
+        symbol_text = str(symbol or "")
+        if symbol_text.startswith(("688", "689", *_BSE_PREFIXES)):
+            quantity_value = math.floor(quantity_value)
+            minimum = 100 if symbol_text.startswith(_BSE_PREFIXES) else 200
+            if quantity_value < minimum:
+                quantity_value = 0.0
+        else:
+            quantity_value = math.floor(quantity_value / 100.0) * 100.0
     if quantity_value <= 0:
         raise VnpyAdapterError("resolved volume is zero")
     return round(float(quantity_value), 8)
@@ -678,6 +740,25 @@ def _safe_positive_float(value: Any) -> Optional[float]:
     if not math.isfinite(number) or number <= 0:
         return None
     return number
+
+
+def _safe_nonnegative_float(value: Any) -> Optional[float]:
+    if value is None or value == "":
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number) or number < 0:
+        return None
+    return number
+
+
+def _safe_nonnegative_int(value: Any) -> Optional[int]:
+    number = _safe_nonnegative_float(value)
+    if number is None or not number.is_integer():
+        return None
+    return int(number)
 
 
 def _build_reference(*, source: str, plan_uid: Optional[str]) -> str:

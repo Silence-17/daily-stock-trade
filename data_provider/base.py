@@ -37,7 +37,7 @@ from src.services.run_diagnostics import (
 )
 from .fundamental_adapter import AkshareFundamentalAdapter
 from .yfinance_fundamental_adapter import YfinanceFundamentalAdapter
-from .realtime_types import CircuitBreaker
+from .realtime_types import CircuitBreaker, RealtimeSource, UnifiedRealtimeQuote
 
 # 配置日志
 logger = logging.getLogger(__name__)
@@ -160,10 +160,18 @@ ETF_PREFIXES = ("51", "52", "56", "58", "15", "16", "18")
 
 def _is_us_market(code: str) -> bool:
     """判断是否为美股/美股指数代码（不含中文前后缀）。"""
-    from .us_index_mapping import is_us_stock_code, is_us_index_code
+    from .us_index_mapping import (
+        is_us_index_code,
+        is_us_stock_code,
+        is_us_yfinance_alias_code,
+    )
 
     normalized = (code or "").strip().upper()
-    return is_us_index_code(normalized) or is_us_stock_code(normalized)
+    return (
+        is_us_index_code(normalized)
+        or is_us_yfinance_alias_code(normalized)
+        or is_us_stock_code(normalized)
+    )
 
 
 def _is_hk_market(code: str) -> bool:
@@ -186,7 +194,11 @@ def _is_hk_market(code: str) -> bool:
 
 def _is_jp_market(code: str) -> bool:
     """判定是否为日本 Yahoo Finance suffix 代码（如 7203.T）。"""
-    return is_suffix_market_symbol(code, "jp")
+    normalized = str(code or "").strip().upper()
+    return normalized in {"N225", "TOPX"} or is_suffix_market_symbol(
+        normalized,
+        "jp",
+    )
 
 
 def _is_kr_market(code: str) -> bool:
@@ -347,6 +359,7 @@ class BaseFetcher(ABC):
     name: str = "BaseFetcher"
     priority: int = 99  # 优先级数字越小越优先
     allow_empty_daily_data: bool = False
+    concurrent_safe_methods: Sequence[str] = ()
     
     @abstractmethod
     def _fetch_raw_data(self, stock_code: str, start_date: str, end_date: str) -> pd.DataFrame:
@@ -627,6 +640,11 @@ class DataFetcherManager:
         "PytdxFetcher": {"cn"},
         "BaostockFetcher": {"cn"},
         "YfinanceFetcher": {"cn", "hk", "us", "jp", "kr", "tw"},
+        "KoreaInvestmentFetcher": {"kr"},
+        "NaverKoreaFetcher": {"kr"},
+        "JapanIndexFetcher": {"jp"},
+        "AsiaEquityFetcher": {"jp", "tw"},
+        "GlobalFuturesFetcher": {"us"},
         "LongbridgeFetcher": {"hk", "us"},
         "FinnhubFetcher": {"us"},
         "AlphaVantageFetcher": {"us"},
@@ -657,7 +675,7 @@ class DataFetcherManager:
         self._stock_name_cache: Dict[str, str] = {}
         self._stock_name_cache_lock = RLock()
         
-        if fetchers:
+        if fetchers is not None:
             # 按优先级排序
             self._fetchers = sorted(fetchers, key=lambda f: f.priority)
             self._refresh_fetcher_indexes_locked()
@@ -752,6 +770,12 @@ class DataFetcherManager:
     def _call_fetcher_method(self, fetcher: BaseFetcher, method_name: str, *args, **kwargs):
         """Serialize shared fetcher state access through manager-owned per-instance locks."""
         method = getattr(fetcher, method_name)
+        concurrent_safe_methods = getattr(fetcher, "concurrent_safe_methods", ())
+        if (
+            isinstance(concurrent_safe_methods, (list, tuple, set, frozenset))
+            and method_name in concurrent_safe_methods
+        ):
+            return method(*args, **kwargs)
         with self._get_fetcher_call_lock(fetcher):
             return method(*args, **kwargs)
 
@@ -1424,6 +1448,14 @@ class DataFetcherManager:
                 ),
                 None,
             )
+            volume_ratio_col = next(
+                (
+                    col
+                    for col in raw_data.columns
+                    if str(col) in {"volume_ratio", "\u91cf\u6bd4"}
+                ),
+                None,
+            )
             lead_col = next(
                 (
                     col
@@ -1466,6 +1498,15 @@ class DataFetcherManager:
                             item["change_pct"] = float(change_raw)
                         except (TypeError, ValueError):
                             item["change_pct"] = str(change_raw).strip()
+                if volume_ratio_col is not None:
+                    volume_ratio_raw = row.get(volume_ratio_col, "")
+                    if not DataFetcherManager._is_missing_board_value(
+                        volume_ratio_raw
+                    ):
+                        try:
+                            item["volume_ratio"] = float(volume_ratio_raw)
+                        except (TypeError, ValueError):
+                            item["volume_ratio"] = str(volume_ratio_raw).strip()
                 if lead_col is not None:
                     lead_raw = row.get(lead_col, "")
                     if not DataFetcherManager._is_missing_board_value(lead_raw):
@@ -1515,6 +1556,21 @@ class DataFetcherManager:
                             normalized_item["change_pct"] = float(change_raw)
                         except (TypeError, ValueError):
                             normalized_item["change_pct"] = str(change_raw).strip()
+                    volume_ratio_raw = _pick_present(
+                        item,
+                        ("volume_ratio", "\u91cf\u6bd4"),
+                    )
+                    if not DataFetcherManager._is_missing_board_value(
+                        volume_ratio_raw
+                    ):
+                        try:
+                            normalized_item["volume_ratio"] = float(
+                                volume_ratio_raw
+                            )
+                        except (TypeError, ValueError):
+                            normalized_item["volume_ratio"] = str(
+                                volume_ratio_raw
+                            ).strip()
                     lead_raw = _pick_present(item, ("lead_stock", "leader", "领涨股", "龙头股"))
                     if not DataFetcherManager._is_missing_board_value(lead_raw):
                         normalized_item["lead_stock"] = str(lead_raw).strip()
@@ -1564,6 +1620,11 @@ class DataFetcherManager:
         from .pytdx_fetcher import PytdxFetcher
         from .baostock_fetcher import BaostockFetcher
         from .yfinance_fetcher import YfinanceFetcher
+        from .korea_investment_fetcher import KoreaInvestmentFetcher
+        from .naver_korea_fetcher import NaverKoreaFetcher
+        from .japan_index_fetcher import JapanIndexFetcher
+        from .asia_equity_fetcher import AsiaEquityFetcher
+        from .global_futures_fetcher import GlobalFuturesFetcher
         from .longbridge_fetcher import LongbridgeFetcher
         config = get_config()
         # 创建所有数据源实例（优先级在各 Fetcher 的 __init__ 中确定）
@@ -1574,7 +1635,18 @@ class DataFetcherManager:
         pytdx = PytdxFetcher()      # 通达信数据源（可配 PYTDX_HOST/PYTDX_PORT）
         baostock = BaostockFetcher()
         yfinance = YfinanceFetcher()
+        naver_korea = NaverKoreaFetcher()
+        japan_index = JapanIndexFetcher()
+        asia_equity = AsiaEquityFetcher()
+        global_futures = GlobalFuturesFetcher()
         optional_fetchers: List[BaseFetcher] = []
+
+        kis_app_key = (getattr(config, "kis_app_key", None) or "").strip()
+        kis_app_secret = (getattr(config, "kis_app_secret", None) or "").strip()
+        if kis_app_key and kis_app_secret:
+            optional_fetchers.append(KoreaInvestmentFetcher())
+        else:
+            logger.debug("[数据源初始化] 跳过未配置的 KoreaInvestmentFetcher")
 
         tushare_token = (getattr(config, "tushare_token", None) or "").strip()
         if tushare_token:
@@ -1625,6 +1697,10 @@ class DataFetcherManager:
                 akshare,
                 pytdx,
                 baostock,
+                naver_korea,
+                japan_index,
+                asia_equity,
+                global_futures,
                 yfinance,
                 *optional_fetchers,
             ]
@@ -1674,7 +1750,11 @@ class DataFetcherManager:
         Raises:
             DataFetchError: 所有数据源都失败时抛出
         """
-        from .us_index_mapping import is_us_index_code, is_us_stock_code
+        from .us_index_mapping import (
+            is_us_index_code,
+            is_us_stock_code,
+            is_us_yfinance_alias_code,
+        )
 
         # Normalize code (strip SH/SZ prefix etc.)
         stock_code = normalize_stock_code(stock_code)
@@ -1687,11 +1767,14 @@ class DataFetcherManager:
         #   - 配置长桥凭据后: Longbridge 为首选, YFinance/AkShare 兜底
         #   - 未配置长桥:     YFinance 为首选（美股）, 通用 fetcher 循环（港股）
         #   - 美股指数:       始终 YFinance 为首选（Longbridge 不提供指数K线）
-        is_us_index = is_us_index_code(stock_code)
+        is_us_alias = is_us_yfinance_alias_code(stock_code)
+        is_us_index = is_us_index_code(stock_code) or is_us_alias
         is_us = is_us_index or is_us_stock_code(stock_code)
         is_hk = (not is_us) and _is_hk_market(stock_code)
         is_jp = (not is_us) and (not is_hk) and _is_jp_market(stock_code)
-        is_kr = (not is_us) and (not is_hk) and _is_kr_market(stock_code)
+        is_kr = (not is_us) and (not is_hk) and (
+            _is_kr_market(stock_code) or stock_code.upper() in {"KS11", "KQ11"}
+        )
         is_tw = (not is_us) and (not is_hk) and _is_tw_market(stock_code)
         market = "us" if is_us else "hk" if is_hk else "jp" if is_jp else "kr" if is_kr else "tw" if is_tw else "cn"
         if market != "cn":
@@ -1710,7 +1793,9 @@ class DataFetcherManager:
         # When Longbridge preferred: Longbridge -> Finnhub -> AlphaVantage -> Yfinance
         if is_us:
             prefer_lb = self._longbridge_preferred(capability="daily_data") and not is_us_index
-            if is_us_index:
+            if is_us_alias:
+                source_order = ["GlobalFuturesFetcher", "YfinanceFetcher"]
+            elif is_us_index:
                 # 指数始终 YFinance 首选（Longbridge 不提供指数K线）
                 source_order = ["YfinanceFetcher", "FinnhubFetcher"]
             elif prefer_lb:
@@ -2086,6 +2171,9 @@ class DataFetcherManager:
             "AkshareFetcher": "akshare",
             "FinnhubFetcher": "finnhub",
             "AlphaVantageFetcher": "alphavantage",
+            "KoreaInvestmentFetcher": "korea_investment",
+            "NaverKoreaFetcher": "naver",
+            "GlobalFuturesFetcher": "global_futures",
             "EfinanceFetcher": "efinance",
             "TushareFetcher": "tushare",
         }
@@ -2124,7 +2212,13 @@ class DataFetcherManager:
         setattr(quote, "is_stale", stale_seconds > int(ttl))
         return quote
     
-    def get_realtime_quote(self, stock_code: str, *, log_final_failure: bool = True):
+    def get_realtime_quote(
+        self,
+        stock_code: str,
+        *,
+        log_final_failure: bool = True,
+        require_provider_timestamp: bool = False,
+    ):
         """
         获取实时行情数据（自动故障切换）
         
@@ -2140,6 +2234,8 @@ class DataFetcherManager:
             stock_code: 股票代码
             log_final_failure: Whether to emit the final "all sources failed"
                 summary log when no realtime quote is available.
+            require_provider_timestamp: Continue fallback when a quote lacks a
+                real provider timestamp. Intended for strict trading gates.
             
         Returns:
             UnifiedRealtimeQuote 对象，所有数据源都失败则返回 None
@@ -2149,10 +2245,21 @@ class DataFetcherManager:
         stock_code = normalize_stock_code(stock_code)
 
         from .akshare_fetcher import _is_us_code
-        from .us_index_mapping import is_us_index_code
+        from .us_index_mapping import is_us_index_code, is_us_yfinance_alias_code
         from src.config import get_config
 
         config = get_config()
+
+        def acceptable(quote) -> bool:
+            return bool(
+                quote is not None
+                and (
+                    not require_provider_timestamp
+                    or self._parse_realtime_timestamp(
+                        getattr(quote, "provider_timestamp", None)
+                    ) is not None
+                )
+            )
 
         # 如果实时行情功能被禁用，直接返回 None
         if not config.enable_realtime_quote:
@@ -2165,22 +2272,100 @@ class DataFetcherManager:
         #   未配置长桥: YFinance/AkShare 首选, Longbridge 补充
         #   美股指数:   始终 YFinance 首选（Longbridge 不提供指数行情）
         # ----------------------------------------------------------
-        is_us_index = is_us_index_code(stock_code)
-        is_us = is_us_index or _is_us_code(stock_code)
-        is_hk = (not is_us) and _is_hk_market(stock_code)
-        is_jp = (not is_us) and (not is_hk) and _is_jp_market(stock_code)
-        is_kr = (not is_us) and (not is_hk) and _is_kr_market(stock_code)
-        is_tw = (not is_us) and (not is_hk) and _is_tw_market(stock_code)
+        is_jp = _is_jp_market(stock_code)
+        is_kr = _is_kr_market(stock_code) or stock_code.upper() in {"KS11", "KQ11"}
+        is_tw = _is_tw_market(stock_code)
+        is_us_alias = is_us_yfinance_alias_code(stock_code)
+        is_us_index = is_us_index_code(stock_code) or is_us_alias
+        is_us = not (is_jp or is_kr or is_tw) and (
+            is_us_index or _is_us_code(stock_code)
+        )
+        is_hk = not (is_us or is_jp or is_kr or is_tw) and _is_hk_market(stock_code)
+
+        if is_us_alias:
+            quote = self._try_fetcher_quote(
+                stock_code,
+                "GlobalFuturesFetcher",
+                health_market="us",
+            )
+            if acceptable(quote):
+                logger.info(
+                    "[实时行情] 全球期货 %s 成功获取 (来源: GlobalFuturesFetcher)",
+                    stock_code,
+                )
+                return self._enrich_realtime_quote(
+                    quote,
+                    realtime_cache_ttl=getattr(config, "realtime_cache_ttl", None),
+                )
 
         if is_jp or is_kr or is_tw:
             market_label = "日股" if is_jp else "韩股" if is_kr else "台股"
             health_market = "jp" if is_jp else "kr" if is_kr else "tw"
+            if is_jp and stock_code.upper() in {"N225", "TOPX"}:
+                quote = self._try_fetcher_quote(
+                    stock_code,
+                    "JapanIndexFetcher",
+                    health_market="jp",
+                )
+                if acceptable(quote):
+                    logger.info(
+                        "[realtime quote] Japan index %s fetched via JapanIndexFetcher",
+                        stock_code,
+                    )
+                    return self._enrich_realtime_quote(
+                        quote,
+                        realtime_cache_ttl=getattr(config, "realtime_cache_ttl", None),
+                    )
+            if is_jp or is_tw:
+                quote = self._try_fetcher_quote(
+                    stock_code,
+                    "AsiaEquityFetcher",
+                    health_market=health_market,
+                )
+                if acceptable(quote):
+                    logger.info(
+                        "[realtime quote] Asia equity %s fetched via AsiaEquityFetcher",
+                        stock_code,
+                    )
+                    return self._enrich_realtime_quote(
+                        quote,
+                        realtime_cache_ttl=getattr(config, "realtime_cache_ttl", None),
+                    )
+            if is_kr:
+                quote = self._try_fetcher_quote(
+                    stock_code,
+                    "KoreaInvestmentFetcher",
+                    health_market="kr",
+                )
+                if acceptable(quote):
+                    logger.info(
+                        "[实时行情] 韩股 %s 成功获取 (来源: KoreaInvestmentFetcher)",
+                        stock_code,
+                    )
+                    return self._enrich_realtime_quote(
+                        quote,
+                        realtime_cache_ttl=getattr(config, "realtime_cache_ttl", None),
+                    )
+                quote = self._try_fetcher_quote(
+                    stock_code,
+                    "NaverKoreaFetcher",
+                    health_market="kr",
+                )
+                if acceptable(quote):
+                    logger.info(
+                        "[实时行情] 韩股 %s 成功获取 (来源: NaverKoreaFetcher)",
+                        stock_code,
+                    )
+                    return self._enrich_realtime_quote(
+                        quote,
+                        realtime_cache_ttl=getattr(config, "realtime_cache_ttl", None),
+                    )
             quote = self._try_fetcher_quote(
                 stock_code,
                 "YfinanceFetcher",
                 health_market=health_market,
             )
-            if quote is not None:
+            if acceptable(quote):
                 logger.info(f"[实时行情] {market_label} {stock_code} 成功获取 (来源: YfinanceFetcher)")
                 return self._enrich_realtime_quote(
                     quote,
@@ -2204,7 +2389,7 @@ class DataFetcherManager:
                     "TencentFetcher",
                     health_market="hk",
                 )
-                if direct_quote is not None:
+                if acceptable(direct_quote):
                     logger.info(f"[实时行情] 港股 {stock_code} 成功获取 (来源: TencentFetcher)")
                     return self._enrich_realtime_quote(
                         direct_quote,
@@ -2224,6 +2409,8 @@ class DataFetcherManager:
                 health_market=health_market,
                 **primary_kw,
             )
+            if not acceptable(primary_quote):
+                primary_quote = None
             fallback_from = primary_token if primary_quote is None else None
             if primary_quote is not None:
                 logger.info(f"[实时行情] {market_label} {stock_code} 成功获取 (来源: {primary_src})")
@@ -2243,7 +2430,7 @@ class DataFetcherManager:
                         extra_src,
                         health_market=health_market,
                     )
-            if primary_quote is not None:
+            if acceptable(primary_quote):
                 return self._enrich_realtime_quote(
                     primary_quote,
                     fallback_from=fallback_from,
@@ -2351,7 +2538,13 @@ class DataFetcherManager:
 
                 provider_name = fetcher.name if fetcher is not None else source
                 
-                if quote is not None and quote.has_basic_data():
+                quote_has_required_timestamp = (
+                    not require_provider_timestamp
+                    or self._parse_realtime_timestamp(
+                        getattr(quote, "provider_timestamp", None)
+                    ) is not None
+                )
+                if quote is not None and quote.has_basic_data() and quote_has_required_timestamp:
                     self._record_realtime_source_success(source, "cn")
                     record_provider_run(
                         data_type="realtime_quote",
@@ -2397,8 +2590,16 @@ class DataFetcherManager:
                         operation="get_realtime_quote",
                         success=False,
                         latency_ms=int((time.time() - attempt_start) * 1000),
-                        error_type="empty",
-                        error_message="empty or incomplete quote",
+                        error_type=(
+                            "provider_timestamp_unavailable"
+                            if quote is not None and quote.has_basic_data() and not quote_has_required_timestamp
+                            else "empty"
+                        ),
+                        error_message=(
+                            "provider timestamp unavailable"
+                            if quote is not None and quote.has_basic_data() and not quote_has_required_timestamp
+                            else "empty or incomplete quote"
+                        ),
                         fallback_to=fallback_to,
                         record_count=0,
                     )
@@ -2441,6 +2642,235 @@ class DataFetcherManager:
                 logger.info(f"[实时行情] {stock_code} 无可用数据源")
 
         return None
+
+    def get_realtime_quote_with_provider_timestamp(self, stock_code: str):
+        """Return a quote only after falling through sources without provider time."""
+
+        return self.get_realtime_quote(
+            stock_code,
+            require_provider_timestamp=True,
+        )
+
+    def get_cross_market_us_premarket_quote_with_provider_timestamp(
+        self,
+        stock_code: str,
+    ):
+        """Return strict US extended-hours evidence without regular-session fallback."""
+
+        from src.config import get_config
+
+        config = get_config()
+        if not config.enable_realtime_quote:
+            return None
+        fetcher = self._get_fetcher_by_name(
+            "YfinanceFetcher",
+            capability="realtime_quote",
+        )
+        specialized_getter = getattr(
+            fetcher,
+            "get_cross_market_us_premarket_quote",
+            None,
+        )
+        if not callable(specialized_getter):
+            return None
+        attempt_start = time.time()
+        try:
+            record_provider_run_started(
+                data_type="realtime_quote",
+                provider=fetcher.name,
+                operation="get_cross_market_us_premarket_quote",
+            )
+            quote = self._call_fetcher_method(
+                fetcher,
+                "get_cross_market_us_premarket_quote",
+                stock_code,
+            )
+            timestamp = self._parse_realtime_timestamp(
+                getattr(quote, "provider_timestamp", None)
+            )
+            valid = bool(
+                quote is not None
+                and quote.has_basic_data()
+                and timestamp is not None
+            )
+            record_provider_run(
+                data_type="realtime_quote",
+                provider=fetcher.name,
+                operation="get_cross_market_us_premarket_quote",
+                success=valid,
+                latency_ms=int((time.time() - attempt_start) * 1000),
+                error_type=None if valid else "premarket_provider_timestamp_unavailable",
+                error_message=None if valid else "extended-hours quote unavailable",
+                record_count=1 if valid else 0,
+            )
+            return quote if valid else None
+        except Exception as exc:
+            error_type, error_reason = summarize_exception(exc)
+            record_provider_run(
+                data_type="realtime_quote",
+                provider=fetcher.name,
+                operation="get_cross_market_us_premarket_quote",
+                success=False,
+                latency_ms=int((time.time() - attempt_start) * 1000),
+                error_type=error_type,
+                error_message=error_reason,
+                record_count=0,
+            )
+            logger.warning(
+                "[跨市场行情] 美股盘前 %s 专用证据路由失败: %s",
+                stock_code,
+                error_reason,
+            )
+            return None
+
+    def get_cross_market_us_premarket_quotes_with_provider_timestamps(
+        self,
+        stock_codes: Sequence[str],
+    ) -> Dict[str, UnifiedRealtimeQuote]:
+        """Return a batch of strict US premarket ticks from Yahoo's streamer."""
+
+        from src.config import get_config
+
+        config = get_config()
+        if not config.enable_realtime_quote:
+            return {}
+        fetcher = self._get_fetcher_by_name(
+            "YfinanceFetcher",
+            capability="realtime_quote",
+        )
+        specialized_getter = getattr(
+            fetcher,
+            "get_cross_market_us_premarket_quotes",
+            None,
+        )
+        if not callable(specialized_getter):
+            return {}
+        attempt_start = time.time()
+        try:
+            record_provider_run_started(
+                data_type="realtime_quote",
+                provider=fetcher.name,
+                operation="get_cross_market_us_premarket_quotes",
+            )
+            raw_quotes = self._call_fetcher_method(
+                fetcher,
+                "get_cross_market_us_premarket_quotes",
+                list(stock_codes),
+            )
+            valid_quotes = {
+                str(code).strip().upper(): quote
+                for code, quote in dict(raw_quotes or {}).items()
+                if quote is not None
+                and quote.has_basic_data()
+                and self._parse_realtime_timestamp(
+                    getattr(quote, "provider_timestamp", None)
+                ) is not None
+            }
+            record_provider_run(
+                data_type="realtime_quote",
+                provider=fetcher.name,
+                operation="get_cross_market_us_premarket_quotes",
+                success=bool(valid_quotes),
+                latency_ms=int((time.time() - attempt_start) * 1000),
+                error_type=None if valid_quotes else "premarket_stream_unavailable",
+                error_message=None if valid_quotes else "stream returned no timestamped quote",
+                record_count=len(valid_quotes),
+            )
+            return valid_quotes
+        except Exception as exc:
+            error_type, error_reason = summarize_exception(exc)
+            record_provider_run(
+                data_type="realtime_quote",
+                provider=fetcher.name,
+                operation="get_cross_market_us_premarket_quotes",
+                success=False,
+                latency_ms=int((time.time() - attempt_start) * 1000),
+                error_type=error_type,
+                error_message=error_reason,
+                record_count=0,
+            )
+            logger.warning(
+                "Cross-market US premarket batch stream failed: %s",
+                error_reason,
+            )
+            return {}
+
+    def get_cross_market_us_quote_with_provider_timestamp(self, stock_code: str):
+        """Return strict US strategy evidence without sharing Yahoo's burst limit."""
+
+        from src.config import get_config
+
+        config = get_config()
+        if not config.enable_realtime_quote:
+            return None
+
+        fetcher = self._get_fetcher_by_name(
+            "YfinanceFetcher",
+            capability="realtime_quote",
+        )
+        specialized_getter = getattr(
+            fetcher,
+            "get_cross_market_us_realtime_quote",
+            None,
+        )
+        if callable(specialized_getter):
+            attempt_start = time.time()
+            try:
+                record_provider_run_started(
+                    data_type="realtime_quote",
+                    provider=fetcher.name,
+                    operation="get_cross_market_us_realtime_quote",
+                )
+                quote = self._call_fetcher_method(
+                    fetcher,
+                    "get_cross_market_us_realtime_quote",
+                    stock_code,
+                )
+                timestamp = self._parse_realtime_timestamp(
+                    getattr(quote, "provider_timestamp", None)
+                )
+                if quote is not None and quote.has_basic_data() and timestamp is not None:
+                    record_provider_run(
+                        data_type="realtime_quote",
+                        provider=fetcher.name,
+                        operation="get_cross_market_us_realtime_quote",
+                        success=True,
+                        latency_ms=int((time.time() - attempt_start) * 1000),
+                        record_count=1,
+                    )
+                    return self._enrich_realtime_quote(
+                        quote,
+                        realtime_cache_ttl=getattr(config, "realtime_cache_ttl", None),
+                    )
+                record_provider_run(
+                    data_type="realtime_quote",
+                    provider=fetcher.name,
+                    operation="get_cross_market_us_realtime_quote",
+                    success=False,
+                    latency_ms=int((time.time() - attempt_start) * 1000),
+                    error_type="provider_timestamp_unavailable",
+                    error_message="empty quote or provider timestamp unavailable",
+                    record_count=0,
+                )
+            except Exception as exc:
+                error_type, error_reason = summarize_exception(exc)
+                record_provider_run(
+                    data_type="realtime_quote",
+                    provider=fetcher.name,
+                    operation="get_cross_market_us_realtime_quote",
+                    success=False,
+                    latency_ms=int((time.time() - attempt_start) * 1000),
+                    error_type=error_type,
+                    error_message=error_reason,
+                    record_count=0,
+                )
+                logger.warning(
+                    "[跨市场行情] 美股 %s 专用证据路由失败: %s",
+                    stock_code,
+                    error_reason,
+                )
+
+        return self.get_realtime_quote_with_provider_timestamp(stock_code)
 
     # Fields worth supplementing from secondary sources when the primary
     # source returns None for them. Ordered by importance.
@@ -3063,6 +3493,78 @@ class DataFetcherManager:
                 logger.warning(f"[{fetcher.name}] 获取指数行情失败: {e}")
                 continue
         return []
+
+    def get_main_index_quote_with_provider_timestamp(
+        self,
+        index_code: str,
+        *,
+        region: str = "cn",
+    ) -> Optional[UnifiedRealtimeQuote]:
+        """Resolve one index across providers, rejecting rows without provider time."""
+
+        target_code = normalize_stock_code(index_code)
+        providers = []
+        if region == "cn":
+            tickflow_fetcher = self._get_tickflow_fetcher()
+            if tickflow_fetcher is not None:
+                providers.append(tickflow_fetcher)
+        providers.extend(
+            fetcher
+            for fetcher in self._fetchers
+            if fetcher not in providers
+        )
+
+        for fetcher in providers:
+            try:
+                data = fetcher.get_main_indices(region=region)
+            except Exception as exc:
+                logger.warning("[%s] 获取指数 %s 失败: %s", fetcher.name, target_code, exc)
+                continue
+            if not isinstance(data, list):
+                continue
+            row = next(
+                (
+                    item
+                    for item in data
+                    if isinstance(item, dict)
+                    and normalize_stock_code(str(item.get("code") or "")) == target_code
+                ),
+                None,
+            )
+            if row is None:
+                continue
+            provider_timestamp = self._parse_realtime_timestamp(
+                row.get("provider_timestamp")
+            )
+            if provider_timestamp is None:
+                continue
+            provider_token = self._realtime_fetcher_token(fetcher.name)
+            try:
+                source = RealtimeSource(provider_token)
+            except ValueError:
+                source = RealtimeSource.FALLBACK
+            quote = UnifiedRealtimeQuote(
+                code=target_code,
+                name=str(row.get("name") or target_code),
+                source=source,
+                provider_timestamp=provider_timestamp.isoformat(),
+                market=region,
+                currency="CNY" if region == "cn" else None,
+                data_quality="partial",
+                price=row.get("current"),
+                change_pct=row.get("change_pct"),
+                change_amount=row.get("change"),
+                volume=row.get("volume"),
+                amount=row.get("amount"),
+                amplitude=row.get("amplitude"),
+                open_price=row.get("open"),
+                high=row.get("high"),
+                low=row.get("low"),
+                pre_close=row.get("prev_close"),
+            )
+            if quote.has_basic_data():
+                return self._enrich_realtime_quote(quote)
+        return None
 
     def _enrich_market_indices(
         self,

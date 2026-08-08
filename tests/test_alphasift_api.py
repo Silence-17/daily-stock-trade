@@ -222,19 +222,19 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
         module = SimpleNamespace(fetch_us_universe=lambda source: ["AAPL", "MSFT"])
         manager = MagicMock()
         quote = SimpleNamespace(
-                price=245.0,
-                volume=1000,
-                amount=None,
-                change_pct=1.2,
-                name="Apple Inc.",
-                source=SimpleNamespace(value="stooq"),
-                total_mv=None,
-                circ_mv=None,
-                pe_ratio=None,
-                pb_ratio=None,
-                volume_ratio=None,
-                turnover_rate=None,
-            )
+            price=245.0,
+            volume=1000,
+            amount=None,
+            change_pct=1.2,
+            name="Apple Inc.",
+            source=SimpleNamespace(value="stooq"),
+            total_mv=None,
+            circ_mv=None,
+            pe_ratio=None,
+            pb_ratio=None,
+            volume_ratio=None,
+            turnover_rate=None,
+        )
         manager.get_realtime_quote.side_effect = (
             lambda ticker, **_kwargs: quote if ticker == "AAPL" else None
         )
@@ -1231,7 +1231,6 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
         self.assertEqual(payload["hotspot_count"], 0)
         import_hotspot.assert_not_called()
 
-
     def test_hotspots_uses_last_success_cache_by_default(self) -> None:
         config = self._config(enabled=True)
 
@@ -1457,6 +1456,86 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
         sleep_values = [call.args[0] for call in sleep_mock.call_args_list if call.args]
         self.assertIn(0.3, sleep_values)
         self.assertTrue(any(0 < value <= provider._min_request_interval for value in sleep_values))
+
+    def test_cross_market_theme_leaders_are_balanced_by_strategy_family(self) -> None:
+        provider = alphasift_service.DsaEastMoneyHotspotProvider()
+        frame = pd.DataFrame([
+            {
+                "\u677f\u5757\u540d\u79f0": "\u534a\u5bfc\u4f53\u8bbe\u5907",
+                "\u6da8\u8dcc\u5e45": 2.0,
+                "\u677f\u5757\u5f02\u52a8\u603b\u6b21\u6570": 300,
+                "\u677f\u5757\u5f02\u52a8\u6700\u9891\u7e41\u4e2a\u80a1\u53ca\u6240\u5c5e\u7c7b\u578b-\u80a1\u7968\u4ee3\u7801": "688012",
+                "\u677f\u5757\u5f02\u52a8\u6700\u9891\u7e41\u4e2a\u80a1\u53ca\u6240\u5c5e\u7c7b\u578b-\u80a1\u7968\u540d\u79f0": "Tech",
+            },
+            {
+                "\u677f\u5757\u540d\u79f0": "CPO\u6982\u5ff5",
+                "\u6da8\u8dcc\u5e45": 1.0,
+                "\u677f\u5757\u5f02\u52a8\u603b\u6b21\u6570": 200,
+                "\u677f\u5757\u5f02\u52a8\u6700\u9891\u7e41\u4e2a\u80a1\u53ca\u6240\u5c5e\u7c7b\u578b-\u80a1\u7968\u4ee3\u7801": "300308",
+                "\u677f\u5757\u5f02\u52a8\u6700\u9891\u7e41\u4e2a\u80a1\u53ca\u6240\u5c5e\u7c7b\u578b-\u80a1\u7968\u540d\u79f0": "CPO",
+            },
+            {
+                "\u677f\u5757\u540d\u79f0": "\u9ec4\u91d1\u6982\u5ff5",
+                "\u6da8\u8dcc\u5e45": 0.5,
+                "\u677f\u5757\u5f02\u52a8\u603b\u6b21\u6570": 100,
+                "\u677f\u5757\u5f02\u52a8\u6700\u9891\u7e41\u4e2a\u80a1\u53ca\u6240\u5c5e\u7c7b\u578b-\u80a1\u7968\u4ee3\u7801": "600547",
+                "\u677f\u5757\u5f02\u52a8\u6700\u9891\u7e41\u4e2a\u80a1\u53ca\u6240\u5c5e\u7c7b\u578b-\u80a1\u7968\u540d\u79f0": "Gold",
+            },
+            {
+                "\u677f\u5757\u540d\u79f0": "\u94dc",
+                "\u6da8\u8dcc\u5e45": 6.0,
+                "\u677f\u5757\u5f02\u52a8\u603b\u6b21\u6570": 800,
+                "\u677f\u5757\u5f02\u52a8\u6700\u9891\u7e41\u4e2a\u80a1\u53ca\u6240\u5c5e\u7c7b\u578b-\u80a1\u7968\u4ee3\u7801": "600362",
+                "\u677f\u5757\u5f02\u52a8\u6700\u9891\u7e41\u4e2a\u80a1\u53ca\u6240\u5c5e\u7c7b\u578b-\u80a1\u7968\u540d\u79f0": "Copper",
+            },
+            {
+                "\u677f\u5757\u540d\u79f0": "\u94dd",
+                "\u6da8\u8dcc\u5e45": 5.0,
+                "\u677f\u5757\u5f02\u52a8\u603b\u6b21\u6570": 700,
+                "\u677f\u5757\u5f02\u52a8\u6700\u9891\u7e41\u4e2a\u80a1\u53ca\u6240\u5c5e\u7c7b\u578b-\u80a1\u7968\u4ee3\u7801": "601600",
+                "\u677f\u5757\u5f02\u52a8\u6700\u9891\u7e41\u4e2a\u80a1\u53ca\u6240\u5c5e\u7c7b\u578b-\u80a1\u7968\u540d\u79f0": "Aluminum",
+            },
+            {
+                "\u677f\u5757\u540d\u79f0": "\u94f6\u884c",
+                "\u6da8\u8dcc\u5e45": 4.0,
+                "\u677f\u5757\u5f02\u52a8\u603b\u6b21\u6570": 999,
+                "\u677f\u5757\u5f02\u52a8\u6700\u9891\u7e41\u4e2a\u80a1\u53ca\u6240\u5c5e\u7c7b\u578b-\u80a1\u7968\u4ee3\u7801": "600036",
+                "\u677f\u5757\u5f02\u52a8\u6700\u9891\u7e41\u4e2a\u80a1\u53ca\u6240\u5c5e\u7c7b\u578b-\u80a1\u7968\u540d\u79f0": "Bank",
+            },
+        ])
+
+        with patch.object(provider, "_fetch_board_changes_raw", return_value=frame):
+            candidates = provider.cross_market_theme_leader_candidates(max_results=3)
+
+        self.assertEqual([item["code"] for item in candidates], ["688012", "300308", "600547"])
+        self.assertEqual(
+            [item["_cross_market_source_theme"] for item in candidates],
+            ["equipment", "cpo", "gold"],
+        )
+        self.assertTrue(all(item["is_core_stock"] for item in candidates))
+
+    def test_cross_market_board_theme_maps_ai_compute_gaming_and_fiber(self) -> None:
+        classify = alphasift_service.DsaEastMoneyHotspotProvider._cross_market_board_theme
+
+        self.assertEqual(classify("人工智能大模型"), "artificial_intelligence")
+        self.assertEqual(classify("AI算力租赁"), "compute_services")
+        self.assertEqual(classify("网络游戏"), "gaming")
+        self.assertEqual(classify("光纤光通信"), "cpo")
+        self.assertEqual(classify("MLCC被动器件"), "mlcc")
+        self.assertEqual(classify("高频高速覆铜板"), "ccl")
+        self.assertEqual(classify("创新药CDMO"), "pharma")
+        self.assertEqual(classify("晶圆制造先进封装"), "semiconductor")
+        self.assertEqual(classify("电子特气靶材"), "materials")
+        self.assertEqual(classify("MicroLED"), "semiconductor")
+        self.assertEqual(classify("AIDC"), "compute_services")
+        self.assertEqual(classify("macro economy"), "other")
+
+    def test_cross_market_board_theme_disambiguates_semiconductor_materials(self) -> None:
+        classify = alphasift_service.DsaEastMoneyHotspotProvider._cross_market_board_theme
+
+        self.assertEqual(classify("\u5149\u523b\u80f6"), "materials")
+        self.assertEqual(classify("\u534a\u5bfc\u4f53\u7845\u7247"), "materials")
+        self.assertEqual(classify("\u7845\u6599\u7845\u7247"), "other")
 
     def test_hotspots_respects_custom_alphasift_data_dir_for_cache_paths(self) -> None:
         config = self._config(enabled=True)
@@ -2383,6 +2462,41 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
         self.assertEqual(caught.exception.detail.get("diagnostics", {}).get("reason"), "missing_module")
         self.assertIn("pip install -r requirements.txt", caught.exception.detail["message"])
         install_mock.assert_not_called()
+
+    def test_cross_market_scope_does_not_require_alphasift_adapter(self) -> None:
+        config = self._config(enabled=False)
+        expected = {
+            "strategy": "momentum_quality",
+            "market": "cn",
+            "candidate_scope": "cross_market_target_themes",
+            "candidates": [{"code": "300308"}],
+        }
+
+        with (
+            patch(
+                "src.services.alphasift_service._ensure_alphasift_available_for_use",
+                side_effect=AssertionError("adapter probe must not run"),
+            ) as availability_probe,
+            patch(
+                "src.services.alphasift_service._build_cross_market_target_theme_screen",
+                return_value=expected,
+            ) as build_screen,
+        ):
+            result = alphasift_service.AlphaSiftService(config=config).screen(
+                strategy="momentum_quality",
+                market="cn",
+                max_results=3,
+                candidate_scope="cross_market_target_themes",
+                use_llm=False,
+            )
+
+        self.assertEqual(result, expected)
+        availability_probe.assert_not_called()
+        build_screen.assert_called_once_with(
+            strategy="momentum_quality",
+            market="cn",
+            max_results=3,
+        )
 
     def test_start_screen_task_submits_background_work(self) -> None:
         config = self._config(enabled=True)
@@ -3566,6 +3680,7 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
                     "LLM_MAX_CANDIDATES": "",
                     "DAILY_FETCH_RETRIES": "",
                     "DAILY_FETCH_MAX_WORKERS": "",
+                    "TUSHARE_TOKEN": "",
                 },
                 clear=False,
             ),

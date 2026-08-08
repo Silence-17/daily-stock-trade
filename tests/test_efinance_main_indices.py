@@ -27,6 +27,30 @@ def _available_circuit_breaker():
     )
 
 
+class TestEfinancePriority(unittest.TestCase):
+    def test_explicit_priority_is_read_after_config_load(self):
+        config = types.SimpleNamespace(enable_eastmoney_patch=False)
+
+        with (
+            patch.dict(os.environ, {"EFINANCE_PRIORITY": "1"}),
+            patch("data_provider.efinance_fetcher.get_config", return_value=config),
+        ):
+            fetcher = EfinanceFetcher()
+
+        self.assertEqual(fetcher.priority, 1)
+
+    def test_invalid_priority_uses_default(self):
+        config = types.SimpleNamespace(enable_eastmoney_patch=False)
+
+        with (
+            patch.dict(os.environ, {"EFINANCE_PRIORITY": "invalid"}),
+            patch("data_provider.efinance_fetcher.get_config", return_value=config),
+        ):
+            fetcher = EfinanceFetcher()
+
+        self.assertEqual(fetcher.priority, 0)
+
+
 class TestEfinanceMainIndices(unittest.TestCase):
     def test_get_main_indices_prefers_jinkai_column_for_open_price(self):
         fetcher = EfinanceFetcher()

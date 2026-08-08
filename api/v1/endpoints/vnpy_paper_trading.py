@@ -7,6 +7,7 @@ import logging
 import os
 import sys
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path as FilePath
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query, Request
@@ -16,6 +17,10 @@ from api.deps import get_runtime_scheduler_service
 from api.v1.errors import api_error
 from api.v1.schemas.common import ErrorResponse
 from api.v1.schemas.vnpy_paper_trading import (
+    CrossMarketBacktestRequest,
+    CrossMarketBacktestResponse,
+    CrossMarketPaperCampaignStartRequest,
+    CrossMarketStrategyMigrationRequest,
     VnpyPaperAccountListResponse,
     VnpyPaperArchivedAccountCleanupRequest,
     VnpyPaperArchivedAccountCleanupResponse,
@@ -65,6 +70,15 @@ from src.services.agent_calibration_evidence_service import (
     collect_persisted_calibration_evidence,
 )
 from src.services.alert_service import AlertService
+from src.services.cross_market_backtest_service import (
+    CrossMarketBacktestService,
+    ReplayFrame,
+)
+from src.services.cross_market_acceptance_service import CrossMarketAcceptanceService
+from src.services.cross_market_paper_strategy import (
+    MinuteBar,
+    STRATEGY_ID as CROSS_MARKET_STRATEGY_ID,
+)
 from src.services.portfolio_service import PortfolioBusyError
 from src.services.runtime_scheduler import RuntimeSchedulerService
 from src.services.stock_selection_agent_backtest_service import StockSelectionAgentBacktestService
@@ -223,8 +237,81 @@ def _with_alphasift_status(payload: Dict[str, Any]) -> Dict[str, Any]:
 _TASK_HEALTH_LABELS = {
     "vnpy_paper_auto_trade": "定时自动买入",
     "vnpy_paper_auto_retry": "自动恢复扫描",
+    "cross_market_pending_order_revalidation": "跨市场待成交复核",
+    "cross_market_intraday_sell_monitor": "跨市场盘中卖出监控",
+    "cross_market_intraday_entry_scan": "跨市场四时点选板块选股",
+    "cross_market_formal_recovery": "跨市场正式轮次恢复",
+    "cross_market_paper_observation": "跨市场零委托观察",
+    "cross_market_campaign_closing_snapshot": "跨市场收盘净值快照",
+    "cross_market_korea_signal": "韩日股及亚洲产业链信号采集",
+    "cross_market_us_tech_signal": "美股科技信号采集",
+    "cross_market_cpo_signal": "CPO 信号采集",
+    "cross_market_gold_signal": "黄金信号采集",
+    "cross_market_cn_open_signal": "A 股开盘信号采集",
 }
 _EXPECTED_VNPY_PAPER_TASKS = tuple(_TASK_HEALTH_LABELS.keys())
+
+_EXPECTED_TASK_SKIP_REASONS = {
+    "vnpy_paper_auto_trade": {"paper_campaign_completed"},
+    "cross_market_paper_observation": {
+        "outside_cn_observation_session",
+        "observation_already_fully_evidenced_today",
+        "paper_campaign_completed",
+    },
+    "cross_market_intraday_sell_monitor": {
+        "outside_cn_intraday_sell_session",
+        "daily_cross_market_run_window_reserved",
+        "no_cross_market_strategy_positions",
+        "paper_campaign_completed",
+    },
+    "cross_market_intraday_entry_scan": {
+        "outside_cross_market_entry_analysis_slot",
+        "cross_market_entry_analysis_slot_already_audited",
+    },
+    "cross_market_formal_recovery": {
+        "outside_cn_formal_recovery_session",
+        "formal_execution_already_fully_evidenced_today",
+        "formal_execution_already_observed_today",
+        "formal_execution_not_observed_today",
+        "formal_execution_activity_blocks_recovery",
+        "formal_execution_skip_not_recoverable",
+        "formal_recovery_evidence_not_ready",
+        "paper_campaign_completed",
+    },
+    "cross_market_campaign_closing_snapshot": {
+        "before_cn_closing_snapshot_cutoff",
+        "non_cn_trading_day",
+        "closing_snapshot_already_persisted",
+        "paper_campaign_not_active",
+        "paper_campaign_completed",
+    },
+    "cross_market_korea_signal": {"outside_korea_trading_session"},
+    "cross_market_us_tech_signal": {
+        "outside_us_signal_capture_window",
+        "us_premarket_stream_warmed",
+        "us_premarket_stream_warmup_unavailable",
+        "us_premarket_snapshot_throttled",
+        "us_first_hour_snapshot_throttled",
+        "us_close_snapshot_already_collected",
+    },
+    "cross_market_cpo_signal": {
+        "outside_cpo_signal_capture_window",
+        "cpo_first_hour_snapshot_throttled",
+        "cpo_close_snapshot_already_collected",
+    },
+    "cross_market_gold_signal": {
+        "outside_gold_signal_window",
+        "non_cn_trading_day",
+    },
+    "cross_market_cn_open_signal": {
+        "outside_cn_open_signal_window",
+        "non_cn_trading_day",
+    },
+}
+
+
+def _is_expected_task_skip(name: str, reason: str) -> bool:
+    return reason in _EXPECTED_TASK_SKIP_REASONS.get(name, set())
 
 
 def _status_tone(status: str) -> str:
@@ -402,6 +489,10 @@ def _system_health_payload(status_payload: Dict[str, Any]) -> Dict[str, Any]:
     backend = diagnostics.get("backend") if isinstance(diagnostics.get("backend"), dict) else {}
 
     auto_trade_enabled = bool(settings.get("auto_trade_enabled"))
+    internal_cross_market_selection = (
+        str(settings.get("auto_strategy") or "").strip()
+        == CROSS_MARKET_STRATEGY_ID
+    )
     execution_mode = str(settings.get("auto_execution_mode") or status_payload.get("mode") or "paper")
     time_gate_enforced = bool(trading_window.get("time_gate_enforced"))
     market_open_now = trading_window.get("is_market_open_now") is True
@@ -466,6 +557,10 @@ def _system_health_payload(status_payload: Dict[str, Any]) -> Dict[str, Any]:
 
     alphasift_enabled = bool(alphasift.get("enabled", True)) if alphasift else True
     alphasift_available = bool(alphasift.get("available")) if alphasift else False
+    selection_source_ready = bool(
+        internal_cross_market_selection
+        or (alphasift_enabled and alphasift_available)
+    )
     add_component(
         key="selection_source",
         label="选股来源",
@@ -473,21 +568,25 @@ def _system_health_payload(status_payload: Dict[str, Any]) -> Dict[str, Any]:
             "disabled"
             if not auto_trade_enabled
             else "ready"
-            if alphasift_enabled and alphasift_available
+            if selection_source_ready
             else "blocked"
         ),
         reason=(
             "auto_trade_disabled"
             if not auto_trade_enabled
+            else "cross_market_internal_selection_ready"
+            if internal_cross_market_selection
             else "alphasift_ready"
-            if alphasift_enabled and alphasift_available
+            if selection_source_ready
             else "alphasift_unavailable"
         ),
         detail=(
             "自动买入关闭"
             if not auto_trade_enabled
+            else "跨市场策略使用内部 EastMoney 目标主题候选源"
+            if internal_cross_market_selection
             else f"AlphaSift 策略 {alphasift.get('strategy_count') or '-'} 个"
-            if alphasift_enabled and alphasift_available
+            if selection_source_ready
             else str(alphasift.get("error") or alphasift.get("diagnostics") or "AlphaSift 不可用")
         ),
         required=auto_trade_enabled,
@@ -1132,7 +1231,7 @@ def _auto_trade_readiness_payload(status_payload: Dict[str, Any]) -> Dict[str, A
         if auto_trade_event is not None and isinstance(auto_trade_event.get("details"), dict)
         else {}
     )
-    last_auto_run = (
+    latest_recorded_run = (
         status_payload.get("last_auto_run")
         if isinstance(status_payload.get("last_auto_run"), dict)
         else {}
@@ -1141,6 +1240,20 @@ def _auto_trade_readiness_payload(status_payload: Dict[str, Any]) -> Dict[str, A
     paper_enabled = bool(settings.get("enabled", status_payload.get("enabled", False)))
     local_available = bool(status_payload.get("available", paper_enabled))
     auto_trade_enabled = bool(settings.get("auto_trade_enabled"))
+    internal_cross_market_selection = (
+        str(settings.get("auto_strategy") or "").strip()
+        == CROSS_MARKET_STRATEGY_ID
+    )
+    last_formal_auto_run = (
+        status_payload.get("last_formal_auto_run")
+        if isinstance(status_payload.get("last_formal_auto_run"), dict)
+        else {}
+    )
+    last_auto_run = (
+        last_formal_auto_run
+        if internal_cross_market_selection and last_formal_auto_run
+        else latest_recorded_run
+    )
     execution_mode = str(settings.get("auto_execution_mode") or status_payload.get("mode") or "paper")
     scheduler_enabled = bool(scheduler_status.get("enabled"))
     scheduler_loop_running = _scheduler_loop_running(scheduler_status)
@@ -1152,6 +1265,10 @@ def _auto_trade_readiness_payload(status_payload: Dict[str, Any]) -> Dict[str, A
     alphasift_known = bool(alphasift)
     alphasift_enabled = bool(alphasift.get("enabled", True)) if alphasift_known else True
     alphasift_available = bool(alphasift.get("available")) if alphasift_known else True
+    selection_source_ready = bool(
+        internal_cross_market_selection
+        or (alphasift_enabled and alphasift_available)
+    )
 
     components: List[Dict[str, Any]] = []
 
@@ -1241,19 +1358,21 @@ def _auto_trade_readiness_payload(status_payload: Dict[str, Any]) -> Dict[str, A
     )
     add_component(
         key="alphasift",
-        label="AlphaSift",
+        label="选股来源",
         status=(
             "disabled"
             if not auto_trade_enabled
             else "ready"
-            if alphasift_enabled and alphasift_available
+            if selection_source_ready
             else "blocked"
         ),
         reason=(
             "auto_trade_disabled"
             if not auto_trade_enabled
+            else "cross_market_internal_selection_ready"
+            if internal_cross_market_selection
             else "alphasift_available"
-            if alphasift_enabled and alphasift_available
+            if selection_source_ready
             else "alphasift_disabled"
             if not alphasift_enabled
             else "alphasift_unavailable"
@@ -1261,8 +1380,10 @@ def _auto_trade_readiness_payload(status_payload: Dict[str, Any]) -> Dict[str, A
         detail=(
             "自动买入关闭"
             if not auto_trade_enabled
+            else "跨市场策略使用内部 EastMoney 目标主题候选源"
+            if internal_cross_market_selection
             else f"策略 {alphasift.get('strategy_count') or '-'} 个"
-            if alphasift_enabled and alphasift_available
+            if selection_source_ready
             else str(alphasift.get("error") or alphasift.get("diagnostics") or "AlphaSift 不可用")
         ),
     )
@@ -1294,11 +1415,30 @@ def _auto_trade_readiness_payload(status_payload: Dict[str, Any]) -> Dict[str, A
         last_run_reason = str(last_auto_run.get("reason") or "").strip()
         last_run_skipped = bool(last_auto_run.get("skipped"))
         last_run_accepted = bool(last_auto_run.get("accepted"))
+        evidence_status = str(
+            last_auto_run.get("evidence_status") or ""
+        ).strip().lower()
+        missing_requirements = [
+            str(item).strip()
+            for item in list(last_auto_run.get("missing_requirements") or [])
+            if str(item).strip()
+        ]
         last_run_at = str(last_auto_run.get("ran_at") or "-")
         last_run_uid = str(last_auto_run.get("agent_run_uid") or "").strip()
         submitted_count = int(last_auto_run.get("submitted_count") or 0)
         candidate_count = int(last_auto_run.get("candidate_count") or 0)
-        if last_run_skipped:
+        if (
+            internal_cross_market_selection
+            and (evidence_status not in {"", "ready"} or missing_requirements)
+        ):
+            last_run_status = "warning"
+            last_run_component_reason = "last_formal_cross_market_evidence_degraded"
+            missing_text = ", ".join(missing_requirements) or evidence_status
+            last_run_detail = (
+                f"Latest formal run {last_run_at} has incomplete evidence: "
+                f"{missing_text}"
+            )
+        elif last_run_skipped:
             last_run_status = "warning"
             last_run_component_reason = last_run_reason or "last_auto_run_skipped"
             last_run_detail = f"最近运行 {last_run_at} 跳过：{last_run_component_reason}"
@@ -1407,6 +1547,12 @@ def _auto_trade_readiness_payload(status_payload: Dict[str, Any]) -> Dict[str, A
         "auto_execution_mode": execution_mode,
         "timing_alignment": timing_alignment,
         "last_auto_run": dict(last_auto_run) if last_auto_run else None,
+        "last_formal_auto_run": (
+            dict(last_formal_auto_run) if last_formal_auto_run else None
+        ),
+        "latest_recorded_run": (
+            dict(latest_recorded_run) if latest_recorded_run else None
+        ),
         "blockers": blockers,
         "warnings": warnings,
         "disabled": disabled,
@@ -1421,6 +1567,39 @@ def _latest_task_event(events: List[Dict[str, Any]], name: str) -> Optional[Dict
     return None
 
 
+def _required_vnpy_paper_task_names(settings: Dict[str, Any]) -> set[str]:
+    """Return tasks that must be registered for the saved execution contract."""
+
+    required = {"vnpy_paper_auto_retry"}
+    auto_trade_enabled = bool(settings.get("auto_trade_enabled"))
+    cross_market_strategy_active = (
+        str(settings.get("auto_strategy") or "").strip()
+        == CROSS_MARKET_STRATEGY_ID
+    )
+    observation_enabled = bool(settings.get("cross_market_observation_enabled"))
+    if auto_trade_enabled:
+        required.add("vnpy_paper_auto_trade")
+    if cross_market_strategy_active:
+        required.add("cross_market_pending_order_revalidation")
+    if cross_market_strategy_active and auto_trade_enabled:
+        required.add("cross_market_intraday_sell_monitor")
+        if str(settings.get("auto_execution_mode") or "").strip() == "vnpy_paper":
+            required.add("cross_market_intraday_entry_scan")
+            required.add("cross_market_formal_recovery")
+    if observation_enabled:
+        required.add("cross_market_paper_observation")
+    if (cross_market_strategy_active and auto_trade_enabled) or observation_enabled:
+        required.update({
+            "cross_market_campaign_closing_snapshot",
+            "cross_market_korea_signal",
+            "cross_market_us_tech_signal",
+            "cross_market_cpo_signal",
+            "cross_market_gold_signal",
+            "cross_market_cn_open_signal",
+        })
+    return required
+
+
 def _task_health_payload(status_payload: Dict[str, Any]) -> Dict[str, Any]:
     scheduler_status = status_payload.get("scheduler") if isinstance(status_payload.get("scheduler"), dict) else {}
     settings = status_payload.get("settings") if isinstance(status_payload.get("settings"), dict) else {}
@@ -1432,6 +1611,7 @@ def _task_health_payload(status_payload: Dict[str, Any]) -> Dict[str, Any]:
     tasks = [task for task in list(scheduler_status.get("background_tasks") or []) if isinstance(task, dict)]
     events = [event for event in list(scheduler_status.get("task_events") or []) if isinstance(event, dict)]
     tasks_by_name = {str(task.get("name") or ""): task for task in tasks}
+    required_task_names = _required_vnpy_paper_task_names(settings)
     extra_names = sorted(name for name in tasks_by_name if name and name not in _EXPECTED_VNPY_PAPER_TASKS)
     names = list(_EXPECTED_VNPY_PAPER_TASKS) + extra_names
     items: List[Dict[str, Any]] = []
@@ -1440,11 +1620,7 @@ def _task_health_payload(status_payload: Dict[str, Any]) -> Dict[str, Any]:
         task = tasks_by_name.get(name)
         registered = task is not None
         is_auto_trade_task = name == "vnpy_paper_auto_trade"
-        is_recovery_task = name == "vnpy_paper_auto_retry"
-        required = bool(
-            paper_enabled
-            and (is_recovery_task or (is_auto_trade_task and auto_trade_enabled))
-        )
+        required = bool(paper_enabled and name in required_task_names)
         event = _latest_task_event(events, name)
         event_status = str(event.get("status") or "") if event is not None else None
         event_details = event.get("details") if event is not None and isinstance(event.get("details"), dict) else {}
@@ -1474,8 +1650,15 @@ def _task_health_payload(status_payload: Dict[str, Any]) -> Dict[str, Any]:
                 health = "error"
                 reason = "last_event_failed"
             elif event_status == "skipped":
-                health = "warning"
                 reason = str(event_details.get("reason") or "last_event_skipped")
+                health = "healthy" if _is_expected_task_skip(name, reason) else "warning"
+            elif (
+                event_status == "completed"
+                and str(event_details.get("component_status") or "").strip().lower()
+                == "degraded"
+            ):
+                health = "warning"
+                reason = "component_degraded"
             elif not task.get("next_run_at"):
                 health = "warning"
                 reason = "next_run_unknown"
@@ -1806,9 +1989,13 @@ def get_vnpy_paper_status(
     include_recent_trades: bool = Query(True, description="Include recent paper trade events."),
 ) -> VnpyPaperStatusResponse:
     try:
-        payload = _service(request).get_status(
+        service = _service(request)
+        payload = service.get_status(
             include_snapshot=include_snapshot,
             include_recent_trades=include_recent_trades,
+        )
+        payload.setdefault("diagnostics", {})["cross_market_strategy"] = (
+            service.cross_market_signal_service.get_runtime_status()
         )
         payload = _with_status_dependencies(payload, scheduler, request)
         return VnpyPaperStatusResponse.model_validate(
@@ -1816,6 +2003,233 @@ def get_vnpy_paper_status(
         )
     except Exception as exc:
         raise _internal_error("Get vn.py paper trading status failed", exc)
+
+
+@router.get(
+    "/cross-market-strategy/status",
+    response_model=Dict[str, Any],
+    responses={500: {"model": ErrorResponse}},
+    summary="Get frozen cross-market strategy evidence status",
+)
+def get_cross_market_strategy_status(request: Request) -> Dict[str, Any]:
+    try:
+        return _service(request).cross_market_signal_service.get_runtime_status()
+    except Exception as exc:
+        raise _internal_error("Get cross-market strategy status failed", exc)
+
+
+@router.post(
+    "/cross-market-strategy/migrate",
+    response_model=Dict[str, Any],
+    responses={400: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
+    summary="Safely migrate a clean legacy campaign to the current strategy",
+)
+def migrate_cross_market_strategy(
+    request: Request,
+    payload: CrossMarketStrategyMigrationRequest,
+    scheduler: RuntimeSchedulerService = Depends(get_runtime_scheduler_service),
+) -> Dict[str, Any]:
+    try:
+        service = _service(request)
+        before = service.get_settings()
+        if before.auto_strategy != CROSS_MARKET_STRATEGY_ID and not payload.reset_campaign:
+            raise ValueError("legacy_strategy_migration_requires_campaign_reset")
+        status = service.migrate_cross_market_strategy(
+            target_account_id=payload.target_account_id,
+            include_snapshot=True,
+            include_recent_trades=True,
+        )
+        migrated_account_id = service.get_settings().account_id
+        snapshot = status.get("snapshot") if isinstance(status.get("snapshot"), dict) else {}
+        snapshot_accounts = [
+            item for item in list(snapshot.get("accounts") or [])
+            if isinstance(item, dict)
+        ]
+        account_snapshot = snapshot_accounts[0] if snapshot_accounts else snapshot
+        acceptance_path = (
+            FilePath(service.config_path).parent
+            / "cross_market_strategy_acceptance.json"
+        )
+        acceptance = CrossMarketAcceptanceService(
+            repository=service.agent_repo,
+            state_path=acceptance_path,
+            current_account_id=migrated_account_id,
+        ).start_paper_campaign(
+            reset=payload.reset_campaign,
+            initial_equity=account_snapshot.get("total_equity"),
+        )
+        scheduler.reconcile_from_config()
+        status = _with_status_dependencies(status, scheduler, request)
+        return {
+            "strategy_id": CROSS_MARKET_STRATEGY_ID,
+            "migration": status.get("diagnostics", {}).get(
+                "cross_market_migration",
+                {},
+            ),
+            "acceptance": acceptance,
+            "status": status,
+        }
+    except ValueError as exc:
+        raise _bad_request(exc) from exc
+    except Exception as exc:
+        raise _internal_error("Migrate cross-market strategy failed", exc)
+
+
+@router.post(
+    "/cross-market-strategy/backtest",
+    response_model=CrossMarketBacktestResponse,
+    responses={400: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
+    summary="Run point-in-time cross-market strategy replay and ablations",
+)
+def run_cross_market_strategy_backtest(
+    request: Request,
+    payload: CrossMarketBacktestRequest,
+) -> CrossMarketBacktestResponse:
+    try:
+        frames = []
+        for item in payload.frames:
+            frames.append(
+                ReplayFrame(
+                    session_date=item.session_date,
+                    signal_at=item.signal_at,
+                    symbol=item.symbol,
+                    theme=item.theme,
+                    cn_gap_pct=item.cn_gap_pct,
+                    reclaimed_open=item.reclaimed_open,
+                    above_vwap=item.above_vwap,
+                    sector_signal_score=item.sector_signal_score,
+                    expected_gross_edge_pct=item.expected_gross_edge_pct,
+                    signal_price=item.signal_price,
+                    next_minute_bar=MinuteBar(**item.next_minute_bar.model_dump()),
+                    close_price=item.close_price,
+                    entry_phase=item.entry_phase,
+                    us_tech_score=item.us_tech_score,
+                    us_close_theme_signal=item.us_close_theme_signal,
+                    us_premarket_signal=item.us_premarket_signal,
+                    nasdaq_futures_signal=item.nasdaq_futures_signal,
+                    asia_supply_chain_signal=item.asia_supply_chain_signal,
+                    low_position_signal=item.low_position_signal,
+                    intraday_pullback_signal=item.intraday_pullback_signal,
+                    asia_market_gate=item.asia_market_gate,
+                    board_technical_signal=item.board_technical_signal,
+                    rotation_signal=item.rotation_signal,
+                    next_day_high_open_exit_signal=(
+                        item.next_day_high_open_exit_signal
+                    ),
+                    korea_gate=item.korea_gate,
+                    cpo_signal=item.cpo_signal,
+                    gold_signal=item.gold_signal,
+                    range_signal=item.range_signal,
+                    evidence_timestamps=item.evidence_timestamps,
+                    instrument_type=item.instrument_type,
+                    split_ratio=item.split_ratio,
+                    cash_dividend_per_share=item.cash_dividend_per_share,
+                    order_cancel_requested=item.order_cancel_requested,
+                    previous_close=item.previous_close,
+                    price_limit_pct=item.price_limit_pct,
+                )
+            )
+        result = CrossMarketBacktestService(initial_cash=payload.initial_cash).run_ablation_suite(
+            frames,
+            minimum_sessions=payload.minimum_sessions,
+        )
+        service = _service(request)
+        acceptance_path = FilePath(service.config_path).parent / "cross_market_strategy_acceptance.json"
+        result["acceptance_evidence"] = CrossMarketAcceptanceService(
+            repository=service.agent_repo,
+            state_path=acceptance_path,
+        ).record_backtest(
+            result=result,
+            dataset_kind=payload.dataset_kind,
+            dataset_id=payload.dataset_id,
+            data_sources=payload.data_sources,
+            minute_bar_source=payload.minute_bar_source,
+            request_payload=payload.model_dump(mode="json"),
+        )
+        return CrossMarketBacktestResponse.model_validate(result)
+    except ValueError as exc:
+        raise _bad_request(exc) from exc
+    except Exception as exc:
+        raise _internal_error("Run cross-market strategy backtest failed", exc)
+
+
+@router.get(
+    "/cross-market-strategy/acceptance",
+    response_model=Dict[str, Any],
+    responses={500: {"model": ErrorResponse}},
+    summary="Get 30-trading-day forward paper campaign status",
+)
+def get_cross_market_strategy_acceptance(request: Request) -> Dict[str, Any]:
+    try:
+        service = _service(request)
+        current_account_id = service.get_settings().account_id
+        acceptance_path = FilePath(service.config_path).parent / "cross_market_strategy_acceptance.json"
+        return CrossMarketAcceptanceService(
+            repository=service.agent_repo,
+            state_path=acceptance_path,
+            current_account_id=current_account_id,
+        ).get_status()
+    except Exception as exc:
+        raise _internal_error("Get cross-market strategy acceptance failed", exc)
+
+
+@router.post(
+    "/cross-market-strategy/acceptance/start",
+    response_model=Dict[str, Any],
+    responses={500: {"model": ErrorResponse}},
+    summary="Start or reset the 30-trading-day forward paper campaign",
+)
+def start_cross_market_strategy_acceptance(
+    request: Request,
+    payload: CrossMarketPaperCampaignStartRequest,
+) -> Dict[str, Any]:
+    try:
+        service = _service(request)
+        account = service.ensure_account()
+        current_account_id = int(account["id"])
+        account_status = service.get_status(
+            include_snapshot=True,
+            include_recent_trades=False,
+        )
+        snapshot = (
+            account_status.get("snapshot")
+            if isinstance(account_status.get("snapshot"), dict)
+            else {}
+        )
+        acceptance_path = FilePath(service.config_path).parent / "cross_market_strategy_acceptance.json"
+        return CrossMarketAcceptanceService(
+            repository=service.agent_repo,
+            state_path=acceptance_path,
+            current_account_id=current_account_id,
+        ).start_paper_campaign(
+            reset=payload.reset,
+            initial_equity=snapshot.get("total_equity"),
+        )
+    except ValueError as exc:
+        raise _bad_request(exc) from exc
+    except Exception as exc:
+        raise _internal_error("Start cross-market strategy acceptance failed", exc)
+
+
+@router.get(
+    "/cross-market-strategy/acceptance/report",
+    response_model=Dict[str, Any],
+    responses={500: {"model": ErrorResponse}},
+    summary="Get the account-bound 30-trading-day campaign performance report",
+)
+def get_cross_market_strategy_acceptance_report(request: Request) -> Dict[str, Any]:
+    try:
+        service = _service(request)
+        current_account_id = service.get_settings().account_id
+        acceptance_path = FilePath(service.config_path).parent / "cross_market_strategy_acceptance.json"
+        acceptance = CrossMarketAcceptanceService(
+            repository=service.agent_repo,
+            state_path=acceptance_path,
+            current_account_id=current_account_id,
+        ).get_status()
+        return service.get_cross_market_campaign_report(acceptance)
+    except Exception as exc:
+        raise _internal_error("Get cross-market strategy campaign report failed", exc)
 
 
 @router.get(
@@ -1949,24 +2363,37 @@ def get_vnpy_paper_task_health(
 )
 def list_vnpy_paper_task_events(
     scheduler: RuntimeSchedulerService = Depends(get_runtime_scheduler_service),
-    limit: int = Query(50, ge=1, le=100, description="Maximum number of events to return."),
+    limit: int = Query(50, ge=1, le=5000, description="Maximum number of events to return."),
     name: Optional[str] = Query(None, description="Filter by background task name."),
     status: Optional[str] = Query(None, description="Filter by event status."),
+    started_at: Optional[datetime] = Query(
+        None,
+        description="Return events at or after this server-local timestamp.",
+    ),
 ) -> VnpyPaperTaskEventListResponse:
     try:
         event_name = (name or "").strip() or None
         event_status = (status or "").strip() or None
+        event_started_at = started_at
+        if event_started_at is not None and event_started_at.tzinfo is not None:
+            event_started_at = event_started_at.astimezone().replace(tzinfo=None)
         events = _scheduler_task_events(
             scheduler,
             name=event_name,
             status=event_status,
             limit=limit,
+            started_at=event_started_at,
         )
         return VnpyPaperTaskEventListResponse.model_validate({
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "limit": limit,
             "name": event_name,
             "status": event_status,
+            "started_at": (
+                event_started_at.isoformat()
+                if event_started_at is not None
+                else None
+            ),
             "count": len(events),
             "items": events,
         })

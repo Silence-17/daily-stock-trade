@@ -8,7 +8,7 @@ import sqlite3
 import tempfile
 import threading
 import unittest
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Optional
@@ -135,6 +135,111 @@ class PortfolioServiceTestCase(unittest.TestCase):
         self.assertEqual(pos["price_source"], "realtime_quote")
         self.assertEqual(pos["price_provider"], "unit-test")
         self.assertTrue(pos["price_available"])
+
+    def test_snapshot_uses_timestamped_realtime_price_override(self) -> None:
+        account_id = self._create_account_with_position(
+            market="cn",
+            currency="CNY",
+            symbol="600519",
+        )
+        provider_timestamp = datetime.now(timezone.utc).isoformat()
+
+        with patch.object(
+            PortfolioService,
+            "_fetch_realtime_position_price",
+            side_effect=AssertionError("override must bypass the ordinary quote route"),
+        ):
+            snapshot = self.service.get_portfolio_snapshot(
+                account_id=account_id,
+                as_of=date.today(),
+                persist=True,
+                realtime_price_overrides={
+                    "600519": {
+                        "price": 125.0,
+                        "provider": "strict-unit-test",
+                        "provider_timestamp": provider_timestamp,
+                    },
+                },
+            )
+
+        position = snapshot["accounts"][0]["positions"][0]
+        self.assertEqual(position["last_price"], 125.0)
+        self.assertEqual(position["price_source"], "realtime_quote")
+        self.assertEqual(position["price_provider"], "strict-unit-test")
+        self.assertEqual(
+            position["price_provider_timestamp"],
+            provider_timestamp,
+        )
+
+    def test_read_only_snapshot_does_not_replace_persisted_position_cache(self) -> None:
+        snapshot_date = date(2026, 1, 3)
+        account_id = self._create_account_with_position(
+            market="cn",
+            currency="CNY",
+            symbol="600519",
+            close=105.0,
+            close_date=snapshot_date,
+        )
+
+        with patch.object(
+            self.service.repo,
+            "replace_positions_lots_and_snapshot",
+            wraps=self.service.repo.replace_positions_lots_and_snapshot,
+        ) as replace_snapshot:
+            snapshot = self.service.get_portfolio_snapshot(
+                account_id=account_id,
+                as_of=snapshot_date,
+                persist=False,
+            )
+
+        self.assertEqual(snapshot["as_of"], snapshot_date.isoformat())
+        replace_snapshot.assert_not_called()
+
+    def test_cn_sellable_quantity_excludes_same_day_buys_and_tracks_prior_lots(self) -> None:
+        today = date(2026, 7, 23)
+        account = self.service.create_account(name="T1", broker="Demo", market="cn", base_currency="CNY")
+        account_id = int(account["id"])
+        self.service.record_trade(
+            account_id=account_id,
+            symbol="600519",
+            trade_date=today - timedelta(days=1),
+            side="buy",
+            quantity=200,
+            price=100,
+            market="cn",
+            currency="CNY",
+        )
+        self.service.record_trade(
+            account_id=account_id,
+            symbol="600519",
+            trade_date=today,
+            side="buy",
+            quantity=100,
+            price=101,
+            market="cn",
+            currency="CNY",
+        )
+        self.service.record_trade(
+            account_id=account_id,
+            symbol="600519",
+            trade_date=today,
+            side="sell",
+            quantity=50,
+            price=102,
+            market="cn",
+            currency="CNY",
+        )
+
+        self.assertEqual(
+            self.service.get_sellable_quantity(
+                account_id=account_id,
+                symbol="600519",
+                trade_date=today,
+                market="cn",
+                currency="CNY",
+            ),
+            150.0,
+        )
 
     def test_current_snapshot_prefers_realtime_price_over_stale_close(self) -> None:
         today = date.today()

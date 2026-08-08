@@ -16,6 +16,7 @@ export type VnpyPaperSettings = {
   accountId?: number | null;
   initialCash: number;
   autoTradeEnabled: boolean;
+  crossMarketObservationEnabled?: boolean;
   autoStrategy: string;
   autoMarket: VnpyPaperMarket | string;
   autoMaxResults: number;
@@ -382,6 +383,7 @@ export type VnpyPaperStatusResponse = {
   snapshot?: VnpyPaperSnapshot | null;
   recentTrades: VnpyPaperTrade[];
   lastAutoRun?: Record<string, unknown> | null;
+  lastFormalAutoRun?: Record<string, unknown> | null;
   scheduler?: VnpyPaperSchedulerStatus | null;
   diagnostics?: Record<string, unknown>;
 };
@@ -1191,6 +1193,143 @@ export type VnpyPaperStatusOptions = {
   includeRecentTrades?: boolean;
 };
 
+export type CrossMarketPaperCampaignSessionResult = {
+  sessionDate: string;
+  evidenceStatus: 'ready' | 'degraded';
+  fullyEvidenced: boolean;
+  qualifiesForCampaign?: boolean;
+  missingRequirements: string[];
+  runId?: number | null;
+  runUid?: string | null;
+  runStatus?: string | null;
+  triggerSource?: string | null;
+  executionMode?: string | null;
+  createdAt?: string | null;
+  evidenceCheckedAt?: string | null;
+  candidateCount: number;
+  plannedCount: number;
+  submittedCount: number;
+  skippedCount: number;
+  formalExecution?: {
+    observed: boolean;
+    fullyEvidenced: boolean;
+    evidenceStatus: 'ready' | 'degraded' | 'unavailable';
+    missingRequirements: string[];
+    runId?: number | null;
+    runUid?: string | null;
+    runStatus?: string | null;
+    triggerSource?: string | null;
+    executionMode?: string | null;
+    createdAt?: string | null;
+    candidateCount: number;
+    plannedCount: number;
+    submittedCount: number;
+    skippedCount: number;
+  };
+};
+
+export type CrossMarketPaperCampaignStatus = {
+  strategyId: string;
+  historicalRequired: boolean;
+  historicalReady: boolean;
+  ready: boolean;
+  paperObservation: {
+    campaignActive: boolean;
+    campaignStartedAt?: string | null;
+    campaignAccountId?: number | null;
+    currentAccountId?: number | null;
+    accountMatchesCurrent?: boolean;
+    initialEquity?: number | null;
+    requiredTradingDays: number;
+    observedTradingDays: number;
+    remainingTradingDays: number;
+    fullyEvidencedTradingDays?: number;
+    qualifiedPaperTradingDays?: number;
+    degradedTradingDays?: number;
+    dataCompletenessPct?: number | null;
+    missingRequirementCounts?: Record<string, number>;
+    firstObservationDate?: string | null;
+    latestObservationDate?: string | null;
+    completionSessionDate?: string | null;
+    completedAt?: string | null;
+    postCompletionObservationDays?: number;
+    observationDates: string[];
+    fullyEvidencedObservationDates?: string[];
+    degradedObservationDates?: string[];
+    sessionResults?: CrossMarketPaperCampaignSessionResult[];
+    formalExecutionTradingDays?: number;
+    fullyEvidencedFormalExecutionDays?: number;
+    evidenceOnlyTradingDays?: number;
+    fullyEvidencedWithoutFormalExecutionDays?: number;
+    fullyEvidencedViaLaterObservationDays?: number;
+    formalExecutionObservationDates?: string[];
+    fullyEvidencedFormalExecutionDates?: string[];
+    qualifiedPaperTradingDates?: string[];
+    evidenceOnlyObservationDates?: string[];
+    fullyEvidencedWithoutFormalExecutionDates?: string[];
+    fullyEvidencedViaLaterObservationDates?: string[];
+    completionBasis?: string;
+    ready: boolean;
+  };
+};
+
+export type CrossMarketPaperCampaignStartResponse = {
+  started: boolean;
+  reset: boolean;
+  campaign: {
+    status: string;
+    startedAt: string;
+    requiredTradingDays: number;
+    accountId?: number | null;
+    initialEquity?: number | null;
+  };
+  status: CrossMarketPaperCampaignStatus;
+};
+
+export type CrossMarketPaperCampaignReport = {
+  schemaVersion: number;
+  strategyId: string;
+  generatedAt: string;
+  isFinal: boolean;
+  strategyAccepted: boolean;
+  reportStatus: string;
+  campaign: CrossMarketPaperCampaignStatus['paperObservation'];
+  performance: {
+    initialEquity?: number | null;
+    totalCash?: number | null;
+    totalMarketValue?: number | null;
+    totalEquity?: number | null;
+    totalPnl?: number | null;
+    returnPct?: number | null;
+    tradeMetrics?: Record<string, unknown>;
+    slippageMetrics?: Record<string, unknown>;
+    riskMetrics?: Record<string, unknown>;
+    equityCurve?: Array<Record<string, unknown>>;
+    dailyReturns?: Array<Record<string, unknown>>;
+    monthlyReturns?: Array<Record<string, unknown>>;
+    [key: string]: unknown;
+  };
+  transactions: Array<Record<string, unknown>>;
+  transactionCount: number;
+  nonStrategyTransactionCount: number;
+  statisticalSample?: {
+    ready: boolean;
+    buyTradeCount: number;
+    closedTradeCount: number;
+    minimumBuyTrades: number;
+    minimumClosedTrades: number;
+  };
+  decisionAudit?: Array<Record<string, unknown>>;
+  decisionMetrics?: Record<string, unknown>;
+  reportWindow?: {
+    dateFrom?: string | null;
+    dateTo?: string | null;
+    boundedToCompletionSession: boolean;
+  };
+  warnings: string[];
+  methodology: Record<string, unknown>;
+};
+
 export type VnpyPaperOrderRequest = {
   symbol: string;
   side: VnpyPaperSide;
@@ -1280,6 +1419,9 @@ function buildSettingsPayload(payload: VnpyPaperSettingsUpdate): Record<string, 
   if (hasOwn(payload, 'accountId')) body.account_id = payload.accountId;
   if (hasOwn(payload, 'initialCash')) body.initial_cash = payload.initialCash;
   if (hasOwn(payload, 'autoTradeEnabled')) body.auto_trade_enabled = payload.autoTradeEnabled;
+  if (hasOwn(payload, 'crossMarketObservationEnabled')) {
+    body.cross_market_observation_enabled = payload.crossMarketObservationEnabled;
+  }
   if (hasOwn(payload, 'autoStrategy')) body.auto_strategy = payload.autoStrategy;
   if (hasOwn(payload, 'autoMarket')) body.auto_market = payload.autoMarket;
   if (hasOwn(payload, 'autoMaxResults')) body.auto_max_results = payload.autoMaxResults;
@@ -1585,6 +1727,28 @@ export const vnpyPaperTradingApi = {
       ? await apiClient.get<Record<string, unknown>>('/api/v1/vnpy-paper/status', { params })
       : await apiClient.get<Record<string, unknown>>('/api/v1/vnpy-paper/status');
     return toCamelCase<VnpyPaperStatusResponse>(response.data);
+  },
+
+  async getCrossMarketPaperCampaign(): Promise<CrossMarketPaperCampaignStatus> {
+    const response = await apiClient.get<Record<string, unknown>>(
+      '/api/v1/vnpy-paper/cross-market-strategy/acceptance',
+    );
+    return toCamelCase<CrossMarketPaperCampaignStatus>(response.data);
+  },
+
+  async startCrossMarketPaperCampaign(reset = false): Promise<CrossMarketPaperCampaignStartResponse> {
+    const response = await apiClient.post<Record<string, unknown>>(
+      '/api/v1/vnpy-paper/cross-market-strategy/acceptance/start',
+      { reset },
+    );
+    return toCamelCase<CrossMarketPaperCampaignStartResponse>(response.data);
+  },
+
+  async getCrossMarketPaperCampaignReport(): Promise<CrossMarketPaperCampaignReport> {
+    const response = await apiClient.get<Record<string, unknown>>(
+      '/api/v1/vnpy-paper/cross-market-strategy/acceptance/report',
+    );
+    return toCamelCase<CrossMarketPaperCampaignReport>(response.data);
   },
 
   async reconnectGateway(): Promise<VnpyPaperGatewayReconnectResponse> {

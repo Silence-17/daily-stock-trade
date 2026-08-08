@@ -302,6 +302,7 @@ class Scheduler:
         run_immediately: bool = False,
         name: Optional[str] = None,
         initial_delay_seconds: Optional[int] = None,
+        next_delay_seconds_provider: Optional[Callable[[], Optional[float]]] = None,
     ) -> None:
         """Register a periodic background task executed inside the scheduler loop.
 
@@ -323,6 +324,8 @@ class Scheduler:
             "thread": None,
             "running": False,
         }
+        if callable(next_delay_seconds_provider):
+            entry["next_delay_seconds_provider"] = next_delay_seconds_provider
         if not run_immediately:
             delay_seconds = None
             if initial_delay_seconds is not None:
@@ -359,6 +362,24 @@ class Scheduler:
             except Exception as exc:
                 logger.exception("后台任务执行失败 [%s]: %s", entry["name"], exc)
             finally:
+                delay_provider = entry.get("next_delay_seconds_provider")
+                if callable(delay_provider):
+                    try:
+                        next_delay = delay_provider()
+                        if next_delay is not None:
+                            normalized_delay = max(0.0, float(next_delay))
+                            entry["last_run"] = (
+                                time.time()
+                                + normalized_delay
+                                - float(entry["interval_seconds"])
+                            )
+                            entry["dynamic_next_delay_seconds"] = normalized_delay
+                    except Exception as exc:
+                        logger.exception(
+                            "后台任务动态重排失败 [%s]: %s",
+                            entry["name"],
+                            exc,
+                        )
                 entry["running"] = False
                 entry["thread"] = None
 
@@ -464,6 +485,7 @@ def run_with_schedule(
             run_immediately=entry.get("run_immediately", False),
             name=entry.get("name"),
             initial_delay_seconds=entry.get("initial_delay_seconds"),
+            next_delay_seconds_provider=entry.get("next_delay_seconds_provider"),
         )
     scheduler.set_daily_task(task, run_immediately=run_immediately)
     scheduler.run()

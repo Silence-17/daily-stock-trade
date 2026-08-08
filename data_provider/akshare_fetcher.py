@@ -1194,6 +1194,8 @@ class AkshareFetcher(BaseFetcher):
                     f"{fields[30]} {fields[31]}"
                 ),
                 price=price,
+                bid_price=safe_float(fields[6]),
+                ask_price=safe_float(fields[7]),
                 change_pct=change_pct,
                 change_amount=change_amount,
                 volume=safe_int(fields[8]),  # 成交量（股）
@@ -1340,6 +1342,8 @@ class AkshareFetcher(BaseFetcher):
                 source=RealtimeSource.TENCENT,
                 provider_timestamp=_normalize_cn_quote_timestamp(fields[30]),
                 price=safe_float(fields[3]),
+                bid_price=safe_float(fields[9]) if len(fields) > 9 else None,
+                ask_price=safe_float(fields[19]) if len(fields) > 19 else None,
                 change_pct=safe_float(fields[32]),
                 change_amount=safe_float(fields[31]) if len(fields) > 31 else None,
                 volume=_normalize_tencent_volume(fields),
@@ -1348,6 +1352,8 @@ class AkshareFetcher(BaseFetcher):
                 high=safe_float(fields[33]) if len(fields) > 33 else None,  # 修正：字段 33 是最高价
                 low=safe_float(fields[34]) if len(fields) > 34 else None,  # 修正：字段 34 是最低价
                 pre_close=safe_float(fields[4]),
+                limit_up_price=safe_float(fields[47]) if len(fields) > 47 else None,
+                limit_down_price=safe_float(fields[48]) if len(fields) > 48 else None,
                 turnover_rate=safe_float(fields[38]) if len(fields) > 38 else None,
                 amplitude=safe_float(fields[43]) if len(fields) > 43 else None,
                 volume_ratio=safe_float(fields[49]) if len(fields) > 49 else None,  # 量比

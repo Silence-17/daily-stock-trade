@@ -168,6 +168,12 @@ class RuntimeSchedulerServiceTestCase(unittest.TestCase):
             "completed_count": 2,
             "submitted_count": 0,
             "execution_mode": "dry_run",
+            "trigger_source": "cross_market_intraday_entry_scan",
+            "analysis_slot": "13:30",
+            "formal_recovery": False,
+            "intraday_entry_recheck": True,
+            "retryable": True,
+            "retry_after_seconds": 30,
             "submits_orders": False,
             "runs": [
                 {
@@ -209,6 +215,15 @@ class RuntimeSchedulerServiceTestCase(unittest.TestCase):
         self.assertEqual(details["completed_count"], 2)
         self.assertEqual(details["submitted_count"], 0)
         self.assertEqual(details["execution_mode"], "dry_run")
+        self.assertEqual(
+            details["trigger_source"],
+            "cross_market_intraday_entry_scan",
+        )
+        self.assertEqual(details["analysis_slot"], "13:30")
+        self.assertFalse(details["formal_recovery"])
+        self.assertTrue(details["intraday_entry_recheck"])
+        self.assertTrue(details["retryable"])
+        self.assertEqual(details["retry_after_seconds"], 30)
         self.assertFalse(details["submits_orders"])
         self.assertEqual(details["run_count"], 2)
         self.assertEqual(details["failure_count"], 0)
@@ -595,6 +610,7 @@ class RuntimeSchedulerServiceTestCase(unittest.TestCase):
                 run_immediately: bool,
                 name: str | None = None,
                 initial_delay_seconds: int | None = None,
+                next_delay_seconds_provider=None,
             ) -> None:
                 self.background_tasks.append({
                     "task": task,
@@ -678,6 +694,7 @@ class RuntimeSchedulerServiceTestCase(unittest.TestCase):
                 run_immediately: bool,
                 name: str | None = None,
                 initial_delay_seconds: int | None = None,
+                next_delay_seconds_provider=None,
             ) -> None:
                 self.background_tasks.append({
                     "task": task,
@@ -973,6 +990,7 @@ class RuntimeSchedulerServiceTestCase(unittest.TestCase):
                 run_immediately,
                 name=None,
                 initial_delay_seconds=None,
+                next_delay_seconds_provider=None,
             ):
                 self.background_tasks.append({
                     "task": task,
@@ -1081,6 +1099,7 @@ class RuntimeSchedulerServiceTestCase(unittest.TestCase):
                 run_immediately: bool,
                 name: str | None = None,
                 initial_delay_seconds: int | None = None,
+                next_delay_seconds_provider=None,
             ) -> None:
                 self.background_tasks.append({
                     "task": task,

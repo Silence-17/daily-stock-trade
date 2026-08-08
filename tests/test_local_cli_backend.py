@@ -914,8 +914,14 @@ def test_output_stat_error_is_structured_and_kills_process_group(
     backend = _backend(
         tmp_path,
         f"""
-import subprocess, sys, time
-child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+import subprocess, sys, tempfile, time
+child = subprocess.Popen(
+    [sys.executable, "-c", "import time; time.sleep(30)"],
+    stdin=subprocess.DEVNULL,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+    cwd=tempfile.gettempdir(),
+)
 open({str(pid_file)!r}, "w", encoding="utf-8").write(str(child.pid))
 sys.stdout.write("started")
 sys.stdout.flush()

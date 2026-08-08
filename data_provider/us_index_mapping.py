@@ -17,6 +17,16 @@ import re
 _US_STOCK_PATTERN = re.compile(r'^[A-Z]{1,5}(\.[A-Z])?$')
 
 
+# Non-index Yahoo instruments that still use the US-market data route.
+US_YFINANCE_ALIAS_MAPPING = {
+    'NQ00Y': ('NQ=F', 'E-mini Nasdaq-100 Continuous'),
+    'NQ1': ('NQ=F', 'E-mini Nasdaq-100 Continuous'),
+    'NQ=F': ('NQ=F', 'E-mini Nasdaq-100 Continuous'),
+    'GC1': ('GC=F', '纽约黄金主连'),
+    'GC=F': ('GC=F', '纽约黄金主连'),
+}
+
+
 # 用户输入 -> (Yahoo Finance 符号, 中文名称)
 US_INDEX_MAPPING = {
     # 标普 500
@@ -60,6 +70,15 @@ def is_us_index_code(code: str) -> bool:
         False
     """
     return (code or '').strip().upper() in US_INDEX_MAPPING
+
+
+def is_us_yfinance_alias_code(code: str) -> bool:
+    return (code or '').strip().upper() in US_YFINANCE_ALIAS_MAPPING
+
+
+def get_us_yfinance_alias(code: str) -> tuple:
+    normalized = (code or '').strip().upper()
+    return US_YFINANCE_ALIAS_MAPPING.get(normalized, (None, None))
 
 
 def is_us_stock_code(code: str) -> bool:

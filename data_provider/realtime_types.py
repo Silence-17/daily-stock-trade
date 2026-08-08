@@ -103,6 +103,13 @@ class RealtimeSource(Enum):
     TENCENT = "tencent"             # 腾讯直连
     SINA = "sina"                   # 新浪直连
     STOOQ = "stooq"                 # Stooq 美股兜底
+    YAHOO_CHART = "yahoo_chart"     # Yahoo Chart 免 crumb 分钟行情
+    YAHOO_STREAMER = "yahoo_streamer"  # Yahoo realtime WebSocket ticks
+    KOREA_INVESTMENT = "korea_investment"  # 韩国投资证券 KIS Open API
+    NAVER = "naver"                 # Naver Finance 韩国实时行情
+    EASTMONEY_GLOBAL = "eastmoney_global"  # EastMoney global index quote
+    YAHOO_JAPAN = "yahoo_japan"     # Yahoo Japan zero-delay index page
+    TWSE = "twse"                   # Taiwan Stock Exchange MIS realtime feed
     LONGBRIDGE = "longbridge"       # 长桥（美股/港股兜底）
     FALLBACK = "fallback"           # 降级兜底
 
@@ -134,6 +141,8 @@ class UnifiedRealtimeQuote:
     
     # === 核心价格数据（几乎所有源都有）===
     price: Optional[float] = None           # 最新价
+    bid_price: Optional[float] = None       # 买一价
+    ask_price: Optional[float] = None       # 卖一价
     change_pct: Optional[float] = None      # 涨跌幅(%)
     change_amount: Optional[float] = None   # 涨跌额
     
@@ -149,6 +158,8 @@ class UnifiedRealtimeQuote:
     high: Optional[float] = None            # 最高价
     low: Optional[float] = None             # 最低价
     pre_close: Optional[float] = None       # 昨收价
+    limit_up_price: Optional[float] = None  # 供应商给出的当日涨停价
+    limit_down_price: Optional[float] = None  # 供应商给出的当日跌停价
     
     # === 估值指标（仅东财等全量接口有）===
     pe_ratio: Optional[float] = None        # 市盈率(动态)
@@ -172,9 +183,11 @@ class UnifiedRealtimeQuote:
         optional_fields = [
             'fetched_at', 'provider_timestamp', 'is_stale', 'stale_seconds',
             'fallback_from', 'market', 'currency', 'data_quality', 'missing_fields',
-            'price', 'change_pct', 'change_amount', 'volume', 'amount',
+            'price', 'bid_price', 'ask_price', 'change_pct', 'change_amount',
+            'volume', 'amount',
             'volume_ratio', 'turnover_rate', 'amplitude',
             'open_price', 'high', 'low', 'pre_close',
+            'limit_up_price', 'limit_down_price',
             'pe_ratio', 'pb_ratio', 'total_mv', 'circ_mv',
             'change_60d', 'high_52w', 'low_52w'
         ]

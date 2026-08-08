@@ -27,6 +27,8 @@ class UnifiedRealtimeQuoteMetadataTestCase(unittest.TestCase):
             code="600519",
             source=RealtimeSource.TENCENT,
             price=1688.0,
+            bid_price=1687.9,
+            ask_price=1688.1,
             fetched_at="2026-05-31T10:00:05+00:00",
             provider_timestamp="2026-05-31T10:00:00+00:00",
             is_stale=False,
@@ -41,6 +43,8 @@ class UnifiedRealtimeQuoteMetadataTestCase(unittest.TestCase):
         self.assertIs(data["is_stale"], False)
         self.assertEqual(data["stale_seconds"], 5)
         self.assertEqual(data["fallback_from"], "efinance")
+        self.assertEqual(data["bid_price"], 1687.9)
+        self.assertEqual(data["ask_price"], 1688.1)
 
 
 class CircuitBreakerConcurrencyTestCase(unittest.TestCase):

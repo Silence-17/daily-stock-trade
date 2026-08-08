@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Watchlist API regressions for stock-code variant matching."""
 
+from api.v1.endpoints import stocks as stocks_endpoint
 from api.v1.endpoints.stocks import add_to_watchlist, remove_from_watchlist
 from api.v1.schemas.history import WatchlistRequest
 
@@ -21,6 +22,12 @@ class FakeSystemConfigService:
         items = kwargs["items"]
         self.stock_list = items[0]["value"]
         self.update_calls.append(self.stock_list)
+
+
+def test_removed_industry_boards_endpoint_is_not_registered() -> None:
+    paths = {getattr(route, "path", None) for route in stocks_endpoint.router.routes}
+
+    assert "/industry-boards" not in paths
 
 
 def test_watchlist_add_deduplicates_raw_hk_code_against_prefixed_variant() -> None:

@@ -44,10 +44,6 @@ vi.mock('./pages/PortfolioPage', () => ({
   default: () => <div data-testid="portfolio-page">Portfolio</div>,
 }));
 
-vi.mock('./pages/IndustryBoardsPage', () => ({
-  default: () => <div data-testid="industry-boards-page">Industry boards</div>,
-}));
-
 vi.mock('./pages/VnpyPaperTradingPage', () => ({
   default: () => <div data-testid="paper-trading-page">Paper trading</div>,
 }));
@@ -164,14 +160,13 @@ describe('App routing behavior', () => {
     expect(screen.queryByTestId('home-page')).not.toBeInTheDocument();
   });
 
-  it('routes /industry-boards to the industry boards page after auth is ready', async () => {
+  it('routes the removed /industry-boards path to not found', async () => {
     window.history.pushState({}, '', '/industry-boards');
 
     render(<App />);
 
-    expect(await screen.findByTestId('industry-boards-page')).toBeInTheDocument();
+    expect(await screen.findByTestId('not-found-page')).toBeInTheDocument();
     expect(setCurrentRoute).toHaveBeenCalledWith('/industry-boards');
-    expect(screen.queryByTestId('home-page')).not.toBeInTheDocument();
   });
 
   it('routes /paper-trading to the vn.py paper trading page after auth is ready', async () => {

@@ -15,6 +15,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from src.services.vnpy_runtime import (
+    BUILTIN_SIMULATED_GATEWAY_CLASS,
     VnpyRuntimeSettings,
     bootstrap_vnpy_runtime,
     load_vnpy_runtime_settings,
@@ -415,6 +416,127 @@ class VnpyRuntimeTestCase(unittest.TestCase):
         self.assertIsNone(handle.diagnostics["connect"]["settings_path"])
         self.assertEqual(handle.main_engine.connects[0], ({}, "SIM"))
         handle.close()
+
+    def test_builtin_gateway_uses_paper_initial_cash_and_drops_broker_settings(self) -> None:
+        installed = _install_fake_vnpy_runtime_modules()
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config_path = tmp_path / "vnpy-paper.json"
+            config_path.write_text(
+                json.dumps({"settings": {"initial_cash": 123456.0}}),
+                encoding="utf-8",
+            )
+            connect_path = tmp_path / "external-broker.json"
+            connect_path.write_text(
+                json.dumps(
+                    {
+                        "userid": "paper",
+                        "password": "not-for-the-simulator",
+                        "initial_balance": 999999.0,
+                        "matching_mode": "next_minute_vwap",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            simulated_gateway = sys.modules["fake_vnpy_gateway"].SimGateway
+            try:
+                with patch(
+                    "src.services.vnpy_runtime._import_object",
+                    return_value=simulated_gateway,
+                ):
+                    handle = bootstrap_vnpy_runtime(
+                        settings=VnpyRuntimeSettings(
+                            enabled=True,
+                            gateway_class=BUILTIN_SIMULATED_GATEWAY_CLASS,
+                            gateway_name="DSA_SIM",
+                            connect_settings_path=str(connect_path),
+                            connect_on_start=True,
+                            auto_attach_events=False,
+                        ),
+                        config_path=config_path,
+                    )
+            finally:
+                _restore_modules(installed)
+
+        payload, gateway_name = handle.main_engine.connects[0]
+        self.assertEqual(gateway_name, "DSA_SIM")
+        self.assertEqual(
+            payload,
+            {
+                "initial_balance": 123456.0,
+                "matching_mode": "next_minute_vwap",
+            },
+        )
+        self.assertEqual(
+            handle.diagnostics["connect"]["builtin_simulated_gateway"],
+            {
+                "initial_balance": 123456.0,
+                "initial_balance_source": "vnpy_paper_settings",
+                "ignored_setting_count": 2,
+            },
+        )
+        self.assertNotIn("not-for-the-simulator", json.dumps(handle.diagnostics))
+        handle.close()
+
+    def test_builtin_gateway_reconnect_refreshes_paper_initial_cash(self) -> None:
+        installed = _install_fake_vnpy_runtime_modules()
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config_path = tmp_path / "vnpy-paper.json"
+            config_path.write_text(
+                json.dumps({"settings": {"initial_cash": 100000.0}}),
+                encoding="utf-8",
+            )
+            connect_path = tmp_path / "external-broker.json"
+            connect_path.write_text(
+                json.dumps({"password": "not-for-the-simulator"}),
+                encoding="utf-8",
+            )
+            simulated_gateway = sys.modules["fake_vnpy_gateway"].SimGateway
+            try:
+                with patch(
+                    "src.services.vnpy_runtime._import_object",
+                    return_value=simulated_gateway,
+                ):
+                    handle = bootstrap_vnpy_runtime(
+                        settings=VnpyRuntimeSettings(
+                            enabled=True,
+                            gateway_class=BUILTIN_SIMULATED_GATEWAY_CLASS,
+                            gateway_name="DSA_SIM",
+                            connect_settings_path=str(connect_path),
+                            connect_on_start=True,
+                            auto_attach_events=False,
+                        ),
+                        config_path=config_path,
+                    )
+                config_path.write_text(
+                    json.dumps({"settings": {"initial_cash": 88000.0}}),
+                    encoding="utf-8",
+                )
+                handle.main_engine.get_gateway("DSA_SIM").connected = False
+                reconnect = handle.run_manual_reconnect()
+
+                self.assertEqual(reconnect["last_result"], "reconnected")
+                self.assertEqual(
+                    handle.main_engine.connects,
+                    [
+                        ({"initial_balance": 100000.0}, "DSA_SIM"),
+                        ({"initial_balance": 88000.0}, "DSA_SIM"),
+                    ],
+                )
+                self.assertEqual(
+                    handle.diagnostics["connect"]["builtin_simulated_gateway"],
+                    {
+                        "initial_balance": 88000.0,
+                        "initial_balance_source": "vnpy_paper_settings",
+                        "ignored_setting_count": 1,
+                    },
+                )
+                self.assertNotIn("not-for-the-simulator", json.dumps(handle.diagnostics))
+            finally:
+                if "handle" in locals():
+                    handle.close()
+                _restore_modules(installed)
 
     def test_bootstrap_keeps_unconfirmed_async_connection_distinct(self) -> None:
         installed = _install_fake_vnpy_runtime_modules()

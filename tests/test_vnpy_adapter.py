@@ -8,6 +8,11 @@ import types
 import unittest
 from unittest.mock import patch
 
+from scripts.check_vnpy_adapter import (
+    RECONNECT_PENDING_DELAY_MS,
+    SMOKE_MATCHING_MODE,
+    _smoke_gateway_settings,
+)
 from src.services.vnpy_adapter import (
     VnpyAdapterError,
     VnpyEventSubscriptionBridge,
@@ -24,6 +29,19 @@ from src.services.vnpy_adapter import (
 
 
 class VnpyAdapterTestCase(unittest.TestCase):
+    def test_adapter_smoke_matching_is_isolated_from_deployed_mode(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {"DSA_SIM_MATCHING_MODE": "next_minute_vwap"},
+        ):
+            settings = _smoke_gateway_settings()
+
+        self.assertEqual(settings["matching_mode"], SMOKE_MATCHING_MODE)
+        self.assertEqual(settings["matching_mode"], "fixed_delay_limit")
+        self.assertEqual(settings["reject_every_nth_order"], 0)
+        self.assertEqual(settings["duplicate_trade_event_count"], 1)
+        self.assertGreater(RECONNECT_PENDING_DELAY_MS, settings["fill_delay_ms"])
+
     def test_builds_a_share_limit_order_payload_with_lot_rounding(self) -> None:
         payload = build_vnpy_order_request_payload(
             symbol="SH600519",
@@ -47,6 +65,13 @@ class VnpyAdapterTestCase(unittest.TestCase):
 
     def test_builds_cross_market_payloads(self) -> None:
         sz_symbol, sz_exchange = normalize_vnpy_symbol("000001.SZ", market="cn")
+        bse_payload = build_vnpy_order_request_payload(
+            symbol="BJ920045",
+            side="buy",
+            market="cn",
+            cash_amount=2150,
+            price=10,
+        )
         hk_payload = build_vnpy_order_request_payload(
             symbol="700",
             side="buy",
@@ -63,6 +88,10 @@ class VnpyAdapterTestCase(unittest.TestCase):
         )
 
         self.assertEqual((sz_symbol, sz_exchange), ("000001", "SZSE"))
+        self.assertEqual(bse_payload["symbol"], "920045")
+        self.assertEqual(bse_payload["exchange"], "BSE")
+        self.assertEqual(bse_payload["vt_symbol"], "920045.BSE")
+        self.assertEqual(bse_payload["volume"], 215.0)
         self.assertEqual(hk_payload["symbol"], "00700")
         self.assertEqual(hk_payload["exchange"], "SEHK")
         self.assertEqual(hk_payload["volume"], 200.0)
@@ -80,6 +109,25 @@ class VnpyAdapterTestCase(unittest.TestCase):
                 price=10,
             )
 
+    def test_star_market_buy_uses_two_hundred_share_minimum_and_unit_increments(self) -> None:
+        payload = build_vnpy_order_request_payload(
+            symbol="688981",
+            side="buy",
+            market="cn",
+            cash_amount=13000,
+            price=60,
+        )
+
+        self.assertEqual(payload["volume"], 216.0)
+        with self.assertRaisesRegex(VnpyAdapterError, "resolved volume is zero"):
+            build_vnpy_order_request_payload(
+                symbol="688981",
+                side="buy",
+                market="cn",
+                cash_amount=10000,
+                price=60,
+            )
+
     def test_status_reports_local_fallback_when_vnpy_import_is_missing(self) -> None:
         def _missing_import(module_name: str):
             raise ModuleNotFoundError(f"No module named {module_name!r}", name="vnpy")
@@ -91,6 +139,18 @@ class VnpyAdapterTestCase(unittest.TestCase):
         self.assertEqual(status["mode"], "local_paper_fallback")
         self.assertEqual(status["reason"], "missing_module")
         self.assertFalse(status["order_request_supported"])
+
+    def test_status_reports_board_specific_cn_buy_quantity_rules(self) -> None:
+        status = get_vnpy_adapter_status()
+        mapping = status["mapping"]
+
+        self.assertEqual(mapping["cn_buy_lot_size"], 100)
+        self.assertEqual(mapping["cn_regular_buy_lot_size"], 100)
+        self.assertEqual(mapping["cn_star_min_buy_quantity"], 200)
+        self.assertEqual(mapping["cn_star_buy_increment"], 1)
+        self.assertEqual(mapping["cn_bse_min_buy_quantity"], 100)
+        self.assertEqual(mapping["cn_bse_buy_increment"], 1)
+        self.assertIn("BSE", mapping["supported_exchanges"])
 
     def test_instantiates_order_request_when_fake_vnpy_modules_exist(self) -> None:
         installed = _install_fake_vnpy_modules()
@@ -164,6 +224,45 @@ class VnpyAdapterTestCase(unittest.TestCase):
         )
         self.assertTrue(recovered["connection_confirmed"])
         self.assertEqual(recovered["connection_status"], "connected")
+
+    def test_bridge_status_exposes_safe_dsa_sim_matching_diagnostics(self) -> None:
+        installed = _install_fake_vnpy_modules()
+        main_engine = _FakeMainEngine()
+        main_engine.gateway = types.SimpleNamespace(
+            get_state_snapshot=lambda: {
+                "connected": True,
+                "matching": {
+                    "mode": "next_minute_vwap",
+                    "fill_delay_seconds": 65.0,
+                    "min_provider_span_seconds": 45.0,
+                    "max_provider_span_seconds": 90.0,
+                    "spread_source": "normalized_best_bid_ask_with_4bp_fallback",
+                    "pending_baseline_count": 2,
+                    "private_internal_value": "not exposed",
+                },
+            }
+        )
+        try:
+            status = get_vnpy_bridge_status(
+                main_engine=main_engine,
+                gateway_name="DSA_SIM",
+            )
+        finally:
+            _restore_modules(installed)
+
+        self.assertEqual(
+            status["matching"],
+            {
+                "available": True,
+                "reason": None,
+                "mode": "next_minute_vwap",
+                "fill_delay_seconds": 65.0,
+                "min_provider_span_seconds": 45.0,
+                "max_provider_span_seconds": 90.0,
+                "spread_source": "normalized_best_bid_ask_with_4bp_fallback",
+                "pending_baseline_count": 2,
+            },
+        )
 
     def test_bridge_status_reads_gateway_channel_login_state(self) -> None:
         installed = _install_fake_vnpy_modules()
@@ -364,6 +463,7 @@ def _install_fake_vnpy_modules() -> dict[str, object]:
     class Exchange:
         SSE = "SSE"
         SZSE = "SZSE"
+        BSE = "BSE"
         SEHK = "SEHK"
         SMART = "SMART"
 

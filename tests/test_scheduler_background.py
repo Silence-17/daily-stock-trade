@@ -117,6 +117,33 @@ class SchedulerBackgroundTaskTestCase(unittest.TestCase):
 
         self.assertEqual(calls, ["ran"])
 
+    def test_background_task_can_realign_after_each_run(self):
+        fake_schedule = _FakeScheduleModule()
+        with patch.dict(sys.modules, {"schedule": fake_schedule}):
+            from src.scheduler import Scheduler
+
+            scheduler = Scheduler(schedule_time="18:00")
+            fake_thread = MagicMock()
+            fake_thread.is_alive.return_value = False
+
+            def _make_thread(target=None, **kwargs):
+                fake_thread.start.side_effect = target
+                return fake_thread
+
+            with patch("src.scheduler.threading.Thread", side_effect=_make_thread):
+                with patch("src.scheduler.time.time", side_effect=[1000.0, 1000.0]):
+                    scheduler.add_background_task(
+                        lambda: None,
+                        interval_seconds=300,
+                        run_immediately=True,
+                        name="daily-aligned",
+                        next_delay_seconds_provider=lambda: 120.0,
+                    )
+
+        entry = scheduler._background_tasks[0]
+        self.assertEqual(entry["dynamic_next_delay_seconds"], 120.0)
+        self.assertEqual(entry["last_run"], 820.0)
+
     def test_run_with_schedule_registers_background_tasks_before_immediate_daily_task(self):
         fake_schedule = _FakeScheduleModule()
         with patch.dict(sys.modules, {"schedule": fake_schedule}):

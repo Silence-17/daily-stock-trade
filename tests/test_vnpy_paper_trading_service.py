@@ -8,6 +8,7 @@ import importlib.util
 import os
 import sys
 import tempfile
+import threading
 import time
 import types
 import unittest
@@ -16,24 +17,50 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
+from zoneinfo import ZoneInfo
 
+import pandas as pd
 from sqlalchemy import text
 
 from src.config import Config
 from src.notification import ChannelAttemptResult, NotificationDispatchResult
 from src.services.alert_service import AlertService
 from src.services.decision_signal_service import DecisionSignalService
+from src.services.cross_market_paper_strategy import (
+    GLOBAL_MARKET_LINKED_THEMES,
+    STRATEGY_ID as CROSS_MARKET_STRATEGY_ID,
+    StrategyDecision,
+    TradeFeeSchedule,
+)
+from src.services.cross_market_signal_service import CrossMarketSignalService
 from src.services.vnpy_paper_trading_service import (
+    AUTO_TRADE_RUN_LOCK_WAIT_SECONDS,
+    CALIBRATION_SHADOW_AUTO_TRADE_STAGGER_SECONDS,
+    CROSS_MARKET_OBSERVATION_LOCK_WAIT_SECONDS,
+    CROSS_MARKET_OBSERVATION_TRIGGER_SOURCE,
     LLM_DYNAMIC_AGENT_PLAN_EVALUATOR_VERSION,
     LLM_DYNAMIC_AGENT_PLAN_PROMPT_VERSION,
     LLM_PRE_TRADE_REVIEW_EVALUATOR_VERSION,
     LLM_PRE_TRADE_REVIEW_PROMPT_VERSION,
+    VnpyPaperSettings,
     VnpyPaperTradingService,
+    _auto_trade_initial_delay_seconds,
+    _cross_market_daily_evidence_status,
+    _cross_market_intraday_entry_slot_audited,
+    _cross_market_observation_initial_delay_seconds,
+    _cross_market_session_order_activity_status,
+    _last_auto_trade_ran_in_session,
+    _next_daily_auto_trade_target,
     _resolve_auto_alphasift_llm_policy,
     build_calibration_shadow_schedule,
     build_vnpy_paper_trading_background_tasks,
 )
-from src.storage import DatabaseManager, StockDaily, StockSelectionAgentTradePlan
+from src.storage import (
+    DatabaseManager,
+    PortfolioDailySnapshot,
+    StockDaily,
+    StockSelectionAgentTradePlan,
+)
 
 
 class _FakeDataFetcherManager:
@@ -42,10 +69,31 @@ class _FakeDataFetcherManager:
         self.boards_by_symbol = boards_by_symbol or {}
 
     def get_realtime_quote(self, symbol: str):
-        return SimpleNamespace(price=self.price, provider="unit-test")
+        amount = getattr(self, "amount", 200_000_000.0)
+        volume = getattr(self, "volume", amount / max(self.price, 0.01))
+        return SimpleNamespace(
+            price=self.price,
+            provider="unit-test",
+            provider_timestamp=datetime.now(timezone.utc).isoformat(),
+            open_price=getattr(self, "open_price", self.price),
+            pre_close=getattr(self, "pre_close", self.price),
+            amount=amount,
+            volume=volume,
+            volume_ratio=1.2,
+            high=getattr(self, "high", self.price * 1.02),
+            low=getattr(self, "low", self.price * 0.99),
+        )
 
     def get_belong_boards(self, symbol: str):
         return self.boards_by_symbol.get(symbol, [])
+
+
+class _SequenceDateTime(datetime):
+    values = []
+
+    @classmethod
+    def now(cls, tz=None):
+        return cls.values.pop(0)
 
 
 class VnpyPaperTradingServiceTestCase(unittest.TestCase):
@@ -76,9 +124,101 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         os.environ["DSA_AGENT_CALIBRATION_SHADOW_ENABLED"] = "false"
         Config.reset_instance()
         DatabaseManager.reset_instance()
+        data_fetcher_manager = _FakeDataFetcherManager(price=10.0)
+        cross_market_signal_service = CrossMarketSignalService(
+            data_fetcher_manager=data_fetcher_manager,
+            state_path=self.data_dir / "cross_market_strategy_state.json",
+        )
+        board_technical_service = MagicMock()
+        board_technical_service.analyze_boards.return_value = {
+            "available": True,
+            "supportive": True,
+            "near_resistance": False,
+            "breakout_confirmed": False,
+            "support_score": 100.0,
+            "reason": "unit_test_board_support",
+            "alerts": [{"kind": "near_60d_ma_support"}],
+        }
         self.service = VnpyPaperTradingService(
-            data_fetcher_manager=_FakeDataFetcherManager(price=10.0),
+            data_fetcher_manager=data_fetcher_manager,
             config_path=self.config_path,
+            cross_market_signal_service=cross_market_signal_service,
+            cross_market_board_technical_service=board_technical_service,
+        )
+        strong_us_signal = {
+            "available": True,
+            "strong": True,
+            "score": 82.0,
+            "sector_change_pct": 2.8,
+            "advancing_ratio": 0.8,
+            "leader_change_pct": 4.0,
+            "premarket_reversal_invalidated": False,
+        }
+        self.service.cross_market_signal_service.get_us_close_theme_signal_for_cn_trade = MagicMock(
+            return_value=strong_us_signal,
+        )
+        self.service.cross_market_signal_service.get_us_premarket_signal_for_cn_trade = MagicMock(
+            return_value=strong_us_signal,
+        )
+        self.service.cross_market_signal_service.get_us_tech_signal_for_cn_trade = MagicMock(
+            return_value={"available": True, "buy_allowed": True, "score": 65.0},
+        )
+        self.service.cross_market_signal_service.get_nasdaq_futures_signal_for_cn_trade = MagicMock(
+            return_value={
+                "available": True,
+                "confirmed": True,
+                "buy_allowed": True,
+                "sell_fraction": 0.0,
+                "reason": "nasdaq_futures_trend_confirmed",
+                "sector_score_adjustment": 0.0,
+            },
+        )
+        self.service.cross_market_signal_service.get_cpo_signal_for_cn_trade = MagicMock(
+            return_value={"available": True, "supportive": True, "score": 30.0},
+        )
+
+        def asia_gate(*, theme, **_kwargs):
+            if str(theme).lower() == "cpo":
+                return {
+                    "available": True,
+                    "buy_allowed": True,
+                    "reason": "cpo_independent_asia_gate",
+                    "bypassed": True,
+                    "korea": {
+                        "status": "bypassed",
+                        "buy_allowed": True,
+                        "sell_fraction": 0.0,
+                    },
+                }
+            return {
+                "available": True,
+                "buy_allowed": True,
+                "reason": "unit_test_asia_markets_confirmed",
+                "korea": {
+                    "status": "hold",
+                    "buy_allowed": True,
+                    "sell_fraction": 0.0,
+                },
+                "japan": {"available": True, "buy_allowed": True},
+                "supply_chain": {
+                    "available": True,
+                    "strong": True,
+                    "score": 55.0,
+                    "sector_change_pct": 0.7,
+                    "advancing_ratio": 0.8,
+                },
+            }
+
+        self.service.cross_market_signal_service.evaluate_asia_market_gate = MagicMock(
+            side_effect=asia_gate,
+        )
+        self.service._cross_market_rotation_cache = (
+            time.monotonic(),
+            {
+                "available": False,
+                "tailwind": False,
+                "reason": "unit_test_rotation_unavailable",
+            },
         )
 
     def tearDown(self) -> None:
@@ -119,6 +259,1497 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertTrue(policy["use_llm"])
         self.assertEqual(policy["state"], "closed")
         self.assertEqual(policy["fallback"], "screen_score")
+
+    def test_cross_market_settings_allow_existing_positions_for_range_adds(self) -> None:
+        settings = replace(
+            self.service.get_settings(),
+            auto_strategy=CROSS_MARKET_STRATEGY_ID,
+            initial_cash=100000.0,
+            auto_max_results=10,
+            auto_max_positions=10,
+            auto_skip_existing_positions=True,
+            auto_cash_per_order=50000.0,
+            auto_max_total_position_pct=90.0,
+            auto_max_industry_position_pct=50.0,
+            auto_max_single_position_value=50000.0,
+            auto_max_drawdown_pct=20.0,
+            auto_consecutive_loss_limit=8,
+            auto_sell_enabled=False,
+            auto_score_weighted_allocation_enabled=True,
+            auto_allocation_budget=90000.0,
+            auto_cross_run_quality_gate_enabled=True,
+            auto_market_light_gate_enabled=True,
+            auto_market_breadth_gate_enabled=True,
+            auto_hotspot_retreat_gate_enabled=True,
+            auto_intraday_market_gate_enabled=True,
+            auto_cross_market_gate_enabled=True,
+            auto_signal_exit_enabled=True,
+            auto_rebalance_enabled=True,
+            auto_target_position_weights={"600000": 20.0},
+            auto_target_industry_weights={"bank": 20.0},
+            auto_llm_plan_enabled=True,
+            auto_llm_review_enabled=True,
+        )
+
+        applied = self.service._apply_cross_market_strategy_settings(settings)
+
+        self.assertEqual(applied.auto_market, "cn")
+        self.assertEqual(applied.auto_max_results, 2)
+        self.assertEqual(applied.auto_max_positions, 2)
+        self.assertFalse(applied.auto_skip_existing_positions)
+        self.assertEqual(applied.auto_cash_per_order, 50000.0)
+        self.assertEqual(applied.auto_max_total_position_pct, 100.0)
+        self.assertIsNone(applied.auto_max_total_position_value)
+        self.assertEqual(applied.auto_max_industry_position_pct, 100.0)
+        self.assertIsNone(applied.auto_max_industry_position_value)
+        self.assertIsNone(applied.auto_max_single_position_value)
+        self.assertEqual(applied.auto_daily_max_orders, 4)
+        self.assertIsNone(applied.auto_daily_budget)
+        self.assertEqual(applied.auto_min_cash_balance, 0.0)
+        self.assertEqual(applied.auto_max_drawdown_pct, 8.0)
+        self.assertEqual(applied.auto_consecutive_loss_limit, 3)
+        self.assertTrue(applied.auto_sell_enabled)
+        self.assertEqual(applied.auto_stop_loss_pct, 5.0)
+        self.assertEqual(applied.auto_take_profit_pct, 8.0)
+        self.assertEqual(applied.auto_trailing_stop_pct, 4.0)
+        self.assertIsNone(applied.auto_max_holding_days)
+        self.assertEqual(applied.auto_sell_position_pct, 100.0)
+        self.assertIsNone(applied.auto_no_progress_days)
+        self.assertIsNone(applied.auto_no_progress_min_return_pct)
+        self.assertFalse(applied.auto_score_weighted_allocation_enabled)
+        self.assertIsNone(applied.auto_allocation_budget)
+        self.assertFalse(applied.auto_cross_run_quality_gate_enabled)
+        self.assertFalse(applied.auto_market_light_gate_enabled)
+        self.assertFalse(applied.auto_market_breadth_gate_enabled)
+        self.assertFalse(applied.auto_hotspot_retreat_gate_enabled)
+        self.assertFalse(applied.auto_intraday_market_gate_enabled)
+        self.assertFalse(applied.auto_cross_market_gate_enabled)
+        self.assertFalse(applied.auto_signal_exit_enabled)
+        self.assertFalse(applied.auto_rebalance_enabled)
+        self.assertEqual(applied.auto_target_position_weights, {})
+        self.assertEqual(applied.auto_target_industry_weights, {})
+        self.assertFalse(applied.auto_llm_plan_enabled)
+        self.assertFalse(applied.auto_llm_review_enabled)
+
+    def test_cross_market_signal_cash_allocation_compounds_current_equity(self) -> None:
+        settings = self.service._apply_cross_market_strategy_settings(
+            replace(
+                self.service.get_settings(),
+                auto_strategy=CROSS_MARKET_STRATEGY_ID,
+                initial_cash=100000.0,
+            )
+        )
+
+        amount, diagnostics = self.service._cross_market_signal_cash_allocation_cap(
+            settings=settings,
+            exposure_state={"total_equity": 120000.0},
+            candidate={"_cross_market_target_position_pct": 50.0},
+        )
+
+        self.assertEqual(amount, 60000.0)
+        self.assertEqual(diagnostics["allocation_basis"], "current_total_equity_pct")
+        self.assertEqual(diagnostics["target_position_pct"], 50.0)
+        self.assertEqual(diagnostics["total_equity_reference"], 120000.0)
+
+    def test_cross_market_entry_cost_uses_current_equity_target_notional(self) -> None:
+        self.service.data_fetcher_manager.boards_by_symbol["002281"] = [
+            {"name": "CPO", "type": "concept", "change_pct": 1.2}
+        ]
+        settings = self.service._apply_cross_market_strategy_settings(
+            replace(
+                self.service.get_settings(),
+                auto_strategy=CROSS_MARKET_STRATEGY_ID,
+                initial_cash=100000.0,
+            )
+        )
+        exposure = {
+            "available": True,
+            "held_symbols": set(),
+            "position_values": {},
+            "industry_values": {},
+            "industry_available": True,
+            "total_market_value": 0.0,
+            "total_equity": 120000.0,
+            "total_cash": 120000.0,
+        }
+        candidate = {
+            "code": "002281",
+            "score": 90.0,
+            "expected_return_pct": 4.0,
+            "is_core_stock": True,
+            "source": "dsa_eastmoney_board_change_leader",
+            "_cross_market_source_theme": "cpo",
+            "_cross_market_entry_phase": "opening",
+        }
+
+        with patch.object(
+            self.service.cross_market_signal_service,
+            "get_cn_open_signal",
+            return_value={
+                "available": True,
+                "regime": "low_open",
+                "gap_pct": -0.6,
+                "buy_allowed": True,
+                "force_sell": False,
+            },
+        ), patch.object(
+            self.service,
+            "_cross_market_range_signal",
+            return_value={},
+        ), patch.object(
+            self.service,
+            "_cross_market_daily_pnl_pct",
+            return_value=0.0,
+        ):
+            decision, evidence = self.service._cross_market_candidate_decision(
+                candidate=candidate,
+                symbol="002281",
+                settings=settings,
+                exposure_state=exposure,
+            )
+
+        expected_cost = TradeFeeSchedule().estimate_round_trip_cost_pct(
+            notional=60000.0,
+            instrument_type="stock",
+            buy_slippage_bps=10.0,
+            sell_slippage_bps=10.0,
+        )
+        self.assertEqual(decision.action, "buy")
+        self.assertEqual(decision.target_position_pct, 50.0)
+        self.assertEqual(evidence["estimated_order_notional"], 60000.0)
+        self.assertEqual(evidence["estimated_round_trip_cost_pct"], expected_cost)
+
+    def test_flat_open_staged_add_uses_current_equity_cost_basis(self) -> None:
+        self.service.data_fetcher_manager.boards_by_symbol["002281"] = [
+            {"name": "CPO", "type": "concept", "change_pct": 3.0}
+        ]
+        settings = self.service._apply_cross_market_strategy_settings(
+            replace(
+                self.service.get_settings(),
+                auto_strategy=CROSS_MARKET_STRATEGY_ID,
+                initial_cash=100000.0,
+            )
+        )
+        strategy_position = {
+            "status": "available",
+            "quantity": 3000.0,
+            "sellable_quantity": 3000.0,
+            "gross_cost_basis": 30000.0,
+            "entry_reasons": ["cpo_flat_open_staged_entry_confirmed"],
+            "entry_theme": "cpo",
+            "entry_themes": ["cpo"],
+            "open_entry_order_count": 1,
+            "flat_open_staged_entry": True,
+        }
+        exposure = {
+            "available": True,
+            "held_symbols": {"002281"},
+            "position_values": {"002281": 30000.0},
+            "industry_values": {},
+            "industry_available": True,
+            "total_market_value": 30000.0,
+            "total_equity": 120000.0,
+            "total_cash": 90000.0,
+        }
+        candidate = {
+            "code": "002281",
+            "score": 90.0,
+            "expected_return_pct": 4.0,
+            "is_core_stock": True,
+            "source": "dsa_eastmoney_board_change_leader",
+            "_cross_market_source_theme": "cpo",
+            "_cross_market_entry_phase": "intraday_dip",
+        }
+
+        with patch.object(
+            self.service.cross_market_signal_service,
+            "get_cn_open_signal",
+            return_value={
+                "available": True,
+                "regime": "flat_open",
+                "gap_pct": 0.0,
+                "buy_allowed": False,
+                "force_sell": False,
+            },
+        ), patch.object(
+            self.service,
+            "_cross_market_strategy_position",
+            return_value=strategy_position,
+        ), patch.object(
+            self.service,
+            "_cross_market_range_signal",
+            return_value={},
+        ), patch.object(
+            self.service,
+            "_cross_market_daily_pnl_pct",
+            return_value=0.0,
+        ):
+            decision, evidence = self.service._cross_market_candidate_decision(
+                candidate=candidate,
+                symbol="002281",
+                settings=settings,
+                exposure_state=exposure,
+            )
+
+        self.assertEqual(decision.action, "buy")
+        self.assertEqual(
+            decision.reason,
+            "cpo_flat_open_staged_add_confirmed",
+        )
+        self.assertEqual(decision.target_position_pct, 25.0)
+        self.assertEqual(evidence["strategy_cost_basis_pct"], 25.0)
+        self.assertEqual(
+            evidence["strategy_cost_basis_equity_reference"],
+            120000.0,
+        )
+        self.assertEqual(evidence["estimated_order_notional"], 30000.0)
+
+    def test_active_theme_scores_require_aggregate_us_tech_for_kr_themes(self) -> None:
+        now = datetime(2026, 8, 4, 1, 35, tzinfo=timezone.utc)
+
+        ready_scores, ready_evidence = self.service._cross_market_active_theme_scores(
+            entry_phase="opening",
+            now=now,
+        )
+        self.assertIn("memory", ready_scores)
+        self.assertTrue(
+            ready_evidence["memory"]["regular_us_technology_ready"]
+        )
+
+        self.service.cross_market_signal_service.get_us_tech_signal_for_cn_trade.return_value = {
+            "available": True,
+            "buy_allowed": False,
+            "score": 39.9,
+        }
+        weak_scores, weak_evidence = self.service._cross_market_active_theme_scores(
+            entry_phase="opening",
+            now=now,
+        )
+
+        for theme in ("semiconductor", "memory", "equipment", "materials"):
+            self.assertNotIn(theme, weak_scores)
+            self.assertFalse(
+                weak_evidence[theme]["regular_us_technology_ready"]
+            )
+        self.assertIn("artificial_intelligence", weak_scores)
+
+    def test_active_theme_scores_recheck_thresholds_and_do_not_force_cpo(self) -> None:
+        now = datetime(2026, 8, 4, 1, 35, tzinfo=timezone.utc)
+        mislabeled_signal = {
+            "available": True,
+            "strong": True,
+            "score": 82.0,
+            "sector_change_pct": 0.1,
+            "advancing_ratio": 0.8,
+            "leader_change_pct": 4.0,
+            "premarket_reversal_invalidated": False,
+        }
+        self.service.cross_market_signal_service.get_us_close_theme_signal_for_cn_trade.return_value = (
+            mislabeled_signal
+        )
+
+        opening_scores, opening_evidence = (
+            self.service._cross_market_active_theme_scores(
+                entry_phase="opening",
+                now=now,
+            )
+        )
+
+        self.assertEqual(opening_scores, {})
+        self.assertFalse(opening_evidence["cpo"]["close_theme_ready"])
+        self.assertNotIn("cpo", opening_scores)
+
+        valid_close = {
+            **mislabeled_signal,
+            "sector_change_pct": 2.8,
+        }
+        self.service.cross_market_signal_service.get_us_close_theme_signal_for_cn_trade.return_value = (
+            valid_close
+        )
+        self.service.cross_market_signal_service.get_us_premarket_signal_for_cn_trade.return_value = (
+            mislabeled_signal
+        )
+
+        intraday_scores, intraday_evidence = (
+            self.service._cross_market_active_theme_scores(
+                entry_phase="intraday_dip",
+                now=now,
+            )
+        )
+
+        self.assertEqual(intraday_scores, {})
+        self.assertFalse(intraday_evidence["cpo"]["premarket_theme_ready"])
+        self.assertNotIn("cpo", intraday_scores)
+
+    def test_active_theme_scores_use_only_verified_asia_otc_supplement(self) -> None:
+        now = datetime(2026, 8, 4, 1, 35, tzinfo=timezone.utc)
+        asia_signal = {
+            "available": True,
+            "strong": True,
+            "score": 55.0,
+            "sector_change_pct": 0.7,
+            "advancing_ratio": 0.8,
+        }
+
+        def coverage_shortfall(stage):
+            reason = (
+                "premarket_theme_coverage_insufficient"
+                if stage == "premarket"
+                else "us_close_theme_coverage_insufficient"
+            )
+            observed_at = "2026-08-03T20:00:00+00:00"
+            stored_signal = {
+                "available": False,
+                "strong": False,
+                "reason": reason,
+            }
+            return {
+                **stored_signal,
+                "theme": "mlcc",
+                "signal_theme": "mlcc",
+                "session_date": "2026-08-03",
+                "observed_at": observed_at,
+                "asia_supplement_eligible": True,
+                "premarket_reversal_invalidated": False,
+                "snapshot": {
+                    "session_date": "2026-08-03",
+                    "session_stage": stage,
+                    "observed_at": observed_at,
+                    "theme_signals": {"mlcc": stored_signal},
+                },
+            }
+
+        default_signal = (
+            self.service.cross_market_signal_service
+            .get_us_close_theme_signal_for_cn_trade.return_value
+        )
+
+        def close_signal(*, theme, now):
+            return coverage_shortfall("close") if theme == "mlcc" else default_signal
+
+        def premarket_signal(*, theme, now):
+            return (
+                coverage_shortfall("premarket")
+                if theme == "mlcc"
+                else default_signal
+            )
+
+        with patch.object(
+            self.service.cross_market_signal_service,
+            "get_us_close_theme_signal_for_cn_trade",
+            side_effect=close_signal,
+        ), patch.object(
+            self.service.cross_market_signal_service,
+            "get_us_premarket_signal_for_cn_trade",
+            side_effect=premarket_signal,
+        ), patch.object(
+            self.service.cross_market_signal_service,
+            "get_asia_theme_signal_for_cn_trade",
+            return_value=asia_signal,
+        ):
+            opening_scores, opening_evidence = (
+                self.service._cross_market_active_theme_scores(
+                    entry_phase="opening",
+                    now=now,
+                )
+            )
+            intraday_scores, intraday_evidence = (
+                self.service._cross_market_active_theme_scores(
+                    entry_phase="intraday_dip",
+                    now=now,
+                )
+            )
+
+        self.assertEqual(opening_scores["mlcc"], 55.0)
+        self.assertTrue(opening_evidence["mlcc"]["asia_close_supplement_ready"])
+        self.assertEqual(
+            opening_evidence["mlcc"]["active_score_source"],
+            "asia_supply_chain",
+        )
+        self.assertEqual(intraday_scores["mlcc"], 55.0)
+        self.assertTrue(
+            intraday_evidence["mlcc"]["asia_premarket_supplement_ready"]
+        )
+
+    def test_legacy_cross_market_campaign_fails_closed_until_explicit_migration(self) -> None:
+        self.service.update_settings(
+            {
+                "auto_trade_enabled": True,
+                "auto_strategy": "cross_market_semiconductor_gold_v1.1",
+                "auto_execution_mode": "vnpy_paper",
+            },
+            include_snapshot=False,
+            include_recent_trades=False,
+        )
+
+        with patch(
+            "src.services.vnpy_paper_trading_service.AlphaSiftService"
+        ) as alphasift:
+            result = self.service.run_auto_trade_once()
+
+        self.assertFalse(result["accepted"])
+        self.assertTrue(result["skipped"])
+        self.assertEqual(
+            result["reason"],
+            "legacy_cross_market_strategy_requires_explicit_migration",
+        )
+        self.assertEqual(result["strategy"], "cross_market_semiconductor_gold_v1.1")
+        self.assertEqual(result["orders"], [])
+        alphasift.assert_not_called()
+
+    def test_legacy_cross_market_campaign_migrates_to_clean_owned_account(self) -> None:
+        legacy_account = self.service.ensure_account()
+        legacy_account_id = int(legacy_account["id"])
+        self.service.update_settings(
+            {
+                "auto_trade_enabled": True,
+                "auto_strategy": "cross_market_semiconductor_gold_v1.1",
+                "auto_execution_mode": "vnpy_paper",
+                "account_id": legacy_account_id,
+            },
+            include_snapshot=False,
+            include_recent_trades=False,
+        )
+
+        result = self.service.migrate_cross_market_strategy(
+            include_snapshot=False,
+            include_recent_trades=False,
+        )
+
+        migrated = self.service.get_settings()
+        self.assertEqual(migrated.auto_strategy, CROSS_MARKET_STRATEGY_ID)
+        self.assertEqual(migrated.auto_execution_mode, "vnpy_paper")
+        self.assertTrue(migrated.auto_trade_enabled)
+        self.assertNotEqual(migrated.account_id, legacy_account_id)
+        new_account = self.service._find_account(migrated.account_id)
+        self.assertIsNotNone(new_account)
+        assert new_account is not None
+        self.assertEqual(new_account["owner_id"], CROSS_MARKET_STRATEGY_ID)
+        self.assertEqual(
+            result["diagnostics"]["cross_market_migration"]["previous_account_id"],
+            legacy_account_id,
+        )
+        self.assertFalse(self.service._paper_account_has_positions(int(migrated.account_id)))
+
+    def test_legacy_cross_market_campaign_reuses_clean_archived_target(self) -> None:
+        legacy_account = self.service.ensure_account()
+        legacy_account_id = int(legacy_account["id"])
+        target = self.service.portfolio.create_account(
+            name="V1.3 migration target",
+            broker="vnpy_paper",
+            market="cn",
+            base_currency="CNY",
+            owner_id=CROSS_MARKET_STRATEGY_ID,
+        )
+        target_account_id = int(target["id"])
+        self.service.portfolio.record_cash_ledger(
+            account_id=target_account_id,
+            event_date=date.today(),
+            direction="in",
+            amount=100_000,
+            currency="CNY",
+            note="clean migration target initial cash",
+        )
+        self.service.portfolio.deactivate_account(target_account_id)
+        self.service.update_settings(
+            {
+                "auto_trade_enabled": True,
+                "auto_strategy": "cross_market_semiconductor_gold_v1.1",
+                "auto_execution_mode": "vnpy_paper",
+                "account_id": legacy_account_id,
+            },
+            include_snapshot=False,
+            include_recent_trades=False,
+        )
+
+        result = self.service.migrate_cross_market_strategy(
+            target_account_id=target_account_id,
+            include_snapshot=False,
+            include_recent_trades=False,
+        )
+
+        migrated = self.service.get_settings()
+        self.assertEqual(migrated.account_id, target_account_id)
+        self.assertEqual(migrated.auto_strategy, CROSS_MARKET_STRATEGY_ID)
+        self.assertTrue(self.service._find_account(target_account_id)["is_active"])
+        self.assertEqual(
+            result["diagnostics"]["cross_market_migration"]["previous_account_id"],
+            legacy_account_id,
+        )
+
+    def test_cross_market_candidate_quote_prefers_strict_timestamp_route(self) -> None:
+        manager = MagicMock()
+        strict_quote = SimpleNamespace(
+            price=10.0,
+            provider_timestamp=datetime.now(timezone.utc).isoformat(),
+            source="tencent",
+        )
+        manager.get_realtime_quote_with_provider_timestamp.return_value = strict_quote
+        manager.get_realtime_quote.return_value = SimpleNamespace(
+            price=10.0,
+            provider_timestamp=None,
+            source="tushare",
+        )
+        self.service.data_fetcher_manager = manager
+
+        quote = self.service._get_cross_market_realtime_quote("603398")
+
+        self.assertIs(quote, strict_quote)
+        manager.get_realtime_quote_with_provider_timestamp.assert_called_once_with("603398")
+        manager.get_realtime_quote.assert_not_called()
+
+    def test_cross_market_candidate_quote_falls_back_for_legacy_manager(self) -> None:
+        quote = SimpleNamespace(
+            price=10.0,
+            provider_timestamp=datetime.now(timezone.utc).isoformat(),
+        )
+        manager = _FakeDataFetcherManager(price=10.0)
+        manager.get_realtime_quote = MagicMock(return_value=quote)
+        self.service.data_fetcher_manager = manager
+
+        result = self.service._get_cross_market_realtime_quote("603398")
+
+        self.assertIs(result, quote)
+        manager.get_realtime_quote.assert_called_once_with("603398")
+
+    def test_cross_market_candidate_refreshes_asia_before_final_cn_quote(self) -> None:
+        manager = self.service.data_fetcher_manager
+        manager.boards_by_symbol["000815"] = [
+            {
+                "name": "cloud computing",
+                "type": "concept",
+                "change_pct": 3.0,
+            }
+        ]
+        settings = self.service._apply_cross_market_strategy_settings(
+            replace(
+                self.service.get_settings(),
+                auto_strategy=CROSS_MARKET_STRATEGY_ID,
+                initial_cash=100000.0,
+            )
+        )
+        exposure = {
+            "available": True,
+            "held_symbols": set(),
+            "position_values": {},
+            "industry_values": {},
+            "industry_available": True,
+            "total_market_value": 0.0,
+            "total_equity": 100000.0,
+            "total_cash": 100000.0,
+        }
+        candidate = {
+            "code": "000815",
+            "score": 90.0,
+            "expected_return_pct": 4.0,
+            "source": "dsa_eastmoney_board_change_leader",
+            "_cross_market_source_theme": "compute_services",
+            "_cross_market_entry_phase": "opening",
+        }
+        call_order = []
+
+        def asia_gate(*, theme, **kwargs):
+            call_order.append(("asia", dict(kwargs)))
+            return {
+                "available": True,
+                "buy_allowed": True,
+                "reason": "unit_test_asia_markets_confirmed",
+                "korea": {
+                    "status": "hold",
+                    "buy_allowed": True,
+                    "sell_fraction": 0.0,
+                },
+                "japan": {"available": True, "buy_allowed": True},
+                "supply_chain": {
+                    "available": True,
+                    "strong": True,
+                    "reason": "not_required",
+                },
+            }
+
+        def quote_after_asia(symbol):
+            call_order.append(("quote", {"symbol": symbol}))
+            return manager.get_realtime_quote(symbol)
+
+        self.service.cross_market_signal_service.evaluate_asia_market_gate.reset_mock()
+        self.service.cross_market_signal_service.evaluate_asia_market_gate.side_effect = (
+            asia_gate
+        )
+        with patch.object(
+            self.service.cross_market_signal_service,
+            "get_cn_open_signal",
+            return_value={
+                "available": True,
+                "regime": "low_open",
+                "gap_pct": -0.6,
+                "buy_allowed": True,
+                "force_sell": False,
+            },
+        ), patch.object(
+            self.service,
+            "_get_cross_market_realtime_quote",
+            side_effect=quote_after_asia,
+        ), patch.object(
+            self.service,
+            "_cross_market_range_signal",
+            return_value={},
+        ), patch.object(
+            self.service,
+            "_cross_market_daily_pnl_pct",
+            return_value=0.0,
+        ):
+            decision, _evidence = self.service._cross_market_candidate_decision(
+                candidate=candidate,
+                symbol="000815",
+                settings=settings,
+                exposure_state=exposure,
+            )
+
+        self.assertEqual(decision.action, "buy")
+        self.assertEqual([item[0] for item in call_order[:2]], ["asia", "quote"])
+        self.service.cross_market_signal_service.evaluate_asia_market_gate.assert_called_once_with(
+            theme="compute_services",
+            refresh=True,
+            reuse_fresh_supply_chain=True,
+        )
+        self.assertNotIn("now", call_order[0][1])
+
+    def test_cross_market_candidate_quote_uses_request_completion_time(self) -> None:
+        started_at = datetime(2026, 7, 27, 6, 27, 30, tzinfo=timezone.utc)
+        quote = SimpleNamespace(
+            price=None,
+            provider_timestamp=(started_at + timedelta(seconds=2)).isoformat(),
+        )
+        self.service.data_fetcher_manager.boards_by_symbol["002281"] = [
+            {"name": "CPO 光模块", "type": "concept", "change_pct": 1.2}
+        ]
+        settings = replace(
+            self.service.get_settings(),
+            auto_strategy=CROSS_MARKET_STRATEGY_ID,
+        )
+
+        _SequenceDateTime.values = [
+            started_at,
+            started_at + timedelta(seconds=3),
+        ]
+        with patch(
+            "src.services.vnpy_paper_trading_service.datetime",
+            new=_SequenceDateTime,
+        ), patch.object(
+            self.service,
+            "_get_cross_market_realtime_quote",
+            return_value=quote,
+        ), patch.object(
+            self.service.cross_market_signal_service,
+            "get_cn_open_signal",
+            return_value={
+                "available": True,
+                "regime": "flat_open",
+                "gap_pct": 0.0,
+                "buy_allowed": False,
+                "force_sell": False,
+            },
+        ):
+            decision, evidence = self.service._cross_market_candidate_decision(
+                candidate={"code": "002281", "concepts": ["CPO"]},
+                symbol="002281",
+                settings=settings,
+                exposure_state={},
+            )
+
+        self.assertEqual(decision.reason, "candidate_realtime_price_unavailable")
+        self.assertNotEqual(decision.reason, "candidate_realtime_quote_stale")
+        self.assertEqual(evidence["theme"], "cpo")
+
+    def test_cross_market_candidate_still_rejects_quote_after_completion(self) -> None:
+        started_at = datetime(2026, 7, 27, 6, 27, 30, tzinfo=timezone.utc)
+        quote = SimpleNamespace(
+            price=10.0,
+            provider_timestamp=(started_at + timedelta(seconds=5)).isoformat(),
+        )
+        self.service.data_fetcher_manager.boards_by_symbol["002281"] = [
+            {"name": "CPO 光模块", "type": "concept", "change_pct": 1.2}
+        ]
+        settings = replace(
+            self.service.get_settings(),
+            auto_strategy=CROSS_MARKET_STRATEGY_ID,
+        )
+
+        _SequenceDateTime.values = [
+            started_at,
+            started_at + timedelta(seconds=3),
+        ]
+        with patch(
+            "src.services.vnpy_paper_trading_service.datetime",
+            new=_SequenceDateTime,
+        ), patch.object(
+            self.service,
+            "_get_cross_market_realtime_quote",
+            return_value=quote,
+        ), patch.object(
+            self.service.cross_market_signal_service,
+            "get_cn_open_signal",
+            return_value={"available": True, "gap_pct": 0.0},
+        ):
+            decision, evidence = self.service._cross_market_candidate_decision(
+                candidate={"code": "002281", "concepts": ["CPO"]},
+                symbol="002281",
+                settings=settings,
+                exposure_state={},
+            )
+
+        self.assertEqual(decision.reason, "candidate_realtime_quote_stale")
+        self.assertEqual(evidence["quote_age_seconds"], -2.0)
+        self.assertEqual(
+            evidence["quote_validated_at"],
+            (started_at + timedelta(seconds=3)).isoformat(),
+        )
+
+    def test_cross_market_range_quote_prefers_strict_timestamp_route(self) -> None:
+        observed_at = datetime.now(timezone.utc)
+        strict_quote = SimpleNamespace(
+            price=10.0,
+            provider_timestamp=observed_at.isoformat(),
+            amount=12000.0,
+            volume=1200.0,
+        )
+        manager = MagicMock()
+        manager.get_realtime_quote_with_provider_timestamp.return_value = strict_quote
+        manager.get_realtime_quote.side_effect = AssertionError(
+            "generic quote route must not be used for cross-market range evidence"
+        )
+        self.service.data_fetcher_manager = manager
+
+        with patch.object(
+            self.service,
+            "_cross_market_range_signal",
+            return_value={"action": "sell", "reason": "range_upper_band"},
+        ):
+            result = self.service._cross_market_position_range_signal(
+                symbol="603398",
+                price=10.0,
+                now=observed_at,
+            )
+
+        self.assertEqual(result["action"], "sell")
+        manager.get_realtime_quote_with_provider_timestamp.assert_called_once_with("603398")
+        manager.get_realtime_quote.assert_not_called()
+
+    def test_cross_market_range_appends_live_session_without_rewriting_yesterday(self) -> None:
+        today_cn = datetime.now(ZoneInfo("Asia/Shanghai")).date()
+        completed_dates = pd.date_range(
+            end=pd.Timestamp(today_cn) - pd.Timedelta(days=1),
+            periods=28,
+            freq="D",
+        )
+        frame = pd.DataFrame(
+            {
+                "high": [float(value) + 1.0 for value in range(28)],
+                "low": [float(value) for value in range(28)],
+                "close": [float(value) + 0.5 for value in range(28)],
+            },
+            index=completed_dates,
+        )
+        frame.loc[pd.Timestamp(today_cn)] = {
+            "high": 999.0,
+            "low": 0.01,
+            "close": 888.0,
+        }
+        manager = MagicMock()
+        manager.get_daily_data.return_value = (frame, "unit-test")
+        self.service.data_fetcher_manager = manager
+
+        with patch.object(
+            self.service.cross_market_signal_engine,
+            "calculate_range_indicators",
+            return_value={"regime": "range", "action": "hold"},
+        ) as calculate:
+            result = self.service._cross_market_range_signal(
+                symbol="603398",
+                price=31.0,
+                intraday_vwap=30.5,
+                intraday_high=32.0,
+                intraday_low=29.0,
+            )
+
+        self.assertEqual(result["regime"], "range")
+        values = calculate.call_args.kwargs
+        self.assertEqual(len(values["closes"]), 29)
+        self.assertEqual(values["closes"][-2], 27.5)
+        self.assertEqual(values["closes"][-1], 31.0)
+        self.assertEqual(values["highs"][-1], 32.0)
+        self.assertEqual(values["lows"][-1], 29.0)
+        self.assertNotIn(888.0, values["closes"])
+        self.assertEqual(values["intraday_vwap"], 30.5)
+
+    def test_switching_vnpy_gateway_clears_previous_gateway_sync_state(self) -> None:
+        self.service.update_settings(
+            {"vnpy_gateway_name": "XTP"},
+            include_snapshot=False,
+            include_recent_trades=False,
+        )
+        self.service._record_vnpy_account_state(
+            {"balance": 100000.0, "raw": {"gateway_name": "XTP"}}
+        )
+
+        self.service.update_settings(
+            {"vnpy_gateway_name": "DSA_SIM"},
+            include_snapshot=False,
+            include_recent_trades=False,
+        )
+
+        self.assertEqual(self.service._read_vnpy_sync_state(), {})
+
+    def test_vnpy_sync_state_records_current_gateway(self) -> None:
+        self.service.update_settings(
+            {"vnpy_gateway_name": "DSA_SIM"},
+            include_snapshot=False,
+            include_recent_trades=False,
+        )
+
+        self.service._record_vnpy_positions_state(
+            {"positions": [], "raw": {}, "updated_at": "2026-07-24T00:00:00Z"}
+        )
+
+        self.assertEqual(
+            self.service._read_vnpy_sync_state()["gateway_name"],
+            "DSA_SIM",
+        )
+
+    def test_cross_market_observation_snapshot_requires_audited_stage_evidence(self) -> None:
+        required_themes = sorted(GLOBAL_MARKET_LINKED_THEMES)
+        session_date = "2026-07-28"
+        full_coverage = {
+            "available": True,
+            "full_strategy_coverage": True,
+            "required_themes": required_themes,
+            "qualified_themes": required_themes,
+            "missing_themes": [],
+            "themes": {
+                theme: {"available": True}
+                for theme in required_themes
+            },
+        }
+        premarket_evidence = {
+            **full_coverage,
+            "collection": {
+                "latest_session_date": session_date,
+                "required_stages_complete": True,
+            },
+            "latest_capture": {
+                "available": True,
+                "session_date": session_date,
+                "session_stage": "premarket",
+                "universe_size": 91,
+                "collected_component_count": 49,
+                "required_themes": required_themes,
+            },
+        }
+        close_evidence = {
+            **full_coverage,
+            "collection": {
+                "latest_session_date": session_date,
+                "required_stages_complete": True,
+            },
+        }
+        runtime = {
+            "strategy_id": CROSS_MARKET_STRATEGY_ID,
+            "cn_open": {"available": True, "gap_pct": -0.6},
+            "us_tech": {"available": True, "score": 65.0},
+            "nasdaq_futures": {
+                "available": True,
+                "confirmed": True,
+                "buy_allowed": True,
+            },
+            "us_premarket": premarket_evidence,
+            "us_close_themes": close_evidence,
+            "asia_supply_chain": {
+                "mlcc": {"available": False},
+                "ccl": {"available": False},
+            },
+            "japan": {"available": True, "buy_allowed": True},
+            "korea": {
+                "fresh": True,
+                "linked_technology_gate": {
+                    "status": "neutral",
+                    "reason": "korea_direction_unconfirmed",
+                    "confirmation_span_seconds": 300.0,
+                    "confirmation_duration_seconds": 300,
+                },
+            },
+            "gold": {"available": True, "signal": {"score": 70.0}},
+            "cpo": {"available": False, "reason": "optional"},
+        }
+        with patch.object(
+            self.service.cross_market_signal_service,
+            "get_runtime_status",
+            return_value=runtime,
+        ):
+            ready = self.service._cross_market_observation_snapshot()
+        self.assertEqual(ready["schema_version"], 6)
+        self.assertEqual(ready["status"], "ready")
+        self.assertEqual(ready["missing_requirements"], [])
+
+        runtime["nasdaq_futures"] = {"available": True, "confirmed": False}
+        with patch.object(
+            self.service.cross_market_signal_service,
+            "get_runtime_status",
+            return_value=runtime,
+        ):
+            missing_nasdaq_futures = self.service._cross_market_observation_snapshot()
+        self.assertEqual(
+            missing_nasdaq_futures["missing_requirements"],
+            ["nasdaq_futures_continuous_trend_available"],
+        )
+        runtime["nasdaq_futures"] = {
+            "available": True,
+            "confirmed": True,
+            "buy_allowed": True,
+        }
+
+        runtime["us_premarket"] = {
+            **premarket_evidence,
+            "full_strategy_coverage": False,
+            "qualified_themes": required_themes[:-1],
+            "missing_themes": [required_themes[-1]],
+        }
+        with patch.object(
+            self.service.cross_market_signal_service,
+            "get_runtime_status",
+            return_value=runtime,
+        ):
+            partial_premarket = self.service._cross_market_observation_snapshot()
+        self.assertEqual(partial_premarket["status"], "ready")
+        self.assertFalse(
+            partial_premarket["evidence"]["us_theme_collection_audit"][
+                "premarket_full_strategy_coverage"
+            ]
+        )
+
+        runtime["us_premarket"]["latest_capture"] = {
+            **premarket_evidence["latest_capture"],
+            "collected_component_count": 0,
+        }
+        with patch.object(
+            self.service.cross_market_signal_service,
+            "get_runtime_status",
+            return_value=runtime,
+        ):
+            missing_premarket_audit = (
+                self.service._cross_market_observation_snapshot()
+            )
+        self.assertEqual(
+            missing_premarket_audit["missing_requirements"],
+            [
+                "us_premarket_collection_audited",
+                "us_theme_session_pair_available",
+            ],
+        )
+        runtime["us_premarket"] = premarket_evidence
+
+        runtime["korea"]["linked_technology_gate"][
+            "confirmation_span_seconds"
+        ] = 240.0
+        with patch.object(
+            self.service.cross_market_signal_service,
+            "get_runtime_status",
+            return_value=runtime,
+        ):
+            short_korea_window = self.service._cross_market_observation_snapshot()
+        self.assertEqual(short_korea_window["status"], "unavailable")
+        self.assertEqual(
+            short_korea_window["missing_requirements"],
+            ["korea_continuous_gate_available"],
+        )
+
+        runtime["korea"]["linked_technology_gate"][
+            "confirmation_span_seconds"
+        ] = 300.0
+        runtime["gold"] = {"available": False}
+        with patch.object(
+            self.service.cross_market_signal_service,
+            "get_runtime_status",
+            return_value=runtime,
+        ):
+            unavailable = self.service._cross_market_observation_snapshot()
+        self.assertEqual(unavailable["status"], "unavailable")
+        self.assertEqual(unavailable["missing_requirements"], ["gold_signal_available"])
+
+    def test_cross_market_run_persists_observation_snapshot_without_candidates(self) -> None:
+        self.service.update_settings(
+            {
+                "auto_trade_enabled": True,
+                "auto_trade_time_gate_enabled": False,
+                "auto_execution_mode": "dry_run",
+                "auto_strategy": CROSS_MARKET_STRATEGY_ID,
+            }
+        )
+        observation = {
+            "schema_version": 1,
+            "strategy_id": CROSS_MARKET_STRATEGY_ID,
+            "checked_at": datetime.now(timezone.utc).isoformat(),
+            "status": "ready",
+            "required_checks": {
+                "cn_open_available": True,
+                "us_first_hour_and_close_available": True,
+                "nasdaq_futures_continuous_trend_available": True,
+                "us_premarket_themes_available": True,
+                "korea_continuous_gate_available": True,
+                "gold_signal_available": True,
+            },
+            "missing_requirements": [],
+        }
+        fake_alphasift = MagicMock()
+        fake_alphasift.screen.return_value = {"candidates": [], "warnings": []}
+
+        with patch(
+            "src.services.vnpy_paper_trading_service.AlphaSiftService",
+            return_value=fake_alphasift,
+        ), patch.object(
+            self.service,
+            "_cross_market_observation_snapshot",
+            return_value=observation,
+        ):
+            result = self.service.run_auto_trade_once()
+
+        detail = self.service.agent_repo.get_run_detail(result["agent_run_uid"])
+        self.assertEqual(
+            detail["diagnostics"]["cross_market_observation"],
+            observation,
+        )
+
+    def test_cross_market_global_entry_gate_blocks_only_hard_open_regimes(self) -> None:
+        cases = (
+            (0.19, "high_open", True, "cn_high_open_buy_blocked"),
+            (0.189999, "flat_open", False, "candidate_screen_required"),
+            (-1.6, "extreme_low_open", True, "cn_extreme_low_open_buy_blocked"),
+            (-0.6, "low_open", False, "candidate_screen_required"),
+            (0.0, "flat_open", False, "candidate_screen_required"),
+        )
+
+        for gap_pct, regime, blocked, reason in cases:
+            with self.subTest(regime=regime):
+                gate = self.service._cross_market_global_entry_gate({
+                    "evidence": {
+                        "cn_open": {
+                            "available": True,
+                            "regime": regime,
+                            "gap_pct": gap_pct,
+                        }
+                    }
+                })
+
+                self.assertEqual(gate["blocked"], blocked)
+                self.assertEqual(gate["reason"], reason)
+                self.assertEqual(gate["classification_source"], "gap_pct")
+
+    def test_cross_market_global_open_gate_runs_sells_then_skips_alphasift(
+        self,
+    ) -> None:
+        self.service.update_settings({
+            "auto_trade_enabled": True,
+            "auto_trade_time_gate_enabled": False,
+            "auto_execution_mode": "dry_run",
+            "auto_strategy": CROSS_MARKET_STRATEGY_ID,
+        })
+        observation = {
+            "schema_version": 6,
+            "strategy_id": CROSS_MARKET_STRATEGY_ID,
+            "checked_at": datetime.now(timezone.utc).isoformat(),
+            "status": "ready",
+            "required_checks": {"cn_open_available": True},
+            "missing_requirements": [],
+            "evidence": {
+                "cn_open": {
+                    "available": True,
+                    "regime": "high_open",
+                    "gap_pct": 0.6,
+                    "buy_allowed": False,
+                    "force_sell": True,
+                }
+            },
+        }
+        planned_sell = {
+            "accepted": False,
+            "status": "planned",
+            "symbol": "002281",
+            "side": "sell",
+            "quantity": 200.0,
+        }
+
+        with patch(
+            "src.services.vnpy_paper_trading_service.AlphaSiftService"
+        ) as alphasift_service, patch.object(
+            self.service,
+            "_cross_market_observation_snapshot",
+            return_value=observation,
+        ), patch.object(
+            self.service,
+            "_sync_cross_market_corporate_actions",
+            return_value={"available": True},
+        ), patch.object(
+            self.service,
+            "_run_cross_market_sell_checks",
+            return_value=[planned_sell],
+        ) as sell_checks:
+            result = self.service.run_auto_trade_once()
+
+        sell_checks.assert_called_once()
+        alphasift_service.assert_not_called()
+        self.assertTrue(result["accepted"])
+        self.assertFalse(result["skipped"])
+        self.assertEqual(result["reason"], "cn_high_open_buy_blocked")
+        self.assertEqual(result["candidate_count"], 0)
+        self.assertEqual(result["orders"], [planned_sell])
+
+        detail = self.service.agent_repo.get_run_detail(result["agent_run_uid"])
+        self.assertEqual(detail["status"], "completed")
+        gate = detail["diagnostics"]["cross_market_global_entry_gate"]
+        self.assertTrue(gate["blocked"])
+        self.assertTrue(gate["sell_checks_completed_before_gate"])
+        self.assertTrue(gate["candidate_screen_skipped"])
+        self.assertEqual(
+            detail["diagnostics"]["stage_timings"]["completed_stage"],
+            "global_entry_gate",
+        )
+
+    def test_cross_market_active_orders_continue_or_cancel_after_revalidation(self) -> None:
+        plans = [
+            {
+                "plan_uid": "cross-active-keep",
+                "status": "submitted",
+                "side": "buy",
+                "planned_quantity": 100.0,
+                "order_result": {
+                    "raw": {"cross_market_strategy": {"theme": "memory"}},
+                },
+            },
+            {
+                "plan_uid": "cross-active-cancel",
+                "status": "submitted",
+                "side": "buy",
+                "planned_quantity": 100.0,
+                "order_result": {
+                    "raw": {"cross_market_strategy": {"theme": "memory"}},
+                },
+            },
+            {
+                "plan_uid": "cross-active-reduced",
+                "status": "submitted",
+                "side": "sell",
+                "planned_quantity": 100.0,
+                "order_result": {
+                    "raw": {"cross_market_strategy": {"theme": "memory"}},
+                },
+            },
+        ]
+        cancel_result = {
+            "accepted": True,
+            "status": "cancel_requested",
+            "reason": "cross_market_active_signal_expired",
+        }
+        with patch.object(
+            self.service,
+            "_active_vnpy_trade_plans",
+            return_value=plans,
+        ), patch.object(
+            self.service,
+            "_reconcile_vnpy_trade_plan",
+            return_value={"supported": False, "observed": False},
+        ), patch.object(
+            self.service,
+            "_revalidate_cross_market_trade_plan",
+            side_effect=[
+                (None, 100.0, {"decision": {"action": "buy"}}),
+                ("cross_market_plan_korea_direction_unconfirmed", 100.0, {"decision": {"action": "blocked"}}),
+                (None, 50.0, {"sell_fraction": 0.5}),
+            ],
+        ), patch.object(
+            self.service,
+            "cancel_trade_plan",
+            return_value=cancel_result,
+        ) as cancel:
+            result = self.service.revalidate_active_cross_market_trade_plans()
+
+        self.assertEqual(result["cross_market_count"], 3)
+        self.assertEqual(result["continued_count"], 1)
+        self.assertEqual(result["cancel_requested_count"], 2)
+        self.assertEqual(cancel.call_count, 2)
+        self.assertEqual(
+            cancel.call_args_list[0].kwargs["cancellation_context"]["revalidation_reason"],
+            "cross_market_plan_korea_direction_unconfirmed",
+        )
+        self.assertEqual(
+            cancel.call_args_list[1].kwargs["cancellation_reason"],
+            "cross_market_active_quantity_reduced",
+        )
+
+    def test_cross_market_pending_buy_quantity_uses_current_equity_and_price(self) -> None:
+        settings = self.service._apply_cross_market_strategy_settings(
+            replace(
+                self.service.get_settings(),
+                auto_strategy=CROSS_MARKET_STRATEGY_ID,
+            )
+        )
+        plan = {
+            "symbol": "600519",
+            "market": "cn",
+            "planned_quantity": 5000.0,
+            "planned_price": 10.0,
+            "submitted_price": 10.0,
+        }
+        decision = StrategyDecision(
+            action="buy",
+            reason="semiconductor_us_close_opening_entry_confirmed",
+            buy_allowed=True,
+            target_position_pct=50.0,
+        )
+        exposure = {
+            "total_equity": 120000.0,
+            "total_cash": 120000.0,
+        }
+        current = {"candidate_intraday": {"price": 12.0}}
+
+        approval_quantity, approval_audit, approval_reason = (
+            self.service._cross_market_revalidated_buy_quantity(
+                plan=plan,
+                raw={"cross_market_strategy": {"theme": "semiconductor"}},
+                settings=settings,
+                decision=decision,
+                current=current,
+                exposure_state=exposure,
+                active_order=False,
+            )
+        )
+        active_quantity, active_audit, active_reason = (
+            self.service._cross_market_revalidated_buy_quantity(
+                plan=plan,
+                raw={"cross_market_strategy": {"theme": "semiconductor"}},
+                settings=settings,
+                decision=decision,
+                current=current,
+                exposure_state=exposure,
+                active_order=True,
+            )
+        )
+
+        self.assertIsNone(approval_reason)
+        self.assertEqual(approval_quantity, 4900.0)
+        self.assertEqual(approval_audit["sizing_price"], 12.0)
+        self.assertEqual(approval_audit["allocation_basis"], "current_total_equity_pct")
+        self.assertIsNone(active_reason)
+        self.assertEqual(active_quantity, 5000.0)
+        self.assertEqual(active_audit["sizing_price"], 10.0)
+
+    def test_cross_market_pending_buy_rechecks_account_risk_fuses(self) -> None:
+        settings = self.service._apply_cross_market_strategy_settings(
+            replace(
+                self.service.get_settings(),
+                auto_strategy=CROSS_MARKET_STRATEGY_ID,
+            )
+        )
+        plan = {
+            "symbol": "002281",
+            "side": "buy",
+            "market": "cn",
+            "planned_quantity": 100.0,
+        }
+        raw = {
+            "cross_market_strategy": {
+                "theme": "cpo",
+            }
+        }
+
+        for risk_reason in (
+            "account_drawdown_limit_reached",
+            "consecutive_loss_limit_reached",
+        ):
+            with self.subTest(risk_reason=risk_reason), patch.object(
+                self.service.cross_market_signal_service,
+                "get_cn_open_signal",
+                return_value={"available": True, "gap_pct": -0.6},
+            ), patch.object(
+                self.service,
+                "_sync_cross_market_corporate_actions",
+                return_value={"available": True},
+            ), patch.object(
+                self.service,
+                "_account_pre_trade_risk",
+                return_value=(
+                    risk_reason,
+                    {
+                        "status": "blocked",
+                        "reason": risk_reason,
+                    },
+                ),
+            ) as account_risk, patch.object(
+                self.service,
+                "_cross_market_candidate_decision",
+            ) as candidate_decision:
+                reason, quantity, evidence = (
+                    self.service._revalidate_cross_market_trade_plan(
+                        plan=plan,
+                        raw=raw,
+                        settings=settings,
+                        active_order=True,
+                    )
+                )
+
+            self.assertEqual(reason, f"cross_market_plan_{risk_reason}")
+            self.assertEqual(quantity, 0.0)
+            self.assertEqual(
+                evidence["account_pre_trade_risk"]["reason"],
+                risk_reason,
+            )
+            account_risk.assert_called_once_with(settings)
+            candidate_decision.assert_not_called()
+
+    def test_cross_market_partial_second_entry_keeps_its_remaining_position_slot(self) -> None:
+        self.service.data_fetcher_manager.boards_by_symbol["002281"] = [
+            {"name": "CPO", "type": "concept", "change_pct": 1.2}
+        ]
+        settings = self.service._apply_cross_market_strategy_settings(
+            replace(
+                self.service.get_settings(),
+                auto_strategy=CROSS_MARKET_STRATEGY_ID,
+            )
+        )
+        strategy_position = {
+            "status": "available",
+            "quantity": 2500.0,
+            "sellable_quantity": 0.0,
+            "gross_cost_basis": 25000.0,
+            "entry_reasons": ["cpo_us_close_opening_entry_confirmed"],
+            "entry_theme": "cpo",
+            "entry_themes": ["cpo"],
+            "open_entry_order_count": 1,
+            "flat_open_staged_entry": False,
+        }
+        exposure = {
+            "available": True,
+            "held_symbols": {"600519", "002281"},
+            "position_values": {"600519": 50000.0, "002281": 25000.0},
+            "industry_values": {},
+            "industry_available": True,
+            "total_market_value": 75000.0,
+            "total_equity": 100000.0,
+            "total_cash": 25000.0,
+        }
+        candidate = {
+            "code": "002281",
+            "score": 90.0,
+            "expected_return_pct": 4.0,
+            "is_core_stock": True,
+            "source": "dsa_eastmoney_board_change_leader",
+            "_cross_market_source_theme": "cpo",
+            "_cross_market_entry_phase": "opening",
+            "cross_market_strategy": {
+                "decision": {
+                    "reason": "cpo_us_close_opening_entry_confirmed",
+                }
+            },
+        }
+
+        with patch.object(
+            self.service.cross_market_signal_service,
+            "get_cn_open_signal",
+            return_value={
+                "available": True,
+                "regime": "low_open",
+                "gap_pct": -0.6,
+                "buy_allowed": True,
+                "force_sell": False,
+            },
+        ), patch.object(
+            self.service,
+            "_cross_market_strategy_position",
+            return_value=strategy_position,
+        ), patch.object(
+            self.service,
+            "_cross_market_range_signal",
+            return_value={},
+        ), patch.object(
+            self.service,
+            "_cross_market_daily_pnl_pct",
+            return_value=0.0,
+        ):
+            decision, evidence = self.service._cross_market_candidate_decision(
+                candidate=candidate,
+                symbol="002281",
+                settings=settings,
+                exposure_state=exposure,
+                pending_buy_revalidation=True,
+            )
+
+        self.assertEqual(decision.action, "buy")
+        self.assertEqual(decision.target_position_pct, 25.0)
+        self.assertTrue(evidence["partial_entry_position_excluded"])
+        self.assertEqual(evidence["risk"]["position_count"], 1)
+
+    def test_completed_campaign_reconciles_then_cancels_active_cross_market_order(self) -> None:
+        plan = {
+            "plan_uid": "cross-active-campaign-completed",
+            "status": "submitted",
+            "side": "buy",
+            "planned_quantity": 100.0,
+            "order_result": {
+                "raw": {"cross_market_strategy": {"theme": "memory"}},
+            },
+        }
+        guard = {
+            "block": True,
+            "reason": "paper_campaign_completed",
+            "completion_session_date": "2026-09-07",
+            "current_session_date": "2026-09-08",
+        }
+        cancellation = {
+            "accepted": True,
+            "status": "cancel_requested",
+            "reason": "paper_campaign_completed",
+        }
+        call_order = []
+
+        def reconcile(_plan):
+            call_order.append("reconcile")
+            return {"supported": False, "observed": False}
+
+        def cancel(*args, **kwargs):
+            call_order.append("cancel")
+            return cancellation
+
+        with patch.object(
+            self.service,
+            "_active_vnpy_trade_plans",
+            return_value=[plan],
+        ), patch.object(
+            self.service,
+            "_cross_market_campaign_execution_guard",
+            return_value=guard,
+        ), patch.object(
+            self.service,
+            "_reconcile_vnpy_trade_plan",
+            side_effect=reconcile,
+        ), patch.object(
+            self.service,
+            "_revalidate_cross_market_trade_plan",
+        ) as revalidate, patch.object(
+            self.service,
+            "cancel_trade_plan",
+            side_effect=cancel,
+        ) as cancel_plan:
+            result = self.service.revalidate_active_cross_market_trade_plans()
+
+        self.assertEqual(call_order, ["reconcile", "cancel"])
+        self.assertEqual(result["cross_market_count"], 1)
+        self.assertEqual(result["cancel_requested_count"], 1)
+        revalidate.assert_not_called()
+        context = cancel_plan.call_args.kwargs["cancellation_context"]
+        self.assertEqual(
+            cancel_plan.call_args.kwargs["cancellation_reason"],
+            "paper_campaign_completed",
+        )
+        self.assertEqual(context["revalidation_reason"], "paper_campaign_completed")
+        self.assertEqual(context["evidence"]["campaign_guard"], guard)
 
     def test_auto_alphasift_llm_policy_uses_realistic_probe_budget_by_default(self) -> None:
         with patch.dict(
@@ -412,6 +2043,135 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         account_snapshot = status["snapshot"]["accounts"][0]
         self.assertEqual(account_snapshot["total_cash"], 99000.0)
         self.assertEqual(account_snapshot["positions"][0]["symbol"], "600519")
+
+    def test_star_market_buy_requires_at_least_two_hundred_shares(self) -> None:
+        rejected = self.service.submit_order(
+            symbol="688981",
+            side="buy",
+            market="cn",
+            cash_amount=10000,
+            price=60.0,
+        )
+        with patch(
+            "src.services.portfolio_service.PortfolioService._fetch_realtime_position_price",
+            return_value=(60.0, "unit-test"),
+        ):
+            accepted = self.service.submit_order(
+                symbol="688981",
+                side="buy",
+                market="cn",
+                cash_amount=13000,
+                price=60.0,
+            )
+
+        self.assertEqual(rejected["reason"], "cash_below_min_lot")
+        self.assertIn("buy 200 shares", rejected["message"])
+        self.assertTrue(accepted["accepted"])
+        self.assertEqual(accepted["quantity"], 216.0)
+
+    def test_bse_buy_requires_one_hundred_shares_and_allows_unit_increments(
+        self,
+    ) -> None:
+        rejected = self.service.submit_order(
+            symbol="920045",
+            side="buy",
+            market="cn",
+            cash_amount=990,
+            price=10.0,
+        )
+        with patch(
+            "src.services.portfolio_service.PortfolioService._fetch_realtime_position_price",
+            return_value=(10.0, "unit-test"),
+        ):
+            accepted = self.service.submit_order(
+                symbol="920045",
+                side="buy",
+                market="cn",
+                cash_amount=1050,
+                price=10.0,
+            )
+
+        self.assertEqual(rejected["reason"], "cash_below_min_lot")
+        self.assertTrue(accepted["accepted"])
+        self.assertEqual(accepted["quantity"], 105.0)
+
+    def test_vnpy_bse_exchange_callbacks_map_back_to_cn_market(self) -> None:
+        for exchange in ("BSE", "BJ", "XBSE", SimpleNamespace(value="BSE")):
+            with self.subTest(exchange=exchange):
+                self.assertEqual(
+                    self.service._market_from_vnpy_exchange(exchange),
+                    "cn",
+                )
+
+    def test_cross_market_cn_partial_sells_follow_board_lot_rules(self) -> None:
+        normalize = self.service._cross_market_cn_sell_order_quantity
+
+        self.assertEqual(
+            normalize(symbol="300308", target_quantity=266, sellable_quantity=800),
+            200.0,
+        )
+        self.assertEqual(
+            normalize(symbol="300308", target_quantity=50, sellable_quantity=800),
+            0.0,
+        )
+        self.assertEqual(
+            normalize(symbol="300308", target_quantity=50, sellable_quantity=50),
+            50.0,
+        )
+        self.assertEqual(
+            normalize(symbol="688981", target_quantity=266, sellable_quantity=800),
+            266.0,
+        )
+        self.assertEqual(
+            normalize(symbol="688981", target_quantity=150, sellable_quantity=800),
+            0.0,
+        )
+        self.assertEqual(
+            normalize(symbol="688981", target_quantity=150, sellable_quantity=150),
+            150.0,
+        )
+        self.assertEqual(
+            normalize(symbol="920045", target_quantity=266, sellable_quantity=800),
+            266.0,
+        )
+        self.assertEqual(
+            normalize(symbol="920045", target_quantity=50, sellable_quantity=800),
+            0.0,
+        )
+        self.assertEqual(
+            normalize(symbol="920045", target_quantity=50, sellable_quantity=50),
+            50.0,
+        )
+
+    def test_cross_market_budget_rejects_star_order_below_minimum_quantity(self) -> None:
+        settings = replace(
+            self.service.get_settings(),
+            auto_strategy=CROSS_MARKET_STRATEGY_ID,
+            auto_market="cn",
+            auto_score_weighted_allocation_enabled=False,
+        )
+        sizing = {"adjusted": False}
+        budget = {
+            "base_cash_amount": 10000.0 / 3.0,
+            "quote_cash_amount": 10000.0 / 3.0,
+            "base_currency": "CNY",
+            "quote_currency": "CNY",
+            "rate": 1.0,
+        }
+
+        amount, resolved_budget, reason = self.service._executable_target_weight_budget(
+            symbol="688981",
+            settings=settings,
+            budget=budget,
+            sizing=sizing,
+            price=60.0,
+        )
+
+        self.assertEqual(amount, 0.0)
+        self.assertIs(resolved_budget, budget)
+        self.assertEqual(reason, "target_weight_below_min_lot")
+        self.assertEqual(sizing["executable_quantity"], 0.0)
+        self.assertTrue(sizing["lot_adjusted"])
 
     def test_data_quality_gate_defaults_to_guarded_floor_and_zero_disables(self) -> None:
         self.assertEqual(self.service.get_settings().auto_min_data_quality_score, 60.0)
@@ -741,6 +2501,40 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertFalse(third["diagnostics"]["snapshot_cache_hit"])
         self.assertEqual(third["snapshot"]["accounts"][0]["total_cash"], 99000.0)
 
+    def test_cross_market_status_snapshot_does_not_overwrite_closing_evidence(
+        self,
+    ) -> None:
+        account = self.service.ensure_account()
+        account_id = int(account["id"])
+        self.service.update_settings({
+            "account_id": account_id,
+            "auto_strategy": CROSS_MARKET_STRATEGY_ID,
+        })
+        self.service._invalidate_status_snapshot_cache(account_id)
+        snapshot = {
+            "accounts": [{
+                "account_id": account_id,
+                "total_cash": 100000.0,
+                "positions": [],
+            }],
+        }
+
+        with patch.object(
+            self.service.portfolio,
+            "get_portfolio_snapshot",
+            return_value=snapshot,
+        ) as get_snapshot:
+            status = self.service.get_status(
+                include_snapshot=True,
+                include_recent_trades=False,
+            )
+
+        self.assertEqual(status["snapshot"], snapshot)
+        get_snapshot.assert_called_once_with(
+            account_id=account_id,
+            persist=False,
+        )
+
     def test_status_exposes_trading_window_diagnostics(self) -> None:
         fake_window = {
             "available": True,
@@ -783,6 +2577,64 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
 
         self.assertTrue(settings.auto_trade_enabled)
         self.assertEqual(settings.auto_interval_minutes, 5)
+
+    def test_config_payload_read_retries_transient_partial_write(self) -> None:
+        transient_error = json.JSONDecodeError("empty", "", 0)
+        with (
+            patch.object(
+                Path,
+                "read_text",
+                side_effect=[transient_error, '{"settings":{"auto_trade_enabled":true}}'],
+            ) as read_text,
+            patch("src.services.vnpy_paper_trading_service.time.sleep") as sleep,
+        ):
+            payload = self.service._read_config_payload()
+
+        self.assertTrue(payload["settings"]["auto_trade_enabled"])
+        self.assertEqual(read_text.call_count, 2)
+        sleep.assert_called_once()
+
+    def test_config_payload_write_atomically_replaces_target(self) -> None:
+        payload = {"settings": {"auto_trade_enabled": True}, "revision": 2}
+
+        with patch(
+            "src.services.vnpy_paper_trading_service.os.replace",
+            wraps=os.replace,
+        ) as replace_file:
+            self.service._write_config_payload(payload)
+
+        replace_file.assert_called_once()
+        source, target = replace_file.call_args.args
+        self.assertEqual(Path(target), self.config_path)
+        self.assertNotEqual(Path(source), self.config_path)
+        self.assertEqual(json.loads(self.config_path.read_text(encoding="utf-8")), payload)
+        self.assertEqual(list(self.data_dir.glob("*.tmp")), [])
+
+    def test_config_payload_write_retries_transient_windows_replace_lock(self) -> None:
+        payload = {"settings": {"auto_trade_enabled": True}, "revision": 3}
+        real_replace = os.replace
+        attempts = 0
+
+        def flaky_replace(source, target):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise PermissionError(5, "transient Windows file lock", str(target))
+            return real_replace(source, target)
+
+        with (
+            patch(
+                "src.services.vnpy_paper_trading_service.os.replace",
+                side_effect=flaky_replace,
+            ) as replace_file,
+            patch("src.services.vnpy_paper_trading_service.time.sleep") as sleep,
+        ):
+            self.service._write_config_payload(payload)
+
+        self.assertEqual(replace_file.call_count, 2)
+        sleep.assert_called_once()
+        self.assertEqual(json.loads(self.config_path.read_text(encoding="utf-8")), payload)
+        self.assertEqual(list(self.data_dir.glob("*.tmp")), [])
 
     def test_settings_inherit_runtime_gateway_name_when_not_saved(self) -> None:
         with patch.dict(os.environ, {"VNPY_GATEWAY_NAME": "DSA_SIM"}, clear=False):
@@ -1454,6 +3306,2639 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertEqual(portfolio_event["status"], "changed")
         self.assertEqual(portfolio_event["details"], audit["portfolio_change"])
 
+    def test_cross_market_strategy_uses_base_screen_and_cpo_independent_gate(self) -> None:
+        self.service.data_fetcher_manager.boards_by_symbol["002281"] = [
+            {"name": "CPO 光模块", "type": "concept", "change_pct": 1.2}
+        ]
+        self.service.update_settings(
+            {
+                "auto_trade_enabled": True,
+                "auto_trade_time_gate_enabled": False,
+                "auto_execution_mode": "dry_run",
+                "auto_strategy": CROSS_MARKET_STRATEGY_ID,
+                "auto_max_results": 1,
+                "auto_cash_per_order": 1200,
+            }
+        )
+        fake_alphasift = MagicMock()
+        fake_alphasift.screen.return_value = {
+            "candidates": [
+                {
+                    "code": "600036",
+                    "name": "Bank candidate",
+                    "industry": "bank",
+                    "score": 99,
+                    "price": 10.0,
+                },
+                {
+                    "code": "002281",
+                    "name": "CPO candidate",
+                    "concepts": "CPO 光模块",
+                    "score": 75,
+                    "price": 10.0,
+                    "expected_return_pct": 4.0,
+                    "is_core_stock": True,
+                    "source": "dsa_eastmoney_board_change_leader",
+                    "_cross_market_source_theme": "cpo",
+                },
+            ],
+            "warnings": [],
+        }
+
+        with patch(
+            "src.services.vnpy_paper_trading_service.AlphaSiftService",
+            return_value=fake_alphasift,
+        ), patch.object(
+            self.service.cross_market_signal_service,
+            "get_cn_open_signal",
+            return_value={
+                "available": True,
+                "regime": "low_open",
+                "gap_pct": -0.6,
+                "buy_allowed": True,
+                "force_sell": False,
+            },
+        ):
+            result = self.service.run_auto_trade_once()
+
+        self.assertEqual(result["planned_count"], 1, result)
+        self.assertEqual(result["orders"][0]["status"], "planned")
+        evidence = result["orders"][0]["raw"]["cross_market_strategy"]
+        self.assertEqual(evidence["theme"], "cpo")
+        self.assertEqual(evidence["korea"]["status"], "bypassed")
+        self.assertEqual(evidence["sector"]["score"], 45.118836)
+        self.assertEqual(evidence["candidate_score"], 75.0)
+        self.assertTrue(evidence["core_stock"]["confirmed"])
+        fake_alphasift.screen.assert_called_once()
+        self.assertEqual(
+            fake_alphasift.screen.call_args.kwargs["strategy"],
+            "momentum_quality",
+        )
+        self.assertEqual(fake_alphasift.screen.call_args.kwargs["max_results"], 50)
+        self.assertFalse(fake_alphasift.screen.call_args.kwargs["use_llm"])
+        self.assertEqual(
+            fake_alphasift.screen.call_args.kwargs["candidate_scope"],
+            "cross_market_target_themes",
+        )
+        detail = self.service.agent_repo.get_run_detail(result["agent_run_uid"])
+        self.assertEqual(
+            detail["diagnostics"]["cross_market_theme_prefilter"]["unsupported_count"],
+            0,
+        )
+        self.assertEqual(
+            detail["diagnostics"]["cross_market_theme_prefilter"][
+                "inactive_theme_skipped_count"
+            ],
+            1,
+        )
+
+    def test_cross_market_cpo_rejects_high_rank_without_core_leader_provenance(self) -> None:
+        self.service.data_fetcher_manager.boards_by_symbol["002281"] = [
+            {"name": "CPO 光模块", "type": "concept", "change_pct": 1.2}
+        ]
+        settings = replace(
+            self.service.get_settings(),
+            auto_strategy=CROSS_MARKET_STRATEGY_ID,
+        )
+
+        with patch.object(
+            self.service.cross_market_signal_service,
+            "get_cn_open_signal",
+            return_value={
+                "available": True,
+                "regime": "low_open",
+                "gap_pct": -0.6,
+                "buy_allowed": True,
+                "force_sell": False,
+            },
+        ):
+            decision, evidence = self.service._cross_market_candidate_decision(
+                candidate={
+                    "code": "002281",
+                    "concepts": ["CPO"],
+                    "score": 99,
+                    "expected_return_pct": 4.0,
+                    "_cross_market_candidate_rank": 1,
+                },
+                symbol="002281",
+                settings=settings,
+                exposure_state={},
+            )
+
+        self.assertEqual(decision.reason, "cpo_core_stock_unconfirmed")
+        self.assertFalse(evidence["core_stock"]["confirmed"])
+        self.assertFalse(evidence["core_stock"]["is_core_stock"])
+        self.assertIsNone(evidence["core_stock"]["source"])
+        self.assertIsNone(evidence["core_stock"]["source_theme"])
+
+    def test_cross_market_theme_prefilter_enriches_missing_theme_once(self) -> None:
+        self.service.data_fetcher_manager.boards_by_symbol["002281"] = [
+            {"name": "CPO 光模块", "type": "concept", "change_pct": 1.2}
+        ]
+        candidates = [{"code": "002281", "name": "candidate", "score": 75}]
+
+        with patch.object(
+            self.service.data_fetcher_manager,
+            "get_belong_boards",
+            wraps=self.service.data_fetcher_manager.get_belong_boards,
+        ) as get_boards:
+            first, first_diagnostics = self.service._cross_market_theme_prefilter(
+                candidates
+            )
+            second, second_diagnostics = self.service._cross_market_theme_prefilter(
+                candidates
+            )
+
+        self.assertEqual(first[0]["_cross_market_prefilter_theme"], "cpo")
+        self.assertIn("_cross_market_prefilter_boards_observed_at", first[0])
+        self.assertEqual(first_diagnostics["enriched_count"], 1)
+        self.assertEqual(second[0]["_cross_market_prefilter_theme"], "cpo")
+        self.assertEqual(second_diagnostics["cache_hit_count"], 1)
+        get_boards.assert_called_once_with("002281")
+
+    def test_cross_market_theme_prefilter_allows_only_cn_main_board_entries(
+        self,
+    ) -> None:
+        candidates = [
+            {
+                "code": symbol,
+                "_cross_market_source_theme": "cpo",
+            }
+            for symbol in (
+                "000001",
+                "001232",
+                "002281",
+                "003019",
+                "600000",
+                "601318",
+                "603019",
+                "605117",
+                "300620",
+                "688316",
+                "920045",
+            )
+        ]
+
+        selected, diagnostics = self.service._cross_market_theme_prefilter(
+            candidates
+        )
+
+        self.assertEqual(
+            [item["code"] for item in selected],
+            [
+                "000001",
+                "001232",
+                "002281",
+                "003019",
+                "600000",
+                "601318",
+                "603019",
+                "605117",
+            ],
+        )
+        self.assertEqual(diagnostics["trading_permission"], "cn_main_board_only")
+        self.assertEqual(diagnostics["trading_permission_blocked_count"], 3)
+        self.assertEqual(
+            diagnostics["trading_permission_blocked_symbols"],
+            ["300620", "688316", "920045"],
+        )
+
+    def test_cross_market_candidate_decision_rechecks_main_board_permission(
+        self,
+    ) -> None:
+        settings = replace(
+            self.service.get_settings(),
+            auto_strategy=CROSS_MARKET_STRATEGY_ID,
+        )
+
+        with patch.object(
+            self.service,
+            "_cross_market_live_belong_boards",
+        ) as live_boards:
+            for symbol in ("300620", "688316", "920045"):
+                with self.subTest(symbol=symbol):
+                    decision, evidence = self.service._cross_market_candidate_decision(
+                        candidate={"code": symbol},
+                        symbol=symbol,
+                        settings=settings,
+                        exposure_state={},
+                    )
+                    self.assertEqual(decision.action, "blocked")
+                    self.assertEqual(
+                        decision.reason,
+                        "trading_permission_main_board_only",
+                    )
+                    self.assertEqual(
+                        evidence["trading_permission"],
+                        "cn_main_board_only",
+                    )
+
+        live_boards.assert_not_called()
+
+    def test_cross_market_specialized_gold_candidate_is_live_validated(self) -> None:
+        self.service.data_fetcher_manager.boards_by_symbol["000417"] = [
+            {"name": "商贸零售", "type": "industry", "change_pct": 2.0},
+            {"name": "黄金概念", "type": "concept", "change_pct": 1.7},
+            {"name": "参股银行", "type": "concept", "change_pct": 1.6},
+        ]
+        candidates = [{
+            "code": "000417",
+            "name": "合百集团",
+            "concepts": ["黄金概念"],
+            "score": 78.5,
+            "source": "dsa_eastmoney_board_change_leader",
+            "_cross_market_source_theme": "gold",
+        }]
+
+        selected, diagnostics = self.service._cross_market_theme_prefilter(candidates)
+
+        self.assertEqual([item["code"] for item in selected], ["000417"])
+        self.assertEqual(selected[0]["_cross_market_prefilter_theme"], "gold")
+        self.assertEqual(diagnostics["supported_count"], 1)
+        self.assertEqual(diagnostics["unsupported_count"], 0)
+        self.assertEqual(diagnostics["enriched_count"], 1)
+        self.assertEqual(diagnostics["source_theme_verified_count"], 1)
+        self.assertEqual(diagnostics["source_theme_rejected_count"], 0)
+
+    def test_cross_market_specialized_source_theme_mismatch_fails_closed(self) -> None:
+        self.service.data_fetcher_manager.boards_by_symbol["600981"] = [
+            {"name": "银行", "type": "industry", "change_pct": 1.0},
+            {"name": "融资融券", "type": "concept", "change_pct": 0.5},
+        ]
+        candidate = {
+            "code": "600981",
+            "name": "mismatched candidate",
+            "concepts": ["半导体"],
+            "score": 80.0,
+            "source": "dsa_eastmoney_board_change_leader",
+            "_cross_market_source_theme": "semiconductor",
+        }
+
+        first, first_diagnostics = self.service._cross_market_theme_prefilter(
+            [candidate]
+        )
+        second, second_diagnostics = self.service._cross_market_theme_prefilter(
+            [candidate]
+        )
+
+        self.assertEqual(first, [])
+        self.assertEqual(first_diagnostics["unsupported_count"], 1)
+        self.assertEqual(first_diagnostics["source_theme_verified_count"], 0)
+        self.assertEqual(first_diagnostics["source_theme_rejected_count"], 1)
+        self.assertEqual(first_diagnostics["source_theme_unavailable_count"], 0)
+        self.assertEqual(second, [])
+        self.assertEqual(second_diagnostics["cache_hit_count"], 1)
+        self.assertEqual(second_diagnostics["source_theme_rejected_count"], 1)
+
+        settings = replace(
+            self.service.get_settings(),
+            auto_strategy=CROSS_MARKET_STRATEGY_ID,
+        )
+        decision, evidence = self.service._cross_market_candidate_decision(
+            candidate=candidate,
+            symbol="600981",
+            settings=settings,
+            exposure_state={},
+        )
+
+        self.assertEqual(decision.action, "blocked")
+        self.assertEqual(decision.reason, "source_theme_live_board_mismatch")
+        self.assertEqual(evidence["source_theme"], "semiconductor")
+        self.assertNotIn("semiconductor", evidence["live_board_themes"])
+
+    def test_cross_market_target_candidate_qualification_can_fill_two_from_active_theme(self) -> None:
+        candidates = [
+            {
+                "code": "600981",
+                "name": "technology",
+                "concepts": ["半导体"],
+                "source": "dsa_eastmoney_board_change_leader",
+                "_cross_market_source_theme": "semiconductor",
+            },
+            {
+                "code": "002281",
+                "name": "cpo",
+                "concepts": ["CPO"],
+                "source": "dsa_eastmoney_board_change_leader",
+                "_cross_market_source_theme": "cpo",
+            },
+            {
+                "code": "000417",
+                "name": "retailer",
+                "concepts": ["黄金概念"],
+                "source": "dsa_eastmoney_board_change_leader",
+                "_cross_market_source_theme": "gold",
+            },
+            {
+                "code": "002371",
+                "name": "technology backup",
+                "concepts": ["半导体"],
+                "source": "dsa_eastmoney_board_change_leader",
+                "_cross_market_source_theme": "semiconductor",
+            },
+            {
+                "code": "300502",
+                "name": "cpo backup",
+                "concepts": ["CPO"],
+                "source": "dsa_eastmoney_board_change_leader",
+                "_cross_market_source_theme": "cpo",
+            },
+            {
+                "code": "600547",
+                "name": "gold miner",
+                "concepts": ["黄金"],
+                "source": "dsa_eastmoney_board_change_leader",
+                "_cross_market_source_theme": "gold",
+            },
+        ]
+        self.service.data_fetcher_manager.boards_by_symbol.update({
+            "600981": [{"name": "半导体", "type": "industry"}],
+            "002281": [{"name": "CPO 光模块", "type": "concept"}],
+            "002371": [{"name": "半导体", "type": "industry"}],
+            "000417": [
+                {"name": "商贸零售", "type": "industry"},
+                {"name": "黄金概念", "type": "concept"},
+                {"name": "参股银行", "type": "concept"},
+            ],
+            "600547": [{"name": "黄金", "type": "industry"}],
+        })
+
+        with patch.object(
+            self.service,
+            "_cross_market_completed_atr_20_pct",
+            return_value=3.0,
+        ) as atr:
+            selected, theme_diagnostics, edge_diagnostics = (
+                self.service._cross_market_qualify_target_candidates(
+                    candidates,
+                    target_count=2,
+                    active_theme_scores={"semiconductor": 80.0},
+                )
+            )
+
+        self.assertEqual(
+            [candidate["code"] for candidate in selected],
+            ["600981", "002371"],
+        )
+        self.assertEqual(
+            theme_diagnostics["selected_families"],
+            ["semiconductor"],
+        )
+        self.assertEqual(theme_diagnostics["unsupported_count"], 0)
+        self.assertEqual(theme_diagnostics["skipped_filled_family_count"], 0)
+        self.assertEqual(theme_diagnostics["source_theme_verified_count"], 2)
+        self.assertEqual(theme_diagnostics["source_theme_rejected_count"], 0)
+        self.assertEqual(theme_diagnostics["source_theme_unavailable_count"], 0)
+        self.assertEqual(edge_diagnostics["qualified_count"], 2)
+        self.assertEqual(atr.call_count, 2)
+
+    def test_cross_market_target_candidate_qualification_round_robins_active_themes(
+        self,
+    ) -> None:
+        candidates = [
+            {
+                "code": "603679",
+                "name": "compute one",
+                "concepts": ["算力租赁"],
+                "source": "dsa_eastmoney_board_change_leader",
+                "_cross_market_source_theme": "compute_services",
+            },
+            {
+                "code": "000815",
+                "name": "compute two",
+                "concepts": ["算力租赁"],
+                "source": "dsa_eastmoney_board_change_leader",
+                "_cross_market_source_theme": "compute_services",
+            },
+            {
+                "code": "603296",
+                "name": "compute three",
+                "concepts": ["算力租赁"],
+                "source": "dsa_eastmoney_board_change_leader",
+                "_cross_market_source_theme": "compute_services",
+            },
+            {
+                "code": "300996",
+                "name": "compute four",
+                "concepts": ["算力租赁"],
+                "source": "dsa_eastmoney_board_change_leader",
+                "_cross_market_source_theme": "compute_services",
+            },
+            {
+                "code": "603660",
+                "name": "ai one",
+                "concepts": ["人工智能"],
+                "source": "dsa_eastmoney_board_change_leader",
+                "_cross_market_source_theme": "artificial_intelligence",
+            },
+            {
+                "code": "002131",
+                "name": "ai two",
+                "concepts": ["人工智能"],
+                "source": "dsa_eastmoney_board_change_leader",
+                "_cross_market_source_theme": "artificial_intelligence",
+            },
+            {
+                "code": "002281",
+                "name": "cpo one",
+                "concepts": ["CPO"],
+                "source": "dsa_eastmoney_board_change_leader",
+                "_cross_market_source_theme": "cpo",
+            },
+            {
+                "code": "603186",
+                "name": "ccl one",
+                "concepts": ["覆铜板"],
+                "source": "dsa_eastmoney_board_change_leader",
+                "_cross_market_source_theme": "ccl",
+            },
+            {
+                "code": "002517",
+                "name": "gaming one",
+                "concepts": ["游戏"],
+                "source": "dsa_eastmoney_board_change_leader",
+                "_cross_market_source_theme": "gaming",
+            },
+        ]
+        self.service.data_fetcher_manager.boards_by_symbol.update({
+            "603679": [{"name": "算力租赁", "type": "concept"}],
+            "000815": [{"name": "算力租赁", "type": "concept"}],
+            "603660": [{"name": "人工智能", "type": "concept"}],
+            "002281": [{"name": "CPO", "type": "concept"}],
+            "603186": [{"name": "覆铜板", "type": "concept"}],
+            "002517": [{"name": "游戏", "type": "industry"}],
+        })
+
+        with patch.object(
+            self.service,
+            "_cross_market_completed_atr_20_pct",
+            return_value=3.0,
+        ) as atr:
+            selected, theme_diagnostics, edge_diagnostics = (
+                self.service._cross_market_qualify_target_candidates(
+                    candidates,
+                    target_count=6,
+                    active_theme_scores={
+                        "compute_services": 100.0,
+                        "artificial_intelligence": 97.0,
+                        "cpo": 96.0,
+                        "ccl": 93.0,
+                        "gaming": 70.0,
+                    },
+                )
+            )
+
+        self.assertEqual(
+            [candidate["code"] for candidate in selected],
+            ["603679", "603660", "002281", "603186", "002517", "000815"],
+        )
+        self.assertEqual(
+            theme_diagnostics["candidate_family_order"],
+            [
+                "compute_services",
+                "artificial_intelligence",
+                "cpo",
+                "ccl",
+                "gaming",
+            ],
+        )
+        self.assertEqual(
+            theme_diagnostics["qualification_mode"],
+            "active_theme_round_robin_fill",
+        )
+        self.assertEqual(theme_diagnostics["source_theme_verified_count"], 6)
+        self.assertEqual(theme_diagnostics["inactive_theme_skipped_count"], 0)
+        self.assertEqual(edge_diagnostics["qualified_count"], 6)
+        self.assertEqual(atr.call_count, 6)
+
+    def test_cross_market_auto_trade_uses_reserve_candidates_until_two_plans(self) -> None:
+        self.service.update_settings(
+            {
+                "auto_trade_enabled": True,
+                "auto_trade_time_gate_enabled": False,
+                "auto_execution_mode": "dry_run",
+                "auto_strategy": CROSS_MARKET_STRATEGY_ID,
+                "auto_max_results": 2,
+            }
+        )
+        candidates = [
+            {
+                "code": f"60000{index}",
+                "name": f"semiconductor candidate {index}",
+                "industry": "semiconductor",
+                "score": 90 - index,
+                "price": 10.0,
+                "turnover_amount": 200_000_000.0,
+                "source": "dsa_eastmoney_board_change_leader",
+                "_cross_market_source_theme": "semiconductor",
+            }
+            for index in range(1, 6)
+        ]
+        self.service.data_fetcher_manager.boards_by_symbol.update({
+            f"60000{index}": [
+                {"name": "半导体", "type": "industry", "change_pct": 1.0}
+            ]
+            for index in range(1, 6)
+        })
+        fake_alphasift = MagicMock()
+        fake_alphasift.screen.return_value = {
+            "quality_status": "ok",
+            "candidates": candidates,
+            "warnings": [],
+            "source_errors": [],
+        }
+        blocked_one = StrategyDecision(
+            action="blocked",
+            reason="candidate_realtime_quote_unavailable",
+        )
+        blocked_two = StrategyDecision(
+            action="blocked",
+            reason="board_technical_evidence_unavailable",
+        )
+        buy = StrategyDecision(
+            action="buy",
+            reason="low_open_reclaim_confirmed",
+            buy_allowed=True,
+            target_tranche_delta=1,
+            target_position_pct=50.0,
+        )
+        decision_evidence = {
+            "strategy_id": CROSS_MARKET_STRATEGY_ID,
+            "theme": "semiconductor",
+            "candidate_intraday": {
+                "price": 10.0,
+                "amount": 200_000_000.0,
+            },
+        }
+
+        with patch(
+            "src.services.vnpy_paper_trading_service.AlphaSiftService",
+            return_value=fake_alphasift,
+        ), patch.object(
+            self.service,
+            "_cross_market_active_theme_scores",
+            return_value=({"semiconductor": 80.0}, {"entry_phase": "opening"}),
+        ), patch.object(
+            self.service,
+            "_cross_market_completed_atr_20_pct",
+            return_value=3.0,
+        ), patch.object(
+            self.service,
+            "_cross_market_candidate_decision",
+            side_effect=[
+                (blocked_one, decision_evidence),
+                (blocked_two, decision_evidence),
+                (buy, decision_evidence),
+                (buy, decision_evidence),
+                (buy, decision_evidence),
+            ],
+        ) as candidate_decision:
+            result = self.service.run_auto_trade_once()
+
+        self.assertEqual(result["candidate_count"], 5)
+        self.assertEqual(result["planned_count"], 2, result)
+        self.assertEqual(result["skipped_count"], 2, result)
+        self.assertEqual(candidate_decision.call_count, 4)
+        self.assertEqual(
+            [call.kwargs["symbol"] for call in candidate_decision.call_args_list],
+            ["600001", "600002", "600003", "600004"],
+        )
+        self.assertEqual(
+            [item["symbol"] for item in result["orders"] if item["status"] == "planned"],
+            ["600003", "600004"],
+        )
+        detail = self.service.agent_repo.get_run_detail(result["agent_run_uid"])
+        pool = detail["diagnostics"]["cross_market_candidate_decision_pool"]
+        self.assertEqual(pool["order_activity_limit"], 2)
+        self.assertEqual(pool["candidate_decision_limit"], 6)
+        self.assertEqual(pool["reserve_candidate_count"], 4)
+
+    def test_cross_market_formal_recovery_is_persisted_as_intraday_phase(self) -> None:
+        self.service.update_settings(
+            {
+                "auto_trade_enabled": True,
+                "auto_trade_time_gate_enabled": False,
+                "auto_execution_mode": "dry_run",
+                "auto_strategy": CROSS_MARKET_STRATEGY_ID,
+                "auto_max_results": 2,
+            }
+        )
+        fake_alphasift = MagicMock()
+        fake_alphasift.screen.return_value = {
+            "quality_status": "ok",
+            "candidates": [],
+            "warnings": [],
+            "source_errors": [],
+        }
+
+        with patch(
+            "src.services.vnpy_paper_trading_service.AlphaSiftService",
+            return_value=fake_alphasift,
+        ), patch.object(
+            self.service,
+            "_cross_market_active_theme_scores",
+            return_value=({}, {"entry_phase": "intraday_dip"}),
+        ) as active_themes:
+            result = self.service.run_auto_trade_once(
+                trigger_source_override="vnpy_paper_auto",
+                allow_cross_market_intraday_entry_recheck=True,
+            )
+
+        detail = self.service.agent_repo.get_run_detail(result["agent_run_uid"])
+        diagnostics = detail["diagnostics"]
+        self.assertTrue(diagnostics["formal_recovery"])
+        self.assertTrue(diagnostics["intraday_entry_recheck"])
+        self.assertEqual(diagnostics["cross_market_entry_phase"], "intraday_dip")
+        active_themes.assert_called_once_with(entry_phase="intraday_dip")
+
+    def test_cross_market_board_leaders_attach_atr_without_dropping_missing_history(self) -> None:
+        candidates = [
+            {
+                "code": "603583",
+                "source": "dsa_eastmoney_board_change_leader",
+            },
+            {
+                "code": "002281",
+                "source": "dsa_eastmoney_board_change_leader",
+            },
+            {
+                "code": "600547",
+                "source": "other_source",
+            },
+        ]
+
+        with patch.object(
+            self.service,
+            "_cross_market_completed_atr_20_pct",
+            side_effect=[None, 2.4],
+        ) as atr:
+            selected, diagnostics = (
+                self.service._cross_market_enrich_target_candidate_volatility(candidates)
+            )
+
+        self.assertEqual(
+            [item["code"] for item in selected],
+            ["603583", "002281", "600547"],
+        )
+        self.assertNotIn("atr_20_pct", selected[0])
+        self.assertEqual(selected[1]["atr_20_pct"], 2.4)
+        self.assertEqual(diagnostics["insufficient_history_count"], 1)
+        self.assertEqual(diagnostics["enriched_count"], 1)
+        self.assertEqual(atr.call_count, 2)
+
+    def test_cross_market_range_signal_adds_to_existing_strategy_position(self) -> None:
+        self.service.data_fetcher_manager.boards_by_symbol["002281"] = [
+            {"name": "CPO", "type": "concept"}
+        ]
+        self.service.update_settings(
+            {
+                "auto_trade_enabled": True,
+                "auto_trade_time_gate_enabled": False,
+                "auto_execution_mode": "dry_run",
+                "auto_strategy": CROSS_MARKET_STRATEGY_ID,
+                "auto_max_results": 1,
+            }
+        )
+        account = self.service.ensure_account()
+        self.service.portfolio.record_trade(
+            account_id=int(account["id"]),
+            symbol="002281",
+            trade_date=date.today() - timedelta(days=1),
+            side="buy",
+            quantity=100,
+            price=10.0,
+            market="cn",
+            currency="CNY",
+            note="vn.py paper | source=cross_market_auto_entry | price=explicit",
+        )
+        fake_alphasift = MagicMock()
+        fake_alphasift.screen.return_value = {
+            "candidates": [{
+                "code": "002281",
+                "name": "CPO candidate",
+                "score": 75,
+                "price": 10.0,
+                "expected_return_pct": 4.0,
+                "is_core_stock": True,
+                "source": "dsa_eastmoney_board_change_leader",
+                "_cross_market_source_theme": "cpo",
+                "adx14": 16.0,
+                "ma20_slope_pct_per_day": 0.05,
+                "range_low": 9.0,
+                "rsi14": 32.0,
+                "bollinger_position": 0.1,
+            }],
+            "warnings": [],
+        }
+
+        with patch(
+            "src.services.vnpy_paper_trading_service.AlphaSiftService",
+            return_value=fake_alphasift,
+        ), patch.object(
+            self.service.cross_market_signal_service,
+            "get_cn_open_signal",
+            return_value={
+                "available": True,
+                "regime": "flat_open",
+                "gap_pct": 0.0,
+                "buy_allowed": False,
+                "force_sell": False,
+            },
+        ):
+            result = self.service.run_auto_trade_once()
+
+        self.assertEqual(result["planned_count"], 1, result)
+        evidence = result["orders"][0]["raw"]["cross_market_strategy"]
+        self.assertEqual(evidence["decision"]["reason"], "range_add_tranche")
+        self.assertEqual(evidence["strategy_position"]["current_tranche_count"], 1)
+
+    def test_cross_market_tranche_count_tracks_remaining_strategy_cost_basis(self) -> None:
+        initial_cash = 100000.0
+
+        self.assertEqual(
+            self.service._cross_market_current_tranche_count(
+                strategy_position={"quantity": 100, "gross_cost_basis": 25000.0},
+                initial_cash=initial_cash,
+            ),
+            1,
+        )
+        self.assertEqual(
+            self.service._cross_market_current_tranche_count(
+                strategy_position={"quantity": 200, "gross_cost_basis": 50000.0},
+                initial_cash=initial_cash,
+            ),
+            2,
+        )
+        self.assertEqual(
+            self.service._cross_market_current_tranche_count(
+                strategy_position={"quantity": 300, "gross_cost_basis": 75000.0},
+                initial_cash=initial_cash,
+            ),
+            2,
+        )
+        self.assertEqual(
+            self.service._cross_market_current_tranche_count(
+                strategy_position={"quantity": 0, "gross_cost_basis": 0},
+                initial_cash=initial_cash,
+            ),
+            0,
+        )
+
+    def test_cross_market_tranche_count_groups_partial_fills_by_vnpy_order(self) -> None:
+        account = self.service.ensure_account()
+        account_id = int(account["id"])
+        shared_note = (
+            "vn.py paper | source=cross_market_auto_entry | "
+            "vn.py callback vt_orderid=DSA_SIM.entry-one; "
+            "entry_reason=cpo_flat_open_staged_entry_confirmed; entry_theme=cpo"
+        )
+        for index in range(2):
+            self.service.portfolio.record_trade(
+                account_id=account_id,
+                symbol="002281",
+                trade_date=date.today(),
+                side="buy",
+                quantity=100,
+                price=150.0,
+                market="cn",
+                currency="CNY",
+                trade_uid=f"partial-fill-{index}",
+                note=shared_note,
+            )
+
+        one_order_position = self.service._cross_market_strategy_position(
+            account_id=account_id,
+            symbol="002281",
+            market="cn",
+            as_of=date.today(),
+        )
+
+        self.assertEqual(one_order_position["gross_cost_basis"], 30000.0)
+        self.assertEqual(one_order_position["open_entry_order_count"], 1)
+        self.assertEqual(
+            self.service._cross_market_current_tranche_count(
+                strategy_position=one_order_position,
+                initial_cash=100000.0,
+            ),
+            1,
+        )
+
+        self.service.portfolio.record_trade(
+            account_id=account_id,
+            symbol="002281",
+            trade_date=date.today(),
+            side="buy",
+            quantity=100,
+            price=100.0,
+            market="cn",
+            currency="CNY",
+            trade_uid="second-entry-order",
+            note=(
+                "vn.py paper | source=cross_market_auto_entry | "
+                "vn.py callback vt_orderid=DSA_SIM.entry-two; "
+                "entry_reason=range_add_tranche; entry_theme=cpo"
+            ),
+        )
+        two_order_position = self.service._cross_market_strategy_position(
+            account_id=account_id,
+            symbol="002281",
+            market="cn",
+            as_of=date.today(),
+        )
+        self.assertEqual(two_order_position["open_entry_order_count"], 2)
+        self.assertEqual(
+            self.service._cross_market_current_tranche_count(
+                strategy_position=two_order_position,
+                initial_cash=100000.0,
+            ),
+            2,
+        )
+
+    def test_cross_market_auto_trade_rejects_immediate_local_paper_fill(self) -> None:
+        self.service.data_fetcher_manager.boards_by_symbol["002281"] = [
+            {"name": "CPO", "type": "concept", "change_pct": 1.2}
+        ]
+        self.service.update_settings(
+            {
+                "auto_trade_enabled": True,
+                "auto_trade_time_gate_enabled": False,
+                "auto_execution_mode": "paper",
+                "auto_strategy": CROSS_MARKET_STRATEGY_ID,
+                "auto_max_results": 1,
+                "auto_cash_per_order": 1200,
+            }
+        )
+        fake_alphasift = MagicMock()
+        fake_alphasift.screen.return_value = {
+            "candidates": [{
+                "code": "002281",
+                "name": "CPO candidate",
+                "score": 75,
+                "price": 10.0,
+                "expected_return_pct": 4.0,
+                "is_core_stock": True,
+                "source": "dsa_eastmoney_board_change_leader",
+                "_cross_market_source_theme": "cpo",
+            }],
+            "warnings": [],
+        }
+
+        with patch(
+            "src.services.vnpy_paper_trading_service.AlphaSiftService",
+            return_value=fake_alphasift,
+        ), patch.object(
+            self.service.cross_market_signal_service,
+            "get_cn_open_signal",
+            return_value={
+                "available": True,
+                "regime": "low_open",
+                "gap_pct": -0.6,
+                "buy_allowed": True,
+                "force_sell": False,
+            },
+        ):
+            result = self.service.run_auto_trade_once()
+
+        self.assertEqual(result["submitted_count"], 0)
+        self.assertEqual(result["orders"][0]["status"], "skipped")
+        self.assertEqual(
+            result["orders"][0]["reason"],
+            "cross_market_next_minute_execution_unavailable",
+        )
+        self.assertEqual(
+            result["orders"][0]["raw"]["required_execution"],
+            "next_1m_vwap",
+        )
+
+    def test_cross_market_account_risk_blocks_before_candidate_analysis(self) -> None:
+        self.service.data_fetcher_manager.boards_by_symbol["002281"] = [
+            {"name": "CPO 光模块", "type": "concept", "change_pct": 1.2}
+        ]
+        self.service.update_settings(
+            {
+                "auto_trade_enabled": True,
+                "auto_trade_time_gate_enabled": False,
+                "auto_execution_mode": "dry_run",
+                "auto_strategy": CROSS_MARKET_STRATEGY_ID,
+                "auto_max_results": 1,
+            }
+        )
+        fake_alphasift = MagicMock()
+        fake_alphasift.screen.return_value = {
+            "quality_status": "ok",
+            "candidates": [{
+                "code": "002281",
+                "name": "CPO candidate",
+                "score": 75,
+                "price": 10.0,
+                "expected_return_pct": 4.0,
+                "is_core_stock": True,
+                "source": "dsa_eastmoney_board_change_leader",
+                "_cross_market_source_theme": "cpo",
+            }],
+            "warnings": [],
+            "source_errors": [],
+        }
+
+        with patch(
+            "src.services.vnpy_paper_trading_service.AlphaSiftService",
+            return_value=fake_alphasift,
+        ), patch.object(
+            self.service,
+            "_account_pre_trade_risk",
+            return_value=(
+                "account_drawdown_limit_reached",
+                {
+                    "status": "blocked",
+                    "reason": "account_drawdown_limit_reached",
+                },
+            ),
+        ), patch.object(
+            self.service,
+            "_cross_market_candidate_decision",
+        ) as candidate_decision:
+            result = self.service.run_auto_trade_once()
+
+        self.assertEqual(result["submitted_count"], 0)
+        self.assertEqual(result["skipped_count"], 1)
+        self.assertEqual(
+            result["orders"][0]["reason"],
+            "account_drawdown_limit_reached",
+        )
+        candidate_decision.assert_not_called()
+
+    def test_cross_market_auto_trade_sizes_two_main_board_orders_with_cost_reserve(self) -> None:
+        self.service.data_fetcher_manager.price = 60.0
+        self.service.data_fetcher_manager.boards_by_symbol["600777"] = [
+            {"name": "CPO", "type": "concept", "change_pct": 1.2}
+        ]
+        self.service.data_fetcher_manager.boards_by_symbol["600778"] = [
+            {"name": "CPO", "type": "concept", "change_pct": 1.2}
+        ]
+        self.service.update_settings(
+            {
+                "auto_trade_enabled": True,
+                "auto_trade_time_gate_enabled": False,
+                "auto_execution_mode": "dry_run",
+                "auto_strategy": CROSS_MARKET_STRATEGY_ID,
+                "auto_max_results": 1,
+            }
+        )
+        fake_alphasift = MagicMock()
+        fake_alphasift.screen.return_value = {
+            "candidates": [
+                {
+                    "code": "600777",
+                    "name": "CPO main-board candidate one",
+                    "score": 75,
+                    "price": 10.0,
+                    "expected_return_pct": 4.0,
+                    "is_core_stock": True,
+                    "source": "dsa_eastmoney_board_change_leader",
+                    "_cross_market_source_theme": "cpo",
+                },
+                {
+                    "code": "600778",
+                    "name": "CPO main-board candidate two",
+                    "score": 74,
+                    "price": 10.0,
+                    "expected_return_pct": 4.0,
+                    "is_core_stock": True,
+                    "source": "dsa_eastmoney_board_change_leader",
+                    "_cross_market_source_theme": "cpo",
+                },
+            ],
+            "warnings": [],
+        }
+
+        with patch(
+            "src.services.vnpy_paper_trading_service.AlphaSiftService",
+            return_value=fake_alphasift,
+        ), patch.object(
+            self.service.cross_market_signal_service,
+            "get_cn_open_signal",
+            return_value={
+                "available": True,
+                "regime": "low_open",
+                "gap_pct": -0.6,
+                "buy_allowed": True,
+                "force_sell": False,
+            },
+        ):
+            result = self.service.run_auto_trade_once()
+
+        self.assertEqual(result["planned_count"], 2)
+        total_maximum_debit = 0.0
+        for order in result["orders"]:
+            with self.subTest(symbol=order["symbol"]):
+                self.assertEqual(order["reason"], "dry_run")
+                self.assertEqual(order["price"], 60.0)
+                evidence = order["raw"]["cross_market_strategy"]
+                self.assertEqual(evidence["candidate_intraday"]["price"], 60.0)
+                self.assertEqual(
+                    order["raw"]["target_weight_sizing"]["executable_quantity"],
+                    800.0,
+                )
+                execution_budget = order["raw"]["cross_market_execution_budget"]
+                self.assertEqual(
+                    execution_budget["allocation_basis"],
+                    "current_total_equity_pct",
+                )
+                self.assertEqual(execution_budget["target_position_pct"], 50.0)
+                self.assertEqual(
+                    execution_budget["total_equity_reference"],
+                    100000.0,
+                )
+                self.assertEqual(execution_budget["cash_allocation_cap"], 50000.0)
+                self.assertLess(execution_budget["signal_notional_cap"], 50000.0)
+                self.assertTrue(execution_budget["fill_notional_capped_by_limit_price"])
+                self.assertEqual(execution_budget["maximum_dynamic_slippage_bps"], 50.0)
+                self.assertLessEqual(
+                    execution_budget["signal_notional_cap"]
+                    + execution_budget["reserved_buy_fees"]["total"],
+                    execution_budget["cash_allocation_cap"],
+                )
+                actual_fees = TradeFeeSchedule().calculate(
+                    side="buy",
+                    notional=order["cash_amount"],
+                    instrument_type="stock",
+                )
+                total_maximum_debit += order["cash_amount"] + actual_fees["total"]
+        self.assertLessEqual(total_maximum_debit, 100000.0)
+
+    def test_cross_market_low_open_rejects_high_score_stock_when_sector_is_weak(self) -> None:
+        self.service.data_fetcher_manager.boards_by_symbol["002281"] = [
+            {"name": "CPO", "type": "concept", "change_pct": -0.2}
+        ]
+        self.service.update_settings(
+            {
+                "auto_trade_enabled": True,
+                "auto_trade_time_gate_enabled": False,
+                "auto_execution_mode": "dry_run",
+                "auto_strategy": CROSS_MARKET_STRATEGY_ID,
+                "auto_max_results": 1,
+            }
+        )
+        fake_alphasift = MagicMock()
+        fake_alphasift.screen.return_value = {
+            "candidates": [{
+                "code": "002281",
+                "name": "CPO candidate",
+                "score": 99,
+                "price": 10.0,
+                "expected_return_pct": 4.0,
+                "is_core_stock": True,
+                "source": "dsa_eastmoney_board_change_leader",
+                "_cross_market_source_theme": "cpo",
+            }],
+            "warnings": [],
+        }
+
+        with patch(
+            "src.services.vnpy_paper_trading_service.AlphaSiftService",
+            return_value=fake_alphasift,
+        ), patch.object(
+            self.service.cross_market_signal_service,
+            "get_cn_open_signal",
+            return_value={
+                "available": True,
+                "regime": "low_open",
+                "gap_pct": -0.6,
+                "buy_allowed": True,
+                "force_sell": False,
+            },
+        ):
+            result = self.service.run_auto_trade_once()
+
+        self.assertEqual(result["planned_count"], 0)
+        self.assertEqual(result["orders"][0]["reason"], "sector_signal_too_weak")
+        evidence = result["orders"][0]["raw"]["cross_market_strategy"]
+        self.assertEqual(evidence["candidate_score"], 99.0)
+        self.assertEqual(evidence["sector"]["score"], 0.0)
+
+    def test_cross_market_high_open_plans_only_t_plus_one_sellable_quantity(self) -> None:
+        self.service.data_fetcher_manager.price = 10.3
+        self.service.data_fetcher_manager.open_price = 10.2
+        self.service.data_fetcher_manager.pre_close = 10.0
+        self.service.data_fetcher_manager.high = 10.4
+        self.service.update_settings(
+            {
+                "auto_trade_enabled": True,
+                "auto_trade_time_gate_enabled": False,
+                "auto_execution_mode": "dry_run",
+                "auto_strategy": CROSS_MARKET_STRATEGY_ID,
+                "auto_max_results": 1,
+            }
+        )
+        account = self.service.ensure_account()
+        account_id = int(account["id"])
+        self.service.portfolio.record_trade(
+            account_id=account_id,
+            symbol="002281",
+            trade_date=date.today() - timedelta(days=1),
+            side="buy",
+            quantity=200,
+            price=10.0,
+            market="cn",
+            currency="CNY",
+            note="vn.py paper | source=cross_market_auto_entry | price=explicit",
+        )
+        self.service.portfolio.record_trade(
+            account_id=account_id,
+            symbol="002281",
+            trade_date=date.today(),
+            side="buy",
+            quantity=100,
+            price=10.0,
+            market="cn",
+            currency="CNY",
+            note="vn.py paper | source=cross_market_auto_entry | price=explicit",
+        )
+        self.service.data_fetcher_manager.boards_by_symbol["002281"] = [
+            {"name": "CPO 光模块", "type": "concept"}
+        ]
+        fake_alphasift = MagicMock()
+        fake_alphasift.screen.return_value = {"candidates": [], "warnings": []}
+
+        with patch(
+            "src.services.vnpy_paper_trading_service.AlphaSiftService",
+            return_value=fake_alphasift,
+        ), patch.object(
+            self.service.cross_market_signal_service,
+            "get_cn_open_signal",
+            return_value={
+                "available": True,
+                "regime": "high_open",
+                "gap_pct": 0.6,
+                "buy_allowed": False,
+                "force_sell": True,
+            },
+        ):
+            result = self.service.run_auto_trade_once()
+
+        sell = next(order for order in result["orders"] if order["side"] == "sell")
+        self.assertEqual(sell["status"], "planned")
+        self.assertEqual(sell["quantity"], 200.0)
+        self.assertEqual(sell["raw"]["sellable_quantity"], 200.0)
+        self.assertEqual(
+            sell["raw"]["reason"],
+            "next_day_high_open_trailing_exit",
+        )
+
+    def test_cross_market_index_high_open_does_not_sell_flat_open_stock(self) -> None:
+        self.service.update_settings({
+            "auto_trade_enabled": True,
+            "auto_execution_mode": "dry_run",
+            "auto_strategy": CROSS_MARKET_STRATEGY_ID,
+        })
+        account = self.service.ensure_account()
+        self.service.portfolio.record_trade(
+            account_id=int(account["id"]),
+            symbol="002281",
+            trade_date=date.today() - timedelta(days=1),
+            side="buy",
+            quantity=200,
+            price=10.0,
+            market="cn",
+            currency="CNY",
+            note=(
+                "vn.py paper | source=cross_market_auto_entry | price=explicit | "
+                "entry_reason=cpo_us_close_opening_entry_confirmed; entry_theme=cpo"
+            ),
+        )
+
+        with patch.object(
+            self.service,
+            "_trading_window_diagnostics",
+            return_value={"is_market_open_now": True, "phase": "intraday"},
+        ), patch.object(
+            self.service.cross_market_signal_service,
+            "get_cn_open_signal",
+            return_value={
+                "available": True,
+                "regime": "high_open",
+                "gap_pct": 0.8,
+                "buy_allowed": False,
+                "force_sell": True,
+            },
+        ), patch.object(
+            self.service,
+            "_cross_market_position_range_signal",
+            return_value={},
+        ):
+            result = self.service.run_cross_market_intraday_sell_monitor()
+
+        self.assertEqual(result["candidate_count"], 1)
+        self.assertEqual(result["planned_count"], 0)
+        self.assertEqual(result["orders"], [])
+
+    def test_cross_market_intraday_sell_uses_persisted_theme_and_nasdaq_futures(self) -> None:
+        self.service.update_settings({
+            "auto_trade_enabled": True,
+            "auto_execution_mode": "dry_run",
+            "auto_strategy": CROSS_MARKET_STRATEGY_ID,
+        })
+        account = self.service.ensure_account()
+        self.service.portfolio.record_trade(
+            account_id=int(account["id"]),
+            symbol="002281",
+            trade_date=date.today() - timedelta(days=1),
+            side="buy",
+            quantity=200,
+            price=10.0,
+            market="cn",
+            currency="CNY",
+            note=(
+                "vn.py paper | source=cross_market_auto_entry | price=explicit | "
+                "entry_reason=artificial_intelligence_us_close_opening_entry_confirmed; "
+                "entry_theme=artificial_intelligence"
+            ),
+        )
+        self.service.data_fetcher_manager.boards_by_symbol["002281"] = [
+            {"name": "gold concept", "type": "concept"}
+        ]
+
+        with patch.object(
+            self.service,
+            "_trading_window_diagnostics",
+            return_value={"is_market_open_now": True, "phase": "intraday"},
+        ), patch.object(
+            self.service.cross_market_signal_service,
+            "get_cn_open_signal",
+            return_value={
+                "available": True,
+                "regime": "flat_open",
+                "gap_pct": 0.0,
+                "buy_allowed": False,
+                "force_sell": False,
+            },
+        ), patch.object(
+            self.service.cross_market_signal_service,
+            "get_nasdaq_futures_signal_for_cn_trade",
+            return_value={
+                "available": True,
+                "confirmed": True,
+                "sell_fraction": 0.5,
+                "reason": "nasdaq_futures_severe_downtrend",
+            },
+        ) as nasdaq, patch.object(
+            self.service,
+            "_cross_market_position_range_signal",
+            return_value={},
+        ):
+            result = self.service.run_cross_market_intraday_sell_monitor()
+
+        self.assertEqual(result["planned_count"], 1)
+        order = result["orders"][0]
+        self.assertEqual(order["quantity"], 100.0)
+        self.assertEqual(order["raw"]["theme"], "artificial_intelligence")
+        self.assertEqual(order["raw"]["theme_source"], "persisted_entry_theme")
+        self.assertEqual(order["raw"]["reason"], "nasdaq_futures_severe_downtrend")
+        nasdaq.assert_called_once()
+
+    def test_cross_market_hard_stop_precedes_high_open_exit(self) -> None:
+        self.service.update_settings(
+            {
+                "auto_trade_enabled": True,
+                "auto_trade_time_gate_enabled": False,
+                "auto_execution_mode": "dry_run",
+                "auto_strategy": CROSS_MARKET_STRATEGY_ID,
+                "auto_max_results": 1,
+            }
+        )
+        account = self.service.ensure_account()
+        self.service.portfolio.record_trade(
+            account_id=int(account["id"]),
+            symbol="002281",
+            trade_date=date.today() - timedelta(days=1),
+            side="buy",
+            quantity=100,
+            price=10.0,
+            market="cn",
+            currency="CNY",
+            note="vn.py paper | source=cross_market_auto_entry | price=explicit",
+        )
+        self.service.data_fetcher_manager.price = 9.4
+        self.service.data_fetcher_manager.boards_by_symbol["002281"] = [
+            {"name": "CPO", "type": "concept"}
+        ]
+        fake_alphasift = MagicMock()
+        fake_alphasift.screen.return_value = {"candidates": [], "warnings": []}
+
+        with patch(
+            "src.services.vnpy_paper_trading_service.AlphaSiftService",
+            return_value=fake_alphasift,
+        ), patch.object(
+            self.service.cross_market_signal_service,
+            "get_cn_open_signal",
+            return_value={
+                "available": True,
+                "regime": "high_open",
+                "gap_pct": 0.6,
+                "buy_allowed": False,
+                "force_sell": True,
+            },
+        ):
+            result = self.service.run_auto_trade_once()
+
+        sell = next(order for order in result["orders"] if order["side"] == "sell")
+        self.assertEqual(sell["status"], "planned")
+        self.assertEqual(sell["quantity"], 100.0)
+        self.assertEqual(sell["raw"]["reason"], "hard_stop_loss")
+
+    def test_cross_market_sell_fails_closed_on_stale_stock_quote(self) -> None:
+        self.service.update_settings(
+            {
+                "auto_trade_enabled": True,
+                "auto_trade_time_gate_enabled": False,
+                "auto_execution_mode": "dry_run",
+                "auto_strategy": CROSS_MARKET_STRATEGY_ID,
+            }
+        )
+        account = self.service.ensure_account()
+        self.service.portfolio.record_trade(
+            account_id=int(account["id"]),
+            symbol="002281",
+            trade_date=date.today() - timedelta(days=1),
+            side="buy",
+            quantity=100,
+            price=10.0,
+            market="cn",
+            currency="CNY",
+            note="vn.py paper | source=cross_market_auto_entry | price=explicit",
+        )
+        self.service.data_fetcher_manager.boards_by_symbol["002281"] = [
+            {"name": "CPO", "type": "concept"}
+        ]
+        stale_quote = SimpleNamespace(
+            price=9.0,
+            provider_timestamp=(datetime.now(timezone.utc) - timedelta(seconds=121)).isoformat(),
+            amount=9000.0,
+            volume=1000.0,
+        )
+        fake_alphasift = MagicMock()
+        fake_alphasift.screen.return_value = {"candidates": [], "warnings": []}
+
+        with patch(
+            "src.services.vnpy_paper_trading_service.AlphaSiftService",
+            return_value=fake_alphasift,
+        ), patch.object(
+            self.service.data_fetcher_manager,
+            "get_realtime_quote",
+            return_value=stale_quote,
+        ), patch.object(
+            self.service.cross_market_signal_service,
+            "get_cn_open_signal",
+            return_value={
+                "available": True,
+                "regime": "high_open",
+                "gap_pct": 0.6,
+                "buy_allowed": False,
+                "force_sell": True,
+            },
+        ):
+            result = self.service.run_auto_trade_once()
+
+        self.assertFalse(any(order["side"] == "sell" for order in result["orders"]))
+
+    def test_cross_market_sell_prefers_strict_timestamp_route(self) -> None:
+        self.service.update_settings(
+            {
+                "auto_trade_enabled": True,
+                "auto_trade_time_gate_enabled": False,
+                "auto_execution_mode": "dry_run",
+                "auto_strategy": CROSS_MARKET_STRATEGY_ID,
+            }
+        )
+        account = self.service.ensure_account()
+        self.service.portfolio.record_trade(
+            account_id=int(account["id"]),
+            symbol="002281",
+            trade_date=date.today() - timedelta(days=1),
+            side="buy",
+            quantity=100,
+            price=10.0,
+            market="cn",
+            currency="CNY",
+            note="vn.py paper | source=cross_market_auto_entry | price=explicit",
+        )
+        self.service.data_fetcher_manager.boards_by_symbol["002281"] = [
+            {"name": "CPO", "type": "concept"}
+        ]
+        strict_quote = SimpleNamespace(
+            price=9.4,
+            provider_timestamp=datetime.now(timezone.utc).isoformat(),
+            amount=9400.0,
+            volume=1000.0,
+        )
+        fake_alphasift = MagicMock()
+        fake_alphasift.screen.return_value = {"candidates": [], "warnings": []}
+        flat_open = {
+            "available": True,
+            "regime": "flat",
+            "gap_pct": 0.0,
+            "buy_allowed": False,
+            "force_sell": False,
+        }
+
+        with patch(
+            "src.services.vnpy_paper_trading_service.AlphaSiftService",
+            return_value=fake_alphasift,
+        ), patch.object(
+            self.service.data_fetcher_manager,
+            "get_realtime_quote_with_provider_timestamp",
+            return_value=strict_quote,
+            create=True,
+        ) as strict_getter, patch.object(
+            self.service.data_fetcher_manager,
+            "get_realtime_quote",
+            side_effect=AssertionError(
+                "generic quote route must not be used for cross-market exits"
+            ),
+        ), patch.object(
+            self.service.cross_market_signal_service,
+            "get_cn_open_signal",
+            return_value=flat_open,
+        ):
+            result = self.service.run_auto_trade_once()
+
+        sell = next(order for order in result["orders"] if order["side"] == "sell")
+        self.assertEqual(sell["raw"]["reason"], "hard_stop_loss")
+        self.assertEqual(sell["raw"]["provider_timestamp"], strict_quote.provider_timestamp)
+        strict_getter.assert_called_once_with("002281")
+
+    def test_cross_market_sell_does_not_claim_manual_position(self) -> None:
+        self.service.update_settings(
+            {
+                "auto_trade_enabled": True,
+                "auto_trade_time_gate_enabled": False,
+                "auto_execution_mode": "dry_run",
+                "auto_strategy": CROSS_MARKET_STRATEGY_ID,
+            }
+        )
+        account = self.service.ensure_account()
+        self.service.portfolio.record_trade(
+            account_id=int(account["id"]),
+            symbol="002281",
+            trade_date=date.today() - timedelta(days=1),
+            side="buy",
+            quantity=100,
+            price=10.0,
+            market="cn",
+            currency="CNY",
+            note="manual position",
+        )
+        self.service.data_fetcher_manager.boards_by_symbol["002281"] = [
+            {"name": "CPO", "type": "concept"}
+        ]
+        fake_alphasift = MagicMock()
+        fake_alphasift.screen.return_value = {"candidates": [], "warnings": []}
+
+        with patch(
+            "src.services.vnpy_paper_trading_service.AlphaSiftService",
+            return_value=fake_alphasift,
+        ), patch.object(
+            self.service.cross_market_signal_service,
+            "get_cn_open_signal",
+            return_value={
+                "available": True,
+                "regime": "high_open",
+                "gap_pct": 0.6,
+                "buy_allowed": False,
+                "force_sell": True,
+            },
+        ):
+            result = self.service.run_auto_trade_once()
+
+        self.assertFalse(any(order["side"] == "sell" for order in result["orders"]))
+
+    def test_cross_market_intraday_sell_monitor_runs_sell_only_for_strategy_position(self) -> None:
+        self.service.data_fetcher_manager.price = 10.3
+        self.service.data_fetcher_manager.open_price = 10.2
+        self.service.data_fetcher_manager.pre_close = 10.0
+        self.service.data_fetcher_manager.high = 10.4
+        self.service.update_settings(
+            {
+                "auto_trade_enabled": True,
+                "auto_execution_mode": "dry_run",
+                "auto_strategy": CROSS_MARKET_STRATEGY_ID,
+            }
+        )
+        account = self.service.ensure_account()
+        self.service.portfolio.record_trade(
+            account_id=int(account["id"]),
+            symbol="002281",
+            trade_date=date.today() - timedelta(days=1),
+            side="buy",
+            quantity=100,
+            price=10.0,
+            market="cn",
+            currency="CNY",
+            note="vn.py paper | source=cross_market_auto_entry | price=explicit",
+        )
+        self.service.data_fetcher_manager.boards_by_symbol["002281"] = [
+            {"name": "CPO", "type": "concept"}
+        ]
+
+        with patch.object(
+            self.service,
+            "_trading_window_diagnostics",
+            return_value={"is_market_open_now": True, "phase": "intraday"},
+        ), patch.object(
+            self.service,
+            "_account_drawdown_diagnostics",
+            return_value={"status": "blocked", "drawdown_pct": 8.0},
+        ), patch.object(
+            self.service.cross_market_signal_service,
+            "get_cn_open_signal",
+            return_value={
+                "available": True,
+                "regime": "high_open",
+                "gap_pct": 0.6,
+                "buy_allowed": False,
+                "force_sell": True,
+            },
+        ), patch.object(
+            self.service,
+            "_cross_market_position_range_signal",
+            return_value={},
+        ), patch.object(
+            self.service,
+            "_cross_market_daily_pnl_pct",
+            return_value=-3.0,
+        ) as daily_loss_gate, patch.object(
+            self.service.portfolio,
+            "get_portfolio_snapshot",
+            wraps=self.service.portfolio.get_portfolio_snapshot,
+        ) as snapshot_reads:
+            result = self.service.run_cross_market_intraday_sell_monitor()
+
+        self.assertTrue(result["sell_only"])
+        self.assertEqual(result["candidate_count"], 1)
+        self.assertEqual(result["planned_count"], 1)
+        self.assertEqual(result["submitted_count"], 0)
+        self.assertEqual(result["orders"][0]["side"], "sell")
+        self.assertEqual(
+            result["orders"][0]["raw"]["reason"],
+            "next_day_high_open_trailing_exit",
+        )
+        detail = self.service.agent_repo.get_run_detail(result["agent_run_uid"])
+        self.assertIsNotNone(detail)
+        assert detail is not None
+        self.assertEqual(detail["trigger_source"], "cross_market_intraday_sell_monitor")
+        self.assertTrue(detail["diagnostics"]["sell_only"])
+        self.assertFalse(detail["diagnostics"]["places_buy_orders"])
+        daily_loss_gate.assert_not_called()
+        self.assertGreater(snapshot_reads.call_count, 0)
+        self.assertTrue(
+            all(call.kwargs.get("persist") is False for call in snapshot_reads.call_args_list)
+        )
+
+    def test_cross_market_submitted_trailing_stop_keeps_peak_until_position_is_gone(self) -> None:
+        self.service.update_settings({
+            "auto_trade_enabled": True,
+            "auto_execution_mode": "vnpy_paper",
+            "auto_strategy": CROSS_MARKET_STRATEGY_ID,
+        })
+        account = self.service.ensure_account()
+        account_id = int(account["id"])
+        self.service.portfolio.record_trade(
+            account_id=account_id,
+            symbol="002281",
+            trade_date=date.today() - timedelta(days=1),
+            side="buy",
+            quantity=100,
+            price=10.0,
+            market="cn",
+            currency="CNY",
+            note=(
+                "vn.py paper | source=cross_market_auto_entry | price=explicit | "
+                "entry_reason=cpo_us_close_opening_entry_confirmed; entry_theme=cpo"
+            ),
+        )
+        self.service.data_fetcher_manager.price = 11.4
+        self.service.data_fetcher_manager.open_price = 11.4
+        self.service.data_fetcher_manager.pre_close = 11.4
+        self.service.data_fetcher_manager.high = 11.5
+        self.service._save_trailing_peaks({"002281": 12.0})
+
+        def submitted_order(**kwargs):
+            return {
+                "accepted": True,
+                "status": "submitted",
+                "source": "unit_test_gateway",
+                "symbol": kwargs["symbol"],
+                "side": kwargs["side"],
+                "quantity": kwargs["quantity"],
+                "price": kwargs["price"],
+                "reason": None,
+                "raw": kwargs["raw"],
+            }
+
+        with patch.object(
+            self.service,
+            "_trading_window_diagnostics",
+            return_value={"is_market_open_now": True, "phase": "intraday"},
+        ), patch.object(
+            self.service,
+            "_sync_cross_market_corporate_actions",
+            return_value={"available": True},
+        ), patch.object(
+            self.service.cross_market_signal_service,
+            "get_cn_open_signal",
+            return_value={
+                "available": True,
+                "regime": "flat_open",
+                "gap_pct": 0.0,
+                "buy_allowed": False,
+                "force_sell": False,
+            },
+        ), patch.object(
+            self.service,
+            "submit_order",
+            side_effect=submitted_order,
+        ):
+            submitted = self.service.run_cross_market_intraday_sell_monitor()
+
+        self.assertEqual(submitted["submitted_count"], 1)
+        self.assertEqual(submitted["orders"][0]["raw"]["reason"], "trailing_stop")
+        self.assertEqual(self.service._load_trailing_peaks(), {"002281": 12.0})
+
+        self.service.portfolio.record_trade(
+            account_id=account_id,
+            symbol="002281",
+            trade_date=date.today(),
+            side="sell",
+            quantity=100,
+            price=11.4,
+            market="cn",
+            currency="CNY",
+            note="vn.py paper | source=cross_market_auto_exit | price=explicit",
+        )
+        with patch.object(
+            self.service,
+            "_trading_window_diagnostics",
+            return_value={"is_market_open_now": True, "phase": "intraday"},
+        ), patch.object(
+            self.service,
+            "_sync_cross_market_corporate_actions",
+            return_value={"available": True},
+        ):
+            cleared = self.service.run_cross_market_intraday_sell_monitor()
+
+        self.assertTrue(cleared["skipped"])
+        self.assertEqual(cleared["reason"], "no_cross_market_strategy_positions")
+        self.assertEqual(self.service._load_trailing_peaks(), {})
+
+    def test_cross_market_intraday_sell_monitor_cpo_bypasses_korea_weakness(self) -> None:
+        self.service.update_settings(
+            {
+                "auto_trade_enabled": True,
+                "auto_execution_mode": "dry_run",
+                "auto_strategy": CROSS_MARKET_STRATEGY_ID,
+            }
+        )
+        account = self.service.ensure_account()
+        self.service.portfolio.record_trade(
+            account_id=int(account["id"]),
+            symbol="002281",
+            trade_date=date.today() - timedelta(days=1),
+            side="buy",
+            quantity=100,
+            price=10.0,
+            market="cn",
+            currency="CNY",
+            note="vn.py paper | source=cross_market_auto_entry | price=explicit",
+        )
+        self.service.data_fetcher_manager.boards_by_symbol["002281"] = [
+            {"name": "CPO", "type": "concept"}
+        ]
+
+        with patch.object(
+            self.service,
+            "_trading_window_diagnostics",
+            return_value={"is_market_open_now": True, "phase": "intraday"},
+        ), patch.object(
+            self.service.cross_market_signal_service,
+            "get_cn_open_signal",
+            return_value={
+                "available": True,
+                "regime": "flat_open",
+                "gap_pct": 0.0,
+                "buy_allowed": False,
+                "force_sell": False,
+            },
+        ), patch.object(
+            self.service.cross_market_signal_service,
+            "evaluate_korea_gate",
+            side_effect=AssertionError("CPO sell checks must not query the Korea gate"),
+        ) as korea_gate, patch.object(
+            self.service,
+            "_cross_market_position_range_signal",
+            return_value={},
+        ):
+            result = self.service.run_cross_market_intraday_sell_monitor()
+
+        self.assertEqual(result["candidate_count"], 1)
+        self.assertEqual(result["planned_count"], 0)
+        self.assertEqual(result["orders"], [])
+        korea_gate.assert_not_called()
+
+    def test_cross_market_range_sell_exits_single_active_strategy_tranche(self) -> None:
+        self.service.update_settings(
+            {
+                "auto_trade_enabled": True,
+                "auto_execution_mode": "dry_run",
+                "auto_strategy": CROSS_MARKET_STRATEGY_ID,
+            }
+        )
+        account = self.service.ensure_account()
+        self.service.portfolio.record_trade(
+            account_id=int(account["id"]),
+            symbol="002281",
+            trade_date=date.today() - timedelta(days=1),
+            side="buy",
+            quantity=600,
+            price=10.0,
+            market="cn",
+            currency="CNY",
+            note="vn.py paper | source=cross_market_auto_entry | price=explicit",
+        )
+        self.service.data_fetcher_manager.boards_by_symbol["002281"] = [
+            {"name": "CPO", "type": "concept"}
+        ]
+
+        with patch.object(
+            self.service,
+            "_trading_window_diagnostics",
+            return_value={"is_market_open_now": True, "phase": "intraday"},
+        ), patch.object(
+            self.service.cross_market_signal_service,
+            "get_cn_open_signal",
+            return_value={
+                "available": True,
+                "regime": "flat_open",
+                "gap_pct": 0.0,
+                "buy_allowed": False,
+                "force_sell": False,
+            },
+        ), patch.object(
+            self.service,
+            "_cross_market_position_range_signal",
+            return_value={"regime": "range", "action": "sell"},
+        ):
+            result = self.service.run_cross_market_intraday_sell_monitor()
+
+        self.assertEqual(result["planned_count"], 1)
+        order = result["orders"][0]
+        self.assertEqual(order["quantity"], 600.0)
+        self.assertEqual(order["raw"]["requested_sell_fraction"], 1.0)
+        self.assertEqual(order["raw"]["reason"], "range_exit_signal")
+
+    def test_cross_market_daily_loss_uses_previous_snapshot_equity(self) -> None:
+        account = self.service.ensure_account()
+        settings = replace(self.service.get_settings(), account_id=int(account["id"]))
+        observed_at = datetime(2026, 7, 24, 2, 0, tzinfo=timezone.utc)
+        snapshots = [
+            SimpleNamespace(snapshot_date=date(2026, 7, 23), total_equity=98000.0),
+            SimpleNamespace(snapshot_date=date(2026, 7, 24), total_equity=99000.0),
+        ]
+
+        with patch.object(
+            self.service.portfolio.repo,
+            "list_daily_snapshots_for_risk",
+            return_value=snapshots,
+        ) as list_snapshots:
+            daily_pnl_pct = self.service._cross_market_daily_pnl_pct(
+                settings=settings,
+                total_equity=99000.0,
+                total_market_value=10000.0,
+                observed_at=observed_at,
+            )
+
+        self.assertEqual(daily_pnl_pct, 1.020408)
+        list_snapshots.assert_called_once_with(
+            as_of=date(2026, 7, 24),
+            cost_method="fifo",
+            account_id=int(account["id"]),
+            lookback_days=3650,
+        )
+
+    def test_cross_market_daily_loss_fails_closed_when_snapshots_fail(self) -> None:
+        account = self.service.ensure_account()
+        settings = replace(self.service.get_settings(), account_id=int(account["id"]))
+
+        with patch.object(
+            self.service.portfolio.repo,
+            "list_daily_snapshots_for_risk",
+            side_effect=RuntimeError("snapshot unavailable"),
+        ):
+            daily_pnl_pct = self.service._cross_market_daily_pnl_pct(
+                settings=settings,
+                total_equity=97000.0,
+                total_market_value=10000.0,
+            )
+
+        self.assertIsNone(daily_pnl_pct)
+
+    def test_cross_market_expected_edge_does_not_treat_atr_as_return(self) -> None:
+        edge, source = self.service._cross_market_expected_gross_edge_pct(
+            candidate={"raw": {"atr_20_pct": 2.4}},
+            price=10.0,
+            range_signal={},
+        )
+
+        self.assertIsNone(edge)
+        self.assertIsNone(source)
+
+    def test_cross_market_expected_edge_prefers_range_target(self) -> None:
+        edge, source = self.service._cross_market_expected_gross_edge_pct(
+            candidate={"raw": {"atr_20_pct": 2.4}},
+            price=10.0,
+            range_signal={
+                "regime": "range",
+                "action": "buy",
+                "bollinger_upper": 10.6,
+            },
+        )
+
+        self.assertAlmostEqual(edge or 0.0, 6.0)
+        self.assertEqual(source, "range_bollinger_upper")
+
+    def test_cross_market_expected_edge_fails_closed_without_evidence(self) -> None:
+        edge, source = self.service._cross_market_expected_gross_edge_pct(
+            candidate={"score": 90.0},
+            price=10.0,
+            range_signal={},
+        )
+
+        self.assertIsNone(edge)
+        self.assertIsNone(source)
+
+    def test_cross_market_expected_edge_does_not_fetch_atr_as_return_fallback(self) -> None:
+        with patch.object(
+            self.service,
+            "_cross_market_completed_atr_20_pct",
+            return_value=2.1,
+        ) as atr:
+            edge, source = self.service._cross_market_expected_gross_edge_pct(
+                candidate={"score": 90.0},
+                price=10.0,
+                range_signal={},
+                symbol="002281",
+            )
+
+        self.assertIsNone(edge)
+        self.assertIsNone(source)
+        atr.assert_not_called()
+
+    def test_cross_market_corporate_actions_sync_once_and_adjust_strategy_lots(self) -> None:
+        self.service.update_settings({"auto_strategy": CROSS_MARKET_STRATEGY_ID})
+        settings = self.service._apply_cross_market_strategy_settings(
+            self.service.get_settings()
+        )
+        account = self.service.ensure_account(settings=settings)
+        self.service.portfolio.record_trade(
+            account_id=int(account["id"]),
+            symbol="600519",
+            trade_date=date.today() - timedelta(days=1),
+            side="buy",
+            quantity=100,
+            price=10.0,
+            market="cn",
+            currency="CNY",
+            note="vn.py paper | source=cross_market_auto_entry | price=explicit",
+        )
+        fetch_actions = MagicMock(return_value=[
+            {
+                "symbol": "600519",
+                "effective_date": date.today(),
+                "action_type": "cash_dividend",
+                "cash_dividend_per_share": 1.0,
+                "source": "unit-test",
+                "source_record_key": "600519|cash",
+            },
+            {
+                "symbol": "600519",
+                "effective_date": date.today(),
+                "action_type": "split_adjustment",
+                "split_ratio": 2.0,
+                "source": "unit-test",
+                "source_record_key": "600519|split",
+            },
+        ])
+        self.service.data_fetcher_manager._fetchers = [
+            SimpleNamespace(get_stock_corporate_actions=fetch_actions)
+        ]
+
+        first = self.service._sync_cross_market_corporate_actions(
+            settings=settings,
+            as_of=date.today(),
+        )
+        second = self.service._sync_cross_market_corporate_actions(
+            settings=settings,
+            as_of=date.today(),
+        )
+        events = self.service.portfolio.list_corporate_action_events(
+            account_id=int(account["id"]),
+            symbol="600519",
+            page=1,
+            page_size=20,
+        )
+        strategy_position = self.service._cross_market_strategy_position(
+            account_id=int(account["id"]),
+            symbol="600519",
+            market="cn",
+            as_of=date.today(),
+        )
+
+        self.assertTrue(first["available"])
+        self.assertEqual(first["inserted_count"], 2)
+        self.assertTrue(second["available"])
+        self.assertEqual(second["reason"], "corporate_actions_already_synchronized")
+        self.assertEqual(events["total"], 2)
+        self.assertEqual(strategy_position["quantity"], 200.0)
+        self.assertFalse(strategy_position["flat_open_staged_entry"])
+        self.assertEqual(fetch_actions.call_count, 1)
+
+    def test_cross_market_strategy_position_retains_flat_open_stage_reason(self) -> None:
+        self.service.update_settings({"auto_strategy": CROSS_MARKET_STRATEGY_ID})
+        settings = self.service._apply_cross_market_strategy_settings(
+            self.service.get_settings()
+        )
+        account = self.service.ensure_account(settings=settings)
+        self.service.portfolio.record_trade(
+            account_id=int(account["id"]),
+            symbol="600519",
+            trade_date=date.today(),
+            side="buy",
+            quantity=100,
+            price=10.0,
+            market="cn",
+            currency="CNY",
+            note=(
+                "vn.py paper | source=cross_market_auto_entry | "
+                "entry_reason=memory_flat_open_staged_entry_confirmed"
+            ),
+        )
+
+        strategy_position = self.service._cross_market_strategy_position(
+            account_id=int(account["id"]),
+            symbol="600519",
+            market="cn",
+            as_of=date.today(),
+        )
+
+        self.assertTrue(strategy_position["flat_open_staged_entry"])
+        self.assertEqual(
+            strategy_position["entry_reasons"],
+            ["memory_flat_open_staged_entry_confirmed"],
+        )
+
+    def test_cross_market_next_day_high_open_only_sells_eligible_lots(self) -> None:
+        account = self.service.ensure_account()
+        account_id = int(account["id"])
+        current_date = date.today()
+        older_entry = current_date - timedelta(days=2)
+        recent_entry = current_date - timedelta(days=1)
+        for trade_date, trade_uid in (
+            (older_entry, "older-entry"),
+            (recent_entry, "recent-entry"),
+        ):
+            self.service.portfolio.record_trade(
+                account_id=account_id,
+                symbol="002281",
+                trade_date=trade_date,
+                side="buy",
+                quantity=100,
+                price=10.0,
+                market="cn",
+                currency="CNY",
+                trade_uid=trade_uid,
+                note=(
+                    "vn.py paper | source=cross_market_auto_entry | "
+                    "entry_reason=cpo_us_close_opening_entry_confirmed; entry_theme=cpo"
+                ),
+            )
+
+        def next_session(entry_date):
+            resolved = current_date if entry_date == recent_entry else recent_entry
+            return resolved, {
+                "available": True,
+                "next_session_date": resolved.isoformat(),
+                "reason": None,
+            }
+
+        with patch.object(
+            self.service,
+            "_cross_market_next_cn_session_date",
+            side_effect=next_session,
+        ):
+            strategy_position = self.service._cross_market_strategy_position(
+                account_id=account_id,
+                symbol="002281",
+                market="cn",
+                as_of=current_date,
+            )
+
+        quote = SimpleNamespace(
+            price=10.3,
+            open_price=10.2,
+            pre_close=10.0,
+            high=10.4,
+        )
+        cn_signal = {"force_sell": True, "gap_pct": 0.8}
+        signal = self.service._cross_market_next_day_high_open_exit_signal(
+            quote=quote,
+            cn_signal=cn_signal,
+            strategy_position=strategy_position,
+        )
+        expired_signal = self.service._cross_market_next_day_high_open_exit_signal(
+            quote=quote,
+            cn_signal=cn_signal,
+            strategy_position={
+                **strategy_position,
+                "next_session_exit_quantity": 0.0,
+            },
+        )
+
+        self.assertEqual(strategy_position["quantity"], 200.0)
+        self.assertEqual(strategy_position["next_session_exit_quantity"], 100.0)
+        self.assertEqual(signal["action"], "sell")
+        self.assertEqual(signal["sell_fraction"], 0.5)
+        self.assertEqual(expired_signal["action"], "hold")
+        self.assertEqual(
+            expired_signal["reason"],
+            "position_not_in_next_session_exit_window",
+        )
+
+    def test_cross_market_next_cn_session_skips_weekend(self) -> None:
+        next_session, evidence = self.service._cross_market_next_cn_session_date(
+            date(2026, 8, 7)
+        )
+
+        self.assertTrue(evidence["available"])
+        self.assertEqual(next_session, date(2026, 8, 10))
+
+    def test_cross_market_corporate_action_sync_failure_is_fail_closed(self) -> None:
+        self.service.update_settings({"auto_strategy": CROSS_MARKET_STRATEGY_ID})
+        settings = self.service._apply_cross_market_strategy_settings(
+            self.service.get_settings()
+        )
+        account = self.service.ensure_account(settings=settings)
+        self.service.portfolio.record_trade(
+            account_id=int(account["id"]),
+            symbol="600519",
+            trade_date=date.today() - timedelta(days=1),
+            side="buy",
+            quantity=100,
+            price=10.0,
+            market="cn",
+            currency="CNY",
+            note="vn.py paper | source=cross_market_auto_entry | price=explicit",
+        )
+        self.service.data_fetcher_manager._fetchers = [
+            SimpleNamespace(
+                get_stock_corporate_actions=MagicMock(
+                    side_effect=RuntimeError("provider unavailable")
+                )
+            )
+        ]
+
+        result = self.service._sync_cross_market_corporate_actions(
+            settings=settings,
+            as_of=date.today(),
+        )
+
+        self.assertFalse(result["available"])
+        self.assertEqual(result["reason"], "corporate_action_sync_incomplete")
+        self.assertEqual(result["failures"][0]["symbol"], "600519")
+
+    def test_cross_market_intraday_sell_monitor_fails_closed_without_corporate_actions(self) -> None:
+        self.service.update_settings(
+            {
+                "auto_trade_enabled": True,
+                "auto_execution_mode": "dry_run",
+                "auto_strategy": CROSS_MARKET_STRATEGY_ID,
+            }
+        )
+
+        with patch.object(
+            self.service,
+            "_trading_window_diagnostics",
+            return_value={"is_market_open_now": True, "phase": "intraday"},
+        ), patch.object(
+            self.service,
+            "_sync_cross_market_corporate_actions",
+            return_value={"available": False, "reason": "provider_failed"},
+        ), patch.object(self.service.agent_repo, "create_run") as create_run:
+            result = self.service.run_cross_market_intraday_sell_monitor()
+
+        self.assertTrue(result["skipped"])
+        self.assertEqual(
+            result["reason"],
+            "cross_market_corporate_action_evidence_unavailable",
+        )
+        create_run.assert_not_called()
+
+    def test_cross_market_intraday_sell_monitor_ignores_manual_position_without_run(self) -> None:
+        self.service.update_settings(
+            {
+                "auto_trade_enabled": True,
+                "auto_execution_mode": "dry_run",
+                "auto_strategy": CROSS_MARKET_STRATEGY_ID,
+            }
+        )
+        account = self.service.ensure_account()
+        self.service.portfolio.record_trade(
+            account_id=int(account["id"]),
+            symbol="002281",
+            trade_date=date.today() - timedelta(days=1),
+            side="buy",
+            quantity=100,
+            price=10.0,
+            market="cn",
+            currency="CNY",
+            note="manual position",
+        )
+
+        with patch.object(
+            self.service,
+            "_trading_window_diagnostics",
+            return_value={"is_market_open_now": True, "phase": "intraday"},
+        ), patch.object(self.service.agent_repo, "create_run") as create_run:
+            result = self.service.run_cross_market_intraday_sell_monitor()
+
+        self.assertTrue(result["skipped"])
+        self.assertEqual(result["reason"], "no_cross_market_strategy_positions")
+        create_run.assert_not_called()
+
+    def test_cross_market_intraday_sell_monitor_uses_confirmed_korea_weakness(self) -> None:
+        self.service.update_settings(
+            {
+                "auto_trade_enabled": True,
+                "auto_execution_mode": "dry_run",
+                "auto_strategy": CROSS_MARKET_STRATEGY_ID,
+            }
+        )
+        account = self.service.ensure_account()
+        self.service.portfolio.record_trade(
+            account_id=int(account["id"]),
+            symbol="688981",
+            trade_date=date.today() - timedelta(days=1),
+            side="buy",
+            quantity=400,
+            price=10.0,
+            market="cn",
+            currency="CNY",
+            note="vn.py paper | source=cross_market_auto_entry | price=explicit",
+        )
+        self.service.data_fetcher_manager.boards_by_symbol["688981"] = [
+            {"name": "半导体", "type": "industry"}
+        ]
+
+        with patch.object(
+            self.service,
+            "_trading_window_diagnostics",
+            return_value={"is_market_open_now": True, "phase": "intraday"},
+        ), patch.object(
+            self.service.cross_market_signal_service,
+            "get_cn_open_signal",
+            return_value={
+                "available": True,
+                "regime": "flat_open",
+                "gap_pct": 0.0,
+                "buy_allowed": False,
+                "force_sell": False,
+            },
+        ), patch.object(
+            self.service.cross_market_signal_service,
+            "evaluate_korea_gate",
+            return_value={
+                "status": "weak",
+                "reason": "korea_moderate_weakness_confirmed",
+                "buy_allowed": False,
+                "sell_fraction": 0.5,
+                "confirmed": True,
+            },
+        ) as korea_gate:
+            result = self.service.run_cross_market_intraday_sell_monitor()
+
+        self.assertEqual(result["planned_count"], 1)
+        self.assertEqual(result["orders"][0]["quantity"], 200.0)
+        self.assertEqual(
+            result["orders"][0]["raw"]["reason"],
+            "korea_moderate_weakness_confirmed",
+        )
+        korea_gate.assert_called_once_with(
+            theme="semiconductor",
+            refresh=True,
+        )
+
+    def test_cross_market_local_fill_books_commission_transfer_fee_and_tax(self) -> None:
+        buy = self.service.submit_order(
+            symbol="600519",
+            side="buy",
+            market="cn",
+            quantity=100,
+            price=10.0,
+            source="cross_market_auto_entry",
+            raw={"cross_market_strategy": {"theme": "semiconductor"}},
+        )
+
+        self.assertTrue(buy["accepted"])
+        self.assertEqual(buy["fee"], 5.01)
+        self.assertEqual(buy["tax"], 0.0)
+        self.assertEqual(buy["net_cash_change"], -1005.01)
+        self.assertEqual(buy["raw"]["execution_costs"]["schedule"], "cross_market_cn_v1")
+
+        account_id = int(buy["account_id"])
+        sell = self.service.submit_order(
+            symbol="600519",
+            side="sell",
+            market="cn",
+            quantity=100,
+            price=11.0,
+            source="cross_market_auto_exit",
+            raw={"cross_market_strategy": {"theme": "semiconductor"}},
+        )
+        self.assertTrue(sell["accepted"])
+        self.assertEqual(sell["fee"], 5.011)
+        self.assertEqual(sell["tax"], 0.55)
+        trades = self.service.portfolio.repo.list_trades(account_id, as_of=date.today())
+        self.assertEqual(float(trades[-1].fee), 5.011)
+        self.assertEqual(float(trades[-1].tax), 0.55)
+
+        gold_stock = self.service.submit_order(
+            symbol="600547",
+            side="buy",
+            market="cn",
+            quantity=100,
+            price=10.0,
+            source="cross_market_auto_entry",
+            raw={"cross_market_strategy": {"theme": "gold"}},
+        )
+        gold_etf = self.service.submit_order(
+            symbol="518880",
+            side="buy",
+            market="cn",
+            quantity=100,
+            price=10.0,
+            source="cross_market_auto_entry",
+            raw={"cross_market_strategy": {"theme": "gold"}},
+        )
+        self.assertEqual(gold_stock["raw"]["execution_costs"]["instrument_type"], "stock")
+        self.assertEqual(gold_stock["fee"], 5.01)
+        self.assertEqual(gold_etf["raw"]["execution_costs"]["instrument_type"], "etf")
+        self.assertEqual(gold_etf["fee"], 5.0)
+
+    def test_cross_market_manual_plan_revalidates_signals_before_submission(self) -> None:
+        self.service.data_fetcher_manager.boards_by_symbol["002281"] = [
+            {"name": "CPO 光模块", "type": "concept", "change_pct": 1.2}
+        ]
+        self.service.update_settings(
+            {
+                "auto_trade_enabled": True,
+                "auto_trade_time_gate_enabled": False,
+                "auto_execution_mode": "manual_approval",
+                "auto_strategy": CROSS_MARKET_STRATEGY_ID,
+                "auto_max_results": 1,
+                "auto_cash_per_order": 1200,
+            }
+        )
+        fake_alphasift = MagicMock()
+        fake_alphasift.screen.return_value = {
+            "candidates": [{
+                "code": "002281",
+                "score": 75,
+                "price": 10.0,
+                "expected_return_pct": 4.0,
+                "is_core_stock": True,
+                "source": "dsa_eastmoney_board_change_leader",
+                "_cross_market_source_theme": "cpo",
+            }],
+            "warnings": [],
+        }
+        low_open = {
+            "available": True,
+            "regime": "low_open",
+            "gap_pct": -0.6,
+            "buy_allowed": True,
+            "force_sell": False,
+        }
+        with patch(
+            "src.services.vnpy_paper_trading_service.AlphaSiftService",
+            return_value=fake_alphasift,
+        ), patch.object(
+            self.service.cross_market_signal_service,
+            "get_cn_open_signal",
+            return_value=low_open,
+        ):
+            planned = self.service.run_auto_trade_once()
+        detail = self.service.agent_repo.get_run_detail(planned["agent_run_uid"])
+        plan_uid = detail["trade_plans"][0]["plan_uid"]
+
+        high_open = {**low_open, "regime": "high_open", "gap_pct": 0.6, "buy_allowed": False, "force_sell": True}
+        with patch.object(
+            self.service.cross_market_signal_service,
+            "get_cn_open_signal",
+            return_value=high_open,
+        ):
+            result = self.service.approve_trade_plan(plan_uid)
+
+        self.assertFalse(result["accepted"])
+        self.assertEqual(result["status"], "skipped")
+        self.assertEqual(result["reason"], "cross_market_plan_cn_high_open_buy_blocked")
+        self.assertEqual(
+            result["raw"]["cross_market_revalidation"]["decision"]["action"],
+            "blocked",
+        )
+
+    def test_cross_market_manual_sell_plan_revalidates_active_hard_stop(self) -> None:
+        self.service.update_settings(
+            {
+                "auto_trade_enabled": True,
+                "auto_trade_time_gate_enabled": False,
+                "auto_execution_mode": "manual_approval",
+                "auto_strategy": CROSS_MARKET_STRATEGY_ID,
+                "auto_max_results": 1,
+            }
+        )
+        account = self.service.ensure_account()
+        self.service.portfolio.record_trade(
+            account_id=int(account["id"]),
+            symbol="002281",
+            trade_date=date.today() - timedelta(days=1),
+            side="buy",
+            quantity=100,
+            price=10.0,
+            market="cn",
+            currency="CNY",
+            note="vn.py paper | source=cross_market_auto_entry | price=explicit",
+        )
+        self.service.data_fetcher_manager.price = 9.4
+        self.service.data_fetcher_manager.boards_by_symbol["002281"] = [
+            {"name": "CPO", "type": "concept"}
+        ]
+        fake_alphasift = MagicMock()
+        fake_alphasift.screen.return_value = {"candidates": [], "warnings": []}
+        flat_open = {
+            "available": True,
+            "regime": "flat",
+            "gap_pct": 0.0,
+            "buy_allowed": False,
+            "force_sell": False,
+        }
+
+        with patch(
+            "src.services.vnpy_paper_trading_service.AlphaSiftService",
+            return_value=fake_alphasift,
+        ), patch.object(
+            self.service.cross_market_signal_service,
+            "get_cn_open_signal",
+            return_value=flat_open,
+        ):
+            planned = self.service.run_auto_trade_once()
+        detail = self.service.agent_repo.get_run_detail(planned["agent_run_uid"])
+        sell_plan = next(item for item in detail["trade_plans"] if item["side"] == "sell")
+        self.service.data_fetcher_manager.price = 9.3
+
+        with patch.object(
+            self.service.cross_market_signal_service,
+            "get_cn_open_signal",
+            return_value=flat_open,
+        ):
+            result = self.service.approve_trade_plan(sell_plan["plan_uid"])
+
+        self.assertTrue(result["accepted"])
+        self.assertEqual(result["quantity"], 100.0)
+        self.assertEqual(result["price"], 9.3)
+        self.assertEqual(
+            result["raw"]["cross_market_revalidation"]["sell_reason"],
+            "hard_stop_loss",
+        )
+
+    def test_cross_market_pending_sell_revalidation_prefers_strict_quote(self) -> None:
+        account = self.service.ensure_account()
+        self.service.portfolio.record_trade(
+            account_id=int(account["id"]),
+            symbol="002281",
+            trade_date=date.today() - timedelta(days=1),
+            side="buy",
+            quantity=100,
+            price=10.0,
+            market="cn",
+            currency="CNY",
+            note="vn.py paper | source=cross_market_auto_entry | price=explicit",
+        )
+        strict_quote = SimpleNamespace(
+            price=9.4,
+            provider_timestamp=datetime.now(timezone.utc).isoformat(),
+            amount=9400.0,
+            volume=1000.0,
+        )
+        flat_open = {
+            "available": True,
+            "regime": "flat",
+            "gap_pct": 0.0,
+            "buy_allowed": False,
+            "force_sell": False,
+        }
+
+        with patch.object(
+            self.service,
+            "_sync_cross_market_corporate_actions",
+            return_value={"available": True},
+        ), patch.object(
+            self.service,
+            "_account_drawdown_diagnostics",
+            return_value={"status": "blocked", "drawdown_pct": 8.0},
+        ), patch.object(
+            self.service.data_fetcher_manager,
+            "get_realtime_quote_with_provider_timestamp",
+            return_value=strict_quote,
+            create=True,
+        ) as strict_getter, patch.object(
+            self.service.data_fetcher_manager,
+            "get_realtime_quote",
+            side_effect=AssertionError(
+                "generic quote route must not be used for pending cross-market exits"
+            ),
+        ), patch.object(
+            self.service.cross_market_signal_service,
+            "get_cn_open_signal",
+            return_value=flat_open,
+        ):
+            reason, quantity, evidence = self.service._revalidate_cross_market_trade_plan(
+                plan={
+                    "symbol": "002281",
+                    "side": "sell",
+                    "market": "cn",
+                    "planned_quantity": 100,
+                },
+                raw={"cross_market_strategy": {"theme": "cpo"}},
+                settings=self.service.get_settings(),
+            )
+
+        self.assertIsNone(reason)
+        self.assertEqual(quantity, 100.0)
+        self.assertEqual(evidence["sell_reason"], "hard_stop_loss")
+        self.assertEqual(evidence["quote"]["provider_timestamp"], strict_quote.provider_timestamp)
+        strict_getter.assert_called_once_with("002281")
+
+    def test_cross_market_pending_sell_quote_uses_request_completion_time(self) -> None:
+        started_at = datetime(2026, 7, 27, 6, 27, 30, tzinfo=timezone.utc)
+        quote = SimpleNamespace(
+            price=9.4,
+            provider_timestamp=(started_at + timedelta(seconds=2)).isoformat(),
+            amount=9400.0,
+            volume=1000.0,
+        )
+        strategy_position = {
+            "status": "available",
+            "quantity": 100.0,
+            "sellable_quantity": 100.0,
+            "gross_cost_basis": 1000.0,
+            "entry_theme": "cpo",
+            "entry_themes": ["cpo"],
+            "entry_reasons": ["cpo_us_close_opening_entry_confirmed"],
+            "open_entry_order_count": 1,
+        }
+        snapshot = {
+            "accounts": [{
+                "positions": [{
+                    "symbol": "002281",
+                    "market": "cn",
+                    "currency": "CNY",
+                    "quantity": 100.0,
+                    "avg_cost": 10.0,
+                }]
+            }]
+        }
+        settings = self.service._apply_cross_market_strategy_settings(
+            replace(
+                self.service.get_settings(),
+                auto_strategy=CROSS_MARKET_STRATEGY_ID,
+            )
+        )
+        account = self.service.ensure_account(settings=settings)
+        settings = replace(settings, account_id=int(account["id"]))
+
+        _SequenceDateTime.values = [
+            started_at,
+            started_at + timedelta(seconds=3),
+        ]
+        with patch(
+            "src.services.vnpy_paper_trading_service.datetime",
+            new=_SequenceDateTime,
+        ), patch.object(
+            self.service,
+            "_sync_cross_market_corporate_actions",
+            return_value={"available": True},
+        ), patch.object(
+            self.service.cross_market_signal_service,
+            "get_cn_open_signal",
+            return_value={"available": True, "gap_pct": 0.0, "force_sell": False},
+        ), patch.object(
+            self.service.portfolio,
+            "get_portfolio_snapshot",
+            return_value=snapshot,
+        ), patch.object(
+            self.service,
+            "_cross_market_strategy_position",
+            return_value=strategy_position,
+        ), patch.object(
+            self.service,
+            "_get_cross_market_realtime_quote",
+            return_value=quote,
+        ), patch.object(
+            self.service,
+            "_account_drawdown_diagnostics",
+            return_value={"status": "ok"},
+        ), patch.object(
+            self.service.portfolio,
+            "get_sellable_quantity",
+            return_value=100.0,
+        ):
+            reason, quantity, evidence = self.service._revalidate_cross_market_trade_plan(
+                plan={
+                    "symbol": "002281",
+                    "side": "sell",
+                    "market": "cn",
+                    "planned_quantity": 100.0,
+                },
+                raw={"cross_market_strategy": {"theme": "cpo"}},
+                settings=settings,
+            )
+
+        self.assertIsNone(reason)
+        self.assertEqual(quantity, 100.0)
+        self.assertEqual(evidence["quote"]["age_seconds"], 1.0)
+        self.assertEqual(
+            evidence["quote"]["validated_at"],
+            (started_at + timedelta(seconds=3)).isoformat(),
+        )
+
+    def test_cross_market_manual_sell_plan_expires_after_hard_stop_recovers(self) -> None:
+        self.service.update_settings(
+            {
+                "auto_trade_enabled": True,
+                "auto_trade_time_gate_enabled": False,
+                "auto_execution_mode": "manual_approval",
+                "auto_strategy": CROSS_MARKET_STRATEGY_ID,
+                "auto_max_results": 1,
+            }
+        )
+        account = self.service.ensure_account()
+        self.service.portfolio.record_trade(
+            account_id=int(account["id"]),
+            symbol="002281",
+            trade_date=date.today() - timedelta(days=1),
+            side="buy",
+            quantity=100,
+            price=10.0,
+            market="cn",
+            currency="CNY",
+            note="vn.py paper | source=cross_market_auto_entry | price=explicit",
+        )
+        self.service.data_fetcher_manager.price = 9.4
+        self.service.data_fetcher_manager.boards_by_symbol["002281"] = [
+            {"name": "CPO", "type": "concept"}
+        ]
+        fake_alphasift = MagicMock()
+        fake_alphasift.screen.return_value = {"candidates": [], "warnings": []}
+        flat_open = {
+            "available": True,
+            "regime": "flat",
+            "gap_pct": 0.0,
+            "buy_allowed": False,
+            "force_sell": False,
+        }
+
+        with patch(
+            "src.services.vnpy_paper_trading_service.AlphaSiftService",
+            return_value=fake_alphasift,
+        ), patch.object(
+            self.service.cross_market_signal_service,
+            "get_cn_open_signal",
+            return_value=flat_open,
+        ):
+            planned = self.service.run_auto_trade_once()
+        detail = self.service.agent_repo.get_run_detail(planned["agent_run_uid"])
+        sell_plan = next(item for item in detail["trade_plans"] if item["side"] == "sell")
+        self.service.data_fetcher_manager.price = 10.0
+
+        with patch.object(
+            self.service.cross_market_signal_service,
+            "get_cn_open_signal",
+            return_value=flat_open,
+        ):
+            result = self.service.approve_trade_plan(sell_plan["plan_uid"])
+
+        self.assertFalse(result["accepted"])
+        self.assertEqual(result["status"], "skipped")
+        self.assertEqual(result["reason"], "cross_market_plan_sell_signal_expired")
+
     def test_auto_trade_cn_selects_affordable_candidate_from_execution_pool(self) -> None:
         self.service.update_settings(
             {
@@ -1690,6 +6175,28 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
 
         self.assertEqual(result["orders"][0]["reason"], "daily_budget_exceeded")
 
+    def test_daily_auto_usage_counts_cross_market_entries(self) -> None:
+        existing = self.service.submit_order(
+            symbol="002281",
+            side="buy",
+            market="cn",
+            quantity=100,
+            price=10.0,
+            source="cross_market_auto_entry",
+        )
+        self.assertTrue(existing["accepted"])
+        self.service.update_settings(
+            {
+                "auto_daily_max_orders": 3,
+                "auto_daily_budget": 5000,
+            }
+        )
+
+        usage = self.service._daily_auto_trade_usage(self.service.get_settings())
+
+        self.assertEqual(usage["order_count"], 1.0)
+        self.assertEqual(usage["cash_amount"], 1000.0)
+
     def test_daily_budget_fails_closed_when_historical_fx_conversion_raises(self) -> None:
         self.service.update_settings(
             {
@@ -1761,6 +6268,11 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertEqual(performance["total_pnl"], 200.0)
         self.assertEqual(performance["return_pct"], 0.2)
         self.assertEqual(performance["run_window"]["run_count"], 1)
+        self.assertEqual(
+            performance["run_window"]["source"],
+            "current_account_created_at",
+        )
+        self.assertIsNotNone(performance["run_window"]["created_from"])
         self.assertEqual(performance["agent"]["candidate_count"], 1)
         self.assertEqual(performance["agent"]["submitted_count"], 1)
         self.assertEqual(performance["agent"]["fill_rate_pct"], 100.0)
@@ -1800,10 +6312,1646 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertEqual(future_window["run_window"]["run_count"], 0)
         self.assertEqual(future_window["run_window"]["total"], 0)
         self.assertIsNotNone(future_window["run_window"]["created_from"])
+        self.assertEqual(future_window["run_window"]["source"], "request")
         self.assertEqual(future_window["agent"]["candidate_count"], 0)
         self.assertEqual(future_window["agent"]["submitted_count"], 0)
         self.assertEqual(future_window["strategy_attribution"], [])
         self.assertEqual(future_window["industry_attribution"], [])
+
+    def test_performance_summary_scopes_agent_runs_to_current_account_by_default(self) -> None:
+        self.service.ensure_account()
+        status = self.service.get_status(include_snapshot=False, include_recent_trades=False)
+        account_created_at = self.service._parse_db_datetime(
+            status["account"]["created_at"]
+        )
+
+        with patch.object(
+            self.service.agent_repo,
+            "list_runs",
+            return_value={"items": [], "total": 0},
+        ) as list_runs:
+            performance = self.service.get_performance_summary(run_limit=10)
+
+        self.assertEqual(
+            list_runs.call_args.kwargs["created_from"],
+            account_created_at - timedelta(seconds=1),
+        )
+        self.assertEqual(
+            performance["diagnostics"]["run_window_source"],
+            "current_account_created_at",
+        )
+
+    def test_performance_summary_preserves_explicit_agent_run_window(self) -> None:
+        requested_start = datetime(2026, 7, 27, 1, 30, tzinfo=timezone.utc)
+
+        with patch.object(
+            self.service.agent_repo,
+            "list_runs",
+            return_value={"items": [], "total": 0},
+        ) as list_runs:
+            performance = self.service.get_performance_summary(
+                run_limit=10,
+                created_from=requested_start,
+            )
+
+        self.assertEqual(list_runs.call_args.kwargs["created_from"], requested_start)
+        self.assertEqual(performance["run_window"]["source"], "request")
+        self.assertEqual(
+            performance["run_window"]["created_from"],
+            requested_start.isoformat(),
+        )
+
+    def test_performance_summary_excludes_calibration_shadow_runs(self) -> None:
+        self.service.ensure_account()
+        formal = self.service.agent_repo.create_run(
+            run_uid="performance-formal-run",
+            trigger_source="vnpy_paper_auto",
+            strategy="cross_market_semiconductor_gold_v1.1",
+            market="cn",
+        )
+        shadow = self.service.agent_repo.create_run(
+            run_uid="performance-shadow-run",
+            trigger_source="agent_calibration_shadow",
+            strategy="dual_low",
+            market="cn",
+        )
+        for run in (formal, shadow):
+            self.service.agent_repo.complete_run(
+                run_id=run["id"],
+                status="completed",
+                candidate_count=1,
+                submitted_count=0,
+                skipped_count=1,
+            )
+
+        performance = self.service.get_performance_summary(run_limit=10)
+
+        self.assertEqual(performance["run_window"]["run_count"], 1)
+        self.assertEqual(
+            performance["run_window"]["excluded_trigger_sources"],
+            ["agent_calibration_shadow"],
+        )
+        self.assertEqual(
+            [item["key"] for item in performance["strategy_attribution"]],
+            ["cross_market_semiconductor_gold_v1.1"],
+        )
+
+    def test_performance_summary_reports_net_costs_and_profit_factor(self) -> None:
+        raw = {"instrument_type": "stock"}
+        self.service.submit_order(
+            symbol="600519",
+            side="buy",
+            market="cn",
+            quantity=100,
+            price=10.0,
+            source="cross_market_auto_entry",
+            raw=raw,
+        )
+        self.service.submit_order(
+            symbol="600519",
+            side="sell",
+            market="cn",
+            quantity=50,
+            price=12.0,
+            source="cross_market_auto_exit",
+            raw=raw,
+        )
+        self.service.submit_order(
+            symbol="600519",
+            side="sell",
+            market="cn",
+            quantity=50,
+            price=9.0,
+            source="cross_market_auto_exit",
+            raw=raw,
+        )
+
+        metrics = self.service.get_performance_summary()["trade_metrics"]
+
+        self.assertEqual(metrics["trade_count"], 3)
+        self.assertAlmostEqual(metrics["total_fee"], 15.0205, places=6)
+        self.assertAlmostEqual(metrics["total_tax"], 0.525, places=6)
+        self.assertAlmostEqual(metrics["total_transaction_cost"], 15.5455, places=6)
+        self.assertAlmostEqual(metrics["winning_trade_pnl"], 92.189, places=6)
+        self.assertAlmostEqual(metrics["losing_trade_pnl"], -57.7345, places=6)
+        self.assertAlmostEqual(metrics["realized_trade_pnl"], 34.4545, places=6)
+        self.assertAlmostEqual(metrics["profit_factor"], 1.596775, places=6)
+        self.assertEqual(metrics["cost_basis"], {
+            "fees_and_taxes_in_realized_pnl": True,
+            "slippage_in_fill_price": True,
+            "slippage_method": "next_minute_vwap_dynamic_price_impact",
+        })
+
+    def test_completed_campaign_blocks_auto_trade_before_candidate_screening(self) -> None:
+        self.service.update_settings({
+            "auto_trade_enabled": True,
+            "auto_execution_mode": "vnpy_paper",
+            "auto_strategy": CROSS_MARKET_STRATEGY_ID,
+            "auto_market": "cn",
+        })
+        guard = {
+            "block": True,
+            "reason": "paper_campaign_completed",
+            "completion_session_date": "2026-09-07",
+            "current_session_date": "2026-09-08",
+        }
+
+        with patch.object(
+            self.service,
+            "_cross_market_campaign_execution_guard",
+            return_value=guard,
+        ), patch.object(
+            self.service,
+            "_recent_agent_run_context",
+        ) as recent_context:
+            result = self.service.run_auto_trade_once()
+
+        self.assertTrue(result["skipped"])
+        self.assertEqual(result["reason"], "paper_campaign_completed")
+        self.assertEqual(result["candidate_count"], 0)
+        self.assertEqual(result["submitted_count"], 0)
+        self.assertEqual(result["campaign_guard"], guard)
+        recent_context.assert_not_called()
+
+    def test_duplicate_formal_run_is_blocked_before_candidate_screening(self) -> None:
+        self.service.update_settings({
+            "auto_trade_enabled": True,
+            "auto_execution_mode": "vnpy_paper",
+            "auto_strategy": CROSS_MARKET_STRATEGY_ID,
+            "auto_market": "cn",
+        })
+        cadence_guard = {
+            "block": True,
+            "reason": "formal_execution_already_fully_evidenced_today",
+            "formal_evidence": {"run_uid": "formal-ready-run"},
+        }
+
+        with patch.object(
+            self.service,
+            "_cross_market_campaign_execution_guard",
+            return_value={"block": False, "reason": "paper_campaign_in_progress"},
+        ), patch.object(
+            self.service,
+            "_cross_market_formal_run_cadence_guard",
+            return_value=cadence_guard,
+        ), patch.object(
+            self.service,
+            "_recent_agent_run_context",
+        ) as recent_context:
+            result = self.service.run_auto_trade_once()
+
+        self.assertTrue(result["skipped"])
+        self.assertEqual(
+            result["reason"],
+            "formal_execution_already_fully_evidenced_today",
+        )
+        self.assertEqual(result["formal_cadence_guard"], cadence_guard)
+        self.assertEqual(result["submitted_count"], 0)
+        recent_context.assert_not_called()
+
+    def test_formal_cadence_guard_only_allows_zero_activity_recovery(self) -> None:
+        settings = VnpyPaperSettings(
+            enabled=True,
+            account_id=9,
+            auto_trade_enabled=True,
+            auto_strategy=CROSS_MARKET_STRATEGY_ID,
+            auto_execution_mode="vnpy_paper",
+        )
+        window = {
+            "is_market_open_now": True,
+            "session_date": "2026-07-28",
+        }
+        degraded = {
+            "ready": False,
+            "reason": "fully_evidenced_formal_run_not_found",
+            "run_observed": True,
+            "run_uid": "formal-degraded-run",
+            "planned_count": 0,
+            "submitted_count": 0,
+        }
+        with patch.object(
+            self.service,
+            "_trading_window_diagnostics",
+            return_value=window,
+        ), patch(
+            "src.services.vnpy_paper_trading_service._cross_market_daily_evidence_status",
+            return_value=degraded,
+        ), patch.object(
+            self.service,
+            "_cross_market_observation_snapshot",
+            return_value={"status": "ready", "missing_requirements": []},
+        ), patch.object(
+            self.service.agent_repo,
+            "list_runs",
+            return_value={
+                "items": [{
+                    "run_uid": "formal-degraded-run",
+                    "status": "completed",
+                    "planned_count": 0,
+                    "submitted_count": 0,
+                    "settings": {
+                        "account_id": 9,
+                        "auto_execution_mode": "vnpy_paper",
+                    },
+                }],
+            },
+        ), patch.object(
+            self.service.agent_repo,
+            "get_run_detail",
+            return_value={"decisions": []},
+        ):
+            normal = self.service._cross_market_formal_run_cadence_guard(
+                settings,
+                trigger_source="vnpy_paper_auto",
+            )
+            eligible = self.service._cross_market_formal_run_cadence_guard(
+                settings,
+                trigger_source="vnpy_paper_auto",
+                allow_intraday_entry_recheck=True,
+            )
+
+        self.assertTrue(normal["block"])
+        self.assertEqual(normal["reason"], "formal_execution_already_observed_today")
+        self.assertFalse(eligible["block"])
+        self.assertTrue(eligible["formal_recovery"])
+        self.assertTrue(eligible["evidence_level_recovery"])
+        self.assertEqual(eligible["reason"], "formal_intraday_entry_recheck_eligible")
+
+        with patch.object(
+            self.service,
+            "_trading_window_diagnostics",
+            return_value=window,
+        ), patch(
+            "src.services.vnpy_paper_trading_service._cross_market_daily_evidence_status",
+            return_value={**degraded, "planned_count": 1},
+        ), patch.object(
+            self.service,
+            "_cross_market_observation_snapshot",
+        ) as current_evidence:
+            blocked = self.service._cross_market_formal_run_cadence_guard(
+                settings,
+                trigger_source="vnpy_paper_auto",
+                allow_intraday_entry_recheck=True,
+            )
+
+        self.assertTrue(blocked["block"])
+        self.assertEqual(
+            blocked["reason"],
+            "formal_execution_activity_blocks_recovery",
+        )
+        current_evidence.assert_not_called()
+
+    def test_formal_cadence_requires_opening_slot_or_existing_baseline(self) -> None:
+        settings = VnpyPaperSettings(
+            enabled=True,
+            account_id=9,
+            auto_trade_enabled=True,
+            auto_strategy=CROSS_MARKET_STRATEGY_ID,
+            auto_execution_mode="vnpy_paper",
+        )
+        window = {
+            "is_market_open_now": True,
+            "session_date": "2026-08-03",
+        }
+        no_formal = {
+            "ready": False,
+            "reason": "fully_evidenced_formal_run_not_found",
+            "run_observed": False,
+        }
+        with patch.object(
+            self.service,
+            "_trading_window_diagnostics",
+            return_value=window,
+        ), patch(
+            "src.services.vnpy_paper_trading_service._cross_market_daily_evidence_status",
+            return_value=no_formal,
+        ), patch(
+            "src.services.vnpy_paper_trading_service._cross_market_formal_entry_slot",
+            return_value=None,
+        ) as formal_slot:
+            late_initial = self.service._cross_market_formal_run_cadence_guard(
+                settings,
+                trigger_source="vnpy_paper_auto",
+            )
+            orphan_recovery = self.service._cross_market_formal_run_cadence_guard(
+                settings,
+                trigger_source="vnpy_paper_auto",
+                allow_intraday_entry_recheck=True,
+            )
+
+        self.assertTrue(late_initial["block"])
+        self.assertEqual(
+            late_initial["reason"],
+            "outside_cross_market_formal_entry_slot",
+        )
+        self.assertTrue(orphan_recovery["block"])
+        self.assertEqual(
+            orphan_recovery["reason"],
+            "formal_recovery_requires_opening_baseline",
+        )
+        formal_slot.assert_called_once_with()
+
+    def test_formal_cadence_guard_allows_transient_intraday_entry_recheck(self) -> None:
+        settings = VnpyPaperSettings(
+            enabled=True,
+            account_id=9,
+            auto_trade_enabled=True,
+            auto_strategy=CROSS_MARKET_STRATEGY_ID,
+            auto_execution_mode="vnpy_paper",
+        )
+        window = {
+            "is_market_open_now": True,
+            "session_date": "2026-07-30",
+        }
+        formal = {
+            "ready": True,
+            "reason": "fully_evidenced_run_found",
+            "run_uid": "formal-ready-run",
+        }
+        runs = {
+            "items": [{
+                "run_uid": "formal-ready-run",
+                "status": "completed",
+                "planned_count": 0,
+                "submitted_count": 0,
+                "settings": {
+                    "account_id": 9,
+                    "auto_execution_mode": "vnpy_paper",
+                },
+            }],
+        }
+        detail = {
+            "decisions": [{
+                "action": "skip",
+                "reason": "low_open_reclaim_unconfirmed",
+            }],
+        }
+        with patch.object(
+            self.service,
+            "_trading_window_diagnostics",
+            return_value=window,
+        ), patch(
+            "src.services.vnpy_paper_trading_service._cross_market_daily_evidence_status",
+            return_value=formal,
+        ), patch.object(
+            self.service.agent_repo,
+            "list_runs",
+            return_value=runs,
+        ), patch.object(
+            self.service.agent_repo,
+            "get_run_detail",
+            return_value=detail,
+        ):
+            normal = self.service._cross_market_formal_run_cadence_guard(
+                settings,
+                trigger_source="vnpy_paper_auto",
+            )
+            recheck = self.service._cross_market_formal_run_cadence_guard(
+                settings,
+                trigger_source="vnpy_paper_auto",
+                allow_intraday_entry_recheck=True,
+            )
+
+        self.assertTrue(normal["block"])
+        self.assertFalse(recheck["block"])
+        self.assertTrue(recheck["intraday_entry_recheck"])
+        self.assertEqual(
+            recheck["recoverable_reasons"],
+            ["low_open_reclaim_unconfirmed"],
+        )
+
+        detail["decisions"].append({
+            "action": "skip",
+            "reason": "cn_high_open_buy_blocked",
+        })
+        with patch.object(
+            self.service,
+            "_trading_window_diagnostics",
+            return_value=window,
+        ), patch(
+            "src.services.vnpy_paper_trading_service._cross_market_daily_evidence_status",
+            return_value=formal,
+        ), patch.object(
+            self.service.agent_repo,
+            "list_runs",
+            return_value=runs,
+        ), patch.object(
+            self.service.agent_repo,
+            "get_run_detail",
+            return_value=detail,
+        ):
+            mixed = self.service._cross_market_formal_run_cadence_guard(
+                settings,
+                trigger_source="vnpy_paper_auto",
+                allow_intraday_entry_recheck=True,
+            )
+
+        self.assertTrue(mixed["block"])
+        self.assertEqual(mixed["reason"], "formal_execution_skip_not_recoverable")
+        self.assertEqual(
+            mixed["non_recoverable_reasons"],
+            ["cn_high_open_buy_blocked"],
+        )
+        detail["decisions"].pop()
+
+        runs["items"][0]["submitted_count"] = 1
+        with patch.object(
+            self.service,
+            "_trading_window_diagnostics",
+            return_value=window,
+        ), patch(
+            "src.services.vnpy_paper_trading_service._cross_market_daily_evidence_status",
+            return_value=formal,
+        ), patch.object(
+            self.service.agent_repo,
+            "list_runs",
+            return_value=runs,
+        ):
+            active = self.service._cross_market_formal_run_cadence_guard(
+                settings,
+                trigger_source="vnpy_paper_auto",
+                allow_intraday_entry_recheck=True,
+            )
+
+        self.assertTrue(active["block"])
+        self.assertEqual(
+            active["reason"],
+            "formal_execution_activity_blocks_recovery",
+        )
+
+    def test_formal_cadence_guard_rechecks_when_cn_open_snapshot_arrives(self) -> None:
+        settings = VnpyPaperSettings(
+            enabled=True,
+            account_id=9,
+            auto_trade_enabled=True,
+            auto_strategy=CROSS_MARKET_STRATEGY_ID,
+            auto_execution_mode="vnpy_paper",
+        )
+        window = {
+            "is_market_open_now": True,
+            "session_date": "2026-08-04",
+        }
+        formal = {
+            "ready": False,
+            "reason": "fully_evidenced_formal_run_not_found",
+            "run_observed": True,
+            "run_uid": "formal-cn-open-lag-run",
+            "planned_count": 0,
+            "submitted_count": 0,
+        }
+        with patch.object(
+            self.service,
+            "_trading_window_diagnostics",
+            return_value=window,
+        ), patch(
+            "src.services.vnpy_paper_trading_service._cross_market_daily_evidence_status",
+            return_value=formal,
+        ), patch.object(
+            self.service,
+            "_cross_market_observation_snapshot",
+            return_value={"status": "ready", "missing_requirements": []},
+        ), patch.object(
+            self.service.agent_repo,
+            "list_runs",
+            return_value={
+                "items": [{
+                    "run_uid": "formal-cn-open-lag-run",
+                    "status": "completed",
+                    "planned_count": 0,
+                    "submitted_count": 0,
+                    "settings": {
+                        "account_id": 9,
+                        "auto_execution_mode": "vnpy_paper",
+                    },
+                }],
+            },
+        ), patch.object(
+            self.service.agent_repo,
+            "get_run_detail",
+            return_value={
+                "decisions": [{
+                    "action": "skip",
+                    "reason": "cn_open_signal_unavailable",
+                }],
+            },
+        ):
+            result = self.service._cross_market_formal_run_cadence_guard(
+                settings,
+                trigger_source="vnpy_paper_auto",
+                allow_intraday_entry_recheck=True,
+            )
+
+        self.assertFalse(result["block"])
+        self.assertTrue(result["formal_recovery"])
+        self.assertEqual(
+            result["recoverable_reasons"],
+            ["cn_open_signal_unavailable"],
+        )
+        self.assertEqual(result["current_evidence"]["status"], "ready")
+
+    def test_formal_cadence_guard_does_not_recheck_hard_entry_blocks(self) -> None:
+        settings = VnpyPaperSettings(
+            enabled=True,
+            account_id=9,
+            auto_trade_enabled=True,
+            auto_strategy=CROSS_MARKET_STRATEGY_ID,
+            auto_execution_mode="vnpy_paper",
+        )
+        window = {
+            "is_market_open_now": True,
+            "session_date": "2026-07-31",
+        }
+        formal = {
+            "ready": True,
+            "reason": "fully_evidenced_run_found",
+            "run_uid": "formal-high-open-run",
+        }
+        with patch.object(
+            self.service,
+            "_trading_window_diagnostics",
+            return_value=window,
+        ), patch(
+            "src.services.vnpy_paper_trading_service._cross_market_daily_evidence_status",
+            return_value=formal,
+        ), patch.object(
+            self.service.agent_repo,
+            "list_runs",
+            return_value={
+                "items": [{
+                    "run_uid": "formal-high-open-run",
+                    "status": "completed",
+                    "planned_count": 0,
+                    "submitted_count": 0,
+                    "settings": {
+                        "account_id": 9,
+                        "auto_execution_mode": "vnpy_paper",
+                    },
+                }],
+            },
+        ), patch.object(
+            self.service.agent_repo,
+            "get_run_detail",
+            return_value={
+                "decisions": [{
+                    "action": "skip",
+                    "reason": "cn_high_open_buy_blocked",
+                }],
+            },
+        ):
+            result = self.service._cross_market_formal_run_cadence_guard(
+                settings,
+                trigger_source="vnpy_paper_auto",
+                allow_intraday_entry_recheck=True,
+            )
+
+        self.assertTrue(result["block"])
+        self.assertEqual(
+            result["reason"],
+            "formal_execution_skip_not_recoverable",
+        )
+
+    def test_intraday_slot_audit_is_scoped_to_account_and_execution_mode(self) -> None:
+        service = MagicMock()
+        settings = VnpyPaperSettings(
+            account_id=9,
+            auto_strategy=CROSS_MARKET_STRATEGY_ID,
+            auto_execution_mode="vnpy_paper",
+        )
+        start = datetime(2026, 7, 30, 5, 30, tzinfo=timezone.utc)
+        end = start + timedelta(minutes=2)
+        other_account = {
+            "settings": {
+                "account_id": 8,
+                "auto_execution_mode": "vnpy_paper",
+            },
+        }
+        dry_run = {
+            "settings": {
+                "account_id": 9,
+                "auto_execution_mode": "dry_run",
+            },
+        }
+        service.agent_repo.list_runs.return_value = {
+            "items": [other_account, dry_run],
+            "total": 2,
+        }
+
+        self.assertFalse(
+            _cross_market_intraday_entry_slot_audited(
+                service,
+                settings,
+                start=start,
+                end=end,
+            )
+        )
+
+        service.agent_repo.list_runs.return_value = {
+            "items": [
+                other_account,
+                dry_run,
+                {
+                    "settings": {
+                        "account_id": 9,
+                        "auto_execution_mode": "vnpy_paper",
+                    },
+                },
+            ],
+            "total": 3,
+        }
+        self.assertTrue(
+            _cross_market_intraday_entry_slot_audited(
+                service,
+                settings,
+                start=start,
+                end=end,
+            )
+        )
+
+    def test_session_order_activity_scans_all_sell_monitor_pages(self) -> None:
+        service = MagicMock()
+        settings = VnpyPaperSettings(
+            account_id=9,
+            auto_strategy=CROSS_MARKET_STRATEGY_ID,
+            auto_execution_mode="vnpy_paper",
+        )
+        zero_activity = [{
+            "run_uid": f"sell-monitor-{index}",
+            "planned_count": 0,
+            "submitted_count": 0,
+            "settings": {
+                "account_id": 9,
+                "auto_execution_mode": "vnpy_paper",
+            },
+        } for index in range(100)]
+        submitted = {
+            "run_uid": "sell-monitor-submitted",
+            "planned_count": 0,
+            "submitted_count": 1,
+            "settings": {
+                "account_id": 9,
+                "auto_execution_mode": "vnpy_paper",
+            },
+        }
+
+        def list_runs(**kwargs):
+            if kwargs["trigger_source"] != "cross_market_intraday_sell_monitor":
+                return {"items": [], "total": 0}
+            if kwargs["offset"] == 0:
+                return {"items": zero_activity, "total": 101}
+            return {"items": [submitted], "total": 101}
+
+        service.agent_repo.list_runs.side_effect = list_runs
+
+        status = _cross_market_session_order_activity_status(
+            service,
+            settings,
+            {"session_date": "2026-07-30"},
+        )
+
+        self.assertTrue(status["available"])
+        self.assertTrue(status["has_activity"])
+        self.assertEqual(status["planned_count"], 0)
+        self.assertEqual(status["submitted_count"], 1)
+        self.assertEqual(
+            status["activity_runs"][0]["run_uid"],
+            "sell-monitor-submitted",
+        )
+
+    def test_campaign_guard_allows_completion_session_and_blocks_later_dates(self) -> None:
+        account = self.service.ensure_account()
+        self.service.update_settings({
+            "auto_strategy": CROSS_MARKET_STRATEGY_ID,
+            "account_id": int(account["id"]),
+        })
+        settings = self.service.get_settings()
+        today = datetime.now(ZoneInfo("Asia/Shanghai")).date()
+        observation = {
+            "campaign_active": True,
+            "account_matches_current": True,
+            "campaign_account_id": int(account["id"]),
+            "current_account_id": int(account["id"]),
+            "remaining_trading_days": 0,
+        }
+
+        with patch(
+            "src.services.vnpy_paper_trading_service.CrossMarketAcceptanceService.get_status",
+            return_value={
+                "ready": True,
+                "paper_observation": {
+                    **observation,
+                    "completion_session_date": today.isoformat(),
+                },
+            },
+        ):
+            same_day = self.service._cross_market_campaign_execution_guard(settings)
+        with patch(
+            "src.services.vnpy_paper_trading_service.CrossMarketAcceptanceService.get_status",
+            return_value={
+                "ready": True,
+                "paper_observation": {
+                    **observation,
+                    "completion_session_date": (today - timedelta(days=1)).isoformat(),
+                },
+            },
+        ):
+            later_day = self.service._cross_market_campaign_execution_guard(settings)
+
+        self.assertFalse(same_day["block"])
+        self.assertEqual(same_day["reason"], "paper_campaign_completion_session_active")
+        self.assertTrue(later_day["block"])
+        self.assertEqual(later_day["reason"], "paper_campaign_completed")
+
+    def test_cross_market_campaign_report_is_account_bound_and_detects_contamination(self) -> None:
+        account = self.service.ensure_account()
+        campaign_started_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+        strategy_trade = self.service.submit_order(
+            symbol="600519",
+            side="buy",
+            market="cn",
+            quantity=100,
+            price=10.0,
+            source="cross_market_auto_entry",
+            raw={"instrument_type": "stock"},
+        )
+        self.assertTrue(strategy_trade["accepted"])
+        manual_trade = self.service.submit_order(
+            symbol="000001",
+            side="buy",
+            market="cn",
+            quantity=100,
+            price=10.0,
+            source="manual",
+        )
+        self.assertTrue(manual_trade["accepted"])
+        acceptance = {
+            "ready": True,
+            "paper_observation": {
+                "campaign_active": True,
+                "campaign_started_at": campaign_started_at.isoformat(),
+                "campaign_account_id": int(account["id"]),
+                "current_account_id": int(account["id"]),
+                "account_matches_current": True,
+                "initial_equity": 100000.0,
+                "required_trading_days": 30,
+                "observed_trading_days": 30,
+                "remaining_trading_days": 0,
+                "degraded_trading_days": 0,
+                "fully_evidenced_without_formal_execution_days": 1,
+                "fully_evidenced_via_later_observation_days": 1,
+                "completion_session_date": date.today().isoformat(),
+                "ready": True,
+            },
+        }
+
+        with patch(
+            "src.services.portfolio_service.PortfolioService._fetch_realtime_position_price",
+            return_value=(10.0, "unit-test"),
+        ):
+            report = self.service.get_cross_market_campaign_report(acceptance)
+
+        self.assertFalse(report["is_final"])
+        self.assertEqual(report["report_status"], "account_contaminated")
+        self.assertEqual(
+            report["report_window"]["date_to"],
+            date.today().isoformat(),
+        )
+        self.assertTrue(report["report_window"]["bounded_to_completion_session"])
+        self.assertEqual(report["transaction_count"], 1)
+        self.assertEqual(report["non_strategy_transaction_count"], 1)
+        self.assertEqual(report["transactions"][0]["id"], strategy_trade["trade_id"])
+        self.assertAlmostEqual(
+            report["performance"]["trade_metrics"]["total_transaction_cost"],
+            5.01,
+            places=6,
+        )
+        self.assertEqual(
+            report["performance"]["equity_curve"][0]["date"],
+            report["report_window"]["date_from"],
+        )
+        self.assertEqual(
+            report["performance"]["equity_curve"][-1]["date"],
+            date.today().isoformat(),
+        )
+        self.assertIn(
+            "campaign_account_contains_non_strategy_transactions",
+            report["warnings"],
+        )
+        self.assertIn(
+            "campaign_contains_fully_evidenced_days_without_formal_execution",
+            report["warnings"],
+        )
+        self.assertIn(
+            "campaign_contains_later_observation_evidence_not_counted",
+            report["warnings"],
+        )
+
+    def test_cross_market_campaign_report_fails_closed_on_account_mismatch(self) -> None:
+        report = self.service.get_cross_market_campaign_report({
+            "ready": False,
+            "paper_observation": {
+                "campaign_active": True,
+                "campaign_started_at": datetime.now(timezone.utc).isoformat(),
+                "campaign_account_id": 999,
+                "current_account_id": None,
+                "account_matches_current": False,
+            },
+        })
+
+        self.assertFalse(report["is_final"])
+        self.assertEqual(report["report_status"], "account_mismatch")
+        self.assertEqual(report["transactions"], [])
+
+    def test_cross_market_closing_snapshot_skips_before_cutoff(self) -> None:
+        phase = SimpleNamespace(is_trading_day=True, warnings=[])
+        now = datetime(2026, 7, 28, 6, 54, tzinfo=timezone.utc)
+
+        with (
+            patch(
+                "src.services.vnpy_paper_trading_service.trading_calendar."
+                "build_market_phase_context",
+                return_value=phase,
+            ),
+            patch.object(
+                self.service.portfolio,
+                "get_portfolio_snapshot",
+            ) as snapshot_mock,
+        ):
+            result = self.service.capture_cross_market_campaign_closing_snapshot(
+                now=now
+            )
+
+        self.assertTrue(result["skipped"])
+        self.assertEqual(result["reason"], "before_cn_closing_snapshot_cutoff")
+        snapshot_mock.assert_not_called()
+
+    def test_cross_market_closing_snapshot_fails_closed_without_calendar(self) -> None:
+        phase = SimpleNamespace(
+            is_trading_day=True,
+            warnings=["calendar_unavailable"],
+        )
+        now = datetime(2026, 7, 28, 7, 5, tzinfo=timezone.utc)
+
+        with patch(
+            "src.services.vnpy_paper_trading_service.trading_calendar."
+            "build_market_phase_context",
+            return_value=phase,
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "cross_market_closing_snapshot_calendar_unavailable",
+            ):
+                self.service.capture_cross_market_campaign_closing_snapshot(now=now)
+
+    def test_cross_market_closing_snapshot_requires_completion_boundary(self) -> None:
+        phase = SimpleNamespace(is_trading_day=True, warnings=[])
+        now = datetime(2026, 7, 28, 7, 5, tzinfo=timezone.utc)
+        acceptance = {
+            "ready": True,
+            "paper_observation": {
+                "campaign_active": True,
+            },
+        }
+
+        with (
+            patch(
+                "src.services.vnpy_paper_trading_service.trading_calendar."
+                "build_market_phase_context",
+                return_value=phase,
+            ),
+            patch(
+                "src.services.vnpy_paper_trading_service."
+                "CrossMarketAcceptanceService"
+            ) as acceptance_service,
+        ):
+            acceptance_service.return_value.get_status.return_value = acceptance
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "cross_market_closing_snapshot_completion_boundary_unavailable",
+            ):
+                self.service.capture_cross_market_campaign_closing_snapshot(now=now)
+
+    def test_cross_market_closing_snapshot_persists_once_after_cutoff(self) -> None:
+        account = self.service.ensure_account()
+        account_id = int(account["id"])
+        self.service.update_settings({
+            "account_id": account_id,
+            "auto_strategy": CROSS_MARKET_STRATEGY_ID,
+        })
+        session_date = date(2026, 7, 28)
+        now = datetime(2026, 7, 28, 7, 5, tzinfo=timezone.utc)
+        phase = SimpleNamespace(is_trading_day=True, warnings=[])
+        closing_row = SimpleNamespace(
+            snapshot_date=session_date,
+            updated_at=datetime(2026, 7, 28, 15, 5),
+            payload=json.dumps({
+                "data_quality": "ok",
+                "fx_stale": False,
+                "limitations": [],
+                "positions": [],
+            }),
+        )
+        acceptance = {
+            "ready": False,
+            "paper_observation": {
+                "campaign_active": True,
+                "campaign_account_id": account_id,
+                "account_matches_current": True,
+            },
+        }
+
+        with (
+            patch(
+                "src.services.vnpy_paper_trading_service.trading_calendar."
+                "build_market_phase_context",
+                return_value=phase,
+            ),
+            patch(
+                "src.services.vnpy_paper_trading_service."
+                "CrossMarketAcceptanceService"
+            ) as acceptance_service,
+            patch.object(
+                self.service.portfolio.repo,
+                "list_daily_snapshots_for_risk",
+                side_effect=[[], [closing_row], [closing_row]],
+            ),
+            patch.object(
+                self.service.portfolio,
+                "get_portfolio_snapshot",
+                return_value={"total_equity": 100000.0},
+            ) as snapshot_mock,
+        ):
+            acceptance_service.return_value.get_status.return_value = acceptance
+            first = self.service.capture_cross_market_campaign_closing_snapshot(
+                now=now
+            )
+            second = self.service.capture_cross_market_campaign_closing_snapshot(
+                now=now
+            )
+
+        self.assertFalse(first["skipped"])
+        self.assertEqual(first["reason"], "closing_snapshot_persisted")
+        self.assertEqual(first["account_id"], account_id)
+        self.assertEqual(first["total_equity"], 100000.0)
+        self.assertTrue(second["skipped"])
+        self.assertEqual(second["reason"], "closing_snapshot_already_persisted")
+        self.assertEqual(snapshot_mock.call_count, 2)
+        self.assertEqual(
+            snapshot_mock.call_args_list[0].kwargs,
+            {
+                "account_id": account_id,
+                "as_of": session_date,
+                "cost_method": "fifo",
+                "persist": False,
+            },
+        )
+        self.assertEqual(
+            snapshot_mock.call_args_list[1].kwargs,
+            {
+                "account_id": account_id,
+                "as_of": session_date,
+                "cost_method": "fifo",
+                "persist": True,
+                "realtime_price_overrides": {},
+            },
+        )
+
+    def test_cross_market_closing_snapshot_rejects_stale_position_quote(self) -> None:
+        account = self.service.ensure_account()
+        account_id = int(account["id"])
+        self.service.update_settings({
+            "account_id": account_id,
+            "auto_strategy": CROSS_MARKET_STRATEGY_ID,
+        })
+        session_date = date(2026, 7, 28)
+        now = datetime(2026, 7, 28, 7, 5, tzinfo=timezone.utc)
+        phase = SimpleNamespace(is_trading_day=True, warnings=[])
+        acceptance = {
+            "ready": False,
+            "paper_observation": {
+                "campaign_active": True,
+                "campaign_account_id": account_id,
+                "account_matches_current": True,
+            },
+        }
+        stale_quote = SimpleNamespace(
+            price=12.0,
+            provider="unit-test",
+            provider_timestamp=(now - timedelta(minutes=3)).isoformat(),
+        )
+
+        with (
+            patch(
+                "src.services.vnpy_paper_trading_service.trading_calendar."
+                "build_market_phase_context",
+                return_value=phase,
+            ),
+            patch(
+                "src.services.vnpy_paper_trading_service."
+                "CrossMarketAcceptanceService"
+            ) as acceptance_service,
+            patch.object(
+                self.service.portfolio.repo,
+                "list_daily_snapshots_for_risk",
+                return_value=[],
+            ),
+            patch.object(
+                self.service.portfolio,
+                "get_portfolio_snapshot",
+                return_value={
+                    "accounts": [{
+                        "positions": [{"symbol": "600519"}],
+                    }],
+                },
+            ) as snapshot_mock,
+            patch.object(
+                self.service,
+                "_get_cross_market_realtime_quote",
+                return_value=stale_quote,
+            ),
+        ):
+            acceptance_service.return_value.get_status.return_value = acceptance
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "cross_market_closing_snapshot_quote_stale:600519",
+            ):
+                self.service.capture_cross_market_campaign_closing_snapshot(
+                    now=now
+                )
+
+        snapshot_mock.assert_called_once_with(
+            account_id=account_id,
+            as_of=session_date,
+            cost_method="fifo",
+            persist=False,
+        )
+
+    def test_cross_market_final_report_excludes_post_completion_trades_and_prices(self) -> None:
+        account = self.service.ensure_account()
+        account_id = int(account["id"])
+        completion_date = date.today()
+        completion_snapshot_at = datetime.combine(
+            completion_date,
+            datetime.min.time(),
+            tzinfo=ZoneInfo("Asia/Shanghai"),
+        ).replace(hour=15)
+        included = self.service.portfolio.record_trade(
+            account_id=account_id,
+            symbol="600519",
+            trade_date=completion_date,
+            side="buy",
+            quantity=100,
+            price=10.0,
+            fee=5.0,
+            market="cn",
+            currency="CNY",
+            note="source=cross_market_auto_entry",
+        )
+        self.service.portfolio.record_trade(
+            account_id=account_id,
+            symbol="000001",
+            trade_date=completion_date + timedelta(days=1),
+            side="buy",
+            quantity=100,
+            price=20.0,
+            fee=5.0,
+            market="cn",
+            currency="CNY",
+            note="source=cross_market_auto_entry",
+        )
+        run = self.service.agent_repo.create_run(
+            run_uid="completed-campaign-execution-evidence",
+            trigger_source="vnpy_paper_auto",
+            strategy=CROSS_MARKET_STRATEGY_ID,
+            market="cn",
+        )
+        self.service.agent_repo.record_trade_plan(
+            plan_uid="completed-campaign-execution-plan",
+            run_id=int(run["id"]),
+            decision_id=None,
+            symbol="600519",
+            market="cn",
+            side="buy",
+            status="filled",
+            execution_mode="vnpy_paper",
+            planned_cash_amount=1000,
+            planned_quantity=100,
+            planned_price=10,
+            submitted_quantity=100,
+            submitted_price=10,
+            trade_id=int(included["id"]),
+            order_result={
+                "status": "filled",
+                "raw": {
+                    "cross_market_strategy": {
+                        "strategy_id": CROSS_MARKET_STRATEGY_ID,
+                    },
+                    "fill_sync": {
+                        "trades": [{
+                            "local_trade_id": int(included["id"]),
+                            "execution": {
+                                "mode": "next_minute_vwap",
+                                "reference_price": 9.99,
+                                "fill_price": 10.0,
+                                "actual_slippage_bps": 10.01001,
+                                "adverse_slippage_cost": 1.0,
+                            },
+                        }],
+                    },
+                },
+            },
+        )
+        acceptance = {
+            "ready": True,
+            "paper_observation": {
+                "campaign_active": True,
+                "campaign_started_at": (
+                    datetime.now(timezone.utc) - timedelta(days=1)
+                ).isoformat(),
+                "campaign_account_id": account_id,
+                "current_account_id": account_id,
+                "account_matches_current": True,
+                "initial_equity": 100000.0,
+                "required_trading_days": 30,
+                "fully_evidenced_trading_days": 30,
+                "remaining_trading_days": 0,
+                "degraded_trading_days": 0,
+                "observation_dates": [completion_date.isoformat()],
+                "session_results": [{
+                    "session_date": completion_date.isoformat(),
+                    "evidence_status": "ready",
+                    "fully_evidenced": True,
+                }],
+                "completion_session_date": completion_date.isoformat(),
+                "ready": True,
+            },
+        }
+
+        with patch(
+            "src.services.portfolio_service.PortfolioService._fetch_realtime_position_price",
+            return_value=(10.0, "unit-test"),
+        ):
+            self.service.portfolio.get_portfolio_snapshot(
+                account_id=account_id,
+                as_of=completion_date,
+                persist=True,
+                realtime_price_overrides={
+                    "600519": {
+                        "price": 10.0,
+                        "provider": "unit-test",
+                        "provider_timestamp": datetime.now(timezone.utc).isoformat(),
+                    },
+                },
+            )
+            with DatabaseManager.get_instance().get_session() as session:
+                row = session.query(PortfolioDailySnapshot).filter_by(
+                    account_id=account_id,
+                    snapshot_date=completion_date,
+                    cost_method="fifo",
+                ).one()
+                payload = json.loads(row.payload)
+                for position in list(payload.get("positions") or []):
+                    position["price_provider_timestamp"] = (
+                        completion_snapshot_at - timedelta(seconds=30)
+                    ).astimezone(timezone.utc).isoformat()
+                row.payload = json.dumps(payload)
+                row.updated_at = completion_snapshot_at.replace(tzinfo=None)
+                session.commit()
+            report = self.service.get_cross_market_campaign_report(acceptance)
+
+        self.assertTrue(report["is_final"], report)
+        self.assertFalse(report["strategy_accepted"])
+        self.assertEqual(report["report_status"], "final_insufficient_sample")
+        self.assertIn("campaign_statistical_sample_insufficient", report["warnings"])
+        self.assertEqual(report["transaction_count"], 1)
+        self.assertEqual(report["transactions"][0]["id"], included["id"])
+        self.assertEqual(report["performance"]["total_market_value"], 1000.0)
+        self.assertEqual(report["performance"]["trade_metrics"]["trade_count"], 1)
+        self.assertEqual(
+            report["performance"]["daily_snapshot_coverage"]["coverage_pct"],
+            100.0,
+        )
+        self.assertEqual(
+            report["performance"]["slippage_metrics"]["coverage_pct"],
+            100.0,
+        )
+        self.assertEqual(
+            report["report_window"]["date_to"],
+            completion_date.isoformat(),
+        )
+        self.assertEqual(
+            report["performance"]["equity_curve"][-1]["date"],
+            completion_date.isoformat(),
+        )
+
+    def test_cross_market_campaign_report_keeps_zero_trade_daily_snapshots(self) -> None:
+        account = self.service.ensure_account()
+        account_id = int(account["id"])
+        start_date = date.today() - timedelta(days=3)
+        observation_dates = [
+            start_date + timedelta(days=1),
+            start_date + timedelta(days=2),
+        ]
+        for snapshot_date in observation_dates:
+            self.service.portfolio.get_portfolio_snapshot(
+                account_id=account_id,
+                as_of=snapshot_date,
+                persist=True,
+            )
+        with DatabaseManager.get_instance().get_session() as session:
+            for snapshot_date in observation_dates:
+                session.execute(
+                    text(
+                        f"UPDATE {PortfolioDailySnapshot.__tablename__} "
+                        "SET updated_at = :updated_at "
+                        "WHERE account_id = :account_id "
+                        "AND snapshot_date = :snapshot_date"
+                    ),
+                    {
+                        "updated_at": datetime.combine(
+                            snapshot_date,
+                            datetime.min.time(),
+                        ).replace(hour=15, minute=5),
+                        "account_id": account_id,
+                        "snapshot_date": snapshot_date,
+                    },
+                )
+            session.commit()
+        acceptance = {
+            "ready": False,
+            "paper_observation": {
+                "campaign_active": True,
+                "campaign_started_at": (
+                    datetime.combine(
+                        start_date,
+                        datetime.min.time(),
+                        tzinfo=timezone.utc,
+                    ) + timedelta(hours=1)
+                ).isoformat(),
+                "campaign_account_id": account_id,
+                "current_account_id": account_id,
+                "account_matches_current": True,
+                "initial_equity": 100000.0,
+                "required_trading_days": 30,
+                "observed_trading_days": 2,
+                "remaining_trading_days": 28,
+                "degraded_trading_days": 0,
+                "observation_dates": [
+                    item.isoformat() for item in observation_dates
+                ],
+                "session_results": [
+                    {
+                        "session_date": item.isoformat(),
+                        "evidence_status": "ready",
+                        "fully_evidenced": True,
+                    }
+                    for item in observation_dates
+                ],
+            },
+        }
+
+        report = self.service.get_cross_market_campaign_report(acceptance)
+
+        curve = report["performance"]["equity_curve"]
+        self.assertEqual(
+            [item["date"] for item in curve],
+            [start_date.isoformat(), *[item.isoformat() for item in observation_dates]],
+        )
+        self.assertEqual([item["trade_count"] for item in curve], [0, 0, 0])
+        self.assertEqual(len(report["performance"]["daily_returns"]), 3)
+        self.assertEqual(
+            report["performance"]["daily_snapshot_coverage"],
+            {
+                "observed_trading_days": 2,
+                "covered_trading_days": 2,
+                "missing_trading_days": 0,
+                "non_closing_trading_days": 0,
+                "invalid_valuation_trading_days": 0,
+                "coverage_pct": 100.0,
+                "missing_dates": [],
+                "non_closing_dates": [],
+                "invalid_valuation_dates": [],
+                "valuation_requirements": (
+                    "realtime_position_prices_no_stale_fx_no_limitations"
+                ),
+                "closing_time_cutoff": "14:55:00+08:00",
+                "basis": "persisted_account_closing_snapshot",
+            },
+        )
+        self.assertEqual(
+            report["performance"]["risk_metrics"]["drawdown_basis"],
+            "persisted_account_closing_snapshot",
+        )
+        self.assertNotIn(
+            "campaign_daily_snapshot_evidence_incomplete",
+            report["warnings"],
+        )
+
+    def test_cross_market_campaign_report_rejects_degraded_position_valuation(
+        self,
+    ) -> None:
+        account = self.service.ensure_account()
+        account_id = int(account["id"])
+        snapshot_date = date.today()
+        self.service.portfolio.record_trade(
+            account_id=account_id,
+            symbol="600519",
+            trade_date=snapshot_date,
+            side="buy",
+            quantity=100,
+            price=10.0,
+            fee=5.0,
+            market="cn",
+            currency="CNY",
+            note="source=cross_market_auto_entry",
+        )
+        acceptance = {
+            "ready": False,
+            "paper_observation": {
+                "campaign_active": True,
+                "campaign_started_at": (
+                    datetime.now(timezone.utc) - timedelta(hours=1)
+                ).isoformat(),
+                "campaign_account_id": account_id,
+                "current_account_id": account_id,
+                "account_matches_current": True,
+                "initial_equity": 100000.0,
+                "required_trading_days": 30,
+                "observed_trading_days": 1,
+                "remaining_trading_days": 29,
+                "degraded_trading_days": 0,
+                "observation_dates": [snapshot_date.isoformat()],
+                "session_results": [{
+                    "session_date": snapshot_date.isoformat(),
+                    "evidence_status": "ready",
+                    "fully_evidenced": True,
+                }],
+            },
+        }
+
+        with patch(
+            "src.services.portfolio_service.PortfolioService."
+            "_fetch_realtime_position_price",
+            return_value=(None, None),
+        ):
+            self.service.portfolio.get_portfolio_snapshot(
+                account_id=account_id,
+                as_of=snapshot_date,
+                persist=True,
+            )
+            with DatabaseManager.get_instance().get_session() as session:
+                session.execute(
+                    text(
+                        f"UPDATE {PortfolioDailySnapshot.__tablename__} "
+                        "SET updated_at = :updated_at "
+                        "WHERE account_id = :account_id "
+                        "AND snapshot_date = :snapshot_date"
+                    ),
+                    {
+                        "updated_at": datetime.combine(
+                            snapshot_date,
+                            datetime.min.time(),
+                        ).replace(hour=15, minute=5),
+                        "account_id": account_id,
+                        "snapshot_date": snapshot_date,
+                    },
+                )
+                session.commit()
+            report = self.service.get_cross_market_campaign_report(acceptance)
+
+        coverage = report["performance"]["daily_snapshot_coverage"]
+        self.assertEqual(coverage["covered_trading_days"], 0)
+        self.assertEqual(coverage["invalid_valuation_trading_days"], 1)
+        self.assertEqual(
+            coverage["invalid_valuation_dates"],
+            [snapshot_date.isoformat()],
+        )
+        point = report["performance"]["equity_curve"][-1]
+        self.assertFalse(point["valuation_ready"])
+        self.assertIn(
+            "position_price_unavailable:600519",
+            point["valuation_issues"],
+        )
+        self.assertIn(
+            "campaign_daily_snapshot_evidence_incomplete",
+            report["warnings"],
+        )
+
+    def test_cross_market_campaign_report_compacts_formal_decision_audit(self) -> None:
+        account = self.service.ensure_account()
+        account_id = int(account["id"])
+        self.service.update_settings({
+            "account_id": account_id,
+            "auto_strategy": CROSS_MARKET_STRATEGY_ID,
+            "auto_execution_mode": "vnpy_paper",
+        })
+        settings = self.service.get_settings()
+        run = self.service.agent_repo.create_run(
+            run_uid="campaign-decision-audit-run",
+            trigger_source="vnpy_paper_auto",
+            strategy=CROSS_MARKET_STRATEGY_ID,
+            market="cn",
+            settings={},
+            diagnostics={},
+        )
+        candidate = {
+            "code": "300260",
+            "name": "integration candidate",
+            "score": 82.45,
+            "price": 64.24,
+            "data_quality": "partial",
+            "_cross_market_prefilter_theme": "gold",
+            "_cross_market_source_theme": "gold",
+        }
+        order = self.service._skipped_order(
+            symbol="300260",
+            side="buy",
+            price=64.24,
+            reason="cn_extreme_low_open_buy_blocked",
+            raw={
+                "cross_market_strategy": {
+                    "strategy_id": CROSS_MARKET_STRATEGY_ID,
+                    "theme": "other",
+                },
+            },
+        )
+        self.service._record_agent_decision(
+            run_id=int(run["id"]),
+            sequence=1,
+            candidate=candidate,
+            symbol="300260",
+            settings=settings,
+            action="skip",
+            order=order,
+            reason="cn_extreme_low_open_buy_blocked",
+            risk_flags=["cn_extreme_low_open_buy_blocked"],
+        )
+        acceptance = {
+            "ready": False,
+            "paper_observation": {
+                "campaign_active": True,
+                "campaign_started_at": (
+                    datetime.now(timezone.utc) - timedelta(minutes=1)
+                ).isoformat(),
+                "campaign_account_id": account_id,
+                "current_account_id": account_id,
+                "account_matches_current": True,
+                "initial_equity": 100000.0,
+                "required_trading_days": 30,
+                "remaining_trading_days": 29,
+                "degraded_trading_days": 0,
+                "observation_dates": [],
+                "session_results": [{
+                    "session_date": date.today().isoformat(),
+                    "evidence_status": "ready",
+                    "missing_requirements": [],
+                    "formal_execution": {
+                        "observed": True,
+                        "run_id": int(run["id"]),
+                        "run_uid": run["run_uid"],
+                        "run_status": "completed",
+                        "execution_mode": "vnpy_paper",
+                        "candidate_count": 1,
+                        "planned_count": 0,
+                        "submitted_count": 0,
+                        "skipped_count": 1,
+                    },
+                }],
+            },
+        }
+
+        report = self.service.get_cross_market_campaign_report(acceptance)
+
+        metrics = report["decision_metrics"]
+        self.assertEqual(metrics["coverage_pct"], 100.0)
+        self.assertEqual(metrics["decision_count"], 1)
+        self.assertEqual(metrics["action_counts"], {"skip": 1})
+        self.assertEqual(metrics["status_counts"], {"skipped": 1})
+        self.assertEqual(
+            metrics["reason_counts"],
+            {"cn_extreme_low_open_buy_blocked": 1},
+        )
+        self.assertEqual(metrics["theme_counts"], {"other": 1})
+        self.assertEqual(metrics["theme_reclassification_count"], 1)
+        decision = report["decision_audit"][0]["decisions"][0]
+        self.assertEqual(decision["symbol"], "300260")
+        self.assertEqual(decision["theme"], "other")
+        self.assertEqual(decision["prefilter_theme"], "gold")
+        self.assertTrue(decision["theme_reclassified"])
+        self.assertEqual(decision["data_quality"], "partial")
+        self.assertEqual(
+            decision["trade_plan"]["skip_reason"],
+            "cn_extreme_low_open_buy_blocked",
+        )
+
+        missing = self.service._cross_market_campaign_decision_audit({
+            "session_results": [{
+                "session_date": date.today().isoformat(),
+                "formal_execution": {
+                    "observed": True,
+                    "run_uid": "missing-formal-run",
+                },
+            }],
+        })
+        self.assertEqual(missing["metrics"]["coverage_pct"], 0.0)
+        self.assertEqual(missing["metrics"]["missing_formal_run_count"], 1)
+        self.assertEqual(
+            missing["sessions"][0]["detail_status"],
+            "unavailable",
+        )
+
+    def test_cross_market_final_report_fails_closed_without_closing_snapshot(self) -> None:
+        account = self.service.ensure_account()
+        account_id = int(account["id"])
+        completion_date = date.today() - timedelta(days=1)
+        missing_date = completion_date - timedelta(days=1)
+        self.service.portfolio.get_portfolio_snapshot(
+            account_id=account_id,
+            as_of=missing_date,
+            persist=True,
+        )
+        self.service.portfolio.get_portfolio_snapshot(
+            account_id=account_id,
+            as_of=completion_date,
+            persist=True,
+        )
+        with DatabaseManager.get_instance().get_session() as session:
+            session.execute(
+                text(
+                    f"UPDATE {PortfolioDailySnapshot.__tablename__} "
+                    "SET updated_at = :updated_at "
+                    "WHERE account_id = :account_id "
+                    "AND snapshot_date = :snapshot_date"
+                ),
+                {
+                    "updated_at": datetime.combine(
+                        missing_date,
+                        datetime.min.time(),
+                    ).replace(hour=9, minute=35),
+                    "account_id": account_id,
+                    "snapshot_date": missing_date,
+                },
+            )
+            session.execute(
+                text(
+                    f"UPDATE {PortfolioDailySnapshot.__tablename__} "
+                    "SET updated_at = :updated_at "
+                    "WHERE account_id = :account_id "
+                    "AND snapshot_date = :snapshot_date"
+                ),
+                {
+                    "updated_at": datetime.combine(
+                        completion_date,
+                        datetime.min.time(),
+                    ).replace(hour=15),
+                    "account_id": account_id,
+                    "snapshot_date": completion_date,
+                },
+            )
+            session.commit()
+        acceptance = {
+            "ready": True,
+            "paper_observation": {
+                "campaign_active": True,
+                "campaign_started_at": (
+                    datetime.combine(
+                        missing_date - timedelta(days=1),
+                        datetime.min.time(),
+                        tzinfo=timezone.utc,
+                    )
+                ).isoformat(),
+                "campaign_account_id": account_id,
+                "current_account_id": account_id,
+                "account_matches_current": True,
+                "initial_equity": 100000.0,
+                "required_trading_days": 30,
+                "fully_evidenced_trading_days": 30,
+                "remaining_trading_days": 0,
+                "degraded_trading_days": 0,
+                "observation_dates": [
+                    missing_date.isoformat(),
+                    completion_date.isoformat(),
+                ],
+                "completion_session_date": completion_date.isoformat(),
+                "ready": True,
+            },
+        }
+
+        report = self.service.get_cross_market_campaign_report(acceptance)
+
+        self.assertFalse(report["is_final"])
+        self.assertEqual(report["report_status"], "execution_evidence_incomplete")
+        self.assertIn(
+            "campaign_daily_snapshot_evidence_incomplete",
+            report["warnings"],
+        )
+        self.assertEqual(
+            report["performance"]["daily_snapshot_coverage"]["missing_dates"],
+            [],
+        )
+        self.assertEqual(
+            report["performance"]["daily_snapshot_coverage"]["non_closing_dates"],
+            [missing_date.isoformat()],
+        )
 
     def test_trade_plan_recovery_summary_flags_stale_and_retryable_plans(self) -> None:
         run = self.service.agent_repo.create_run(
@@ -2445,6 +8593,75 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         )["items"]
         self.assertEqual(len(resolved), 1)
         self.assertEqual(resolved[0]["reason"], "consecutive_loss_cooldown_elapsed")
+
+    def test_cross_market_consecutive_loss_cooldown_uses_three_cn_trading_days(self) -> None:
+        settings = self.service._apply_cross_market_strategy_settings(
+            replace(
+                self.service.get_settings(),
+                auto_strategy=CROSS_MARKET_STRATEGY_ID,
+                auto_consecutive_loss_limit=3,
+            )
+        )
+        shanghai = timezone(timedelta(hours=8))
+        triggered_at = datetime(2026, 7, 24, 14, 0, tzinfo=shanghai)
+        performance = {
+            "trade_metrics": {
+                "current_consecutive_loss_count": 3,
+                "max_consecutive_loss_count": 3,
+                "last_closed_trade_id": 7,
+                "last_closed_trade_at": triggered_at.isoformat(),
+                "last_closed_trade_pnl": -100.0,
+            },
+        }
+
+        def weekday_open(_market, value):
+            return value.weekday() < 5
+
+        with patch.object(
+            self.service,
+            "_paper_trade_performance",
+            return_value=performance,
+        ), patch(
+            "src.services.vnpy_paper_trading_service.trading_calendar.is_market_open",
+            side_effect=weekday_open,
+        ), patch.object(
+            self.service,
+            "_now_utc",
+            return_value=datetime(2026, 7, 29, 10, 0, tzinfo=shanghai).astimezone(timezone.utc),
+        ):
+            cooling = self.service._consecutive_loss_diagnostics(
+                settings=settings,
+                account={"id": 1},
+                evaluate=False,
+            )
+
+        self.assertEqual(cooling["cooldown_basis"], "cn_trading_days")
+        self.assertEqual(cooling["cooldown_trading_days"], 3)
+        self.assertEqual(cooling["status"], "cooling_down")
+        self.assertEqual(
+            self.service._parse_utc_datetime(cooling["recover_at"]),
+            datetime(2026, 7, 30, 0, 0, tzinfo=shanghai).astimezone(timezone.utc),
+        )
+
+        with patch.object(
+            self.service,
+            "_paper_trade_performance",
+            return_value=performance,
+        ), patch(
+            "src.services.vnpy_paper_trading_service.trading_calendar.is_market_open",
+            side_effect=weekday_open,
+        ), patch.object(
+            self.service,
+            "_now_utc",
+            return_value=datetime(2026, 7, 30, 10, 0, tzinfo=shanghai).astimezone(timezone.utc),
+        ):
+            recovered = self.service._consecutive_loss_diagnostics(
+                settings=settings,
+                account={"id": 1},
+                evaluate=False,
+            )
+        self.assertEqual(recovered["status"], "cooldown_elapsed")
+        self.assertFalse(recovered["guard_blocked"])
 
     def test_consecutive_loss_guard_resets_after_profitable_close(self) -> None:
         self.service.update_settings(
@@ -3447,6 +9664,65 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertTrue(repeated_status["open"])
         self.assertIn(result["agent_run_uid"], triggers[0]["diagnostics"])
 
+    def test_cross_market_read_only_observation_bypasses_failure_fuse(self) -> None:
+        self.service.update_settings(
+            {
+                "auto_trade_enabled": True,
+                "auto_trade_time_gate_enabled": False,
+                "auto_strategy": CROSS_MARKET_STRATEGY_ID,
+                "auto_market": "cn",
+                "auto_failure_fuse_enabled": True,
+                "auto_failure_fuse_threshold": 2,
+            }
+        )
+        for index in range(2):
+            run = self.service.agent_repo.create_run(
+                run_uid=f"failed-observation-{index}",
+                trigger_source=CROSS_MARKET_OBSERVATION_TRIGGER_SOURCE,
+                strategy=CROSS_MARKET_STRATEGY_ID,
+                market="cn",
+                settings={"auto_failure_fuse_enabled": True},
+                diagnostics={"stage": "alphasift_screen"},
+            )
+            self.service.agent_repo.complete_run(
+                run_id=int(run["id"]),
+                status="failed",
+                candidate_count=0,
+                planned_count=0,
+                submitted_count=0,
+                skipped_count=0,
+                message_count=0,
+                error="alphasift_unavailable",
+                diagnostics={"stage": "alphasift_screen"},
+            )
+        fake_alphasift = MagicMock()
+        fake_alphasift.screen.return_value = {
+            "quality_status": "ok",
+            "candidates": [],
+            "warnings": [],
+            "source_errors": [],
+        }
+
+        with patch(
+            "src.services.vnpy_paper_trading_service.AlphaSiftService",
+            return_value=fake_alphasift,
+        ):
+            result = self.service.run_auto_trade_once(
+                execution_mode_override="dry_run",
+                ignore_auto_trade_enabled=True,
+                market_override="cn",
+                strategy_override=CROSS_MARKET_STRATEGY_ID,
+                max_results_override=3,
+                trigger_source_override=CROSS_MARKET_OBSERVATION_TRIGGER_SOURCE,
+            )
+
+        self.assertTrue(result["accepted"])
+        self.assertFalse(result["skipped"])
+        self.assertEqual(result["submitted_count"], 0)
+        audit = self.service.agent_repo.get_run_detail(result["agent_run_uid"])
+        self.assertFalse(audit["settings"]["auto_failure_fuse_enabled"])
+        self.assertNotIn("failure_fuse", audit["diagnostics"])
+
     def test_runtime_connection_event_reuses_alert_history_and_route(self) -> None:
         with patch.object(
             self.service,
@@ -4015,6 +10291,161 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertEqual(evidence["rationale"], "low valuation summary")
         self.assertEqual(evidence["evidence_fields"], ["final_score", "rationale"])
 
+    def test_candidate_strategy_evidence_keeps_bounded_cross_market_board_alerts(self) -> None:
+        settings = self.service.get_settings()
+
+        evidence = self.service._candidate_strategy_evidence(
+            {
+                "code": "688981",
+                "cross_market_strategy": {
+                    "strategy_id": CROSS_MARKET_STRATEGY_ID,
+                    "theme": "semiconductor",
+                    "entry_phase": "opening",
+                    "decision": {
+                        "action": "buy",
+                        "reason": "opening_linked_theme_entry",
+                        "score": 82.5,
+                        "target_position_pct": 50.0,
+                    },
+                    "board_technical": {
+                        "available": True,
+                        "supportive": True,
+                        "near_resistance": False,
+                        "breakout_confirmed": False,
+                        "support_score": 100.0,
+                        "pressure_boards": ["芯片"],
+                        "reason": "board_support_zone_confirmed",
+                        "observed_at": "2026-07-31T01:35:00+00:00",
+                        "primary_board": {
+                            "name": "半导体",
+                            "identifier": "BK1036",
+                            "current_level": 1012.5,
+                            "technical_windows": [5, 10, 20, 30, 60],
+                            "ma5": 1018.0,
+                            "ma10": 1020.0,
+                            "ma20": 1024.0,
+                            "ma30": 1022.0,
+                            "ma60": 1010.0,
+                            "support_5d": 1005.0,
+                            "support_10d": 1000.0,
+                            "support_20d": 995.0,
+                            "support_30d": 980.0,
+                            "support_60d": 960.0,
+                            "resistance_5d": 1040.0,
+                            "resistance_10d": 1060.0,
+                            "resistance_20d": 1080.0,
+                            "resistance_30d": 1100.0,
+                            "resistance_60d": 1120.0,
+                            "nearest_resistance": 1080.0,
+                            "nearest_resistance_window": 20,
+                            "resistance_distance_pct": 6.67,
+                            "support_windows": [60],
+                            "near_ma_support_windows": [60],
+                            "near_swing_support_windows": [],
+                            "support_resonance_count": 1,
+                            "multi_period_support": False,
+                            "near_ma60_support": True,
+                            "supportive": True,
+                        },
+                        "alerts": [
+                            {
+                                "board": "半导体",
+                                "kind": "near_60d_ma_support",
+                                "window_days": 60,
+                                "level": 1010.0,
+                                "distance_pct": 0.25,
+                                "unbounded": "must not leak",
+                            },
+                            *[
+                                {
+                                    "board": "半导体",
+                                    "kind": f"extra_support_{index}",
+                                    "window_days": index,
+                                    "level": 1000.0 + index,
+                                    "distance_pct": 0.1,
+                                }
+                                for index in range(11)
+                            ],
+                            {
+                                "board": "芯片",
+                                "kind": "near_board_resistance",
+                                "window_days": 5,
+                                "level": 1040.0,
+                                "distance_pct": 1.2,
+                            },
+                        ],
+                        "boards": [{"large": "raw payload must not be copied"}],
+                    },
+                    "rotation": {
+                        "available": True,
+                        "tailwind": True,
+                        "reason": "defensive_rotation_boards_near_resistance",
+                        "pressure_groups": ["bank", "liquor"],
+                        "references": [{"large": "raw payload must not be copied"}],
+                    },
+                },
+            },
+            settings,
+        )
+
+        self.assertEqual(evidence["status"], "detailed")
+        self.assertEqual(evidence["evidence_fields"], ["cross_market"])
+        cross_market = evidence["cross_market"]
+        self.assertEqual(cross_market["theme"], "semiconductor")
+        self.assertEqual(cross_market["entry_phase"], "opening")
+        self.assertEqual(
+            cross_market["board_technical"]["primary_board"]["name"],
+            "半导体",
+        )
+        self.assertTrue(
+            cross_market["board_technical"]["primary_board"][
+                "near_ma60_support"
+            ]
+        )
+        self.assertEqual(
+            cross_market["board_technical"]["primary_board"][
+                "technical_windows"
+            ],
+            [5, 10, 20, 30, 60],
+        )
+        self.assertEqual(
+            cross_market["board_technical"]["primary_board"]["ma5"],
+            1018.0,
+        )
+        bounded_alerts = cross_market["board_technical"]["alerts"]
+        self.assertEqual(len(bounded_alerts), 12)
+        self.assertEqual(
+            bounded_alerts[0],
+            {
+                "board": "芯片",
+                "kind": "near_board_resistance",
+                "window_days": 5,
+                "level": 1040.0,
+                "distance_pct": 1.2,
+            },
+        )
+        self.assertIn(
+            {
+                "board": "半导体",
+                "kind": "near_60d_ma_support",
+                "window_days": 60,
+                "level": 1010.0,
+                "distance_pct": 0.25,
+            },
+            bounded_alerts,
+        )
+        self.assertTrue(all("unbounded" not in alert for alert in bounded_alerts))
+        self.assertEqual(
+            cross_market["board_technical"]["pressure_boards"],
+            ["芯片"],
+        )
+        self.assertEqual(
+            cross_market["rotation"]["pressure_groups"],
+            ["bank", "liquor"],
+        )
+        self.assertNotIn("boards", cross_market["board_technical"])
+        self.assertNotIn("references", cross_market["rotation"])
+
     def test_auto_trade_llm_review_passes_candidate_before_plan(self) -> None:
         self.service.update_settings(
             {
@@ -4375,6 +10806,83 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertEqual(result["reason"], "vnpy_gateway_disconnected")
         self.assertEqual(main_engine.calls, [])
 
+    def test_cross_market_vnpy_submit_rejects_dsa_sim_fixed_delay_matcher(self) -> None:
+        installed = _install_fake_vnpy_modules()
+        main_engine = _FakeMainEngine()
+        main_engine.get_gateway = MagicMock(
+            return_value=types.SimpleNamespace(
+                get_state_snapshot=lambda: {
+                    "connected": True,
+                    "matching": {"mode": "fixed_delay_limit"},
+                }
+            )
+        )
+        service = VnpyPaperTradingService(
+            config_path=self.config_path,
+            vnpy_main_engine=main_engine,
+        )
+        service.update_settings({"vnpy_gateway_name": "DSA_SIM"})
+        try:
+            result = service._submit_vnpy_bridge_order(
+                settings=service.get_settings(),
+                account_id=1,
+                symbol="600519",
+                side="buy",
+                market="cn",
+                quantity=100,
+                price=10,
+                cash_amount=1000,
+                source="cross_market_auto_entry",
+            )
+        finally:
+            _restore_modules(installed)
+
+        self.assertFalse(result["accepted"])
+        self.assertEqual(
+            result["reason"],
+            "cross_market_next_minute_execution_unavailable",
+        )
+        self.assertEqual(
+            result["raw"]["vnpy_execution"]["reason"],
+            "dsa_sim_matching_mode_incompatible",
+        )
+        self.assertEqual(main_engine.calls, [])
+
+    def test_cross_market_vnpy_submit_accepts_dsa_sim_next_minute_matcher(self) -> None:
+        installed = _install_fake_vnpy_modules()
+        main_engine = _FakeMainEngine()
+        main_engine.get_gateway = MagicMock(
+            return_value=types.SimpleNamespace(
+                get_state_snapshot=lambda: {
+                    "connected": True,
+                    "matching": {"mode": "next_minute_vwap"},
+                }
+            )
+        )
+        service = VnpyPaperTradingService(
+            config_path=self.config_path,
+            vnpy_main_engine=main_engine,
+        )
+        service.update_settings({"vnpy_gateway_name": "DSA_SIM"})
+        try:
+            result = service._submit_vnpy_bridge_order(
+                settings=service.get_settings(),
+                account_id=1,
+                symbol="600519",
+                side="buy",
+                market="cn",
+                quantity=100,
+                price=10,
+                cash_amount=1000,
+                source="cross_market_auto_entry",
+            )
+        finally:
+            _restore_modules(installed)
+
+        self.assertTrue(result["accepted"])
+        self.assertEqual(result["status"], "submitted")
+        self.assertEqual(len(main_engine.calls), 1)
+
     @unittest.skipUnless(importlib.util.find_spec("vnpy"), "optional vn.py runtime is not installed")
     def test_builtin_simulated_gateway_fills_agent_plan_through_real_event_engine(self) -> None:
         from vnpy.event import EventEngine
@@ -4388,6 +10896,7 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         main_engine.connect(
             {
                 "fill_delay_ms": 100,
+                "matching_mode": "fixed_delay_limit",
                 "duplicate_trade_event_count": 2,
             },
             "DSA_SIM",
@@ -4459,6 +10968,723 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
             main_engine.close()
 
     @unittest.skipUnless(importlib.util.find_spec("vnpy"), "optional vn.py runtime is not installed")
+    def test_cross_market_next_minute_fill_closes_service_ledger_loop(self) -> None:
+        from vnpy.event import EventEngine
+        from vnpy.trader.engine import MainEngine
+
+        from src.services.vnpy_simulated_gateway import DsaSimulatedGateway
+
+        now = datetime.now(timezone.utc)
+        quotes = iter(
+            [
+                SimpleNamespace(
+                    provider_timestamp=(now - timedelta(seconds=60)).isoformat(),
+                    source="tencent",
+                    price=10.0,
+                    volume=100_000,
+                    amount=1_000_000,
+                    pre_close=9.8,
+                    bid_price=9.99,
+                    ask_price=10.01,
+                ),
+                SimpleNamespace(
+                    provider_timestamp=now.isoformat(),
+                    source="tencent",
+                    price=10.1,
+                    volume=110_000,
+                    amount=1_100_500,
+                    pre_close=9.8,
+                    bid_price=10.04,
+                    ask_price=10.06,
+                ),
+            ]
+        )
+        event_engine = EventEngine()
+        main_engine = MainEngine(event_engine)
+        main_engine.add_gateway(DsaSimulatedGateway, "DSA_SIM")
+        main_engine.connect(
+            {
+                "matching_mode": "next_minute_vwap",
+                "fill_delay_ms": 250,
+                "quote_provider": lambda _symbol: next(quotes),
+            },
+            "DSA_SIM",
+        )
+        service = VnpyPaperTradingService(
+            data_fetcher_manager=_FakeDataFetcherManager(price=10.0),
+            config_path=self.config_path,
+            vnpy_main_engine=main_engine,
+            vnpy_event_engine=event_engine,
+        )
+        bridge = service.attach_vnpy_event_engine(event_engine)
+        service.update_settings(
+            {
+                "auto_trade_enabled": True,
+                "auto_trade_time_gate_enabled": False,
+                "auto_execution_mode": "vnpy_paper",
+                "vnpy_gateway_name": "DSA_SIM",
+                "auto_strategy": CROSS_MARKET_STRATEGY_ID,
+                "auto_initial_cash": 100000,
+            }
+        )
+        settings = service.get_settings()
+        account = service.ensure_account(settings=settings)
+        run = service.agent_repo.create_run(
+            run_uid="cross-market-next-minute-loop",
+            trigger_source="vnpy_paper_auto",
+            strategy=CROSS_MARKET_STRATEGY_ID,
+            market="cn",
+            settings={},
+            diagnostics={},
+        )
+        candidate = {
+            "code": "600519",
+            "name": "integration stock",
+            "score": 80,
+            "price": 10.0,
+            "strategy_theme": "semiconductor",
+        }
+
+        try:
+            order = service._submit_vnpy_bridge_order(
+                settings=settings,
+                account_id=int(account["id"]),
+                symbol="600519",
+                side="buy",
+                market="cn",
+                quantity=100,
+                price=10.2,
+                cash_amount=1020,
+                source="cross_market_auto_entry",
+                raw={
+                    "cross_market_strategy": {
+                        "strategy_id": CROSS_MARKET_STRATEGY_ID,
+                        "strategy_theme": "semiconductor",
+                    },
+                    "execution_costs": {"instrument_type": "stock"},
+                },
+            )
+            self.assertTrue(order["accepted"])
+            service._record_agent_decision(
+                run_id=int(run["id"]),
+                sequence=1,
+                candidate=candidate,
+                symbol="600519",
+                settings=settings,
+                action="buy",
+                order=order,
+                reason=None,
+                risk_flags=[],
+            )
+
+            deadline = time.monotonic() + 5.0
+            detail = None
+            while time.monotonic() < deadline:
+                detail = service.agent_repo.get_run_detail(run["run_uid"])
+                plan_raw = (
+                    detail["trade_plans"][0].get("order_result", {}).get("raw", {})
+                    if detail and detail.get("trade_plans")
+                    else {}
+                )
+                fill_trades = (
+                    plan_raw.get("fill_sync", {}).get("trades", [])
+                    if isinstance(plan_raw.get("fill_sync"), dict)
+                    else []
+                )
+                if (
+                    detail
+                    and detail["trade_plans"][0]["status"] == "filled"
+                    and detail["decisions"][0]["status"] == "filled"
+                    and fill_trades
+                    and isinstance(fill_trades[0].get("execution"), dict)
+                ):
+                    break
+                time.sleep(0.05)
+
+            self.assertIsNotNone(detail)
+            assert detail is not None
+            self.assertEqual(detail["trade_plans"][0]["status"], "filled")
+            self.assertEqual(detail["decisions"][0]["status"], "filled")
+            trades = service.portfolio.list_trade_events(
+                account_id=int(account["id"]),
+                page=1,
+            )
+            self.assertEqual(len(trades["items"]), 1)
+            fill = trades["items"][0]
+            self.assertEqual(fill["symbol"], "600519")
+            self.assertEqual(fill["quantity"], 100.0)
+            self.assertGreater(fill["price"], 10.07)
+            self.assertGreaterEqual(fill["fee"], 5.0)
+            self.assertEqual(fill["tax"], 0.0)
+            snapshot = service.portfolio.get_portfolio_snapshot(
+                account_id=int(account["id"]),
+                persist=False,
+            )
+            account_snapshot = snapshot["accounts"][0]
+            self.assertEqual(account_snapshot["positions"][0]["quantity"], 100.0)
+            self.assertGreaterEqual(account_snapshot["fee_total"], 5.0)
+            report = service.get_cross_market_campaign_report({
+                "ready": False,
+                "paper_observation": {
+                    "campaign_active": True,
+                    "campaign_started_at": (
+                        now - timedelta(minutes=1)
+                    ).isoformat(),
+                    "campaign_account_id": int(account["id"]),
+                    "current_account_id": int(account["id"]),
+                    "account_matches_current": True,
+                    "initial_equity": 100000.0,
+                    "required_trading_days": 30,
+                    "remaining_trading_days": 29,
+                    "degraded_trading_days": 0,
+                },
+            })
+            self.assertIn(
+                "execution",
+                report["transactions"][0],
+                msg=(
+                    f"detail_plan={detail['trade_plans'][0]!r}; "
+                    f"listed_plans={service.agent_repo.list_trade_plans(limit=10)!r}; "
+                    f"report_transaction={report['transactions'][0]!r}"
+                ),
+            )
+            transaction_execution = report["transactions"][0]["execution"]
+            self.assertEqual(transaction_execution["mode"], "next_minute_vwap")
+            self.assertEqual(transaction_execution["reference_price"], 10.05)
+            self.assertGreater(transaction_execution["actual_slippage_bps"], 0.0)
+            slippage = report["performance"]["slippage_metrics"]
+            self.assertEqual(slippage["covered_trade_count"], 1)
+            self.assertEqual(slippage["coverage_pct"], 100.0)
+            self.assertGreater(slippage["total_adverse_slippage_cost"], 0.0)
+            metrics = report["performance"]["trade_metrics"]
+            self.assertGreater(
+                metrics["total_all_in_trading_cost"],
+                metrics["total_transaction_cost"],
+            )
+            self.assertNotIn(
+                "campaign_trade_slippage_evidence_incomplete",
+                report["warnings"],
+            )
+        finally:
+            bridge.unregister()
+            main_engine.close()
+
+    @unittest.skipUnless(importlib.util.find_spec("vnpy"), "optional vn.py runtime is not installed")
+    def test_bse_next_minute_fill_closes_cn_service_ledger_loop(self) -> None:
+        from vnpy.event import EventEngine
+        from vnpy.trader.engine import MainEngine
+
+        from src.services.vnpy_simulated_gateway import DsaSimulatedGateway
+
+        now = datetime.now(timezone.utc)
+        quotes = iter(
+            [
+                SimpleNamespace(
+                    provider_timestamp=(now - timedelta(seconds=60)).isoformat(),
+                    source="tencent",
+                    price=10.0,
+                    volume=100_000,
+                    amount=1_000_000,
+                    pre_close=9.8,
+                    bid_price=9.99,
+                    ask_price=10.01,
+                ),
+                SimpleNamespace(
+                    provider_timestamp=now.isoformat(),
+                    source="tencent",
+                    price=10.1,
+                    volume=110_000,
+                    amount=1_100_500,
+                    pre_close=9.8,
+                    bid_price=10.04,
+                    ask_price=10.06,
+                ),
+            ]
+        )
+        event_engine = EventEngine()
+        main_engine = MainEngine(event_engine)
+        main_engine.add_gateway(DsaSimulatedGateway, "DSA_SIM")
+        main_engine.connect(
+            {
+                "matching_mode": "next_minute_vwap",
+                "fill_delay_ms": 250,
+                "quote_provider": lambda _symbol: next(quotes),
+            },
+            "DSA_SIM",
+        )
+        service = VnpyPaperTradingService(
+            data_fetcher_manager=_FakeDataFetcherManager(price=10.0),
+            config_path=self.config_path,
+            vnpy_main_engine=main_engine,
+            vnpy_event_engine=event_engine,
+        )
+        bridge = service.attach_vnpy_event_engine(event_engine)
+        service.update_settings(
+            {
+                "auto_trade_enabled": True,
+                "auto_trade_time_gate_enabled": False,
+                "auto_execution_mode": "vnpy_paper",
+                "vnpy_gateway_name": "DSA_SIM",
+                "auto_strategy": CROSS_MARKET_STRATEGY_ID,
+                "auto_initial_cash": 100000,
+            }
+        )
+        settings = service.get_settings()
+        account = service.ensure_account(settings=settings)
+        run = service.agent_repo.create_run(
+            run_uid="cross-market-bse-next-minute-loop",
+            trigger_source="vnpy_paper_auto",
+            strategy=CROSS_MARKET_STRATEGY_ID,
+            market="cn",
+            settings={},
+            diagnostics={},
+        )
+        candidate = {
+            "code": "920045",
+            "name": "bse integration stock",
+            "score": 80,
+            "price": 10.0,
+            "strategy_theme": "cpo",
+        }
+
+        try:
+            order = service._submit_vnpy_bridge_order(
+                settings=settings,
+                account_id=int(account["id"]),
+                symbol="920045",
+                side="buy",
+                market="cn",
+                quantity=105,
+                price=10.2,
+                cash_amount=1071,
+                source="cross_market_auto_entry",
+                raw={
+                    "cross_market_strategy": {
+                        "strategy_id": CROSS_MARKET_STRATEGY_ID,
+                        "strategy_theme": "cpo",
+                    },
+                    "execution_costs": {"instrument_type": "stock"},
+                },
+            )
+            self.assertTrue(order["accepted"])
+            self.assertEqual(order["raw"]["order_request_payload"]["exchange"], "BSE")
+            service._record_agent_decision(
+                run_id=int(run["id"]),
+                sequence=1,
+                candidate=candidate,
+                symbol="920045",
+                settings=settings,
+                action="buy",
+                order=order,
+                reason=None,
+                risk_flags=[],
+            )
+
+            deadline = time.monotonic() + 5.0
+            detail = None
+            trades = {"items": []}
+            while time.monotonic() < deadline:
+                detail = service.agent_repo.get_run_detail(run["run_uid"])
+                trades = service.portfolio.list_trade_events(
+                    account_id=int(account["id"]),
+                    page=1,
+                )
+                if (
+                    detail
+                    and detail["trade_plans"][0]["status"] == "filled"
+                    and trades["items"]
+                ):
+                    break
+                time.sleep(0.05)
+
+            self.assertIsNotNone(detail)
+            assert detail is not None
+            self.assertEqual(detail["trade_plans"][0]["status"], "filled")
+            self.assertEqual(detail["decisions"][0]["status"], "filled")
+            self.assertEqual(len(trades["items"]), 1)
+            fill = trades["items"][0]
+            self.assertEqual(fill["symbol"], "920045")
+            self.assertEqual(fill["market"], "cn")
+            self.assertEqual(fill["quantity"], 105.0)
+            self.assertGreaterEqual(fill["fee"], 5.0)
+            snapshot = service.portfolio.get_portfolio_snapshot(
+                account_id=int(account["id"]),
+                persist=False,
+            )
+            position = snapshot["accounts"][0]["positions"][0]
+            self.assertEqual(position["symbol"], "920045")
+            self.assertEqual(position["market"], "cn")
+            self.assertEqual(position["quantity"], 105.0)
+        finally:
+            bridge.unregister()
+            main_engine.close()
+
+    @unittest.skipUnless(importlib.util.find_spec("vnpy"), "optional vn.py runtime is not installed")
+    def test_cross_market_two_cost_reserved_slots_fill_without_cash_deficit(self) -> None:
+        from vnpy.event import EventEngine
+        from vnpy.trader.engine import MainEngine
+
+        from src.services.vnpy_simulated_gateway import DsaSimulatedGateway
+
+        now = datetime.now(timezone.utc)
+
+        def quote_pair():
+            return iter(
+                [
+                    SimpleNamespace(
+                        provider_timestamp=(now - timedelta(seconds=60)).isoformat(),
+                        source="tencent",
+                        price=10.0,
+                        volume=100_000,
+                        amount=1_000_000,
+                        pre_close=9.8,
+                        bid_price=9.99,
+                        ask_price=10.01,
+                    ),
+                    SimpleNamespace(
+                        provider_timestamp=now.isoformat(),
+                        source="tencent",
+                        price=10.0,
+                        volume=200_000,
+                        amount=2_000_000,
+                        pre_close=9.8,
+                        bid_price=9.99,
+                        ask_price=10.01,
+                    ),
+                ]
+            )
+
+        quotes = {
+            "600777": quote_pair(),
+            "600778": quote_pair(),
+        }
+        event_engine = EventEngine()
+        main_engine = MainEngine(event_engine)
+        main_engine.add_gateway(DsaSimulatedGateway, "DSA_SIM")
+        main_engine.connect(
+            {
+                "initial_balance": 100000,
+                "matching_mode": "next_minute_vwap",
+                "fill_delay_ms": 250,
+                "quote_provider": lambda symbol: next(quotes[symbol]),
+            },
+            "DSA_SIM",
+        )
+        service = VnpyPaperTradingService(
+            data_fetcher_manager=_FakeDataFetcherManager(price=10.0),
+            config_path=self.config_path,
+            vnpy_main_engine=main_engine,
+            vnpy_event_engine=event_engine,
+        )
+        bridge = service.attach_vnpy_event_engine(event_engine)
+        service.update_settings(
+            {
+                "initial_cash": 100000,
+                "auto_trade_enabled": True,
+                "auto_trade_time_gate_enabled": False,
+                "auto_execution_mode": "vnpy_paper",
+                "vnpy_gateway_name": "DSA_SIM",
+                "auto_strategy": CROSS_MARKET_STRATEGY_ID,
+            }
+        )
+        settings = service._apply_cross_market_strategy_settings(service.get_settings())
+        account = service.ensure_account(settings=settings)
+        run = service.agent_repo.create_run(
+            run_uid="cross-market-two-cost-reserved-slots",
+            trigger_source="vnpy_paper_auto",
+            strategy=CROSS_MARKET_STRATEGY_ID,
+            market="cn",
+            settings={},
+            diagnostics={},
+        )
+        fee_schedule = TradeFeeSchedule()
+        signal_notional_cap = fee_schedule.max_buy_notional_for_cash_budget(
+            cash_budget=50000,
+            instrument_type="stock",
+        )
+
+        try:
+            for sequence, symbol in enumerate(("600777", "600778"), start=1):
+                quantity = service._resolve_order_quantity(
+                    symbol=symbol,
+                    market="cn",
+                    side="buy",
+                    quantity=None,
+                    cash_amount=signal_notional_cap,
+                    price=10.0,
+                )
+                self.assertEqual(quantity, 4999.0)
+                candidate = {
+                    "code": symbol,
+                    "name": f"integration stock {sequence}",
+                    "score": 80 - sequence,
+                    "price": 10.0,
+                    "strategy_theme": "cpo",
+                }
+                order = service._submit_vnpy_bridge_order(
+                    settings=settings,
+                    account_id=int(account["id"]),
+                    symbol=symbol,
+                    side="buy",
+                    market="cn",
+                    quantity=quantity,
+                    price=10.0,
+                    cash_amount=quantity * 10.0,
+                    source="cross_market_auto_entry",
+                    raw={
+                        "cross_market_strategy": {
+                            "strategy_id": CROSS_MARKET_STRATEGY_ID,
+                            "strategy_theme": "cpo",
+                        },
+                        "cross_market_execution_budget": {
+                            "cash_allocation_cap": 50000.0,
+                            "signal_notional_cap": signal_notional_cap,
+                        },
+                        "execution_costs": {"instrument_type": "stock"},
+                    },
+                )
+                self.assertTrue(order["accepted"])
+                service._record_agent_decision(
+                    run_id=int(run["id"]),
+                    sequence=sequence,
+                    candidate=candidate,
+                    symbol=symbol,
+                    settings=settings,
+                    action="buy",
+                    order=order,
+                    reason=None,
+                    risk_flags=[],
+                )
+
+            deadline = time.monotonic() + 5.0
+            detail = None
+            while time.monotonic() < deadline:
+                detail = service.agent_repo.get_run_detail(run["run_uid"])
+                if (
+                    detail
+                    and len(detail["trade_plans"]) == 2
+                    and all(item["status"] == "filled" for item in detail["trade_plans"])
+                    and all(item["status"] == "filled" for item in detail["decisions"])
+                ):
+                    break
+                time.sleep(0.05)
+
+            self.assertIsNotNone(detail)
+            assert detail is not None
+            self.assertEqual(
+                [item["status"] for item in detail["trade_plans"]],
+                ["filled", "filled"],
+            )
+            trades = service.portfolio.list_trade_events(
+                account_id=int(account["id"]),
+                page=1,
+            )["items"]
+            self.assertEqual(len(trades), 2)
+            self.assertEqual({item["symbol"] for item in trades}, {"600777", "600778"})
+            self.assertTrue(all(item["quantity"] == 4999.0 for item in trades))
+            self.assertTrue(all(item["fee"] > 5.0 for item in trades))
+            snapshot = service.portfolio.get_portfolio_snapshot(
+                account_id=int(account["id"]),
+                persist=False,
+            )["accounts"][0]
+            expected_fees = sum(float(item["fee"]) for item in trades)
+            self.assertGreaterEqual(snapshot["total_cash"], 0.0)
+            self.assertAlmostEqual(
+                snapshot["total_cash"],
+                100000.0 - 2 * 49990.0 - expected_fees,
+                places=6,
+            )
+            self.assertAlmostEqual(snapshot["fee_total"], expected_fees, places=6)
+        finally:
+            bridge.unregister()
+            main_engine.close()
+
+    @unittest.skipUnless(importlib.util.find_spec("vnpy"), "optional vn.py runtime is not installed")
+    def test_cross_market_next_minute_sell_books_tax_and_t_plus_one_position(self) -> None:
+        from vnpy.event import EventEngine
+        from vnpy.trader.engine import MainEngine
+
+        from src.services.vnpy_simulated_gateway import DsaSimulatedGateway
+
+        now = datetime.now(timezone.utc)
+        quotes = iter(
+            [
+                SimpleNamespace(
+                    provider_timestamp=(now - timedelta(seconds=60)).isoformat(),
+                    source="tencent",
+                    price=10.0,
+                    volume=100_000,
+                    amount=1_000_000,
+                    pre_close=10.0,
+                    bid_price=9.99,
+                    ask_price=10.01,
+                ),
+                SimpleNamespace(
+                    provider_timestamp=now.isoformat(),
+                    source="tencent",
+                    price=9.9,
+                    volume=110_000,
+                    amount=1_099_500,
+                    pre_close=10.0,
+                    bid_price=9.89,
+                    ask_price=9.91,
+                ),
+            ]
+        )
+        event_engine = EventEngine()
+        main_engine = MainEngine(event_engine)
+        main_engine.add_gateway(DsaSimulatedGateway, "DSA_SIM")
+        main_engine.connect(
+            {
+                "matching_mode": "next_minute_vwap",
+                "fill_delay_ms": 250,
+                "quote_provider": lambda _symbol: next(quotes),
+            },
+            "DSA_SIM",
+        )
+        service = VnpyPaperTradingService(
+            data_fetcher_manager=_FakeDataFetcherManager(price=10.0),
+            config_path=self.config_path,
+            vnpy_main_engine=main_engine,
+            vnpy_event_engine=event_engine,
+        )
+        bridge = service.attach_vnpy_event_engine(event_engine)
+        service.update_settings(
+            {
+                "auto_trade_enabled": True,
+                "auto_trade_time_gate_enabled": False,
+                "auto_execution_mode": "vnpy_paper",
+                "vnpy_gateway_name": "DSA_SIM",
+                "auto_strategy": CROSS_MARKET_STRATEGY_ID,
+                "auto_initial_cash": 100000,
+            }
+        )
+        settings = service.get_settings()
+        account = service.ensure_account(settings=settings)
+        account_id = int(account["id"])
+        service.portfolio.record_trade(
+            account_id=account_id,
+            symbol="600519",
+            trade_date=date.today() - timedelta(days=7),
+            side="buy",
+            quantity=100,
+            price=9.5,
+            market="cn",
+            currency="CNY",
+            trade_uid="cross-market-prior-position",
+            dedup_hash=service._dedup_hash("cross-market-prior-position"),
+            note="source=cross_market_auto_entry",
+        )
+        self.assertEqual(
+            service.portfolio.get_sellable_quantity(
+                account_id=account_id,
+                symbol="600519",
+                trade_date=date.today(),
+                market="cn",
+            ),
+            100.0,
+        )
+        run = service.agent_repo.create_run(
+            run_uid="cross-market-next-minute-sell-loop",
+            trigger_source="cross_market_intraday_sell_monitor",
+            strategy=CROSS_MARKET_STRATEGY_ID,
+            market="cn",
+            settings={},
+            diagnostics={},
+        )
+        candidate = {
+            "code": "600519",
+            "name": "integration stock",
+            "score": -80,
+            "price": 10.0,
+            "position_quantity": 100.0,
+            "sellable_quantity": 100.0,
+            "strategy_theme": "semiconductor",
+        }
+
+        try:
+            order = service._submit_vnpy_bridge_order(
+                settings=settings,
+                account_id=account_id,
+                symbol="600519",
+                side="sell",
+                market="cn",
+                quantity=100,
+                price=9.8,
+                cash_amount=980,
+                source="cross_market_auto_exit",
+                raw={
+                    "cross_market_strategy": {
+                        "strategy_id": CROSS_MARKET_STRATEGY_ID,
+                        "strategy_theme": "semiconductor",
+                    },
+                    "execution_costs": {"instrument_type": "stock"},
+                },
+            )
+            self.assertTrue(order["accepted"])
+            service._record_agent_decision(
+                run_id=int(run["id"]),
+                sequence=1,
+                candidate=candidate,
+                symbol="600519",
+                settings=settings,
+                action="sell",
+                order=order,
+                reason=None,
+                risk_flags=[],
+                side="sell",
+            )
+
+            deadline = time.monotonic() + 5.0
+            detail = None
+            while time.monotonic() < deadline:
+                detail = service.agent_repo.get_run_detail(run["run_uid"])
+                if (
+                    detail
+                    and detail["trade_plans"][0]["status"] == "filled"
+                    and detail["decisions"][0]["status"] == "filled"
+                ):
+                    break
+                time.sleep(0.05)
+
+            self.assertIsNotNone(detail)
+            assert detail is not None
+            self.assertEqual(detail["trade_plans"][0]["status"], "filled")
+            self.assertEqual(detail["decisions"][0]["status"], "filled")
+            trades = service.portfolio.list_trade_events(account_id=account_id, page=1)
+            self.assertEqual(len(trades["items"]), 2)
+            fill = next(item for item in trades["items"] if item["side"] == "sell")
+            self.assertEqual(fill["quantity"], 100.0)
+            self.assertGreater(fill["price"], 9.8)
+            self.assertGreaterEqual(fill["fee"], 5.0)
+            self.assertGreater(fill["tax"], 0.0)
+            self.assertAlmostEqual(
+                fill["tax"],
+                fill["quantity"] * fill["price"] * 0.0005,
+                places=6,
+            )
+            self.assertEqual(
+                service.portfolio.get_sellable_quantity(
+                    account_id=account_id,
+                    symbol="600519",
+                    trade_date=date.today(),
+                    market="cn",
+                ),
+                0.0,
+            )
+            snapshot = service.portfolio.get_portfolio_snapshot(
+                account_id=account_id,
+                persist=False,
+            )
+            account_snapshot = snapshot["accounts"][0]
+            self.assertEqual(account_snapshot["positions"], [])
+            self.assertGreaterEqual(account_snapshot["fee_total"], 5.0)
+            self.assertGreater(account_snapshot["tax_total"], 0.0)
+        finally:
+            bridge.unregister()
+            main_engine.close()
+
+    @unittest.skipUnless(importlib.util.find_spec("vnpy"), "optional vn.py runtime is not installed")
     def test_builtin_simulated_gateway_rejection_fails_agent_plan_without_trade(self) -> None:
         from vnpy.event import EventEngine
         from vnpy.trader.engine import MainEngine
@@ -4471,6 +11697,7 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         main_engine.connect(
             {
                 "fill_delay_ms": 50,
+                "matching_mode": "fixed_delay_limit",
                 "reject_every_nth_order": 1,
             },
             "DSA_SIM",
@@ -4553,6 +11780,7 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         main_engine.connect(
             {
                 "fill_delay_ms": 50,
+                "matching_mode": "fixed_delay_limit",
                 "reject_every_nth_order": 2,
                 "duplicate_trade_event_count": 2,
             },
@@ -4671,6 +11899,7 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         main_engine.connect(
             {
                 "fill_delay_ms": 50,
+                "matching_mode": "fixed_delay_limit",
                 "duplicate_trade_event_count": 2,
             },
             "DSA_SIM",
@@ -5055,6 +12284,115 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
             callback["trade_id"],
         )
 
+    def test_vnpy_order_callback_waits_for_trade_sync_and_preserves_execution(self) -> None:
+        run = self.service.agent_repo.create_run(
+            run_uid="serialized-vnpy-callback-run",
+            trigger_source="vnpy_paper_auto",
+            strategy=CROSS_MARKET_STRATEGY_ID,
+            market="cn",
+            settings={},
+            diagnostics={},
+        )
+        self.service.agent_repo.record_trade_plan(
+            plan_uid="serialized-vnpy-callback-plan",
+            run_id=int(run["id"]),
+            decision_id=None,
+            symbol="600519",
+            market="cn",
+            side="buy",
+            status="submitted",
+            execution_mode="vnpy_paper",
+            planned_cash_amount=1_020,
+            planned_quantity=100,
+            planned_price=10.2,
+            submitted_quantity=100,
+            submitted_price=10.2,
+            order_result={
+                "status": "submitted",
+                "raw": {
+                    "vt_orderid": "DSA_SIM.SERIAL",
+                    "cross_market_strategy": {
+                        "strategy_id": CROSS_MARKET_STRATEGY_ID,
+                    },
+                    "execution_costs": {"instrument_type": "stock"},
+                },
+            },
+        )
+        trade_update_entered = threading.Event()
+        release_trade_update = threading.Event()
+        original_update = (
+            self.service.agent_repo.update_trade_plan_and_decision_execution
+        )
+        results: dict[str, object] = {}
+
+        def delayed_update(**kwargs):
+            if kwargs.get("status") == "filled":
+                trade_update_entered.set()
+                if not release_trade_update.wait(timeout=2):
+                    raise TimeoutError("trade update release was not signalled")
+            return original_update(**kwargs)
+
+        def sync_trade() -> None:
+            try:
+                results["trade"] = self.service.sync_vnpy_trade_callback(
+                    vt_orderid="DSA_SIM.SERIAL",
+                    vt_tradeid="DSA_SIM.SERIAL.T1",
+                    quantity=100,
+                    price=10.1,
+                    trade_date=date(2026, 7, 3),
+                    raw={
+                        "dsa_execution_mode": "next_minute_vwap",
+                        "dsa_reference_price": 10.05,
+                        "dsa_slippage_bps": 49.751244,
+                    },
+                )
+            except Exception as exc:  # noqa: BLE001 - surfaced in the main test thread.
+                results["trade_error"] = exc
+
+        def sync_order() -> None:
+            try:
+                results["order"] = self.service.sync_vnpy_order_callback(
+                    vt_orderid="DSA_SIM.SERIAL",
+                    status="alltraded",
+                    volume=100,
+                    traded=100,
+                    price=10.2,
+                    raw={"reconciled_from_main_engine": True},
+                )
+            except Exception as exc:  # noqa: BLE001 - surfaced in the main test thread.
+                results["order_error"] = exc
+
+        with patch.object(
+            self.service.agent_repo,
+            "update_trade_plan_and_decision_execution",
+            side_effect=delayed_update,
+        ):
+            trade_thread = threading.Thread(target=sync_trade)
+            order_thread = threading.Thread(target=sync_order)
+            trade_thread.start()
+            self.assertTrue(trade_update_entered.wait(timeout=2))
+            order_thread.start()
+            time.sleep(0.05)
+            self.assertTrue(order_thread.is_alive())
+            self.assertNotIn("order", results)
+            release_trade_update.set()
+            trade_thread.join(timeout=2)
+            order_thread.join(timeout=2)
+
+        self.assertFalse(trade_thread.is_alive())
+        self.assertFalse(order_thread.is_alive())
+        self.assertNotIn("trade_error", results)
+        self.assertNotIn("order_error", results)
+        self.assertEqual(results["trade"]["status"], "filled")
+        self.assertEqual(results["order"]["status"], "filled")
+        plan = self.service.agent_repo.get_trade_plan(
+            "serialized-vnpy-callback-plan"
+        )
+        assert plan is not None
+        fill = plan["order_result"]["raw"]["fill_sync"]["trades"][0]
+        self.assertEqual(fill["execution"]["mode"], "next_minute_vwap")
+        self.assertEqual(fill["execution"]["reference_price"], 10.05)
+
     def test_vnpy_trade_id_can_repeat_on_a_later_trade_date(self) -> None:
         account = self.service.ensure_account()
         account_id = int(account["id"])
@@ -5181,6 +12519,106 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         account_id = int(self.service.get_settings().account_id)
         trades = self.service.portfolio.list_trade_events(account_id=account_id, page=1)
         self.assertEqual(len(trades["items"]), 2)
+
+    def test_cross_market_vnpy_partial_fills_charge_order_level_minimum_commission(self) -> None:
+        run = self.service.agent_repo.create_run(
+            run_uid="cross-market-fee-run",
+            trigger_source="vnpy_paper_auto",
+            strategy=CROSS_MARKET_STRATEGY_ID,
+            market="cn",
+            settings={},
+            diagnostics={},
+        )
+        self.service.agent_repo.record_trade_plan(
+            plan_uid="cross-market-fee-plan",
+            run_id=int(run["id"]),
+            decision_id=None,
+            symbol="600519",
+            market="cn",
+            side="buy",
+            status="submitted",
+            execution_mode="vnpy_paper",
+            planned_cash_amount=25_000,
+            planned_quantity=2_500,
+            planned_price=10,
+            submitted_quantity=2_500,
+            submitted_price=10,
+            order_result={
+                "status": "submitted",
+                "raw": {
+                    "vt_orderid": "DSA_SIM.FEES",
+                    "cross_market_strategy": {
+                        "strategy_id": CROSS_MARKET_STRATEGY_ID,
+                    },
+                    "execution_costs": {"instrument_type": "stock"},
+                },
+            },
+        )
+
+        first = self.service.sync_vnpy_trade_callback(
+            vt_orderid="DSA_SIM.FEES",
+            vt_tradeid="DSA_SIM.FEES.T1",
+            quantity=1_000,
+            price=10,
+            trade_date=date(2026, 7, 6),
+        )
+        second = self.service.sync_vnpy_trade_callback(
+            vt_orderid="DSA_SIM.FEES",
+            vt_tradeid="DSA_SIM.FEES.T2",
+            quantity=1_500,
+            price=10,
+            trade_date=date(2026, 7, 6),
+        )
+
+        self.assertEqual(first["status"], "part_filled")
+        self.assertEqual(first["fee"], 5.1)
+        self.assertEqual(first["tax"], 0.0)
+        self.assertEqual(second["status"], "filled")
+        self.assertEqual(second["fee"], 5.25)
+        self.assertEqual(second["tax"], 0.0)
+        self.assertEqual(
+            [item["fee"] for item in second["raw"]["fill_sync"]["trades"]],
+            [5.1, 0.15],
+        )
+        self.assertEqual(second["net_cash_change"], -25_005.25)
+
+        self.service.agent_repo.record_trade_plan(
+            plan_uid="cross-market-sell-fee-plan",
+            run_id=int(run["id"]),
+            decision_id=None,
+            symbol="600519",
+            market="cn",
+            side="sell",
+            status="submitted",
+            execution_mode="vnpy_paper",
+            planned_cash_amount=10_000,
+            planned_quantity=1_000,
+            planned_price=10,
+            submitted_quantity=1_000,
+            submitted_price=10,
+            order_result={
+                "status": "submitted",
+                "raw": {
+                    "vt_orderid": "DSA_SIM.SELL.FEES",
+                    "cross_market_strategy": {
+                        "strategy_id": CROSS_MARKET_STRATEGY_ID,
+                    },
+                    "execution_costs": {"instrument_type": "stock"},
+                },
+            },
+        )
+        sold = self.service.sync_vnpy_trade_callback(
+            vt_orderid="DSA_SIM.SELL.FEES",
+            vt_tradeid="DSA_SIM.SELL.FEES.T1",
+            quantity=1_000,
+            price=10,
+            trade_date=date(2026, 7, 7),
+        )
+
+        self.assertEqual(sold["status"], "filled")
+        self.assertEqual(sold["fee"], 5.1)
+        self.assertEqual(sold["tax"], 5.0)
+        self.assertEqual(sold["net_cash_change"], 9_989.9)
 
     def test_cancelled_order_after_partial_fill_keeps_actual_fill_summary(self) -> None:
         run = self.service.agent_repo.create_run(
@@ -6063,6 +13501,169 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertEqual(refreshed["trade_plans"][0]["execution_mode"], "paper")
         self.assertEqual(refreshed["trade_plans"][0]["order_result"]["retry"]["attempt_count"], 1)
         self.assertEqual(refreshed["decisions"][0]["status"], "filled")
+
+    def test_completed_campaign_blocks_cross_market_trade_plan_retry(self) -> None:
+        self.service.ensure_account(settings=self.service.get_settings())
+        run = self.service.agent_repo.create_run(
+            run_uid="retry-completed-campaign-run",
+            trigger_source="vnpy_paper_auto",
+            strategy=CROSS_MARKET_STRATEGY_ID,
+            market="cn",
+            max_results=1,
+            cash_per_order=1200,
+            settings={"auto_execution_mode": "paper"},
+        )
+        decision = self.service.agent_repo.record_decision(
+            run_id=int(run["id"]),
+            sequence=1,
+            symbol="600519",
+            name="贵州茅台",
+            market="cn",
+            action="buy",
+            status="skipped",
+            reason="price_unavailable",
+            cash_amount=1200,
+            quantity=None,
+            price=10,
+        )
+        self.service.agent_repo.record_trade_plan(
+            plan_uid="retry-completed-campaign-plan",
+            run_id=int(run["id"]),
+            decision_id=int(decision["id"]),
+            symbol="600519",
+            name="贵州茅台",
+            market="cn",
+            side="buy",
+            status="skipped",
+            execution_mode="paper",
+            planned_cash_amount=1200,
+            planned_price=10,
+            skip_reason="price_unavailable",
+            order_result={
+                "status": "skipped",
+                "reason": "price_unavailable",
+                "raw": {"cross_market_strategy": {"theme": "memory"}},
+            },
+        )
+        self.service.agent_repo.complete_run(
+            run_id=int(run["id"]),
+            status="completed",
+            candidate_count=1,
+            planned_count=0,
+            submitted_count=0,
+            skipped_count=1,
+        )
+        guard = {
+            "block": True,
+            "reason": "paper_campaign_completed",
+            "completion_session_date": "2026-09-07",
+            "current_session_date": "2026-09-08",
+        }
+
+        with patch.object(
+            self.service,
+            "_cross_market_campaign_execution_guard",
+            return_value=guard,
+        ), patch.object(
+            self.service,
+            "_revalidate_cross_market_trade_plan",
+        ) as revalidate, patch.object(
+            self.service,
+            "submit_order",
+        ) as submit:
+            retried = self.service.retry_trade_plan("retry-completed-campaign-plan")
+
+        self.assertFalse(retried["accepted"])
+        self.assertEqual(retried["status"], "skipped")
+        self.assertEqual(retried["reason"], "paper_campaign_completed")
+        self.assertEqual(retried["quantity"], 0.0)
+        self.assertEqual(
+            retried["raw"]["cross_market_revalidation"]["campaign_guard"],
+            guard,
+        )
+        revalidate.assert_not_called()
+        submit.assert_not_called()
+
+        refreshed = self.service.agent_repo.get_trade_plan(
+            "retry-completed-campaign-plan"
+        )
+        self.assertIsNotNone(refreshed)
+        assert refreshed is not None
+        self.assertEqual(refreshed["status"], "skipped")
+        self.assertEqual(refreshed["skip_reason"], "paper_campaign_completed")
+        retry_due, retry_reason = self.service._auto_retry_due(refreshed)
+        self.assertFalse(retry_due)
+        self.assertEqual(retry_reason, "trade_plan_not_retryable")
+
+    def test_retry_trade_plan_rejects_plan_from_previous_account(self) -> None:
+        previous_account = self.service.ensure_account()
+        run = self.service.agent_repo.create_run(
+            run_uid="retry-previous-account-run",
+            trigger_source="vnpy_paper_auto",
+            strategy="dual_low",
+            market="cn",
+            settings={
+                "auto_execution_mode": "paper",
+                "account_id": previous_account["id"],
+            },
+        )
+        self.service.agent_repo.record_trade_plan(
+            plan_uid="retry-previous-account-plan",
+            run_id=int(run["id"]),
+            decision_id=None,
+            symbol="600519",
+            name="贵州茅台",
+            market="cn",
+            side="buy",
+            status="skipped",
+            execution_mode="paper",
+            planned_cash_amount=1200,
+            planned_price=10,
+            skip_reason="price_unavailable",
+        )
+        reset = self.service.reset_account(
+            include_snapshot=False,
+            include_recent_trades=False,
+        )
+        self.assertNotEqual(reset["account"]["id"], previous_account["id"])
+
+        with self.assertRaisesRegex(ValueError, "trade_plan_account_scope_mismatch"):
+            self.service.retry_trade_plan("retry-previous-account-plan")
+
+    def test_auto_retry_scan_excludes_previous_account_runs(self) -> None:
+        previous_account = self.service.ensure_account()
+        run = self.service.agent_repo.create_run(
+            run_uid="auto-retry-previous-account-run",
+            trigger_source="vnpy_paper_auto",
+            strategy="dual_low",
+            market="cn",
+            settings={
+                "auto_execution_mode": "paper",
+                "account_id": previous_account["id"],
+            },
+        )
+        self.service.agent_repo.record_trade_plan(
+            plan_uid="auto-retry-previous-account-plan",
+            run_id=int(run["id"]),
+            decision_id=None,
+            symbol="600519",
+            name="贵州茅台",
+            market="cn",
+            side="buy",
+            status="failed",
+            execution_mode="paper",
+            planned_cash_amount=1200,
+            planned_price=10,
+            skip_reason="vnpy_bridge_submit_failed",
+        )
+        self.service.reset_account(
+            include_snapshot=False,
+            include_recent_trades=False,
+        )
+
+        candidates = self.service._auto_retry_candidate_trade_plans(scan_limit=20)
+
+        self.assertEqual(candidates, [])
 
     def test_retry_trade_plan_blocks_unrecoverable_skipped_reason(self) -> None:
         run = self.service.agent_repo.create_run(
@@ -8878,6 +16479,91 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertEqual(tasks[1]["interval_seconds"], 5 * 60)
         self.assertTrue(tasks[1]["run_immediately"])
 
+    def test_auto_trade_background_task_waits_for_transient_agent_lock(self) -> None:
+        fake_service = MagicMock()
+        fake_service.get_settings.return_value = VnpyPaperSettings(
+            enabled=True,
+            auto_trade_enabled=True,
+            auto_interval_minutes=5,
+            auto_trade_time_gate_enabled=False,
+        )
+        fake_service.run_auto_trade_once.return_value = {
+            "accepted": True,
+            "skipped": False,
+            "reason": None,
+            "submitted_count": 0,
+            "skipped_count": 0,
+        }
+        fake_lock = MagicMock()
+        fake_lock.acquire.return_value = True
+
+        with (
+            patch.dict(
+                os.environ,
+                {"DSA_AGENT_CALIBRATION_SHADOW_ENABLED": "false"},
+                clear=False,
+            ),
+            patch(
+                "src.services.vnpy_paper_trading_service.VnpyPaperTradingService",
+                return_value=fake_service,
+            ),
+            patch(
+                "src.services.vnpy_paper_trading_service._AUTO_AGENT_RUN_LOCK",
+                fake_lock,
+            ),
+        ):
+            tasks = build_vnpy_paper_trading_background_tasks()
+            result = next(
+                task for task in tasks if task["name"] == "vnpy_paper_auto_trade"
+            )["task"]()
+
+        self.assertTrue(result["accepted"])
+        fake_lock.acquire.assert_called_once_with(
+            timeout=AUTO_TRADE_RUN_LOCK_WAIT_SECONDS
+        )
+        fake_lock.release.assert_called_once_with()
+        fake_service.run_auto_trade_once.assert_called_once_with()
+
+    def test_auto_trade_background_task_reports_lock_wait_timeout(self) -> None:
+        fake_service = MagicMock()
+        fake_service.get_settings.return_value = VnpyPaperSettings(
+            enabled=True,
+            auto_trade_enabled=True,
+            auto_interval_minutes=5,
+            auto_trade_time_gate_enabled=False,
+        )
+        fake_lock = MagicMock()
+        fake_lock.acquire.return_value = False
+
+        with (
+            patch.dict(
+                os.environ,
+                {"DSA_AGENT_CALIBRATION_SHADOW_ENABLED": "false"},
+                clear=False,
+            ),
+            patch(
+                "src.services.vnpy_paper_trading_service.VnpyPaperTradingService",
+                return_value=fake_service,
+            ),
+            patch(
+                "src.services.vnpy_paper_trading_service._AUTO_AGENT_RUN_LOCK",
+                fake_lock,
+            ),
+        ):
+            tasks = build_vnpy_paper_trading_background_tasks()
+            result = next(
+                task for task in tasks if task["name"] == "vnpy_paper_auto_trade"
+            )["task"]()
+
+        self.assertTrue(result["skipped"])
+        self.assertEqual(result["reason"], "auto_agent_run_lock_timeout")
+        self.assertEqual(
+            result["lock_wait_seconds"],
+            AUTO_TRADE_RUN_LOCK_WAIT_SECONDS,
+        )
+        fake_lock.release.assert_not_called()
+        fake_service.run_auto_trade_once.assert_not_called()
+
     def test_background_task_builder_keeps_recovery_when_auto_trade_is_paused(self) -> None:
         self.service.update_settings(
             {
@@ -8897,6 +16583,1228 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertEqual(tasks[0]["name"], "vnpy_paper_auto_retry")
         self.assertEqual(tasks[0]["interval_seconds"], 5 * 60)
         self.assertTrue(tasks[0]["run_immediately"])
+
+    def test_background_task_builder_adds_cross_market_korea_signal_collector(self) -> None:
+        fake_service = MagicMock()
+        fake_service.get_settings.return_value = SimpleNamespace(
+            enabled=True,
+            auto_trade_enabled=True,
+            auto_interval_minutes=5,
+            auto_strategy=CROSS_MARKET_STRATEGY_ID,
+            auto_market="cn",
+            auto_trade_time_gate_enabled=False,
+            auto_execution_mode="paper",
+        )
+        fake_service.cross_market_signal_service.collect_korea_snapshot_if_open.return_value = {
+            "accepted": True,
+            "skipped": False,
+            "reason": "korea_snapshot_collected",
+        }
+        fake_service.cross_market_signal_service.collect_japan_snapshot_if_open.return_value = {
+            "accepted": True,
+            "skipped": False,
+            "reason": "japan_snapshot_collected",
+        }
+        fake_service.cross_market_signal_service.collect_asia_theme_snapshot_if_cn_open.return_value = {
+            "accepted": True,
+            "skipped": False,
+            "reason": "asia_theme_snapshot_collected",
+        }
+        fake_service.cross_market_signal_service.collect_us_tech_snapshot_if_open.return_value = {
+            "accepted": True,
+            "skipped": False,
+            "reason": "us_tech_snapshot_collected",
+        }
+        fake_service.cross_market_signal_service.collect_cpo_snapshot_if_open.return_value = {
+            "accepted": True,
+            "skipped": False,
+            "reason": "cpo_snapshot_collected",
+        }
+        fake_service.cross_market_signal_service.collect_gold_snapshot_if_window.return_value = {
+            "accepted": True,
+            "skipped": False,
+            "reason": "gold_snapshot_collected",
+        }
+        fake_service.cross_market_signal_service.collect_cn_open_snapshot_if_window.return_value = {
+            "accepted": True,
+            "skipped": False,
+            "reason": "cn_open_snapshot_collected",
+        }
+        fake_service.run_cross_market_intraday_sell_monitor.return_value = {
+            "accepted": True,
+            "skipped": False,
+            "reason": "cross_market_intraday_sell_checked",
+            "submitted_count": 0,
+            "sell_only": True,
+        }
+        fake_service.capture_cross_market_campaign_closing_snapshot.return_value = {
+            "accepted": True,
+            "skipped": True,
+            "reason": "before_cn_closing_snapshot_cutoff",
+        }
+
+        with patch.dict(
+            os.environ,
+            {"DSA_AGENT_CALIBRATION_SHADOW_ENABLED": "false"},
+            clear=False,
+        ), patch(
+            "src.services.vnpy_paper_trading_service.VnpyPaperTradingService",
+            return_value=fake_service,
+        ):
+            tasks = build_vnpy_paper_trading_background_tasks()
+
+        collector = next(
+            task for task in tasks if task["name"] == "cross_market_korea_signal"
+        )
+        self.assertEqual(collector["interval_seconds"], 60)
+        self.assertTrue(collector["run_immediately"])
+        self.assertEqual(collector["task"]()["reason"], "korea_snapshot_collected")
+        fake_service.cross_market_signal_service.collect_korea_snapshot_if_open.assert_called_once_with()
+        fake_service.cross_market_signal_service.collect_japan_snapshot_if_open.assert_called_once_with()
+        fake_service.cross_market_signal_service.collect_asia_theme_snapshot_if_cn_open.assert_called_once_with()
+        us_collector = next(
+            task for task in tasks if task["name"] == "cross_market_us_tech_signal"
+        )
+        self.assertEqual(us_collector["interval_seconds"], 60)
+        self.assertTrue(us_collector["run_immediately"])
+        self.assertEqual(us_collector["task"]()["reason"], "us_tech_snapshot_collected")
+        fake_service.cross_market_signal_service.collect_us_tech_snapshot_if_open.assert_called_once_with()
+        cpo_collector = next(
+            task for task in tasks if task["name"] == "cross_market_cpo_signal"
+        )
+        self.assertEqual(cpo_collector["interval_seconds"], 60)
+        self.assertTrue(cpo_collector["run_immediately"])
+        self.assertEqual(cpo_collector["task"]()["reason"], "cpo_snapshot_collected")
+        fake_service.cross_market_signal_service.collect_cpo_snapshot_if_open.assert_called_once_with()
+        gold_collector = next(
+            task for task in tasks if task["name"] == "cross_market_gold_signal"
+        )
+        self.assertEqual(gold_collector["interval_seconds"], 300)
+        self.assertTrue(gold_collector["run_immediately"])
+        self.assertEqual(gold_collector["task"]()["reason"], "gold_snapshot_collected")
+        fake_service.cross_market_signal_service.collect_gold_snapshot_if_window.assert_called_once_with()
+        cn_open_collector = next(
+            task for task in tasks if task["name"] == "cross_market_cn_open_signal"
+        )
+        self.assertEqual(cn_open_collector["interval_seconds"], 60)
+        self.assertTrue(cn_open_collector["run_immediately"])
+        self.assertEqual(cn_open_collector["task"]()["reason"], "cn_open_snapshot_collected")
+        fake_service.cross_market_signal_service.collect_cn_open_snapshot_if_window.assert_called_once_with()
+
+        closing_snapshot = next(
+            task
+            for task in tasks
+            if task["name"] == "cross_market_campaign_closing_snapshot"
+        )
+        self.assertEqual(closing_snapshot["interval_seconds"], 300)
+        self.assertTrue(closing_snapshot["run_immediately"])
+        self.assertEqual(
+            closing_snapshot["task"]()["reason"],
+            "before_cn_closing_snapshot_cutoff",
+        )
+        fake_service.capture_cross_market_campaign_closing_snapshot.assert_called_once_with()
+        pending_revalidation = next(
+            task
+            for task in tasks
+            if task["name"] == "cross_market_pending_order_revalidation"
+        )
+        self.assertEqual(pending_revalidation["interval_seconds"], 60)
+        self.assertTrue(pending_revalidation["run_immediately"])
+        pending_revalidation["task"]()
+        fake_service.revalidate_active_cross_market_trade_plans.assert_called_once_with()
+        sell_monitor = next(
+            task
+            for task in tasks
+            if task["name"] == "cross_market_intraday_sell_monitor"
+        )
+        self.assertEqual(sell_monitor["interval_seconds"], 60)
+        self.assertTrue(sell_monitor["run_immediately"])
+        self.assertTrue(sell_monitor["task"]()["sell_only"])
+        fake_service.run_cross_market_intraday_sell_monitor.assert_called_once_with()
+        fake_service.run_cross_market_intraday_sell_monitor.reset_mock()
+        with patch(
+            "src.services.vnpy_paper_trading_service."
+            "_cross_market_intraday_sell_reserved_window",
+            return_value=True,
+        ):
+            reserved = sell_monitor["task"]()
+        self.assertTrue(reserved["skipped"])
+        self.assertEqual(reserved["reason"], "daily_cross_market_run_window_reserved")
+        fake_service.run_cross_market_intraday_sell_monitor.assert_not_called()
+
+    def test_asia_collector_isolates_japan_failure_from_other_routes(self) -> None:
+        fake_service = MagicMock()
+        fake_service.get_settings.return_value = SimpleNamespace(
+            enabled=True,
+            auto_trade_enabled=True,
+            auto_interval_minutes=5,
+            auto_strategy=CROSS_MARKET_STRATEGY_ID,
+            auto_market="cn",
+            auto_trade_time_gate_enabled=False,
+            auto_execution_mode="paper",
+        )
+        signal_service = fake_service.cross_market_signal_service
+        signal_service.collect_korea_snapshot_if_open.return_value = {
+            "accepted": True,
+            "skipped": False,
+            "reason": "korea_snapshot_collected",
+        }
+        signal_service.collect_japan_snapshot_if_open.side_effect = ValueError(
+            "japan_quote_unavailable:N225"
+        )
+        signal_service.collect_asia_theme_snapshot_if_cn_open.return_value = {
+            "accepted": True,
+            "skipped": False,
+            "reason": "asia_theme_snapshot_collected",
+        }
+
+        with patch.dict(
+            os.environ,
+            {"DSA_AGENT_CALIBRATION_SHADOW_ENABLED": "false"},
+            clear=False,
+        ), patch(
+            "src.services.vnpy_paper_trading_service.VnpyPaperTradingService",
+            return_value=fake_service,
+        ):
+            collector = next(
+                task
+                for task in build_vnpy_paper_trading_background_tasks()
+                if task["name"] == "cross_market_korea_signal"
+            )
+            result = collector["task"]()
+
+        self.assertEqual(result["reason"], "korea_snapshot_collected")
+        self.assertEqual(result["component_status"], "degraded")
+        self.assertEqual(result["degraded_components"], ["japan"])
+        self.assertEqual(result["japan"]["reason"], "japan_snapshot_failed")
+        self.assertEqual(result["japan"]["error_type"], "ValueError")
+        signal_service.collect_asia_theme_snapshot_if_cn_open.assert_called_once_with()
+
+    def test_background_task_builder_adds_order_free_cross_market_observation(self) -> None:
+        fake_service = MagicMock()
+        fake_lock = MagicMock()
+        fake_lock.acquire.return_value = True
+        fake_service.get_settings.return_value = VnpyPaperSettings(
+            enabled=True,
+            auto_trade_enabled=False,
+            auto_strategy="dual_low",
+            cross_market_observation_enabled=True,
+        )
+        fake_service._trading_window_diagnostics.return_value = {
+            "is_market_open_now": True,
+            "session_date": "2026-07-28",
+            "next_open_at": None,
+        }
+        fake_service.agent_repo.list_runs.return_value = {
+            "items": [],
+            "total": 0,
+        }
+        fake_service.run_auto_trade_once.return_value = {
+            "accepted": True,
+            "skipped": False,
+            "reason": "completed",
+            "submitted_count": 0,
+        }
+
+        with patch.dict(
+            os.environ,
+            {"DSA_AGENT_CALIBRATION_SHADOW_ENABLED": "false"},
+            clear=False,
+        ), patch(
+            "src.services.vnpy_paper_trading_service.VnpyPaperTradingService",
+            return_value=fake_service,
+        ), patch(
+            "src.services.vnpy_paper_trading_service._AUTO_AGENT_RUN_LOCK",
+            fake_lock,
+        ):
+            tasks = build_vnpy_paper_trading_background_tasks()
+            observation = next(
+                task for task in tasks
+                if task["name"] == "cross_market_paper_observation"
+            )
+            result = observation["task"]()
+
+        names = [task["name"] for task in tasks]
+        self.assertIn("cross_market_paper_observation", names)
+        self.assertIn("cross_market_korea_signal", names)
+        self.assertIn("cross_market_us_tech_signal", names)
+        self.assertIn("cross_market_cpo_signal", names)
+        self.assertIn("cross_market_gold_signal", names)
+        self.assertIn("cross_market_cn_open_signal", names)
+        self.assertNotIn("cross_market_pending_order_revalidation", names)
+        self.assertEqual(observation["interval_seconds"], 5 * 60)
+        self.assertFalse(observation["run_immediately"])
+        self.assertEqual(observation["initial_delay_seconds"], 60)
+
+        self.assertFalse(result["submits_orders"])
+        fake_lock.acquire.assert_called_once_with(
+            timeout=CROSS_MARKET_OBSERVATION_LOCK_WAIT_SECONDS
+        )
+        fake_lock.release.assert_called_once_with()
+        fake_service.run_auto_trade_once.assert_called_once_with(
+            execution_mode_override="dry_run",
+            ignore_auto_trade_enabled=True,
+            market_override="cn",
+            strategy_override=CROSS_MARKET_STRATEGY_ID,
+            max_results_override=3,
+            trigger_source_override="cross_market_paper_observation",
+        )
+
+    def test_cross_market_observation_skips_after_daily_evidence_is_ready(self) -> None:
+        required_themes = sorted(GLOBAL_MARKET_LINKED_THEMES)
+        fake_service = MagicMock()
+        fake_lock = MagicMock()
+        fake_lock.acquire.return_value = True
+        fake_service.get_settings.return_value = VnpyPaperSettings(
+            enabled=True,
+            account_id=9,
+            auto_trade_enabled=False,
+            auto_strategy=CROSS_MARKET_STRATEGY_ID,
+            cross_market_observation_enabled=True,
+        )
+        fake_service._trading_window_diagnostics.return_value = {
+            "is_market_open_now": True,
+            "session_date": "2026-07-28",
+        }
+        fake_service.agent_repo.list_runs.return_value = {
+            "items": [
+                {
+                    "run_uid": "formal-ready-run",
+                    "status": "completed",
+                    "created_at": "2026-07-28T09:35:15+08:00",
+                    "settings": {
+                        "account_id": 9,
+                        "auto_execution_mode": "vnpy_paper",
+                    },
+                    "diagnostics": {
+                        "execution_mode": "vnpy_paper",
+                        "cross_market_observation": {
+                            "schema_version": 5,
+                            "strategy_id": CROSS_MARKET_STRATEGY_ID,
+                            "status": "ready",
+                            "checked_at": "2026-07-28T09:35:15+08:00",
+                            "required_checks": {
+                                "nasdaq_futures_continuous_trend_available": True,
+                                "us_premarket_themes_available": True,
+                                "us_close_themes_available": True,
+                                "japan_market_available": True,
+                            },
+                            "evidence": {
+                                "us_premarket": {
+                                    "full_strategy_coverage": True,
+                                    "required_themes": required_themes,
+                                    "qualified_themes": required_themes,
+                                    "missing_themes": [],
+                                },
+                                "us_close_themes": {
+                                    "full_strategy_coverage": True,
+                                    "required_themes": required_themes,
+                                    "qualified_themes": required_themes,
+                                    "missing_themes": [],
+                                },
+                                "nasdaq_futures": {
+                                    "code": "NQ00Y",
+                                    "available": True,
+                                    "confirmed": True,
+                                    "confirmation_sample_count": 3,
+                                    "confirmation_span_seconds": 120.0,
+                                },
+                                "korea": {
+                                    "linked_technology_gate": {
+                                        "confirmation_span_seconds": 300.0,
+                                        "confirmation_duration_seconds": 300,
+                                    },
+                                },
+                            },
+                        },
+                    },
+                }
+            ],
+            "total": 1,
+        }
+
+        with patch.dict(
+            os.environ,
+            {"DSA_AGENT_CALIBRATION_SHADOW_ENABLED": "false"},
+            clear=False,
+        ), patch(
+            "src.services.vnpy_paper_trading_service.VnpyPaperTradingService",
+            return_value=fake_service,
+        ), patch(
+            "src.services.vnpy_paper_trading_service._AUTO_AGENT_RUN_LOCK",
+            fake_lock,
+        ):
+            observation = next(
+                task
+                for task in build_vnpy_paper_trading_background_tasks()
+                if task["name"] == "cross_market_paper_observation"
+            )
+            result = observation["task"]()
+
+        self.assertTrue(result["accepted"])
+        self.assertTrue(result["skipped"])
+        self.assertEqual(
+            result["reason"],
+            "observation_already_fully_evidenced_today",
+        )
+        self.assertEqual(
+            result["daily_evidence"]["run_uid"],
+            "formal-ready-run",
+        )
+        fake_service.run_auto_trade_once.assert_not_called()
+        fake_lock.acquire.assert_called_once_with(
+            timeout=CROSS_MARKET_OBSERVATION_LOCK_WAIT_SECONDS
+        )
+        fake_lock.release.assert_called_once_with()
+
+    def test_cross_market_intraday_scan_reports_only_its_configured_slots(
+        self,
+    ) -> None:
+        fake_service = MagicMock()
+        fake_service.get_settings.return_value = VnpyPaperSettings(
+            enabled=True,
+            account_id=9,
+            auto_trade_enabled=True,
+            auto_strategy=CROSS_MARKET_STRATEGY_ID,
+            auto_execution_mode="vnpy_paper",
+            cross_market_observation_enabled=True,
+        )
+        fake_service._trading_window_diagnostics.return_value = {
+            "is_market_open_now": True,
+            "session_date": "2026-07-30",
+        }
+
+        with patch.dict(
+            os.environ,
+            {"DSA_AGENT_CALIBRATION_SHADOW_ENABLED": "false"},
+            clear=False,
+        ), patch(
+            "src.services.vnpy_paper_trading_service.VnpyPaperTradingService",
+            return_value=fake_service,
+        ), patch(
+            "src.services.vnpy_paper_trading_service._auto_trade_initial_delay_seconds",
+            return_value=300,
+        ), patch(
+            "src.services.vnpy_paper_trading_service._cross_market_intraday_entry_slot",
+            return_value=None,
+        ):
+            scan = next(
+                task
+                for task in build_vnpy_paper_trading_background_tasks()
+                if task["name"] == "cross_market_intraday_entry_scan"
+            )
+            result = scan["task"]()
+
+        self.assertTrue(result["skipped"])
+        self.assertEqual(result["reason"], "outside_cross_market_entry_analysis_slot")
+        self.assertEqual(result["configured_times"], ["10:40", "13:30", "14:30"])
+        fake_service.run_auto_trade_once.assert_not_called()
+
+    def test_cross_market_intraday_scan_recovers_zero_activity_formal_run(
+        self,
+    ) -> None:
+        fake_service = MagicMock()
+        fake_lock = MagicMock()
+        fake_lock.acquire.return_value = True
+        fake_service.get_settings.return_value = VnpyPaperSettings(
+            enabled=True,
+            account_id=9,
+            auto_trade_enabled=True,
+            auto_strategy=CROSS_MARKET_STRATEGY_ID,
+            auto_execution_mode="vnpy_paper",
+            cross_market_observation_enabled=True,
+        )
+        fake_service._trading_window_diagnostics.return_value = {
+            "is_market_open_now": True,
+            "session_date": "2026-07-28",
+        }
+        fake_service.agent_repo.list_runs.return_value = {
+            "items": [{
+                "run_uid": "formal-degraded-run",
+                "status": "completed",
+                "created_at": "2026-07-28T09:35:15+08:00",
+                "candidate_count": 2,
+                "planned_count": 0,
+                "submitted_count": 0,
+                "settings": {
+                    "account_id": 9,
+                    "auto_execution_mode": "vnpy_paper",
+                },
+                "diagnostics": {
+                    "execution_mode": "vnpy_paper",
+                    "cross_market_observation": {
+                        "schema_version": 2,
+                        "strategy_id": CROSS_MARKET_STRATEGY_ID,
+                        "status": "unavailable",
+                        "checked_at": "2026-07-28T09:35:15+08:00",
+                        "missing_requirements": [
+                            "korea_continuous_gate_available"
+                        ],
+                    },
+                },
+            }],
+            "total": 1,
+        }
+        fake_service._cross_market_observation_snapshot.return_value = {
+            "schema_version": 2,
+            "strategy_id": CROSS_MARKET_STRATEGY_ID,
+            "status": "ready",
+            "missing_requirements": [],
+        }
+        fake_service.run_auto_trade_once.return_value = {
+            "accepted": True,
+            "skipped": False,
+            "reason": "completed",
+            "candidate_count": 2,
+            "planned_count": 1,
+            "submitted_count": 1,
+            "skipped_count": 1,
+        }
+
+        with patch.dict(
+            os.environ,
+            {"DSA_AGENT_CALIBRATION_SHADOW_ENABLED": "false"},
+            clear=False,
+        ), patch(
+            "src.services.vnpy_paper_trading_service.VnpyPaperTradingService",
+            return_value=fake_service,
+        ), patch(
+            "src.services.vnpy_paper_trading_service._AUTO_AGENT_RUN_LOCK",
+            fake_lock,
+        ), patch(
+            "src.services.vnpy_paper_trading_service._auto_trade_initial_delay_seconds",
+            return_value=300,
+        ), patch(
+            "src.services.vnpy_paper_trading_service._cross_market_intraday_entry_slot",
+            return_value=(
+                "10:40",
+                datetime(2026, 7, 28, 2, 40, tzinfo=timezone.utc),
+                datetime(2026, 7, 28, 2, 42, tzinfo=timezone.utc),
+            ),
+        ), patch(
+            "src.services.vnpy_paper_trading_service._cross_market_intraday_entry_slot_audited",
+            return_value=False,
+        ), patch(
+            "src.services.vnpy_paper_trading_service._cross_market_daily_evidence_status",
+            return_value={
+                "ready": False,
+                "run_observed": True,
+                "planned_count": 0,
+                "submitted_count": 0,
+                "run_uid": "formal-degraded-run",
+            },
+        ):
+            recovery = next(
+                task
+                for task in build_vnpy_paper_trading_background_tasks()
+                if task["name"] == "cross_market_intraday_entry_scan"
+            )
+            result = recovery["task"]()
+
+        self.assertEqual(recovery["interval_seconds"], 60)
+        self.assertTrue(recovery["run_immediately"])
+        self.assertEqual(result["analysis_slot"], "10:40")
+        self.assertTrue(result["formal_recovery"])
+        self.assertEqual(result["execution_mode"], "vnpy_paper")
+        self.assertEqual(result["trigger_source"], "vnpy_paper_auto")
+        self.assertEqual(result["submitted_count"], 1)
+        fake_service.run_auto_trade_once.assert_called_once_with(
+            trigger_source_override="vnpy_paper_auto",
+            allow_cross_market_intraday_entry_recheck=True,
+            max_results_override=2,
+        )
+        fake_lock.acquire.assert_called_once_with(
+            timeout=AUTO_TRADE_RUN_LOCK_WAIT_SECONDS
+        )
+        fake_lock.release.assert_called_once_with()
+
+    def test_cross_market_intraday_scan_stays_independent_without_formal_baseline(
+        self,
+    ) -> None:
+        fake_service = MagicMock()
+        fake_lock = MagicMock()
+        fake_lock.acquire.return_value = True
+        fake_service.get_settings.return_value = VnpyPaperSettings(
+            enabled=True,
+            account_id=9,
+            auto_trade_enabled=True,
+            auto_strategy=CROSS_MARKET_STRATEGY_ID,
+            auto_execution_mode="vnpy_paper",
+            cross_market_observation_enabled=True,
+        )
+        fake_service._trading_window_diagnostics.return_value = {
+            "is_market_open_now": True,
+            "session_date": "2026-07-30",
+        }
+        fake_service.run_auto_trade_once.return_value = {
+            "accepted": True,
+            "skipped": False,
+            "reason": "completed",
+            "candidate_count": 2,
+            "planned_count": 1,
+            "submitted_count": 1,
+            "skipped_count": 1,
+        }
+
+        with patch.dict(
+            os.environ,
+            {"DSA_AGENT_CALIBRATION_SHADOW_ENABLED": "false"},
+            clear=False,
+        ), patch(
+            "src.services.vnpy_paper_trading_service.VnpyPaperTradingService",
+            return_value=fake_service,
+        ), patch(
+            "src.services.vnpy_paper_trading_service._AUTO_AGENT_RUN_LOCK",
+            fake_lock,
+        ), patch(
+            "src.services.vnpy_paper_trading_service._auto_trade_initial_delay_seconds",
+            return_value=300,
+        ), patch(
+            "src.services.vnpy_paper_trading_service._cross_market_intraday_entry_slot",
+            return_value=(
+                "10:40",
+                datetime(2026, 7, 30, 2, 40, tzinfo=timezone.utc),
+                datetime(2026, 7, 30, 2, 42, tzinfo=timezone.utc),
+            ),
+        ), patch(
+            "src.services.vnpy_paper_trading_service._cross_market_intraday_entry_slot_audited",
+            return_value=False,
+        ), patch(
+            "src.services.vnpy_paper_trading_service._cross_market_session_order_activity_status",
+            return_value={
+                "available": True,
+                "has_activity": False,
+                "planned_count": 0,
+                "submitted_count": 0,
+            },
+        ), patch(
+            "src.services.vnpy_paper_trading_service._cross_market_daily_evidence_status",
+            return_value={
+                "ready": False,
+                "run_observed": False,
+                "planned_count": 0,
+                "submitted_count": 0,
+            },
+        ):
+            scan = next(
+                task
+                for task in build_vnpy_paper_trading_background_tasks()
+                if task["name"] == "cross_market_intraday_entry_scan"
+            )
+            result = scan["task"]()
+
+        self.assertFalse(result["formal_recovery"])
+        self.assertEqual(result["analysis_slot"], "10:40")
+        self.assertEqual(
+            result["trigger_source"],
+            "cross_market_intraday_entry_scan",
+        )
+        fake_service._cross_market_formal_run_cadence_guard.assert_not_called()
+        fake_service.run_auto_trade_once.assert_called_once_with(
+            trigger_source_override="cross_market_intraday_entry_scan",
+            allow_cross_market_intraday_entry_recheck=False,
+            max_results_override=2,
+        )
+        fake_lock.release.assert_called_once_with()
+
+    def test_cross_market_intraday_scan_runs_after_ready_formal_entry(self) -> None:
+        fake_service = MagicMock()
+        fake_lock = MagicMock()
+        fake_lock.acquire.return_value = True
+        fake_service.get_settings.return_value = VnpyPaperSettings(
+            enabled=True,
+            account_id=9,
+            auto_trade_enabled=True,
+            auto_strategy=CROSS_MARKET_STRATEGY_ID,
+            auto_execution_mode="vnpy_paper",
+            cross_market_observation_enabled=True,
+        )
+        window = {
+            "is_market_open_now": True,
+            "session_date": "2026-07-30",
+        }
+        formal = {
+            "ready": True,
+            "reason": "fully_evidenced_run_found",
+            "run_uid": "formal-ready-transient-run",
+        }
+        fake_service._trading_window_diagnostics.return_value = window
+        fake_service._cross_market_intraday_entry_recheck_guard.return_value = {
+            "block": False,
+            "reason": "formal_intraday_entry_recheck_eligible",
+            "recoverable_reasons": ["low_open_reclaim_unconfirmed"],
+        }
+        fake_service._cross_market_observation_snapshot.return_value = {
+            "schema_version": 2,
+            "strategy_id": CROSS_MARKET_STRATEGY_ID,
+            "status": "ready",
+            "missing_requirements": [],
+        }
+        fake_service.run_auto_trade_once.return_value = {
+            "accepted": True,
+            "skipped": False,
+            "reason": "completed",
+            "candidate_count": 2,
+            "planned_count": 1,
+            "submitted_count": 1,
+            "skipped_count": 1,
+        }
+
+        with patch.dict(
+            os.environ,
+            {"DSA_AGENT_CALIBRATION_SHADOW_ENABLED": "false"},
+            clear=False,
+        ), patch(
+            "src.services.vnpy_paper_trading_service.VnpyPaperTradingService",
+            return_value=fake_service,
+        ), patch(
+            "src.services.vnpy_paper_trading_service._AUTO_AGENT_RUN_LOCK",
+            fake_lock,
+        ), patch(
+            "src.services.vnpy_paper_trading_service._cross_market_daily_evidence_status",
+            return_value=formal,
+        ), patch(
+            "src.services.vnpy_paper_trading_service._auto_trade_initial_delay_seconds",
+            return_value=300,
+        ), patch(
+            "src.services.vnpy_paper_trading_service._cross_market_intraday_entry_slot",
+            return_value=(
+                "13:30",
+                datetime(2026, 7, 30, 5, 30, tzinfo=timezone.utc),
+                datetime(2026, 7, 30, 5, 32, tzinfo=timezone.utc),
+            ),
+        ), patch(
+            "src.services.vnpy_paper_trading_service._cross_market_intraday_entry_slot_audited",
+            return_value=False,
+        ):
+            recovery = next(
+                task
+                for task in build_vnpy_paper_trading_background_tasks()
+                if task["name"] == "cross_market_intraday_entry_scan"
+            )
+            result = recovery["task"]()
+
+        self.assertFalse(result["formal_recovery"])
+        self.assertEqual(result["analysis_slot"], "13:30")
+        self.assertEqual(result["execution_mode"], "vnpy_paper")
+        self.assertEqual(
+            result["trigger_source"],
+            "cross_market_intraday_entry_scan",
+        )
+        self.assertEqual(result["submitted_count"], 1)
+        fake_service.run_auto_trade_once.assert_called_once_with(
+            trigger_source_override="cross_market_intraday_entry_scan",
+            allow_cross_market_intraday_entry_recheck=False,
+            max_results_override=2,
+        )
+        fake_lock.release.assert_called_once_with()
+
+    def test_cross_market_intraday_scan_stops_after_any_session_order_activity(self) -> None:
+        fake_service = MagicMock()
+        fake_lock = MagicMock()
+        fake_lock.acquire.return_value = True
+        fake_service.get_settings.return_value = VnpyPaperSettings(
+            enabled=True,
+            account_id=9,
+            auto_trade_enabled=True,
+            auto_strategy=CROSS_MARKET_STRATEGY_ID,
+            auto_execution_mode="vnpy_paper",
+        )
+        fake_service._trading_window_diagnostics.return_value = {
+            "is_market_open_now": True,
+            "session_date": "2026-07-30",
+        }
+
+        with patch.dict(
+            os.environ,
+            {"DSA_AGENT_CALIBRATION_SHADOW_ENABLED": "false"},
+            clear=False,
+        ), patch(
+            "src.services.vnpy_paper_trading_service.VnpyPaperTradingService",
+            return_value=fake_service,
+        ), patch(
+            "src.services.vnpy_paper_trading_service._AUTO_AGENT_RUN_LOCK",
+            fake_lock,
+        ), patch(
+            "src.services.vnpy_paper_trading_service._auto_trade_initial_delay_seconds",
+            return_value=300,
+        ), patch(
+            "src.services.vnpy_paper_trading_service._cross_market_intraday_entry_slot",
+            return_value=(
+                "13:30",
+                datetime(2026, 7, 30, 5, 30, tzinfo=timezone.utc),
+                datetime(2026, 7, 30, 5, 32, tzinfo=timezone.utc),
+            ),
+        ), patch(
+            "src.services.vnpy_paper_trading_service._cross_market_intraday_entry_slot_audited",
+            return_value=False,
+        ), patch(
+            "src.services.vnpy_paper_trading_service._cross_market_session_order_activity_status",
+            return_value={
+                "available": True,
+                "has_activity": True,
+                "planned_count": 1,
+                "submitted_count": 1,
+            },
+        ), patch(
+            "src.services.vnpy_paper_trading_service._cross_market_daily_evidence_status",
+        ) as daily_evidence:
+            scan = next(
+                task
+                for task in build_vnpy_paper_trading_background_tasks()
+                if task["name"] == "cross_market_intraday_entry_scan"
+            )
+            result = scan["task"]()
+
+        self.assertTrue(result["skipped"])
+        self.assertEqual(
+            result["reason"],
+            "cross_market_session_order_activity_blocks_later_entry",
+        )
+        self.assertEqual(result["analysis_slot"], "13:30")
+        self.assertEqual(result["session_order_activity"]["submitted_count"], 1)
+        daily_evidence.assert_not_called()
+        fake_service.run_auto_trade_once.assert_not_called()
+        fake_lock.release.assert_called_once_with()
+
+    def test_cross_market_formal_recovery_stops_after_session_order_activity(self) -> None:
+        fake_service = MagicMock()
+        fake_lock = MagicMock()
+        fake_lock.acquire.return_value = True
+        fake_service.get_settings.return_value = VnpyPaperSettings(
+            enabled=True,
+            account_id=9,
+            auto_trade_enabled=True,
+            auto_strategy=CROSS_MARKET_STRATEGY_ID,
+            auto_execution_mode="vnpy_paper",
+        )
+        fake_service._trading_window_diagnostics.return_value = {
+            "is_market_open_now": True,
+            "session_date": "2026-07-30",
+        }
+
+        with patch.dict(
+            os.environ,
+            {"DSA_AGENT_CALIBRATION_SHADOW_ENABLED": "false"},
+            clear=False,
+        ), patch(
+            "src.services.vnpy_paper_trading_service.VnpyPaperTradingService",
+            return_value=fake_service,
+        ), patch(
+            "src.services.vnpy_paper_trading_service._AUTO_AGENT_RUN_LOCK",
+            fake_lock,
+        ), patch(
+            "src.services.vnpy_paper_trading_service._auto_trade_initial_delay_seconds",
+            return_value=300,
+        ), patch(
+            "src.services.vnpy_paper_trading_service._cross_market_daily_evidence_status",
+            return_value={
+                "ready": False,
+                "run_observed": True,
+                "planned_count": 0,
+                "submitted_count": 0,
+                "run_uid": "formal-degraded-run",
+            },
+        ), patch(
+            "src.services.vnpy_paper_trading_service._cross_market_session_order_activity_status",
+            return_value={
+                "available": True,
+                "has_activity": True,
+                "planned_count": 1,
+                "submitted_count": 1,
+            },
+        ):
+            recovery = next(
+                task
+                for task in build_vnpy_paper_trading_background_tasks()
+                if task["name"] == "cross_market_formal_recovery"
+            )
+            result = recovery["task"]()
+
+        self.assertTrue(result["skipped"])
+        self.assertEqual(
+            result["reason"],
+            "formal_recovery_order_activity_already_recorded",
+        )
+        fake_service._cross_market_formal_run_cadence_guard.assert_not_called()
+        fake_service.run_auto_trade_once.assert_not_called()
+        fake_lock.release.assert_called_once_with()
+
+    def test_cross_market_intraday_scan_never_repeats_an_audited_slot(self) -> None:
+        fake_service = MagicMock()
+        fake_lock = MagicMock()
+        fake_lock.acquire.return_value = True
+        fake_service.get_settings.return_value = VnpyPaperSettings(
+            enabled=True,
+            account_id=9,
+            auto_trade_enabled=True,
+            auto_strategy=CROSS_MARKET_STRATEGY_ID,
+            auto_execution_mode="vnpy_paper",
+        )
+        fake_service._trading_window_diagnostics.return_value = {
+            "is_market_open_now": True,
+            "session_date": "2026-07-28",
+        }
+        fake_service.agent_repo.list_runs.return_value = {
+            "items": [{
+                "run_uid": "formal-active-run",
+                "status": "completed",
+                "created_at": "2026-07-28T09:35:15+08:00",
+                "candidate_count": 2,
+                "planned_count": 1,
+                "submitted_count": 0,
+                "settings": {
+                    "account_id": 9,
+                    "auto_execution_mode": "vnpy_paper",
+                },
+                "diagnostics": {
+                    "execution_mode": "vnpy_paper",
+                    "cross_market_observation": {
+                        "schema_version": 2,
+                        "strategy_id": CROSS_MARKET_STRATEGY_ID,
+                        "status": "unavailable",
+                        "checked_at": "2026-07-28T09:35:15+08:00",
+                        "missing_requirements": ["gold_signal_available"],
+                    },
+                },
+            }],
+            "total": 1,
+        }
+
+        with patch.dict(
+            os.environ,
+            {"DSA_AGENT_CALIBRATION_SHADOW_ENABLED": "false"},
+            clear=False,
+        ), patch(
+            "src.services.vnpy_paper_trading_service.VnpyPaperTradingService",
+            return_value=fake_service,
+        ), patch(
+            "src.services.vnpy_paper_trading_service._AUTO_AGENT_RUN_LOCK",
+            fake_lock,
+        ), patch(
+            "src.services.vnpy_paper_trading_service._auto_trade_initial_delay_seconds",
+            return_value=300,
+        ), patch(
+            "src.services.vnpy_paper_trading_service._cross_market_intraday_entry_slot",
+            return_value=(
+                "14:30",
+                datetime(2026, 7, 28, 6, 30, tzinfo=timezone.utc),
+                datetime(2026, 7, 28, 6, 32, tzinfo=timezone.utc),
+            ),
+        ), patch(
+            "src.services.vnpy_paper_trading_service._cross_market_intraday_entry_slot_audited",
+            return_value=True,
+        ):
+            recovery = next(
+                task
+                for task in build_vnpy_paper_trading_background_tasks()
+                if task["name"] == "cross_market_intraday_entry_scan"
+            )
+            result = recovery["task"]()
+
+        self.assertTrue(result["skipped"])
+        self.assertEqual(
+            result["reason"],
+            "cross_market_entry_analysis_slot_already_audited",
+        )
+        fake_service.run_auto_trade_once.assert_not_called()
+        fake_lock.acquire.assert_not_called()
+        fake_lock.release.assert_not_called()
+
+    def test_cross_market_intraday_scan_marks_guarded_slot_as_audited(self) -> None:
+        fake_service = MagicMock()
+        fake_lock = MagicMock()
+        fake_lock.acquire.return_value = True
+        fake_service.get_settings.return_value = VnpyPaperSettings(
+            enabled=True,
+            account_id=9,
+            auto_trade_enabled=True,
+            auto_strategy=CROSS_MARKET_STRATEGY_ID,
+            auto_execution_mode="vnpy_paper",
+        )
+        fake_service._trading_window_diagnostics.return_value = {
+            "is_market_open_now": True,
+            "session_date": "2026-07-28",
+        }
+        fake_service._cross_market_formal_run_cadence_guard.return_value = {
+            "block": True,
+            "reason": "formal_recovery_evidence_not_ready",
+        }
+
+        with patch.dict(
+            os.environ,
+            {"DSA_AGENT_CALIBRATION_SHADOW_ENABLED": "false"},
+            clear=False,
+        ), patch(
+            "src.services.vnpy_paper_trading_service.VnpyPaperTradingService",
+            return_value=fake_service,
+        ), patch(
+            "src.services.vnpy_paper_trading_service._AUTO_AGENT_RUN_LOCK",
+            fake_lock,
+        ), patch(
+            "src.services.vnpy_paper_trading_service._cross_market_daily_evidence_status",
+            return_value={
+                "ready": False,
+                "run_observed": True,
+                "planned_count": 0,
+                "submitted_count": 0,
+            },
+        ), patch(
+            "src.services.vnpy_paper_trading_service._auto_trade_initial_delay_seconds",
+            return_value=300,
+        ), patch(
+            "src.services.vnpy_paper_trading_service._cross_market_intraday_entry_slot",
+            return_value=(
+                "13:30",
+                datetime(2026, 7, 28, 5, 30, tzinfo=timezone.utc),
+                datetime(2026, 7, 28, 5, 32, tzinfo=timezone.utc),
+            ),
+        ), patch(
+            "src.services.vnpy_paper_trading_service._cross_market_intraday_entry_slot_audited",
+            return_value=False,
+        ):
+            scan = next(
+                task
+                for task in build_vnpy_paper_trading_background_tasks()
+                if task["name"] == "cross_market_intraday_entry_scan"
+            )
+            first = scan["task"]()
+            second = scan["task"]()
+
+        self.assertEqual(first["reason"], "formal_recovery_evidence_not_ready")
+        self.assertEqual(first["analysis_slot"], "13:30")
+        self.assertEqual(
+            second["reason"],
+            "cross_market_entry_analysis_slot_already_audited",
+        )
+        fake_service._cross_market_formal_run_cadence_guard.assert_called_once()
+        fake_service.run_auto_trade_once.assert_not_called()
+        fake_lock.acquire.assert_called_once_with(
+            timeout=AUTO_TRADE_RUN_LOCK_WAIT_SECONDS
+        )
+        fake_lock.release.assert_called_once_with()
+
+    def test_cross_market_daily_evidence_rejects_legacy_four_minute_gate(self) -> None:
+        fake_service = MagicMock()
+        settings = VnpyPaperSettings(
+            enabled=True,
+            account_id=9,
+            auto_strategy=CROSS_MARKET_STRATEGY_ID,
+        )
+        fake_service.agent_repo.list_runs.return_value = {
+            "items": [
+                {
+                    "run_uid": "legacy-four-minute-run",
+                    "status": "completed",
+                    "created_at": "2026-07-28T09:35:15+08:00",
+                    "settings": {
+                        "account_id": 9,
+                        "auto_execution_mode": "vnpy_paper",
+                    },
+                    "diagnostics": {
+                        "execution_mode": "vnpy_paper",
+                        "cross_market_observation": {
+                            "schema_version": 1,
+                            "strategy_id": CROSS_MARKET_STRATEGY_ID,
+                            "status": "ready",
+                            "checked_at": "2026-07-28T09:35:15+08:00",
+                            "evidence": {
+                                "korea": {
+                                    "linked_technology_gate": {
+                                        "confirmation_sample_count": 5,
+                                        "confirmation_span_seconds": 240.0,
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+            ],
+            "total": 1,
+        }
+
+        result = _cross_market_daily_evidence_status(
+            fake_service,
+            settings,
+            {
+                "is_market_open_now": True,
+                "session_date": "2026-07-28",
+            },
+        )
+
+        self.assertFalse(result["ready"])
+        self.assertEqual(result["reason"], "fully_evidenced_run_not_found")
+
+        formal = _cross_market_daily_evidence_status(
+            fake_service,
+            settings,
+            {
+                "is_market_open_now": True,
+                "session_date": "2026-07-28",
+            },
+            formal_only=True,
+        )
+        self.assertFalse(formal["ready"])
+        self.assertTrue(formal["run_observed"])
+        self.assertEqual(formal["run_uid"], "legacy-four-minute-run")
+        self.assertEqual(
+            formal["reason"],
+            "fully_evidenced_formal_run_not_found",
+        )
+
+    def test_cross_market_daily_evidence_does_not_accept_partial_formal_run(
+        self,
+    ) -> None:
+        fake_service = MagicMock()
+        settings = VnpyPaperSettings(
+            enabled=True,
+            account_id=9,
+            auto_strategy=CROSS_MARKET_STRATEGY_ID,
+        )
+        fake_service.agent_repo.list_runs.return_value = {
+            "items": [{
+                "run_uid": "partial-formal-run",
+                "status": "partial",
+                "created_at": "2026-07-28T09:35:15+08:00",
+                "planned_count": 0,
+                "submitted_count": 0,
+                "settings": {
+                    "account_id": 9,
+                    "auto_execution_mode": "vnpy_paper",
+                },
+                "diagnostics": {
+                    "execution_mode": "vnpy_paper",
+                    "cross_market_observation": {
+                        "schema_version": 2,
+                        "strategy_id": CROSS_MARKET_STRATEGY_ID,
+                        "status": "ready",
+                        "checked_at": "2026-07-28T09:35:15+08:00",
+                    },
+                },
+            }],
+            "total": 1,
+        }
+
+        formal = _cross_market_daily_evidence_status(
+            fake_service,
+            settings,
+            {
+                "is_market_open_now": True,
+                "session_date": "2026-07-28",
+            },
+            formal_only=True,
+        )
+
+        self.assertFalse(formal["ready"])
+        self.assertTrue(formal["run_observed"])
+        self.assertEqual(formal["run_status"], "partial")
+        self.assertEqual(formal["run_uid"], "partial-formal-run")
+
+    def test_cross_market_daily_evidence_ignores_late_unmarked_formal_run(
+        self,
+    ) -> None:
+        fake_service = MagicMock()
+        settings = VnpyPaperSettings(
+            enabled=True,
+            account_id=9,
+            auto_strategy=CROSS_MARKET_STRATEGY_ID,
+        )
+        fake_service.agent_repo.list_runs.return_value = {
+            "items": [{
+                "run_uid": "late-unmarked-formal-run",
+                "status": "completed",
+                "created_at": "2026-08-03T10:58:00+08:00",
+                "planned_count": 0,
+                "submitted_count": 0,
+                "settings": {
+                    "account_id": 9,
+                    "auto_execution_mode": "vnpy_paper",
+                },
+                "diagnostics": {
+                    "execution_mode": "vnpy_paper",
+                    "cross_market_entry_phase": "intraday_dip",
+                    "cross_market_observation": {
+                        "strategy_id": CROSS_MARKET_STRATEGY_ID,
+                        "status": "unavailable",
+                        "checked_at": "2026-08-03T10:58:00+08:00",
+                        "missing_requirements": ["cn_open_available"],
+                    },
+                },
+            }],
+            "total": 1,
+        }
+
+        formal = _cross_market_daily_evidence_status(
+            fake_service,
+            settings,
+            {
+                "is_market_open_now": True,
+                "session_date": "2026-08-03",
+            },
+            formal_only=True,
+        )
+
+        self.assertFalse(formal["ready"])
+        self.assertFalse(formal["run_observed"])
+        self.assertIsNone(formal["run_uid"])
+
+    def test_cross_market_observation_reports_agent_lock_timeout(self) -> None:
+        fake_service = MagicMock()
+        fake_service.get_settings.return_value = VnpyPaperSettings(
+            enabled=True,
+            auto_trade_enabled=False,
+            auto_strategy=CROSS_MARKET_STRATEGY_ID,
+            cross_market_observation_enabled=True,
+        )
+        fake_service._trading_window_diagnostics.return_value = {
+            "is_market_open_now": True,
+        }
+        fake_lock = MagicMock()
+        fake_lock.acquire.return_value = False
+
+        with patch.dict(
+            os.environ,
+            {"DSA_AGENT_CALIBRATION_SHADOW_ENABLED": "false"},
+            clear=False,
+        ), patch(
+            "src.services.vnpy_paper_trading_service.VnpyPaperTradingService",
+            return_value=fake_service,
+        ), patch(
+            "src.services.vnpy_paper_trading_service._AUTO_AGENT_RUN_LOCK",
+            fake_lock,
+        ):
+            tasks = build_vnpy_paper_trading_background_tasks()
+            result = next(
+                task for task in tasks
+                if task["name"] == "cross_market_paper_observation"
+            )["task"]()
+
+        self.assertTrue(result["skipped"])
+        self.assertEqual(result["reason"], "observation_agent_run_lock_timeout")
+        self.assertEqual(
+            result["lock_wait_seconds"],
+            CROSS_MARKET_OBSERVATION_LOCK_WAIT_SECONDS,
+        )
+        fake_lock.release.assert_not_called()
+        fake_service.run_auto_trade_once.assert_not_called()
+
+    def test_cross_market_observation_starts_after_enabled_auto_trade(self) -> None:
+        fake_service = MagicMock()
+        fake_service._trading_window_diagnostics.return_value = {
+            "is_market_open_now": True,
+        }
+        settings = VnpyPaperSettings(
+            enabled=True,
+            auto_trade_enabled=True,
+            cross_market_observation_enabled=True,
+        )
+
+        delay = _cross_market_observation_initial_delay_seconds(
+            fake_service,
+            settings,
+        )
+
+        self.assertEqual(delay, 3 * 60)
 
     def test_background_task_builder_adds_order_free_multi_market_shadow_runs(self) -> None:
         fake_service = MagicMock()
@@ -8961,6 +17869,58 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         evidence = tasks[2]
         self.assertEqual(evidence["interval_seconds"], 720 * 60)
         self.assertEqual(evidence["initial_delay_seconds"], 600)
+
+    def test_background_task_builder_staggers_shadow_after_first_auto_trade(self) -> None:
+        fake_service = MagicMock()
+        fake_service.get_settings.return_value = VnpyPaperSettings(
+            enabled=True,
+            auto_trade_enabled=True,
+            auto_interval_minutes=1440,
+            auto_trade_time_gate_enabled=True,
+        )
+        fake_service.agent_repo.list_recent_runs.return_value = []
+        env = {
+            "DSA_AGENT_CALIBRATION_SHADOW_ENABLED": "true",
+            "DSA_AGENT_CALIBRATION_SHADOW_PAIRS": "cn:dual_low",
+        }
+
+        with (
+            patch.dict(os.environ, env, clear=False),
+            patch(
+                "src.services.vnpy_paper_trading_service.VnpyPaperTradingService",
+                return_value=fake_service,
+            ),
+            patch(
+                "src.services.vnpy_paper_trading_service."
+                "_auto_trade_initial_delay_seconds",
+                return_value=300,
+            ),
+            patch(
+                "src.services.vnpy_paper_trading_service."
+                "_calibration_shadow_initial_delay_seconds",
+                return_value=300,
+            ),
+        ):
+            tasks = build_vnpy_paper_trading_background_tasks()
+
+        auto_trade = next(
+            task for task in tasks if task["name"] == "vnpy_paper_auto_trade"
+        )
+        shadow = next(
+            task for task in tasks if task["name"] == "agent_calibration_shadow"
+        )
+        evidence = next(
+            task for task in tasks if task["name"] == "agent_calibration_evidence"
+        )
+        self.assertEqual(auto_trade["initial_delay_seconds"], 300)
+        self.assertEqual(
+            shadow["initial_delay_seconds"],
+            300 + CALIBRATION_SHADOW_AUTO_TRADE_STAGGER_SECONDS,
+        )
+        self.assertEqual(
+            evidence["initial_delay_seconds"],
+            600 + CALIBRATION_SHADOW_AUTO_TRADE_STAGGER_SECONDS,
+        )
 
     def test_calibration_evidence_monitor_is_read_only_and_reports_evidence_state(self) -> None:
         fake_service = MagicMock()
@@ -9433,8 +18393,11 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.service._record_last_auto_run(
             {
                 "accepted": True,
+                "agent_run_uid": "same-day-paper-run",
                 "market": "cn",
                 "strategy": "dual_low",
+                "execution_mode": "paper",
+                "trigger_source": "vnpy_paper_auto",
                 "candidate_count": 3,
                 "submitted_count": 1,
             }
@@ -9473,6 +18436,465 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertLessEqual(delay, (22 * 60 * 60) + 300)
         projection_time = projected_window.call_args.kwargs["current_time"]
         self.assertGreater(projection_time, current_close)
+
+    def test_daily_target_after_close_does_not_skip_the_next_session(self) -> None:
+        now = datetime(2026, 7, 27, 7, 20, tzinfo=timezone.utc)
+        current_close = datetime(2026, 7, 27, 7, 0, tzinfo=timezone.utc)
+        next_open = datetime(2026, 7, 28, 1, 30, tzinfo=timezone.utc)
+        settings = replace(
+            self.service.get_settings(),
+            auto_market="cn",
+        )
+
+        with patch(
+            "src.services.vnpy_paper_trading_service._last_auto_trade_ran_in_session",
+            return_value=True,
+        ), patch(
+            "src.services.vnpy_paper_trading_service."
+            "trading_calendar.build_next_trading_window_context",
+            return_value={
+                "available": True,
+                "is_market_open_now": False,
+                "next_open_at": next_open.isoformat(),
+            },
+        ) as projected_window:
+            target = _next_daily_auto_trade_target(
+                self.service,
+                settings,
+                window={
+                    "is_trading_day": True,
+                    "session_date": "2026-07-27",
+                    "is_market_open_now": False,
+                    "current_close_at": current_close.isoformat(),
+                },
+                now=now,
+            )
+
+        self.assertEqual(target, next_open + timedelta(minutes=5))
+        self.assertEqual(
+            projected_window.call_args.kwargs["current_time"],
+            now + timedelta(seconds=1),
+        )
+
+    def test_cross_market_daily_target_skips_missed_opening_slot(self) -> None:
+        shanghai = ZoneInfo("Asia/Shanghai")
+        now = datetime(2026, 8, 3, 10, 53, tzinfo=shanghai).astimezone(
+            timezone.utc
+        )
+        current_close = datetime(
+            2026,
+            8,
+            3,
+            15,
+            0,
+            tzinfo=shanghai,
+        ).astimezone(timezone.utc)
+        next_open = datetime(
+            2026,
+            8,
+            4,
+            9,
+            30,
+            tzinfo=shanghai,
+        ).astimezone(timezone.utc)
+        settings = replace(
+            self.service.get_settings(),
+            auto_market="cn",
+            auto_strategy=CROSS_MARKET_STRATEGY_ID,
+        )
+
+        with patch(
+            "src.services.vnpy_paper_trading_service._last_auto_trade_ran_in_session",
+            return_value=False,
+        ), patch(
+            "src.services.vnpy_paper_trading_service."
+            "trading_calendar.build_next_trading_window_context",
+            return_value={
+                "available": True,
+                "is_market_open_now": False,
+                "next_open_at": next_open.isoformat(),
+            },
+        ) as projected_window:
+            target = _next_daily_auto_trade_target(
+                self.service,
+                settings,
+                window={
+                    "is_trading_day": True,
+                    "session_date": "2026-08-03",
+                    "is_market_open_now": True,
+                    "current_close_at": current_close.isoformat(),
+                },
+                now=now,
+            )
+
+        self.assertEqual(target, next_open + timedelta(minutes=5))
+        self.assertEqual(
+            projected_window.call_args.kwargs["current_time"],
+            current_close + timedelta(seconds=1),
+        )
+
+    def test_cross_market_daily_target_keeps_upcoming_opening_slot(self) -> None:
+        shanghai = ZoneInfo("Asia/Shanghai")
+        now = datetime(2026, 8, 3, 9, 32, tzinfo=shanghai).astimezone(
+            timezone.utc
+        )
+        formal_target = datetime(
+            2026,
+            8,
+            3,
+            9,
+            35,
+            tzinfo=shanghai,
+        ).astimezone(timezone.utc)
+        settings = replace(
+            self.service.get_settings(),
+            auto_market="cn",
+            auto_strategy=CROSS_MARKET_STRATEGY_ID,
+        )
+
+        with patch(
+            "src.services.vnpy_paper_trading_service._last_auto_trade_ran_in_session",
+            return_value=False,
+        ), patch(
+            "src.services.vnpy_paper_trading_service."
+            "trading_calendar.build_next_trading_window_context",
+        ) as projected_window:
+            target = _next_daily_auto_trade_target(
+                self.service,
+                settings,
+                window={
+                    "is_trading_day": True,
+                    "session_date": "2026-08-03",
+                    "is_market_open_now": True,
+                },
+                now=now,
+            )
+
+        self.assertEqual(target, formal_target)
+        projected_window.assert_not_called()
+
+    def test_observation_does_not_overwrite_last_formal_auto_run(self) -> None:
+        self.service._record_last_auto_run(
+            {
+                "accepted": True,
+                "agent_run_uid": "formal-run",
+                "market": "cn",
+                "strategy": CROSS_MARKET_STRATEGY_ID,
+                "execution_mode": "vnpy_paper",
+                "trigger_source": "vnpy_paper_auto",
+                "cross_market_observation": {
+                    "status": "unavailable",
+                    "checked_at": "2026-07-28T01:35:00+00:00",
+                    "missing_requirements": ["cn_open_available"],
+                },
+            }
+        )
+        self.service._record_last_auto_run(
+            {
+                "accepted": True,
+                "agent_run_uid": "observation-run",
+                "market": "cn",
+                "strategy": CROSS_MARKET_STRATEGY_ID,
+                "execution_mode": "dry_run",
+                "trigger_source": CROSS_MARKET_OBSERVATION_TRIGGER_SOURCE,
+            }
+        )
+
+        payload = self.service._read_config_payload()
+
+        self.assertEqual(payload["last_auto_run"]["agent_run_uid"], "observation-run")
+        self.assertEqual(
+            payload["last_formal_auto_run"]["agent_run_uid"],
+            "formal-run",
+        )
+        self.assertEqual(
+            payload["last_formal_auto_run"]["evidence_status"],
+            "unavailable",
+        )
+        self.assertFalse(payload["last_formal_auto_run"]["fully_evidenced"])
+        status = self.service.get_status(
+            include_snapshot=False,
+            include_recent_trades=False,
+        )
+        self.assertEqual(status["last_auto_run"]["agent_run_uid"], "observation-run")
+        self.assertEqual(
+            status["last_formal_auto_run"]["agent_run_uid"],
+            "formal-run",
+        )
+        self.assertIn("vnpy_adapter", status["diagnostics"])
+        self.assertIn("trading_window", status["diagnostics"])
+
+    def test_intraday_entry_does_not_overwrite_last_formal_auto_run(self) -> None:
+        self.service._record_last_auto_run(
+            {
+                "accepted": True,
+                "agent_run_uid": "formal-run",
+                "market": "cn",
+                "strategy": CROSS_MARKET_STRATEGY_ID,
+                "account_id": 10,
+                "execution_mode": "vnpy_paper",
+                "trigger_source": "vnpy_paper_auto",
+            }
+        )
+        self.service._record_last_auto_run(
+            {
+                "accepted": True,
+                "agent_run_uid": "intraday-run",
+                "market": "cn",
+                "strategy": CROSS_MARKET_STRATEGY_ID,
+                "account_id": 10,
+                "execution_mode": "vnpy_paper",
+                "trigger_source": "cross_market_intraday_entry_scan",
+            }
+        )
+
+        payload = self.service._read_config_payload()
+
+        self.assertEqual(payload["last_auto_run"]["agent_run_uid"], "intraday-run")
+        self.assertEqual(payload["last_auto_run"]["account_id"], 10)
+        self.assertEqual(
+            payload["last_formal_auto_run"]["agent_run_uid"],
+            "formal-run",
+        )
+        self.assertEqual(payload["last_formal_auto_run"]["account_id"], 10)
+
+    def test_rejected_duplicate_does_not_overwrite_last_formal_auto_run(self) -> None:
+        self.service._record_last_auto_run(
+            {
+                "accepted": True,
+                "agent_run_uid": "formal-run",
+                "market": "cn",
+                "strategy": CROSS_MARKET_STRATEGY_ID,
+                "account_id": 10,
+                "execution_mode": "vnpy_paper",
+                "trigger_source": "vnpy_paper_auto",
+                "cross_market_observation": {
+                    "status": "ready",
+                    "checked_at": "2026-08-04T01:35:10+00:00",
+                    "missing_requirements": [],
+                },
+            }
+        )
+        self.service._record_last_auto_run(
+            {
+                "accepted": False,
+                "skipped": True,
+                "reason": "formal_execution_already_fully_evidenced_today",
+                "agent_run_uid": None,
+                "market": "cn",
+                "strategy": CROSS_MARKET_STRATEGY_ID,
+                "account_id": 10,
+                "execution_mode": "vnpy_paper",
+                "trigger_source": "vnpy_paper_auto",
+            }
+        )
+
+        payload = self.service._read_config_payload()
+
+        self.assertEqual(payload["last_auto_run"]["reason"], (
+            "formal_execution_already_fully_evidenced_today"
+        ))
+        self.assertEqual(
+            payload["last_formal_auto_run"]["agent_run_uid"],
+            "formal-run",
+        )
+        self.assertTrue(payload["last_formal_auto_run"]["fully_evidenced"])
+
+    def test_schedule_context_is_account_bound_and_ignores_dry_run(self) -> None:
+        shanghai = ZoneInfo("Asia/Shanghai")
+        run_at = datetime(2026, 8, 4, 9, 35, tzinfo=shanghai)
+        settings = replace(
+            self.service.get_settings(),
+            account_id=10,
+            auto_market="cn",
+            auto_strategy=CROSS_MARKET_STRATEGY_ID,
+            auto_execution_mode="vnpy_paper",
+        )
+        self.service._write_config_payload({
+            "last_formal_auto_run": {
+                "ran_at": run_at.astimezone(timezone.utc).isoformat(),
+                "market": "cn",
+                "strategy": CROSS_MARKET_STRATEGY_ID,
+                "account_id": 9,
+                "execution_mode": "vnpy_paper",
+                "trigger_source": "vnpy_paper_auto",
+            }
+        })
+        unrelated_runs = [
+            {
+                "created_at": run_at.isoformat(),
+                "market": "cn",
+                "strategy": CROSS_MARKET_STRATEGY_ID,
+                "trigger_source": "vnpy_paper_auto",
+                "settings": {
+                    "account_id": 10,
+                    "auto_execution_mode": "dry_run",
+                },
+            },
+            {
+                "created_at": run_at.isoformat(),
+                "market": "cn",
+                "strategy": CROSS_MARKET_STRATEGY_ID,
+                "trigger_source": "vnpy_paper_auto",
+                "settings": {
+                    "account_id": 9,
+                    "auto_execution_mode": "vnpy_paper",
+                },
+            },
+        ]
+        self.service.agent_repo.list_runs = MagicMock(
+            return_value={"items": unrelated_runs, "total": len(unrelated_runs)}
+        )
+        window = {
+            "is_trading_day": True,
+            "session_date": "2026-08-04",
+        }
+
+        self.assertFalse(
+            _last_auto_trade_ran_in_session(self.service, settings, window)
+        )
+
+        qualifying_run = {
+            "created_at": run_at.isoformat(),
+            "market": "cn",
+            "strategy": CROSS_MARKET_STRATEGY_ID,
+            "trigger_source": "vnpy_paper_auto",
+            "settings": {
+                "account_id": 10,
+                "auto_execution_mode": "vnpy_paper",
+            },
+        }
+        self.service.agent_repo.list_runs.return_value = {
+            "items": [*unrelated_runs, qualifying_run],
+            "total": 3,
+        }
+
+        self.assertTrue(
+            _last_auto_trade_ran_in_session(self.service, settings, window)
+        )
+
+    def test_schedule_context_enriches_legacy_formal_account(self) -> None:
+        shanghai = ZoneInfo("Asia/Shanghai")
+        run_at = datetime(2026, 8, 4, 9, 35, tzinfo=shanghai)
+        settings = replace(
+            self.service.get_settings(),
+            account_id=10,
+            auto_market="cn",
+            auto_strategy=CROSS_MARKET_STRATEGY_ID,
+            auto_execution_mode="vnpy_paper",
+        )
+        self.service._write_config_payload({
+            "last_formal_auto_run": {
+                "ran_at": run_at.astimezone(timezone.utc).isoformat(),
+                "agent_run_uid": "legacy-formal-run",
+                "market": "cn",
+                "strategy": CROSS_MARKET_STRATEGY_ID,
+                "execution_mode": "vnpy_paper",
+                "trigger_source": "vnpy_paper_auto",
+            }
+        })
+        self.service.agent_repo.get_run_detail = MagicMock(
+            return_value={
+                "run_uid": "legacy-formal-run",
+                "settings": {
+                    "account_id": 10,
+                    "auto_execution_mode": "vnpy_paper",
+                },
+            }
+        )
+        self.service.agent_repo.list_runs = MagicMock(
+            return_value={"items": [], "total": 0}
+        )
+
+        self.assertTrue(
+            _last_auto_trade_ran_in_session(
+                self.service,
+                settings,
+                {"is_trading_day": True, "session_date": "2026-08-04"},
+            )
+        )
+        self.service.agent_repo.get_run_detail.assert_called_once_with(
+            "legacy-formal-run"
+        )
+        self.service.agent_repo.list_runs.assert_not_called()
+
+    def test_daily_schedule_recovers_formal_run_from_agent_audit_after_observation(self) -> None:
+        self.service.update_settings(
+            {
+                "enabled": True,
+                "auto_trade_enabled": True,
+                "auto_interval_minutes": 1440,
+                "auto_strategy": CROSS_MARKET_STRATEGY_ID,
+                "auto_execution_mode": "vnpy_paper",
+                "auto_trade_time_gate_enabled": True,
+            }
+        )
+        self.service._record_last_auto_run(
+            {
+                "accepted": True,
+                "agent_run_uid": "observation-run",
+                "market": "cn",
+                "strategy": CROSS_MARKET_STRATEGY_ID,
+                "execution_mode": "dry_run",
+                "trigger_source": CROSS_MARKET_OBSERVATION_TRIGGER_SOURCE,
+            }
+        )
+        market_today = datetime.now(timezone(timedelta(hours=8))).date().isoformat()
+        current_close = datetime.now(timezone.utc) + timedelta(hours=2)
+        next_open = datetime.now(timezone.utc) + timedelta(hours=22)
+        formal_created_at = datetime.now().replace(microsecond=0).isoformat()
+        self.service.agent_repo.list_runs = MagicMock(
+            return_value={
+                "items": [
+                    {
+                        "market": "cn",
+                        "strategy": CROSS_MARKET_STRATEGY_ID,
+                        "trigger_source": "vnpy_paper_auto",
+                        "status": "completed",
+                        "settings": {"auto_execution_mode": "vnpy_paper"},
+                        "created_at": formal_created_at,
+                    }
+                ],
+                "total": 1,
+            }
+        )
+
+        settings = self.service.get_settings()
+        with (
+            patch.object(
+                self.service,
+                "_trading_window_diagnostics",
+                return_value={
+                    "available": True,
+                    "market": "cn",
+                    "is_trading_day": True,
+                    "session_date": market_today,
+                    "is_market_open_now": True,
+                    "current_close_at": current_close.isoformat(),
+                    "time_gate_enforced": True,
+                },
+            ),
+            patch(
+                "src.services.vnpy_paper_trading_service."
+                "trading_calendar.build_next_trading_window_context",
+                return_value={
+                    "available": True,
+                    "is_market_open_now": False,
+                    "next_open_at": next_open.isoformat(),
+                },
+            ),
+        ):
+            delay = _auto_trade_initial_delay_seconds(self.service, settings)
+
+        self.assertGreaterEqual(delay, (22 * 60 * 60) + 290)
+        self.assertLessEqual(delay, (22 * 60 * 60) + 300)
+        self.service.agent_repo.list_runs.assert_called_once_with(
+            limit=100,
+            offset=0,
+            trigger_source="vnpy_paper_auto",
+            strategy=CROSS_MARKET_STRATEGY_ID,
+            market="cn",
+        )
 
 
 def _install_fake_vnpy_modules() -> dict[str, object]:

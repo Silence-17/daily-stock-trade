@@ -14,6 +14,7 @@ class VnpyPaperSettings(BaseModel):
     account_id: Optional[int] = None
     initial_cash: float = Field(100000.0, gt=0)
     auto_trade_enabled: bool = False
+    cross_market_observation_enabled: bool = False
     auto_strategy: str = Field("dual_low", min_length=1, max_length=64)
     auto_market: str = Field("cn", min_length=1, max_length=16)
     auto_max_results: int = Field(3, ge=1, le=50)
@@ -94,6 +95,7 @@ class VnpyPaperSettingsUpdate(BaseModel):
     account_id: Optional[int] = None
     initial_cash: Optional[float] = Field(None, gt=0)
     auto_trade_enabled: Optional[bool] = None
+    cross_market_observation_enabled: Optional[bool] = None
     auto_strategy: Optional[str] = Field(None, min_length=1, max_length=64)
     auto_market: Optional[str] = Field(None, min_length=1, max_length=16)
     auto_max_results: Optional[int] = Field(None, ge=1, le=50)
@@ -167,6 +169,102 @@ class VnpyPaperSettingsUpdate(BaseModel):
     auto_llm_plan_enabled: Optional[bool] = None
     auto_llm_review_enabled: Optional[bool] = None
     vnpy_gateway_name: Optional[str] = Field(None, max_length=64)
+
+
+class CrossMarketMinuteBarInput(BaseModel):
+    timestamp: datetime
+    open: float = Field(..., gt=0)
+    high: float = Field(..., gt=0)
+    low: float = Field(..., gt=0)
+    close: float = Field(..., gt=0)
+    volume: float = Field(..., ge=0)
+    amount: Optional[float] = Field(None, ge=0)
+    bid_ask_spread_bps: Optional[float] = Field(None, ge=0)
+    atr_1m_pct: Optional[float] = Field(None, ge=0)
+    suspended: bool = False
+    limit_up_price: Optional[float] = Field(None, gt=0)
+    limit_down_price: Optional[float] = Field(None, gt=0)
+
+
+CrossMarketTheme = Literal[
+    "semiconductor",
+    "memory",
+    "equipment",
+    "materials",
+    "cpo",
+    "artificial_intelligence",
+    "compute_services",
+    "gaming",
+    "pharma",
+    "mlcc",
+    "ccl",
+    "gold",
+]
+
+
+class CrossMarketReplayFrameInput(BaseModel):
+    session_date: date
+    signal_at: datetime
+    symbol: str = Field(..., min_length=1, max_length=16)
+    theme: CrossMarketTheme
+    cn_gap_pct: float
+    reclaimed_open: bool
+    above_vwap: bool
+    sector_signal_score: float
+    expected_gross_edge_pct: float
+    signal_price: float = Field(..., gt=0)
+    next_minute_bar: CrossMarketMinuteBarInput
+    close_price: float = Field(..., gt=0)
+    entry_phase: Literal["opening", "intraday_dip"] = "opening"
+    us_tech_score: Optional[float] = None
+    us_close_theme_signal: Dict[str, Any] = Field(default_factory=dict)
+    us_premarket_signal: Dict[str, Any] = Field(default_factory=dict)
+    nasdaq_futures_signal: Dict[str, Any] = Field(default_factory=dict)
+    asia_supply_chain_signal: Dict[str, Any] = Field(default_factory=dict)
+    low_position_signal: Dict[str, Any] = Field(default_factory=dict)
+    intraday_pullback_signal: Dict[str, Any] = Field(default_factory=dict)
+    asia_market_gate: Dict[str, Any] = Field(default_factory=dict)
+    board_technical_signal: Dict[str, Any] = Field(default_factory=dict)
+    rotation_signal: Dict[str, Any] = Field(default_factory=dict)
+    next_day_high_open_exit_signal: Dict[str, Any] = Field(default_factory=dict)
+    korea_gate: Dict[str, Any] = Field(default_factory=dict)
+    cpo_signal: Dict[str, Any] = Field(default_factory=dict)
+    gold_signal: Dict[str, Any] = Field(default_factory=dict)
+    range_signal: Dict[str, Any] = Field(default_factory=dict)
+    evidence_timestamps: Dict[str, datetime] = Field(default_factory=dict)
+    instrument_type: Literal["stock", "etf"] = "stock"
+    split_ratio: Optional[float] = Field(None, gt=0)
+    cash_dividend_per_share: float = Field(0.0, ge=0)
+    order_cancel_requested: bool = False
+    previous_close: Optional[float] = Field(None, gt=0)
+    price_limit_pct: Optional[float] = Field(None, gt=0, le=100)
+
+
+class CrossMarketBacktestRequest(BaseModel):
+    frames: List[CrossMarketReplayFrameInput] = Field(..., min_length=1)
+    minimum_sessions: int = Field(500, ge=1, le=5000)
+    initial_cash: float = Field(100000.0, gt=0)
+    dataset_kind: Literal["deterministic_fixture", "historical_market"] = "deterministic_fixture"
+    dataset_id: Optional[str] = Field(None, min_length=1, max_length=160)
+    data_sources: List[str] = Field(default_factory=list, max_length=32)
+    minute_bar_source: Optional[str] = Field(None, min_length=1, max_length=160)
+
+
+class CrossMarketBacktestResponse(BaseModel):
+    strategy_id: str
+    session_count: int
+    variants: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
+    validation: Dict[str, Any] = Field(default_factory=dict)
+    acceptance_evidence: Dict[str, Any] = Field(default_factory=dict)
+
+
+class CrossMarketPaperCampaignStartRequest(BaseModel):
+    reset: bool = False
+
+
+class CrossMarketStrategyMigrationRequest(BaseModel):
+    target_account_id: Optional[int] = Field(None, ge=1)
+    reset_campaign: bool = True
 
 
 class VnpyPaperOrderRequest(BaseModel):
@@ -277,6 +375,7 @@ class VnpyPaperSchedulerTaskStatus(BaseModel):
     name: str
     interval_seconds: Optional[int] = None
     initial_delay_seconds: Optional[int] = None
+    dynamic_reschedule: bool = False
     running: bool = False
     overlap_guarded: bool = False
     previous_generation_running: bool = False
@@ -344,6 +443,7 @@ class VnpyPaperTaskEventListResponse(BaseModel):
     limit: int = 50
     name: Optional[str] = None
     status: Optional[str] = None
+    started_at: Optional[Any] = None
     count: int = 0
     items: List[VnpyPaperSchedulerTaskEvent] = Field(default_factory=list)
 
@@ -456,6 +556,7 @@ class VnpyPaperStatusResponse(BaseModel):
     snapshot: Optional[Dict[str, Any]] = None
     recent_trades: List[Dict[str, Any]] = Field(default_factory=list)
     last_auto_run: Optional[Dict[str, Any]] = None
+    last_formal_auto_run: Optional[Dict[str, Any]] = None
     scheduler: VnpyPaperSchedulerStatus = Field(default_factory=VnpyPaperSchedulerStatus)
     diagnostics: Dict[str, Any] = Field(default_factory=dict)
 

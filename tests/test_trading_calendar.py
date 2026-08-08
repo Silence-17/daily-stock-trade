@@ -233,6 +233,26 @@ class EffectiveTradingDateTestCase(unittest.TestCase):
 
         self.assertEqual(result, date(2026, 3, 28))
 
+    def test_strict_mode_rejects_unavailable_calendar_without_changing_default(self):
+        current_time = datetime(2026, 3, 27, 18, 0, tzinfo=timezone.utc)
+
+        with patch.object(trading_calendar, "_XCALS_AVAILABLE", False):
+            fallback = trading_calendar.get_effective_trading_date(
+                "us",
+                current_time=current_time,
+            )
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "exchange_calendar_unavailable",
+            ):
+                trading_calendar.get_effective_trading_date(
+                    "us",
+                    current_time=current_time,
+                    strict=True,
+                )
+
+        self.assertEqual(fallback, date(2026, 3, 27))
+
 
 class InferMarketPhaseTestCase(unittest.TestCase):
     """Tests for the Issue #1386 P0 market phase baseline."""

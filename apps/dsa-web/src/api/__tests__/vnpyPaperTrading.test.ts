@@ -990,6 +990,123 @@ describe('vnpyPaperTradingApi', () => {
     });
   });
 
+  it('loads and starts the 30-day cross-market paper campaign', async () => {
+    get.mockResolvedValueOnce({
+      data: {
+        strategy_id: 'cross_market_global_sector_rotation_v1.3_aggressive',
+        historical_required: false,
+        historical_ready: false,
+        ready: false,
+        paper_observation: {
+          campaign_active: false,
+          required_trading_days: 30,
+          observed_trading_days: 0,
+          remaining_trading_days: 30,
+          observation_dates: [],
+          ready: false,
+        },
+      },
+    });
+    post.mockResolvedValueOnce({
+      data: {
+        started: true,
+        reset: false,
+        campaign: {
+          status: 'active',
+          started_at: '2026-07-24T08:00:00+00:00',
+          required_trading_days: 30,
+        },
+        status: {
+          strategy_id: 'cross_market_global_sector_rotation_v1.3_aggressive',
+          historical_required: false,
+          historical_ready: false,
+          ready: false,
+          paper_observation: {
+            campaign_active: true,
+            required_trading_days: 30,
+            observed_trading_days: 0,
+            remaining_trading_days: 30,
+            observation_dates: [],
+            ready: false,
+          },
+        },
+      },
+    });
+    get.mockResolvedValueOnce({
+      data: {
+        schema_version: 1,
+        strategy_id: 'cross_market_global_sector_rotation_v1.3_aggressive',
+        generated_at: '2026-07-24T08:30:00+00:00',
+        is_final: false,
+        report_status: 'in_progress',
+        campaign: {
+          campaign_active: true,
+          campaign_account_id: 9,
+          required_trading_days: 30,
+          observed_trading_days: 1,
+          remaining_trading_days: 29,
+          formal_execution_trading_days: 1,
+          fully_evidenced_formal_execution_days: 0,
+          observation_dates: ['2026-07-24'],
+          session_results: [{
+            session_date: '2026-07-24',
+            evidence_status: 'ready',
+            fully_evidenced: true,
+            missing_requirements: [],
+            candidate_count: 0,
+            planned_count: 0,
+            submitted_count: 0,
+            skipped_count: 0,
+            formal_execution: {
+              observed: true,
+              fully_evidenced: false,
+              evidence_status: 'degraded',
+              missing_requirements: ['korea_continuous_gate_available'],
+              run_uid: 'formal-run-1',
+              run_status: 'completed',
+              trigger_source: 'vnpy_paper_auto',
+              execution_mode: 'vnpy_paper',
+              candidate_count: 2,
+              planned_count: 0,
+              submitted_count: 0,
+              skipped_count: 2,
+            },
+          }],
+          ready: false,
+        },
+        performance: { total_equity: 100000 },
+        transactions: [],
+        transaction_count: 0,
+        non_strategy_transaction_count: 0,
+        warnings: [],
+        methodology: { trade_scope: 'campaign_account_cross_market_auto_entry_exit_only' },
+      },
+    });
+
+    const status = await vnpyPaperTradingApi.getCrossMarketPaperCampaign();
+    const started = await vnpyPaperTradingApi.startCrossMarketPaperCampaign();
+    const report = await vnpyPaperTradingApi.getCrossMarketPaperCampaignReport();
+
+    expect(get).toHaveBeenCalledWith('/api/v1/vnpy-paper/cross-market-strategy/acceptance');
+    expect(post).toHaveBeenCalledWith(
+      '/api/v1/vnpy-paper/cross-market-strategy/acceptance/start',
+      { reset: false },
+    );
+    expect(get).toHaveBeenNthCalledWith(
+      2,
+      '/api/v1/vnpy-paper/cross-market-strategy/acceptance/report',
+    );
+    expect(status.paperObservation.requiredTradingDays).toBe(30);
+    expect(started.status.paperObservation.campaignActive).toBe(true);
+    expect(report.reportStatus).toBe('in_progress');
+    expect(report.campaign.campaignAccountId).toBe(9);
+    expect(report.campaign.formalExecutionTradingDays).toBe(1);
+    expect(report.campaign.sessionResults?.[0].formalExecution?.runUid).toBe('formal-run-1');
+    expect(report.campaign.sessionResults?.[0].formalExecution?.candidateCount).toBe(2);
+    expect(report.campaign.sessionResults?.[0].formalExecution?.submittedCount).toBe(0);
+    expect(report.performance.totalEquity).toBe(100000);
+  });
+
   it('requests one gateway reconnect and camelCases diagnostics', async () => {
     post.mockResolvedValueOnce({
       data: {
@@ -1272,6 +1389,7 @@ describe('vnpyPaperTradingApi', () => {
     await vnpyPaperTradingApi.updateSettings({
       enabled: true,
       autoTradeEnabled: true,
+      crossMarketObservationEnabled: true,
       autoCashPerOrder: 12000,
       autoScoreWeightedAllocationEnabled: true,
       autoAllocationBudget: 25000,
@@ -1347,6 +1465,7 @@ describe('vnpyPaperTradingApi', () => {
     expect(put).toHaveBeenCalledWith('/api/v1/vnpy-paper/settings', {
       enabled: true,
       auto_trade_enabled: true,
+      cross_market_observation_enabled: true,
       auto_cash_per_order: 12000,
       auto_score_weighted_allocation_enabled: true,
       auto_allocation_budget: 25000,

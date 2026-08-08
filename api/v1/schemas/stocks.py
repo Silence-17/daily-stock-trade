@@ -90,32 +90,6 @@ class ExtractFromImageResponse(BaseModel):
     raw_text: Optional[str] = Field(None, description="原始 LLM 响应（调试用）")
 
 
-class IndustryBoard(BaseModel):
-    """A 股行业板块条目"""
-
-    rank: int = Field(..., description="排名")
-    code: str = Field("", description="板块代码")
-    name: str = Field(..., description="板块名称")
-    change_pct: Optional[float] = Field(None, description="涨跌幅")
-    up_count: Optional[int] = Field(None, description="上涨家数")
-    down_count: Optional[int] = Field(None, description="下跌家数")
-    leader: Optional[str] = Field(None, description="领涨股")
-    leader_change: Optional[float] = Field(None, description="领涨股涨跌幅")
-    source: Optional[str] = Field(None, description="数据源")
-    data_quality: Optional[str] = Field(None, description="数据质量：realtime/directory_fallback/offline_seed")
-
-
-class IndustryBoardListResponse(BaseModel):
-    """A 股行业板块列表响应"""
-
-    boards: List[IndustryBoard] = Field(default_factory=list, description="行业板块列表")
-    total: int = Field(0, description="行业板块数量")
-    source: str = Field("", description="成功的数据源")
-    updated_at: str = Field(..., description="响应生成时间")
-    data_quality: str = Field("unavailable", description="数据质量：realtime/directory_fallback/offline_seed/unavailable")
-    message: str = Field("", description="数据质量提示")
-
-
 class StockHistoryResponse(BaseModel):
     """股票历史行情响应"""
     

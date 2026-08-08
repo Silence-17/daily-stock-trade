@@ -106,6 +106,10 @@ class TestStooqFallback(unittest.TestCase):
         # 2. 模拟 Stooq 成功返回
         with patch.object(
             self.fetcher,
+            '_get_yahoo_chart_realtime_quote',
+            return_value=None,
+        ), patch.object(
+            self.fetcher,
             '_get_us_stock_quote_from_tencent',
             return_value=None,
         ), patch.object(self.fetcher, '_get_us_stock_quote_from_stooq') as mock_stooq:

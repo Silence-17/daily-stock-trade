@@ -193,11 +193,27 @@ class TushareFetcher(BaseFetcher):
         Returns:
             优先级数字（0=最高，数字越大优先级越低）
         """
+        explicit_priority = os.getenv("TUSHARE_PRIORITY")
+        if explicit_priority is not None and explicit_priority.strip():
+            try:
+                configured_priority = int(explicit_priority.strip())
+            except ValueError:
+                logger.warning(
+                    "Invalid TUSHARE_PRIORITY=%r; using automatic priority",
+                    explicit_priority,
+                )
+            else:
+                logger.info(
+                    "TUSHARE_PRIORITY explicitly set to %s",
+                    configured_priority,
+                )
+                return configured_priority
+
         config = get_config()
 
         if config.tushare_token and self._api is not None:
             # Token 配置且 API 初始化成功，提升为最高优先级
-            logger.info("✅ 检测到 TUSHARE_TOKEN 且 API 初始化成功，Tushare 数据源优先级提升为最高 (Priority -1)")
+            logger.info("检测到 TUSHARE_TOKEN 且 API 初始化成功，Tushare 数据源优先级提升为最高 (Priority -1)")
             return -1
 
         # Token 未配置或 API 初始化失败，保持默认优先级

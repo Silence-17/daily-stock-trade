@@ -6,8 +6,10 @@ from __future__ import annotations
 import argparse
 import importlib.metadata
 import json
+import os
 import platform
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Dict
@@ -27,6 +29,23 @@ from src.services.vnpy_runtime import (  # noqa: E402
     VnpyRuntimeSettings,
     bootstrap_vnpy_runtime,
 )
+
+SMOKE_MATCHING_MODE = "fixed_delay_limit"
+RECONNECT_PENDING_DELAY_MS = 500
+
+
+def _smoke_gateway_settings(**overrides: Any) -> Dict[str, Any]:
+    """Return deterministic settings isolated from deployed DSA_SIM env values."""
+
+    settings: Dict[str, Any] = {
+        "fill_delay_ms": 50,
+        "matching_mode": SMOKE_MATCHING_MODE,
+        "preserve_state_on_reconnect": True,
+        "reject_every_nth_order": 0,
+        "duplicate_trade_event_count": 1,
+    }
+    settings.update(overrides)
+    return settings
 
 
 class _SmokeMainEngine:
@@ -74,6 +93,10 @@ def _run_reconnect_soak(
     trade_ids: set[str] = set()
     bridge = VnpyMainEngineBridge(main_engine=main_engine, gateway_name="DSA_SIM")
     for index in range(1, cycles + 1):
+        main_engine.connect(
+            _smoke_gateway_settings(fill_delay_ms=RECONNECT_PENDING_DELAY_MS),
+            "DSA_SIM",
+        )
         cycle_payload = {
             **payload,
             "source": "adapter_reconnect_soak",
@@ -96,7 +119,7 @@ def _run_reconnect_soak(
             raise VnpyAdapterError(
                 f"reconnect cycle {index} lost its in-flight order while disconnected"
             )
-        main_engine.connect({}, "DSA_SIM")
+        main_engine.connect(_smoke_gateway_settings(), "DSA_SIM")
         order = _wait_for_terminal_order(main_engine, vt_orderid)
         status_name = getattr(getattr(order, "status", None), "name", None)
         trades = [
@@ -151,12 +174,10 @@ def _run_fault_matrix(
 
     before = gateway.get_state_snapshot()
     reject_order_number = int(before.get("order_count") or 0) + 2
-    fault_settings = {
-        "fill_delay_ms": 50,
-        "preserve_state_on_reconnect": True,
-        "reject_every_nth_order": reject_order_number,
-        "duplicate_trade_event_count": 2,
-    }
+    fault_settings = _smoke_gateway_settings(
+        reject_every_nth_order=reject_order_number,
+        duplicate_trade_event_count=2,
+    )
     observed_trade_ids: list[str] = []
 
     def _capture_trade(event: Any) -> None:
@@ -298,6 +319,11 @@ def main(argv: list[str] | None = None) -> int:
     }
     if status.get("available"):
         runtime_handle = None
+        runtime_workspace = None
+        previous_working_directory = None
+        vnpy_settings = None
+        previous_vnpy_file_logging = None
+        vnpy_file_logging_was_configured = False
         try:
             order_request = create_vnpy_order_request(payload)
             result["order_request_class"] = (
@@ -318,6 +344,18 @@ def main(argv: list[str] | None = None) -> int:
                     else None
                 ),
             }
+            runtime_workspace = tempfile.TemporaryDirectory(
+                prefix="dsa-vnpy-adapter-smoke-",
+                ignore_cleanup_errors=True,
+            )
+            previous_working_directory = Path.cwd()
+            os.chdir(runtime_workspace.name)
+            from vnpy.trader.setting import SETTINGS as runtime_vnpy_settings
+
+            vnpy_settings = runtime_vnpy_settings
+            vnpy_file_logging_was_configured = "log.file" in vnpy_settings
+            previous_vnpy_file_logging = vnpy_settings.get("log.file")
+            vnpy_settings["log.file"] = False
             runtime_handle = bootstrap_vnpy_runtime(
                 settings=VnpyRuntimeSettings(
                     enabled=True,
@@ -333,7 +371,7 @@ def main(argv: list[str] | None = None) -> int:
                 "available": runtime_handle.diagnostics.get("available"),
                 "mode": runtime_handle.diagnostics.get("mode"),
                 "reason": runtime_handle.diagnostics.get("reason"),
-                "runtime_data_dir": runtime_handle.diagnostics.get("runtime_data_dir"),
+                "runtime_data_dir_isolated": True,
                 "event_engine_class": (
                     f"{runtime_handle.event_engine.__class__.__module__}."
                     f"{runtime_handle.event_engine.__class__.__name__}"
@@ -351,6 +389,10 @@ def main(argv: list[str] | None = None) -> int:
                 raise VnpyAdapterError(
                     str(runtime_handle.diagnostics.get("message") or "vn.py runtime bootstrap failed")
                 )
+            runtime_handle.main_engine.connect(
+                _smoke_gateway_settings(),
+                "DSA_SIM",
+            )
             simulated_submission = VnpyMainEngineBridge(
                 main_engine=runtime_handle.main_engine,
                 gateway_name="DSA_SIM",
@@ -374,6 +416,8 @@ def main(argv: list[str] | None = None) -> int:
                 "order_status": simulated_status,
                 "trade_count": len(simulated_trades),
                 "filled": simulated_status == "ALLTRADED" and bool(simulated_trades),
+                "matching_mode": SMOKE_MATCHING_MODE,
+                "isolated_from_deployed_matching_mode": True,
             }
             if not result["simulated_gateway_smoke"]["filled"]:
                 raise VnpyAdapterError("built-in vn.py simulated gateway did not fill the smoke order")
@@ -398,6 +442,15 @@ def main(argv: list[str] | None = None) -> int:
         finally:
             if runtime_handle is not None:
                 runtime_handle.close()
+            if vnpy_settings is not None:
+                if vnpy_file_logging_was_configured:
+                    vnpy_settings["log.file"] = previous_vnpy_file_logging
+                else:
+                    vnpy_settings.pop("log.file", None)
+            if previous_working_directory is not None:
+                os.chdir(previous_working_directory)
+            if runtime_workspace is not None:
+                runtime_workspace.cleanup()
     else:
         result["fallback"] = "vnpy is not importable; DSA local paper mode remains usable."
         if args.require_vnpy or args.reconnect_cycles or args.fault_matrix:

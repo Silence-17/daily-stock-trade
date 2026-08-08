@@ -29,6 +29,8 @@ import {
 } from 'recharts';
 import {
   vnpyPaperTradingApi,
+  type CrossMarketPaperCampaignReport,
+  type CrossMarketPaperCampaignStatus,
   type VnpyPaperAgentRunFilters,
   type VnpyPaperAgentReturnRiskCalibrationTrends,
   type VnpyPaperAgentTradePlan,
@@ -64,6 +66,12 @@ const TEXTAREA_CLASS =
   'min-h-20 w-full rounded-xl border border-border bg-surface px-3 py-2 text-sm text-foreground outline-none transition-colors focus:border-cyan disabled:cursor-not-allowed disabled:opacity-60';
 const CHECKBOX_CLASS = 'h-4 w-4 rounded border-border bg-surface text-cyan focus:ring-cyan/30';
 const EXPECTED_VNPY_PAPER_CONTRACT_VERSION = 3;
+const CROSS_MARKET_STRATEGY_ID = 'cross_market_global_sector_rotation_v1.3_aggressive';
+const CROSS_MARKET_TECHNICAL_WINDOWS = [5, 10, 20, 30, 60] as const;
+const LEGACY_CROSS_MARKET_STRATEGY_IDS = new Set([
+  'cross_market_semiconductor_gold_v1.1',
+  'cross_market_semiconductor_gold_v1.2_aggressive',
+]);
 
 type AvailabilityDiagnostic = {
   key: string;
@@ -73,10 +81,40 @@ type AvailabilityDiagnostic = {
   tone: 'success' | 'warning' | 'danger' | 'info';
 };
 
+type CrossMarketBoardReminder = {
+  key: string;
+  symbol: string;
+  name: string;
+  theme: string;
+  entryPhase: string;
+  board: string;
+  historyThroughDate: string;
+  currentLevel: number | null;
+  levels: Array<{
+    windowDays: number;
+    movingAverage: number | null;
+    support: number | null;
+    resistance: number | null;
+  }>;
+  nearestResistance: number | null;
+  nearestResistanceWindow: number | null;
+  resistanceDistancePct: number | null;
+  supportScore: number | null;
+  supportWindows: number[];
+  multiPeriodSupport: boolean;
+  supportive: boolean;
+  nearResistance: boolean;
+  breakoutConfirmed: boolean;
+  alerts: string[];
+  rotationGroups: string[];
+  rotationTailwind: boolean;
+};
+
 type SettingsForm = {
   enabled: boolean;
   initialCash: string;
   autoTradeEnabled: boolean;
+  crossMarketObservationEnabled: boolean;
   autoStrategy: string;
   autoMarket: VnpyPaperMarket;
   autoMaxResults: string;
@@ -189,6 +227,7 @@ const defaultSettingsForm: SettingsForm = {
   enabled: true,
   initialCash: '100000',
   autoTradeEnabled: false,
+  crossMarketObservationEnabled: false,
   autoStrategy: 'dual_low',
   autoMarket: 'cn',
   autoMaxResults: '3',
@@ -352,6 +391,74 @@ function formatPercent(value: unknown): string {
   return `${numeric.toFixed(2)}%`;
 }
 
+function formatCampaignWarning(value: string): string {
+  const labels: Record<string, string> = {
+    campaign_account_contains_non_strategy_transactions: '活动账户包含手工或其他策略成交，报告暂不能定稿',
+    campaign_contains_degraded_observation_days: '活动包含因跨市场证据不完整而降级的观察日',
+    campaign_contains_fully_evidenced_days_without_formal_execution: '活动包含只有观察证据、没有正式 vn.py 模拟运行的完整日',
+    campaign_contains_later_observation_evidence_not_counted: '部分正式运行仅由后续观察补齐证据，不计入 30 个正式模拟交易日',
+    campaign_trade_slippage_evidence_incomplete: '部分成交缺少下一分钟 VWAP 滑点证据',
+    campaign_daily_snapshot_evidence_incomplete: '部分观察日缺少账户日终净值快照',
+    campaign_formal_decision_audit_incomplete: '部分正式模拟运行缺少逐股决策审计',
+    campaign_statistical_sample_insufficient: '30 个交易日已完成，但买入或闭环成交样本不足，暂不能判定策略通过',
+  };
+  return labels[value] || value;
+}
+
+function formatCampaignDecisionReason(value: string): string {
+  const labels: Record<string, string> = {
+    candidate_provider_timestamp_required: '候选实时行情缺少提供方时间戳',
+    cn_extreme_low_open_buy_blocked: 'A 股极端低开，禁止买入',
+    cn_high_open_buy_blocked: 'A 股高开，禁止买入',
+    linked_technology_gate_blocked: '科技链路跨市场门控未通过',
+    cpo_signal_not_supportive: 'CPO 独立信号不足',
+    gold_signal_unconfirmed: '黄金信号未确认',
+    expected_edge_below_cost_buffer: '预期收益不足以覆盖成本缓冲',
+    range_entry_not_triggered: '震荡低吸条件未触发',
+    korea_evidence_stale: '韩股行情证据过期',
+    theme_not_supported: '实时板块复核后不属于策略支持主题',
+    board_technical_evidence_unavailable: '板块 5/10/20/30/60 日技术位证据不可用',
+    sector_resistance_chasing_blocked: '板块接近压力位且尚未确认突破，禁止追高',
+    sector_signal_too_weak: 'A 股对应板块实时强度不足',
+    asia_market_buy_signal_unconfirmed: '韩日市场联动信号未确认',
+    flat_open_range_or_intraday_dip_signal_required: '平开时震荡低吸或日内回撤信号未确认',
+    low_open_reclaim_unconfirmed: '低开后尚未站回开盘价或 VWAP',
+    legacy_cross_market_strategy_requires_explicit_migration: '旧版跨市场活动需要显式迁移，当前已停止选股和委托',
+  };
+  const normalized = value
+    .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+    .toLowerCase();
+  if (normalized.endsWith('_us_close_theme_unconfirmed')) {
+    return '上一美股常规交易时段收盘主题未确认';
+  }
+  if (normalized.endsWith('_premarket_close_dip_unconfirmed')) {
+    return '上一美股盘前强势、同会话收盘延续与 A 股日内回撤承接未同时确认';
+  }
+  return labels[normalized] || value;
+}
+
+function formatCampaignRequirement(value: string): string {
+  const labels: Record<string, string> = {
+    cn_open_available: 'A 股开盘信号',
+    cnOpenAvailable: 'A 股开盘信号',
+    us_first_hour_and_close_available: '美股首小时与收盘信号',
+    usFirstHourAndCloseAvailable: '美股首小时与收盘信号',
+    us_premarket_themes_available: '美股盘前主题快照',
+    usPremarketThemesAvailable: '美股盘前主题快照',
+    us_close_themes_available: '美股收盘主题快照',
+    usCloseThemesAvailable: '美股收盘主题快照',
+    japan_market_available: '日股大盘信号',
+    japanMarketAvailable: '日股大盘信号',
+    korea_continuous_gate_available: '韩股连续 5 分钟门控',
+    koreaContinuousGateAvailable: '韩股连续 5 分钟门控',
+    gold_signal_available: '纽约金与降息新闻信号',
+    goldSignalAvailable: '纽约金与降息新闻信号',
+    runtime_evidence: '跨市场运行证据',
+    runtimeEvidence: '跨市场运行证据',
+  };
+  return labels[value] || value;
+}
+
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -414,6 +521,148 @@ function asRecordList(value: unknown): Record<string, unknown>[] {
   return Array.isArray(value)
     ? value.filter((item): item is Record<string, unknown> => Boolean(asRecord(item)))
     : [];
+}
+
+const CROSS_MARKET_THEME_LABELS: Record<string, string> = {
+  semiconductor: '半导体',
+  memory: '存储芯片',
+  equipment: '半导体设备',
+  materials: '半导体材料',
+  cpo: 'CPO / 光通信',
+  artificial_intelligence: '人工智能',
+  compute_services: '算力服务',
+  gaming: '游戏',
+  pharma: '医药',
+  mlcc: 'MLCC / 被动元件',
+  ccl: 'CCL / PCB',
+  gold: '黄金',
+};
+
+const BOARD_ALERT_LABELS: Record<string, string> = {
+  near_5d_ma_support: '接近 5 日均线支撑',
+  near_10d_ma_support: '接近 10 日均线支撑',
+  near_20d_ma_support: '接近 20 日均线支撑',
+  near_30d_ma_support: '接近 30 日均线支撑',
+  near_60d_ma_support: '接近 60 日均线支撑',
+  near_5d_swing_support: '接近 5 日区间支撑',
+  near_10d_swing_support: '接近 10 日区间支撑',
+  near_20d_swing_support: '接近 20 日区间支撑',
+  near_30d_swing_support: '接近 30 日区间支撑',
+  near_60d_swing_support: '接近 60 日区间支撑',
+  near_board_resistance: '接近板块压力位',
+};
+
+function recordValue(record: Record<string, unknown> | null, ...keys: string[]): unknown {
+  if (!record) return undefined;
+  for (const key of keys) {
+    if (record[key] !== undefined && record[key] !== null) return record[key];
+  }
+  return undefined;
+}
+
+function formatCrossMarketTheme(value: string): string {
+  return CROSS_MARKET_THEME_LABELS[value] || value || '-';
+}
+
+function isCrossMarketStrategyId(value: string): boolean {
+  return value === CROSS_MARKET_STRATEGY_ID || LEGACY_CROSS_MARKET_STRATEGY_IDS.has(value);
+}
+
+function formatEntryPhase(value: string): string {
+  if (value === 'opening') return '09:35 开盘判断';
+  if (value === 'intraday_dip') return '日内回撤判断';
+  return value || '-';
+}
+
+function formatBoardLevel(value: number | null): string {
+  return value === null ? '-' : formatNumber(value);
+}
+
+function formatBoardAlert(
+  alert: Record<string, unknown>,
+  fallbackBoard: string,
+): string {
+  const kind = String(recordValue(alert, 'kind') || '');
+  const board = String(recordValue(alert, 'board') || fallbackBoard || '板块');
+  const level = finiteNumberOrNull(recordValue(alert, 'level'));
+  const distance = finiteNumberOrNull(recordValue(alert, 'distancePct', 'distance_pct'));
+  const levelText = level === null ? '' : ` ${formatNumber(level)}`;
+  const distanceText = distance === null
+    ? ''
+    : `（${kind === 'near_board_resistance' ? '剩余空间' : '偏离'} ${distance >= 0 ? '+' : ''}${distance.toFixed(2)}%）`;
+  return `${board} ${BOARD_ALERT_LABELS[kind] || kind || '技术位提醒'}${levelText}${distanceText}`;
+}
+
+function crossMarketBoardReminders(
+  run: VnpyPaperAgentRunDetail | null,
+): CrossMarketBoardReminder[] {
+  if (!run) return [];
+  return (run.decisions || []).flatMap((decision) => {
+    const evidence = asRecord(decision.strategyEvidence);
+    const crossMarket = asRecord(recordValue(evidence, 'crossMarket', 'cross_market'));
+    const technical = asRecord(recordValue(crossMarket, 'boardTechnical', 'board_technical'));
+    const primary = asRecord(recordValue(technical, 'primaryBoard', 'primary_board'));
+    if (!crossMarket || !technical || !primary || technical.available !== true) return [];
+    const rotation = asRecord(recordValue(crossMarket, 'rotation'));
+    const board = String(recordValue(primary, 'name') || '-');
+    const movingAverages = asRecord(recordValue(primary, 'movingAverages', 'moving_averages'));
+    const supportLevels = asRecord(recordValue(primary, 'supportLevels', 'support_levels'));
+    const resistanceLevels = asRecord(recordValue(primary, 'resistanceLevels', 'resistance_levels'));
+    const levels = CROSS_MARKET_TECHNICAL_WINDOWS.map((windowDays) => ({
+      windowDays,
+      movingAverage: finiteNumberOrNull(
+        recordValue(primary, `ma${windowDays}`) ?? recordValue(movingAverages, String(windowDays)),
+      ),
+      support: finiteNumberOrNull(
+        recordValue(primary, `support${windowDays}d`, `support_${windowDays}d`)
+          ?? recordValue(supportLevels, String(windowDays)),
+      ),
+      resistance: finiteNumberOrNull(
+        recordValue(primary, `resistance${windowDays}d`, `resistance_${windowDays}d`)
+          ?? recordValue(resistanceLevels, String(windowDays)),
+      ),
+    }));
+    const rawSupportWindows = recordValue(primary, 'supportWindows', 'support_windows');
+    const supportWindows = Array.isArray(rawSupportWindows)
+      ? rawSupportWindows
+        .map((item) => finiteNumberOrNull(item))
+        .filter((item): item is number => item !== null)
+      : [];
+    const rotationGroups = Array.isArray(recordValue(rotation, 'pressureGroups', 'pressure_groups'))
+      ? (recordValue(rotation, 'pressureGroups', 'pressure_groups') as unknown[])
+        .map((item) => String(item || '').trim())
+        .filter(Boolean)
+      : [];
+    const alerts = asRecordList(recordValue(technical, 'alerts'))
+      .map((alert) => formatBoardAlert(alert, board));
+    return [{
+      key: `${decision.id}-${decision.symbol || decision.sequence}`,
+      symbol: String(decision.symbol || '-'),
+      name: String(decision.name || ''),
+      theme: String(recordValue(crossMarket, 'theme') || ''),
+      entryPhase: String(recordValue(crossMarket, 'entryPhase', 'entry_phase') || ''),
+      board,
+      historyThroughDate: String(recordValue(primary, 'historyThroughDate', 'history_through_date') || ''),
+      currentLevel: finiteNumberOrNull(recordValue(primary, 'currentLevel', 'current_level')),
+      levels,
+      nearestResistance: finiteNumberOrNull(recordValue(primary, 'nearestResistance', 'nearest_resistance')),
+      nearestResistanceWindow: finiteNumberOrNull(
+        recordValue(primary, 'nearestResistanceWindow', 'nearest_resistance_window'),
+      ),
+      resistanceDistancePct: finiteNumberOrNull(
+        recordValue(primary, 'resistanceDistancePct', 'resistance_distance_pct'),
+      ),
+      supportScore: finiteNumberOrNull(recordValue(technical, 'supportScore', 'support_score')),
+      supportWindows,
+      multiPeriodSupport: recordValue(primary, 'multiPeriodSupport', 'multi_period_support') === true,
+      supportive: technical.supportive === true,
+      nearResistance: recordValue(technical, 'nearResistance', 'near_resistance') === true,
+      breakoutConfirmed: recordValue(technical, 'breakoutConfirmed', 'breakout_confirmed') === true,
+      alerts,
+      rotationGroups,
+      rotationTailwind: rotation?.tailwind === true,
+    }];
+  });
 }
 
 function formatDateTime(value: unknown): string {
@@ -520,6 +769,7 @@ function settingsToForm(status: VnpyPaperStatusResponse): SettingsForm {
     enabled: Boolean(settings.enabled),
     initialCash: String(settings.initialCash ?? 100000),
     autoTradeEnabled: Boolean(settings.autoTradeEnabled),
+    crossMarketObservationEnabled: Boolean(settings.crossMarketObservationEnabled),
     autoStrategy: settings.autoStrategy || 'dual_low',
     autoMarket: (settings.autoMarket || 'cn') as VnpyPaperMarket,
     autoMaxResults: String(settings.autoMaxResults ?? 3),
@@ -627,6 +877,7 @@ function buildSettingsUpdate(settingsForm: SettingsForm): VnpyPaperSettingsUpdat
     enabled: settingsForm.enabled,
     initialCash: parseNumber(settingsForm.initialCash) ?? 100000,
     autoTradeEnabled: settingsForm.autoTradeEnabled,
+    crossMarketObservationEnabled: settingsForm.crossMarketObservationEnabled,
     autoStrategy: settingsForm.autoStrategy.trim() || 'dual_low',
     autoMarket: settingsForm.autoMarket,
     autoMaxResults: parseNumber(settingsForm.autoMaxResults) ?? 3,
@@ -943,6 +1194,10 @@ const VnpyPaperTradingPage: React.FC = () => {
   const [retryingPlanUid, setRetryingPlanUid] = useState<string | null>(null);
   const [cancellingPlanUid, setCancellingPlanUid] = useState<string | null>(null);
   const [performance, setPerformance] = useState<VnpyPaperPerformanceResponse | null>(null);
+  const [crossMarketCampaign, setCrossMarketCampaign] = useState<CrossMarketPaperCampaignStatus | null>(null);
+  const [crossMarketCampaignReport, setCrossMarketCampaignReport] = useState<CrossMarketPaperCampaignReport | null>(null);
+  const [crossMarketCampaignLoading, setCrossMarketCampaignLoading] = useState(false);
+  const [crossMarketCampaignError, setCrossMarketCampaignError] = useState('');
   const [performanceLoading, setPerformanceLoading] = useState(false);
   const [performanceError, setPerformanceError] = useState('');
   const [performanceFilters, setPerformanceFilters] = useState<PerformanceFilterForm>(defaultPerformanceFilterForm);
@@ -978,6 +1233,10 @@ const VnpyPaperTradingPage: React.FC = () => {
   const [paperAccountsHiddenCount, setPaperAccountsHiddenCount] = useState(0);
   const [paperAccountFilter, setPaperAccountFilter] = useState<PaperAccountHistoryFilter>('all');
   const selectedRiskSummary = useMemo(() => riskFlagSummary(selectedAgentRun), [selectedAgentRun]);
+  const selectedBoardReminders = useMemo(
+    () => crossMarketBoardReminders(selectedAgentRun),
+    [selectedAgentRun],
+  );
   const selectedAgentPlan = asRecord(selectedAgentRun?.diagnostics?.agentPlan);
   const selectedAgentSummary = asRecord(selectedAgentRun?.diagnostics?.agentSummary);
   const selectedAgentSummarySkips = asRecordList(selectedAgentSummary?.topSkipReasons);
@@ -1140,6 +1399,23 @@ const VnpyPaperTradingPage: React.FC = () => {
     }
   }, []);
 
+  const loadCrossMarketCampaign = useCallback(async () => {
+    setCrossMarketCampaignLoading(true);
+    setCrossMarketCampaignError('');
+    try {
+      const [campaign, report] = await Promise.all([
+        vnpyPaperTradingApi.getCrossMarketPaperCampaign(),
+        vnpyPaperTradingApi.getCrossMarketPaperCampaignReport(),
+      ]);
+      setCrossMarketCampaign(campaign);
+      setCrossMarketCampaignReport(report);
+    } catch (err) {
+      setCrossMarketCampaignError(toApiErrorMessage(err, '30 日跨市场模拟状态加载失败'));
+    } finally {
+      setCrossMarketCampaignLoading(false);
+    }
+  }, []);
+
   const loadTradePlanRecovery = useCallback(async () => {
     setTradePlanRecoveryLoading(true);
     setTradePlanRecoveryError('');
@@ -1227,6 +1503,7 @@ const VnpyPaperTradingPage: React.FC = () => {
     void loadPaperAccounts();
     void loadAgentRuns();
     void loadPerformance();
+    void loadCrossMarketCampaign();
     void loadTradePlanRecovery();
     void loadTaskHealth();
     void loadTaskEvents();
@@ -1236,6 +1513,7 @@ const VnpyPaperTradingPage: React.FC = () => {
     loadPaperAccounts,
     loadAgentRuns,
     loadPerformance,
+    loadCrossMarketCampaign,
     loadTradePlanRecovery,
     loadTaskHealth,
     loadTaskEvents,
@@ -1244,6 +1522,42 @@ const VnpyPaperTradingPage: React.FC = () => {
 
   const snapshotAccount = status?.snapshot?.accounts?.[0];
   const currency = snapshotAccount?.baseCurrency || 'CNY';
+  const campaignObservation = crossMarketCampaign?.paperObservation;
+  const campaignReportPerformance = crossMarketCampaignReport?.performance;
+  const campaignTradeMetrics = asRecord(campaignReportPerformance?.tradeMetrics);
+  const campaignRiskMetrics = asRecord(campaignReportPerformance?.riskMetrics);
+  const campaignObservedDays = Number(campaignObservation?.observedTradingDays ?? 0);
+  const campaignFullyEvidencedDays = Number(
+    campaignObservation?.fullyEvidencedTradingDays ?? 0,
+  );
+  const campaignRequiredDays = Number(campaignObservation?.requiredTradingDays ?? 30);
+  const campaignFormalExecutionDays = Number(
+    campaignObservation?.formalExecutionTradingDays ?? 0,
+  );
+  const campaignFormalEvidenceDays = Number(
+    campaignObservation?.fullyEvidencedFormalExecutionDays ?? 0,
+  );
+  const campaignQualifiedPaperDays = Number(
+    campaignObservation?.qualifiedPaperTradingDays
+      ?? campaignFormalEvidenceDays,
+  );
+  const campaignProgressPct = campaignRequiredDays > 0
+    ? Math.min(100, Math.max(0, (campaignQualifiedPaperDays / campaignRequiredDays) * 100))
+    : 0;
+  const campaignAccountMatches = campaignObservation?.accountMatchesCurrent !== false;
+  const campaignReportFinal = crossMarketCampaignReport?.isFinal === true;
+  const campaignStrategyAccepted = crossMarketCampaignReport?.strategyAccepted === true;
+  const campaignStatisticalSample = crossMarketCampaignReport?.statisticalSample;
+  const campaignMissingRequirements = Object.entries(
+    campaignObservation?.missingRequirementCounts ?? {},
+  ).filter(([, count]) => Number(count) > 0);
+  const campaignDecisionMetrics = asRecord(crossMarketCampaignReport?.decisionMetrics);
+  const campaignDecisionReasons = Object.entries(
+    asRecord(campaignDecisionMetrics?.reasonCounts) ?? {},
+  )
+    .filter(([, count]) => Number(count) > 0)
+    .sort((left, right) => Number(right[1]) - Number(left[1]))
+    .slice(0, 5);
   const performanceCurrency = performance?.account?.baseCurrency || currency;
   const performanceRunCount = Number(performance?.runWindow?.runCount ?? 0);
   const performanceSubmitted = Number(performance?.agent?.submittedCount ?? 0);
@@ -1485,6 +1799,16 @@ const VnpyPaperTradingPage: React.FC = () => {
     : vnpyRuntimeMode;
   const vnpyGatewayConnectionStatus = String(vnpyRuntimeConnect?.status || 'unavailable');
   const vnpyGatewayConnected = vnpyRuntimeConnect?.connected === true;
+  const vnpyGatewayName = String(
+    vnpyRuntime?.gatewayName || settingsForm.vnpyGatewayName || 'vn.py gateway',
+  ).trim();
+  const simulationNotice = status?.vnpyAvailable
+    ? (vnpyGatewayConnected
+      ? (vnpyGatewayName === 'DSA_SIM'
+        ? `当前使用本地模拟账本，并已连接 ${vnpyGatewayName} vn.py 模拟网关；不会连接实盘券商或真实资金账户。`
+        : `当前使用本地模拟账本，vn.py 已连接 ${vnpyGatewayName}；请确认该 gateway 指向模拟环境。`)
+      : '当前使用本地模拟账本；vn.py 环境已安装，但 gateway 尚未连接，本地账本仍可继续使用。')
+    : '当前使用本地模拟账本；vn.py 环境未安装时仍可模拟成交，不会连接实盘券商或真实网关。';
   const canReconnectGateway = Boolean(
     vnpyRuntime?.available
     && vnpyRuntime?.gatewayName
@@ -1511,6 +1835,7 @@ const VnpyPaperTradingPage: React.FC = () => {
     tradingWindowGateReason ? formatTradingWindowStatus(tradingWindowGateReason) : '',
   ].filter(Boolean).join(' · ');
   const autoExecutionMode = settingsForm.autoExecutionMode;
+  const isCrossMarketStrategy = isCrossMarketStrategyId(settingsForm.autoStrategy);
   const tradingWindowGatesExecution = settingsForm.autoTradeTimeGateEnabled
     && ['paper', 'vnpy_paper'].includes(autoExecutionMode);
   const availabilityDiagnostics = useMemo(() => {
@@ -2192,6 +2517,7 @@ const VnpyPaperTradingPage: React.FC = () => {
       {taskEventSummaryError ? <InlineAlert variant="warning" title="后台任务趋势加载失败" message={taskEventSummaryError} /> : null}
       {taskMetricsError ? <InlineAlert variant="warning" title="后台任务长期指标加载失败" message={taskMetricsError} /> : null}
       {paperAccountsError ? <InlineAlert variant="warning" title="账户历史加载失败" message={paperAccountsError} /> : null}
+      {crossMarketCampaignError ? <InlineAlert variant="warning" title="30 日模拟状态加载失败" message={crossMarketCampaignError} /> : null}
       {success ? <InlineAlert variant="success" message={success} /> : null}
       {gatewayPreflight ? (
         <InlineAlert
@@ -2203,9 +2529,9 @@ const VnpyPaperTradingPage: React.FC = () => {
         />
       ) : null}
       <InlineAlert
-        variant="warning"
+        variant={vnpyGatewayConnected && vnpyGatewayName === 'DSA_SIM' ? 'info' : 'warning'}
         title="模拟交易"
-        message="当前可用的是本地模拟账本；vn.py 环境未安装时仍可模拟成交，不会连接实盘券商或真实网关。"
+        message={simulationNotice}
       />
       {snapshotLoading ? (
         <InlineAlert
@@ -2219,6 +2545,126 @@ const VnpyPaperTradingPage: React.FC = () => {
           title="调度器最近错误"
           message={schedulerStatus.lastError}
         />
+      ) : null}
+
+      {campaignObservation?.campaignActive ? (
+        <section className="rounded-lg border border-border bg-card/95" data-testid="cross-market-campaign-panel">
+          <div className="flex flex-col gap-3 border-b border-border px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <h2 className="flex items-center gap-2 text-sm font-semibold text-foreground">
+                <LineChart className="h-4 w-4 text-cyan" />
+                30 日跨市场模拟
+              </h2>
+              <p className="mt-1 text-xs text-secondary-text">
+                {crossMarketCampaign?.strategyId || '-'} · 账户 #{campaignObservation.campaignAccountId ?? '-'}
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <span className={`rounded-full border px-2 py-1 text-xs font-semibold ${
+                campaignStrategyAccepted
+                  ? 'border-success/30 bg-success/10 text-success'
+                  : campaignReportFinal
+                    ? 'border-warning/30 bg-warning/10 text-warning'
+                  : campaignAccountMatches
+                    ? 'border-cyan/30 bg-cyan/10 text-cyan'
+                    : 'border-danger/30 bg-danger/10 text-danger'
+              }`}>
+                {campaignStrategyAccepted
+                  ? '策略通过'
+                  : campaignReportFinal
+                    ? '样本不足'
+                    : campaignAccountMatches
+                      ? '运行中'
+                      : '账户不匹配'}
+              </span>
+              <Button
+                size="xsm"
+                variant="outline"
+                isLoading={crossMarketCampaignLoading}
+                loadingText="刷新中..."
+                onClick={() => void loadCrossMarketCampaign()}
+              >
+                <RefreshCw className="h-3.5 w-3.5" />
+                刷新
+              </Button>
+              <Button
+                size="xsm"
+                variant="outline"
+                disabled={!crossMarketCampaignReport}
+                onClick={() => {
+                  if (crossMarketCampaignReport) {
+                    exportJsonFile('cross-market-paper-campaign-report.json', crossMarketCampaignReport);
+                  }
+                }}
+              >
+                <Download className="h-3.5 w-3.5" />
+                导出报告
+              </Button>
+            </div>
+          </div>
+          <div className="px-4 py-3">
+            <div className="flex items-center justify-between gap-3 text-xs">
+              <span className="font-semibold text-foreground">
+                {formatNumber(campaignQualifiedPaperDays, 0)} / {formatNumber(campaignRequiredDays, 0)} 个有效正式模拟日
+                <span className="ml-2 font-normal text-secondary-text">
+                  累计观察 {formatNumber(campaignObservedDays, 0)} 日
+                </span>
+              </span>
+              <span className="text-secondary-text">剩余 {formatNumber(campaignObservation.remainingTradingDays, 0)} 日</span>
+            </div>
+            <div className="mt-2 h-2 overflow-hidden rounded bg-surface" aria-label="30 日模拟进度">
+              <div className="h-full bg-cyan transition-[width]" style={{ width: `${campaignProgressPct}%` }} />
+            </div>
+          </div>
+          <div className="grid border-t border-border sm:grid-cols-2 lg:grid-cols-5">
+            {[
+              ['有效正式模拟日', formatNumber(campaignQualifiedPaperDays, 0)],
+              ['正式模拟日', formatNumber(campaignFormalExecutionDays, 0)],
+              ['证据完整观察日', formatNumber(campaignFullyEvidencedDays, 0)],
+              ['降级观察日', formatNumber(campaignObservation.degradedTradingDays ?? 0, 0)],
+              ['数据完整度', formatPercent(campaignObservation.dataCompletenessPct)],
+              ['活动当前权益', formatMoney(campaignReportPerformance?.totalEquity, currency)],
+              ['活动净收益', formatMoney(campaignReportPerformance?.totalPnl, currency)],
+              ['活动收益率', formatPercent(campaignReportPerformance?.returnPct)],
+              ['活动全口径成本', formatMoney(
+                campaignTradeMetrics?.totalAllInTradingCost
+                  ?? campaignTradeMetrics?.totalTransactionCost,
+                currency,
+              )],
+              ['活动最大回撤', formatPercent(campaignRiskMetrics?.maxDrawdownPct)],
+              ['买入样本', `${formatNumber(campaignStatisticalSample?.buyTradeCount, 0)} / ${formatNumber(campaignStatisticalSample?.minimumBuyTrades, 0)}`],
+              ['闭环样本', `${formatNumber(campaignStatisticalSample?.closedTradeCount, 0)} / ${formatNumber(campaignStatisticalSample?.minimumClosedTrades, 0)}`],
+            ].map(([label, value]) => (
+              <div key={label} className="min-w-0 border-t border-border px-4 py-3 first:border-t-0 sm:border-l sm:first:border-l-0 lg:border-t-0">
+                <p className="text-xs text-secondary-text">{label}</p>
+                <p className="mt-2 truncate text-sm font-semibold text-foreground" title={String(value)}>{value}</p>
+              </div>
+            ))}
+          </div>
+          {campaignMissingRequirements.length ? (
+            <div className="border-t border-border px-4 py-2 text-xs text-secondary-text">
+              <span className="font-semibold text-foreground">缺失证据累计：</span>
+              {' '}
+              {campaignMissingRequirements.map(([requirement, count]) => (
+                `${formatCampaignRequirement(requirement)} ${formatNumber(count, 0)} 日`
+              )).join(' · ')}
+            </div>
+          ) : null}
+          {campaignDecisionReasons.length ? (
+            <div className="border-t border-border px-4 py-2 text-xs text-secondary-text">
+              <span className="font-semibold text-foreground">决策阻断累计：</span>
+              {' '}
+              {campaignDecisionReasons.map(([reason, count]) => (
+                `${formatCampaignDecisionReason(reason)} ${formatNumber(count, 0)} 次`
+              )).join(' · ')}
+            </div>
+          ) : null}
+          {crossMarketCampaignReport?.warnings?.length ? (
+            <div className="border-t border-border px-4 py-2 text-xs text-warning">
+              {crossMarketCampaignReport.warnings.map(formatCampaignWarning).join(' · ')}
+            </div>
+          ) : null}
+        </section>
       ) : null}
 
       <section className="rounded-xl border border-border bg-card/95 px-4 py-3" data-testid="paper-availability-diagnostics">
@@ -3140,25 +3586,25 @@ const VnpyPaperTradingPage: React.FC = () => {
               : `${formatNumber(performanceSubmitted, 0)} / ${formatNumber(performancePlanned, 0)}`}
           </p>
         </div>
-        <div className="rounded-xl border border-border bg-card/95 px-4 py-3">
+        <div className="min-w-0 rounded-xl border border-border bg-card/95 px-4 py-3">
           <p className="text-xs text-secondary-text">主要跳过</p>
-          <p className="mt-2 text-sm font-semibold text-foreground">
+          <p className="mt-2 text-sm font-semibold text-foreground [overflow-wrap:anywhere]">
             {performanceLoading
               ? '加载中...'
               : topSkipReason ? `${topSkipReason.key} ${topSkipReason.count}次` : '-'}
           </p>
         </div>
-        <div className="rounded-xl border border-border bg-card/95 px-4 py-3">
+        <div className="min-w-0 rounded-xl border border-border bg-card/95 px-4 py-3">
           <p className="text-xs text-secondary-text">主策略</p>
-          <p className="mt-2 text-sm font-semibold text-foreground">
+          <p className="mt-2 text-sm font-semibold text-foreground [overflow-wrap:anywhere]">
             {performanceLoading
               ? '加载中...'
               : topStrategy ? `${topStrategy.key} ${formatMoney(topStrategy.filledCashAmount, performanceCurrency)}` : '-'}
           </p>
         </div>
-        <div className="rounded-xl border border-border bg-card/95 px-4 py-3">
+        <div className="min-w-0 rounded-xl border border-border bg-card/95 px-4 py-3">
           <p className="text-xs text-secondary-text">主行业</p>
-          <p className="mt-2 text-sm font-semibold text-foreground">
+          <p className="mt-2 text-sm font-semibold text-foreground [overflow-wrap:anywhere]">
             {performanceLoading
               ? '加载中...'
               : topIndustry ? `${topIndustry.key} ${formatMoney(topIndustry.filledCashAmount, performanceCurrency)}` : '-'}
@@ -3200,7 +3646,12 @@ const VnpyPaperTradingPage: React.FC = () => {
             </div>
           </div>
           <div className="h-64 min-h-[240px] px-2 py-4">
-            <ResponsiveContainer width="100%" height="100%">
+            <ResponsiveContainer
+              width="100%"
+              height="100%"
+              minWidth={0}
+              initialDimension={{ width: 1, height: 224 }}
+            >
               <RechartsLineChart data={equityCurveRows} margin={{ top: 8, right: 24, bottom: 8, left: 8 }}>
                 <CartesianGrid stroke="rgba(148, 163, 184, 0.22)" vertical={false} />
                 <XAxis dataKey="name" tickLine={false} axisLine={false} tickMargin={8} />
@@ -3339,16 +3790,16 @@ const VnpyPaperTradingPage: React.FC = () => {
       ) : null}
 
       <section className="grid gap-4 lg:grid-cols-2">
-        <div className="rounded-xl border border-border bg-card/95 p-4">
+        <div className="min-w-0 rounded-xl border border-border bg-card/95 p-4">
           <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-foreground">
             <BarChart3 className="h-4 w-4 text-cyan" />
             策略归因
           </div>
           <div className="divide-y divide-border/70">
             {strategyAttribution.length > 0 ? strategyAttribution.slice(0, 5).map((item) => (
-              <div key={item.key} className="grid grid-cols-[1fr_auto] gap-3 py-2 text-sm">
-                <div>
-                  <p className="font-semibold text-foreground">{item.key}</p>
+              <div key={item.key} className="grid min-w-0 grid-cols-[1fr_auto] gap-3 py-2 text-sm">
+                <div className="min-w-0">
+                  <p className="break-all font-semibold text-foreground">{item.key}</p>
                   <p className="text-xs text-secondary-text">
                     运行 {formatNumber(item.runCount, 0)} 次 · 成交 {formatNumber(item.filledPlanCount, 0)} 笔
                   </p>
@@ -3363,16 +3814,16 @@ const VnpyPaperTradingPage: React.FC = () => {
             )}
           </div>
         </div>
-        <div className="rounded-xl border border-border bg-card/95 p-4">
+        <div className="min-w-0 rounded-xl border border-border bg-card/95 p-4">
           <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-foreground">
             <LineChart className="h-4 w-4 text-cyan" />
             行业归因
           </div>
           <div className="divide-y divide-border/70">
             {industryAttribution.length > 0 ? industryAttribution.slice(0, 5).map((item) => (
-              <div key={item.key} className="grid grid-cols-[1fr_auto] gap-3 py-2 text-sm">
-                <div>
-                  <p className="font-semibold text-foreground">{item.key}</p>
+              <div key={item.key} className="grid min-w-0 grid-cols-[1fr_auto] gap-3 py-2 text-sm">
+                <div className="min-w-0">
+                  <p className="break-all font-semibold text-foreground">{item.key}</p>
                   <p className="text-xs text-secondary-text">
                     决策 {formatNumber(item.decisionCount, 0)} 条 · 成交 {formatNumber(item.filledCount, 0)} 笔
                   </p>
@@ -3583,6 +4034,18 @@ const VnpyPaperTradingPage: React.FC = () => {
                 onChange={(event) => setSettingsForm((prev) => ({ ...prev, autoTradeEnabled: event.target.checked }))}
               />
               定时自动买入
+            </label>
+            <label className="flex items-center gap-2 text-sm text-foreground">
+              <input
+                type="checkbox"
+                className={CHECKBOX_CLASS}
+                checked={settingsForm.crossMarketObservationEnabled}
+                onChange={(event) => setSettingsForm((prev) => ({
+                  ...prev,
+                  crossMarketObservationEnabled: event.target.checked,
+                }))}
+              />
+              跨市场零委托观察
             </label>
             <label className="flex items-center gap-2 text-sm text-foreground">
               <input
@@ -4164,14 +4627,15 @@ const VnpyPaperTradingPage: React.FC = () => {
               />
             </label>
             <label className="space-y-1 text-xs text-secondary-text">
-              连续亏损冷却（分钟）
+              {isCrossMarketStrategy ? '连续亏损冷却（A股交易日）' : '连续亏损冷却（分钟）'}
               <input
                 className={INPUT_CLASS}
                 type="number"
                 min={1}
-                max={10080}
+                max={isCrossMarketStrategy ? 3 : 10080}
                 step={1}
-                value={settingsForm.autoConsecutiveLossCooldownMinutes}
+                value={isCrossMarketStrategy ? '3' : settingsForm.autoConsecutiveLossCooldownMinutes}
+                disabled={isCrossMarketStrategy}
                 onChange={(event) => setSettingsForm((prev) => ({
                   ...prev,
                   autoConsecutiveLossCooldownMinutes: event.target.value,
@@ -5011,22 +5475,22 @@ const VnpyPaperTradingPage: React.FC = () => {
             暂无自动选股 Agent 运行记录
           </div>
         ) : (
-          <div className="grid gap-4 xl:grid-cols-[0.85fr_1.15fr]">
-            <div className="space-y-2">
+          <div className="grid min-w-0 gap-4 xl:grid-cols-[0.85fr_1.15fr]">
+            <div className="min-w-0 space-y-2">
               {agentRuns.map((item) => (
                 <button
                   key={item.runUid}
                   type="button"
-                  className={`w-full rounded-lg border px-3 py-2 text-left text-xs transition-colors ${
+                  className={`min-w-0 w-full rounded-lg border px-3 py-2 text-left text-xs transition-colors ${
                     selectedAgentRun?.runUid === item.runUid
                       ? 'border-cyan bg-cyan/10'
                       : 'border-border bg-surface hover:border-cyan/60'
                   }`}
                   onClick={() => void loadAgentRunDetail(item.runUid)}
                 >
-                  <div className="flex items-center justify-between gap-3">
-                    <span className="font-semibold text-foreground">{item.strategy}</span>
-                    <span className="text-secondary-text">{formatDateTime(item.startedAt || item.createdAt)}</span>
+                  <div className="flex min-w-0 items-center justify-between gap-3">
+                    <span className="min-w-0 break-all font-semibold text-foreground">{item.strategy}</span>
+                    <span className="shrink-0 text-secondary-text">{formatDateTime(item.startedAt || item.createdAt)}</span>
                   </div>
                   <div className="mt-1 text-secondary-text">
                     {item.market} · 候选 {item.candidateCount} · 计划 {item.plannedCount} · 成交 {item.submittedCount} · 跳过 {item.skippedCount}
@@ -5043,9 +5507,9 @@ const VnpyPaperTradingPage: React.FC = () => {
 
             <div className="min-w-0">
               {selectedAgentRun ? (
-                <div className="space-y-3">
+                <div className="min-w-0 space-y-3">
                   <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div className="text-xs text-secondary-text">
+                    <div className="min-w-0 break-all text-xs text-secondary-text">
                       {selectedAgentRun.runUid} · {formatDateTime(selectedAgentRun.startedAt || selectedAgentRun.createdAt)}
                     </div>
                     <Button size="xsm" variant="outline" onClick={handleExportSelectedAgentRun}>
@@ -5054,12 +5518,12 @@ const VnpyPaperTradingPage: React.FC = () => {
                     </Button>
                   </div>
                   {selectedAgentPlan ? (
-                    <div className="rounded-lg border border-border bg-surface px-3 py-2">
+                    <div className="min-w-0 rounded-lg border border-border bg-surface px-3 py-2">
                       <div className="mb-2 text-xs font-semibold text-foreground">Agent 计划</div>
-                      <div className="grid gap-2 text-xs md:grid-cols-2 xl:grid-cols-4">
-                        <div>
+                      <div className="grid min-w-0 gap-2 text-xs md:grid-cols-2 xl:grid-cols-4">
+                        <div className="min-w-0">
                           <div className="text-secondary-text">策略 / 市场</div>
-                          <div className="mt-1 font-semibold text-foreground">
+                          <div className="mt-1 break-all font-semibold text-foreground">
                             {String(selectedAgentPlan.strategy || selectedAgentRun.strategy || '-')} · {String(selectedAgentPlan.market || selectedAgentRun.market || '-')}
                           </div>
                         </div>
@@ -5126,6 +5590,112 @@ const VnpyPaperTradingPage: React.FC = () => {
                       ) : null}
                     </div>
                   ) : null}
+                  {selectedBoardReminders.length > 0 ? (
+                    <div
+                      data-testid="cross-market-board-reminders"
+                      className="rounded-lg border border-border bg-surface px-3 py-2"
+                    >
+                      <div className="flex items-center gap-2 text-xs font-semibold text-foreground">
+                        <LineChart className="h-4 w-4 text-cyan" />
+                        板块技术位提醒
+                      </div>
+                      <div className="mt-2 divide-y divide-border">
+                        {selectedBoardReminders.map((reminder) => (
+                          <div key={reminder.key} className="py-3 first:pt-0 last:pb-0">
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <div className="min-w-0 text-xs text-foreground">
+                                <span className="font-mono font-semibold">{reminder.symbol}</span>
+                                {reminder.name ? <span> · {reminder.name}</span> : null}
+                                <span className="text-secondary-text">
+                                  {' '}· {formatCrossMarketTheme(reminder.theme)} · {formatEntryPhase(reminder.entryPhase)}
+                                </span>
+                              </div>
+                              <div className="flex flex-wrap gap-2 text-xs">
+                                <span className={reminder.supportive ? 'text-success' : 'text-secondary-text'}>
+                                  {reminder.supportive
+                                    ? `支撑确认 ${formatNumber(reminder.supportScore, 0)} 分`
+                                    : '未处支撑区'}
+                                </span>
+                                {reminder.nearResistance ? (
+                                  <span className="text-warning">压力位预警，禁止追高</span>
+                                ) : null}
+                                {reminder.breakoutConfirmed ? (
+                                  <span className="text-success">压力突破已确认</span>
+                                ) : null}
+                              </div>
+                            </div>
+                            <div className="mt-2 grid grid-cols-1 gap-x-4 gap-y-2 text-xs md:grid-cols-3">
+                              <div className="min-w-0">
+                                <div className="text-secondary-text">板块 / 当前</div>
+                                <div className="mt-1 break-words font-semibold text-foreground">
+                                  {reminder.board} / {formatBoardLevel(reminder.currentLevel)}
+                                </div>
+                              </div>
+                              <div className="min-w-0">
+                                <div className="text-secondary-text">
+                                  最近压力{reminder.nearestResistanceWindow === null ? '' : `（${reminder.nearestResistanceWindow} 日）`}
+                                </div>
+                                <div className="mt-1 break-words font-semibold text-foreground">
+                                  {formatBoardLevel(reminder.nearestResistance)}
+                                  {reminder.resistanceDistancePct === null
+                                    ? ''
+                                    : ` / ${reminder.resistanceDistancePct.toFixed(2)}%`}
+                                </div>
+                              </div>
+                              <div className="min-w-0">
+                                <div className="text-secondary-text">支撑周期</div>
+                                <div className="mt-1 break-words font-semibold text-foreground">
+                                  {reminder.supportWindows.length > 0
+                                    ? `${reminder.supportWindows.join('/')} 日${reminder.multiPeriodSupport ? '共振' : ''}`
+                                    : '-'}
+                                </div>
+                              </div>
+                            </div>
+                            <div className="mt-2 overflow-x-auto rounded-md border border-border">
+                              <table className="w-full min-w-[440px] border-collapse text-xs">
+                                <thead className="bg-card/80 text-left text-secondary-text">
+                                  <tr>
+                                    <th className="px-3 py-2 font-semibold">周期</th>
+                                    <th className="px-3 py-2 font-semibold">均线</th>
+                                    <th className="px-3 py-2 font-semibold">区间支撑</th>
+                                    <th className="px-3 py-2 font-semibold">区间压力</th>
+                                  </tr>
+                                </thead>
+                                <tbody className="divide-y divide-border">
+                                  {reminder.levels.map((level) => (
+                                    <tr key={level.windowDays}>
+                                      <td className="px-3 py-2 font-semibold text-foreground">{level.windowDays} 日</td>
+                                      <td className="px-3 py-2 text-foreground">{formatBoardLevel(level.movingAverage)}</td>
+                                      <td className="px-3 py-2 text-foreground">{formatBoardLevel(level.support)}</td>
+                                      <td className="px-3 py-2 text-foreground">{formatBoardLevel(level.resistance)}</td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                            {reminder.alerts.length > 0 ? (
+                              <div className="mt-2 space-y-1 text-xs text-cyan">
+                                {reminder.alerts.map((alert) => <div key={alert}>{alert}</div>)}
+                              </div>
+                            ) : null}
+                            {reminder.rotationTailwind && reminder.rotationGroups.length > 0 ? (
+                              <div className="mt-2 text-xs text-success">
+                                {reminder.rotationGroups
+                                  .map((group) => (group === 'bank' ? '银行' : group === 'liquor' ? '白酒' : group))
+                                  .join('、')}
+                                接近压力位，且目标板块位于支撑区，计入轮动顺风加分
+                              </div>
+                            ) : null}
+                            {reminder.historyThroughDate ? (
+                              <div className="mt-1 text-xs text-secondary-text">
+                                技术位基于 {reminder.historyThroughDate} 及之前已完成日线
+                              </div>
+                            ) : null}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
                   {selectedRiskSummary.length > 0 ? (
                     <div className="rounded-lg border border-border bg-surface px-3 py-2">
                       <div className="mb-2 text-xs font-semibold text-foreground">风控统计</div>
@@ -5146,19 +5716,19 @@ const VnpyPaperTradingPage: React.FC = () => {
                     currency={currency}
                   />
                   {(selectedAgentRun.timeline || []).length > 0 ? (
-                    <div className="rounded-lg border border-border bg-surface px-3 py-2">
+                    <div className="min-w-0 rounded-lg border border-border bg-surface px-3 py-2">
                       <div className="mb-2 text-xs font-semibold text-foreground">运行时间线</div>
-                      <div className="space-y-2">
+                      <div className="min-w-0 space-y-2">
                         {(selectedAgentRun.timeline || []).map((event, index) => (
                           <div
                             key={`${event.stage}-${index}`}
-                            className="grid gap-2 rounded-md border border-border bg-card/80 px-3 py-2 text-xs md:grid-cols-[120px_1fr]"
+                            className="grid min-w-0 gap-2 rounded-md border border-border bg-card/80 px-3 py-2 text-xs md:grid-cols-[120px_1fr]"
                           >
-                            <div className="text-secondary-text">
+                            <div className="min-w-0 text-secondary-text">
                               <div className="font-mono">{formatDateTime(event.timestamp)}</div>
-                              <div className={decisionTone(event.status)}>{event.stage} · {event.status}</div>
+                              <div className={`break-all ${decisionTone(event.status)}`}>{event.stage} · {event.status}</div>
                             </div>
-                            <div className="text-foreground">{event.message}</div>
+                            <div className="min-w-0 [overflow-wrap:anywhere] text-foreground">{event.message}</div>
                           </div>
                         ))}
                       </div>
