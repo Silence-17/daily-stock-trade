@@ -398,6 +398,8 @@ class RuntimeSchedulerService:
             "completedCount",
             "cadence_skipped_count",
             "evidence_ready",
+            "retryable",
+            "retry_after_seconds",
             "read_only",
             "creates_agent_runs",
             "places_orders",
@@ -407,6 +409,10 @@ class RuntimeSchedulerService:
             "previous_evidence_ready",
             "execution_mode",
             "executionMode",
+            "trigger_source",
+            "analysis_slot",
+            "formal_recovery",
+            "intraday_entry_recheck",
             "submits_orders",
             "submitsOrders",
             "messages",
@@ -760,6 +766,10 @@ class RuntimeSchedulerService:
                 }
                 if entry.get("initial_delay_seconds") is not None:
                     task_kwargs["initial_delay_seconds"] = entry.get("initial_delay_seconds")
+                if callable(entry.get("next_delay_seconds_provider")):
+                    task_kwargs["next_delay_seconds_provider"] = entry.get(
+                        "next_delay_seconds_provider"
+                    )
                 scheduler.add_background_task(**task_kwargs)
             if daily_enabled and run_immediately and self._run_immediately_in_background:
                 self._run_in_background_thread(self._run_analysis_once)
@@ -862,6 +872,10 @@ class RuntimeSchedulerService:
                     "name": task_name,
                     "interval_seconds": entry.get("interval_seconds") if isinstance(entry, dict) else None,
                     "initial_delay_seconds": entry.get("initial_delay_seconds") if isinstance(entry, dict) else None,
+                    "dynamic_reschedule": bool(
+                        isinstance(entry, dict)
+                        and callable(entry.get("next_delay_seconds_provider"))
+                    ),
                     "running": entry_running or guarded_running,
                     "overlap_guarded": task_lock is not None,
                     "previous_generation_running": guarded_running and not entry_running,

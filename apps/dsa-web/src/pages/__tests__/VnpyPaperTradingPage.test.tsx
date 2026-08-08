@@ -17,6 +17,8 @@ const listAccounts = vi.hoisted(() => vi.fn());
 const restoreAccount = vi.hoisted(() => vi.fn());
 const cleanupArchivedAccounts = vi.hoisted(() => vi.fn());
 const getPerformance = vi.hoisted(() => vi.fn());
+const getCrossMarketPaperCampaign = vi.hoisted(() => vi.fn());
+const getCrossMarketPaperCampaignReport = vi.hoisted(() => vi.fn());
 const getTradePlanRecoverySummary = vi.hoisted(() => vi.fn());
 const runTradePlanRecovery = vi.hoisted(() => vi.fn());
 const updateSettings = vi.hoisted(() => vi.fn());
@@ -47,6 +49,8 @@ vi.mock('../../api/vnpyPaperTrading', () => ({
     restoreAccount,
     cleanupArchivedAccounts,
     getPerformance,
+    getCrossMarketPaperCampaign,
+    getCrossMarketPaperCampaignReport,
     getTradePlanRecoverySummary,
     runTradePlanRecovery,
     updateSettings,
@@ -1017,6 +1021,8 @@ describe('VnpyPaperTradingPage', () => {
     restoreAccount.mockReset();
     cleanupArchivedAccounts.mockReset();
     getPerformance.mockReset();
+    getCrossMarketPaperCampaign.mockReset();
+    getCrossMarketPaperCampaignReport.mockReset();
     getTradePlanRecoverySummary.mockReset();
     runTradePlanRecovery.mockReset();
     updateSettings.mockReset();
@@ -1032,6 +1038,75 @@ describe('VnpyPaperTradingPage', () => {
     cancelTradePlan.mockReset();
     listAlertTriggers.mockReset();
     getStatus.mockResolvedValue(statusResponse);
+    getCrossMarketPaperCampaign.mockResolvedValue({
+      strategyId: 'cross_market_global_sector_rotation_v1.3_aggressive',
+      historicalRequired: false,
+      historicalReady: false,
+      ready: false,
+      paperObservation: {
+        campaignActive: true,
+        campaignStartedAt: '2026-07-24T08:26:52+00:00',
+        campaignAccountId: 9,
+        currentAccountId: 9,
+        accountMatchesCurrent: true,
+        initialEquity: 100000,
+        requiredTradingDays: 30,
+        observedTradingDays: 1,
+        remainingTradingDays: 30,
+        fullyEvidencedTradingDays: 0,
+        qualifiedPaperTradingDays: 0,
+        formalExecutionTradingDays: 1,
+        fullyEvidencedFormalExecutionDays: 0,
+        fullyEvidencedViaLaterObservationDays: 0,
+        degradedTradingDays: 1,
+        dataCompletenessPct: 0,
+        missingRequirementCounts: {
+          goldSignalAvailable: 1,
+          usFirstHourAndCloseAvailable: 1,
+        },
+        observationDates: ['2026-07-27'],
+        ready: false,
+      },
+    });
+    getCrossMarketPaperCampaignReport.mockResolvedValue({
+      schemaVersion: 1,
+      strategyId: 'cross_market_global_sector_rotation_v1.3_aggressive',
+      generatedAt: '2026-07-27T07:30:00+00:00',
+      isFinal: false,
+      strategyAccepted: false,
+      reportStatus: 'in_progress',
+      campaign: {},
+      performance: {
+        initialEquity: 100000,
+        totalEquity: 100000,
+        totalPnl: 0,
+        returnPct: 0,
+        tradeMetrics: {
+          totalTransactionCost: 0,
+          totalAllInTradingCost: 1.23,
+        },
+        riskMetrics: { maxDrawdownPct: 0 },
+      },
+      transactions: [],
+      transactionCount: 0,
+      nonStrategyTransactionCount: 0,
+      statisticalSample: {
+        ready: false,
+        buyTradeCount: 0,
+        closedTradeCount: 0,
+        minimumBuyTrades: 8,
+        minimumClosedTrades: 5,
+      },
+      decisionAudit: [],
+      decisionMetrics: {
+        reasonCounts: { cn_extreme_low_open_buy_blocked: 2 },
+      },
+      warnings: [
+        'campaign_contains_degraded_observation_days',
+        'campaign_daily_snapshot_evidence_incomplete',
+      ],
+      methodology: {},
+    });
     reconnectGateway.mockResolvedValue({
       attempted: true,
       connected: true,
@@ -1387,6 +1462,37 @@ describe('VnpyPaperTradingPage', () => {
     });
   });
 
+  it('renders the account-bound 30-day cross-market campaign report', async () => {
+    render(
+      <UiLanguageProvider>
+        <VnpyPaperTradingPage />
+      </UiLanguageProvider>,
+    );
+
+    const panel = await screen.findByTestId('cross-market-campaign-panel');
+    expect(panel).toHaveTextContent('30 日跨市场模拟');
+    expect(panel).toHaveTextContent('0 / 30 个有效正式模拟日');
+    expect(panel).toHaveTextContent('剩余 30 日');
+    expect(panel).toHaveTextContent('账户 #9');
+    expect(panel).toHaveTextContent('运行中');
+    expect(panel).toHaveTextContent('有效正式模拟日');
+    expect(panel).toHaveTextContent('正式模拟日');
+    expect(panel).toHaveTextContent('证据完整观察日');
+    expect(panel).toHaveTextContent('降级观察日');
+    expect(panel).toHaveTextContent('活动全口径成本');
+    expect(panel).toHaveTextContent('¥1.23');
+    expect(panel).toHaveTextContent('累计观察 1 日');
+    expect(panel).toHaveTextContent('缺失证据累计：');
+    expect(panel).toHaveTextContent('纽约金与降息新闻信号 1 日');
+    expect(panel).toHaveTextContent('美股首小时与收盘信号 1 日');
+    expect(panel).toHaveTextContent('决策阻断累计：');
+    expect(panel).toHaveTextContent('A 股极端低开，禁止买入 2 次');
+    expect(panel).toHaveTextContent('活动包含因跨市场证据不完整而降级的观察日');
+    expect(panel).toHaveTextContent('部分观察日缺少账户日终净值快照');
+    expect(getCrossMarketPaperCampaign).toHaveBeenCalledTimes(1);
+    expect(getCrossMarketPaperCampaignReport).toHaveBeenCalledTimes(1);
+  });
+
   it('explains when the paper trading status route is missing', async () => {
     getStatus.mockRejectedValueOnce({
       response: {
@@ -1644,6 +1750,42 @@ describe('VnpyPaperTradingPage', () => {
     expect(await screen.findByText('vn.py gateway 已重新连接')).toBeInTheDocument();
   });
 
+  it('reports the connected simulated vn.py gateway without the installation fallback warning', async () => {
+    const connectedStatus = {
+      ...statusResponse,
+      vnpyAvailable: true,
+      settings: {
+        ...statusResponse.settings,
+        vnpyGatewayName: 'DSA_SIM',
+      },
+      diagnostics: {
+        ...statusResponse.diagnostics,
+        vnpyRuntime: {
+          enabled: true,
+          available: true,
+          mode: 'vnpy_runtime',
+          gatewayName: 'DSA_SIM',
+          connect: {
+            connected: true,
+            status: 'connected',
+            reason: null,
+          },
+        },
+      },
+    };
+    getStatus.mockResolvedValue(connectedStatus);
+
+    render(
+      <UiLanguageProvider>
+        <VnpyPaperTradingPage />
+      </UiLanguageProvider>,
+    );
+
+    expect(await screen.findByText('vn.py 环境已安装')).toBeInTheDocument();
+    expect(screen.getByText(/已连接 DSA_SIM vn\.py 模拟网关/)).toBeInTheDocument();
+    expect(screen.queryByText(/vn\.py 环境未安装时仍可模拟成交/)).not.toBeInTheDocument();
+  });
+
   it('runs and renders the zero-connect production gateway preflight', async () => {
     render(
       <UiLanguageProvider>
@@ -1658,6 +1800,32 @@ describe('VnpyPaperTradingPage', () => {
     const result = await screen.findByText(/builtin_gateway_not_external/);
     expect(result).toHaveTextContent('default_setting_keys_missing');
     expect(result).toHaveTextContent('0/5');
+  });
+
+  it.each([
+    'cross_market_global_sector_rotation_v1.3_aggressive',
+    'cross_market_semiconductor_gold_v1.1',
+  ])('shows the %s loss-streak cooldown as three read-only CN trading days', async (strategy) => {
+    const crossMarketStatus = {
+      ...statusResponse,
+      settings: {
+        ...statusResponse.settings,
+        autoStrategy: strategy,
+        autoConsecutiveLossCooldownMinutes: 4320,
+      },
+    };
+    getStatus.mockResolvedValue(crossMarketStatus);
+
+    render(
+      <UiLanguageProvider>
+        <VnpyPaperTradingPage />
+      </UiLanguageProvider>,
+    );
+
+    const cooldown = await screen.findByLabelText('连续亏损冷却（A股交易日）');
+    expect(cooldown).toHaveValue(3);
+    expect(cooldown).toBeDisabled();
+    expect(screen.queryByLabelText('连续亏损冷却（分钟）')).not.toBeInTheDocument();
   });
 
   it('renders paper account status, positions, and trades', async () => {
@@ -1817,6 +1985,99 @@ describe('VnpyPaperTradingPage', () => {
     expect(screen.getByText('运行时间线')).toBeInTheDocument();
     expect(screen.getByText('2 candidate decisions: buy=1, skip=1')).toBeInTheDocument();
   }, 10_000);
+
+  it('renders cross-market 5 10 20 30 and 60 day board technical reminders', async () => {
+    const crossMarketRun = {
+      ...agentRunDetail,
+      strategy: 'cross_market_global_sector_rotation_v1.3_aggressive',
+      decisions: [{
+        ...agentRunDetail.decisions[0],
+        symbol: '688981',
+        name: '中芯国际',
+        strategyEvidence: {
+          crossMarket: {
+            theme: 'semiconductor',
+            entryPhase: 'opening',
+            boardTechnical: {
+              available: true,
+              supportive: true,
+              supportScore: 100,
+              nearResistance: false,
+              breakoutConfirmed: false,
+              primaryBoard: {
+                name: '半导体',
+                historyThroughDate: '2026-07-30',
+                currentLevel: 1012.5,
+                technicalWindows: [5, 10, 20, 30, 60],
+                ma5: 1018,
+                ma10: 1020,
+                ma20: 1024,
+                ma30: 1022,
+                ma60: 1010,
+                support5d: 1005,
+                support10d: 1000,
+                support20d: 995,
+                support30d: 980,
+                support60d: 960,
+                resistance5d: 1040,
+                resistance10d: 1060,
+                resistance20d: 1080,
+                resistance30d: 1100,
+                resistance60d: 1120,
+                nearestResistance: 1040,
+                nearestResistanceWindow: 5,
+                resistanceDistancePct: 2.72,
+                supportWindows: [20, 60],
+                multiPeriodSupport: true,
+              },
+              alerts: [{
+                board: '半导体',
+                kind: 'near_60d_ma_support',
+                windowDays: 60,
+                level: 1010,
+                distancePct: 0.25,
+              }],
+            },
+            rotation: {
+              available: true,
+              tailwind: true,
+              pressureGroups: ['bank', 'liquor'],
+            },
+          },
+        },
+      }],
+    };
+    listAgentRuns.mockResolvedValue({
+      items: [{
+        ...agentRunSummary,
+        strategy: 'cross_market_global_sector_rotation_v1.3_aggressive',
+      }],
+      limit: 10,
+      offset: 0,
+    });
+    getAgentRun.mockResolvedValue(crossMarketRun);
+
+    render(
+      <UiLanguageProvider>
+        <VnpyPaperTradingPage />
+      </UiLanguageProvider>,
+    );
+
+    const reminders = await screen.findByTestId('cross-market-board-reminders');
+    expect(reminders).toHaveTextContent('板块技术位提醒');
+    expect(reminders).toHaveTextContent('中芯国际');
+    expect(reminders).toHaveTextContent('支撑确认 100 分');
+    expect(reminders).toHaveTextContent('半导体 / 1012.50');
+    expect(reminders).toHaveTextContent('最近压力（5 日）');
+    expect(reminders).toHaveTextContent('20/60 日共振');
+    expect(reminders).toHaveTextContent('5 日');
+    expect(reminders).toHaveTextContent('1018.00');
+    expect(reminders).toHaveTextContent('10 日');
+    expect(reminders).toHaveTextContent('30 日');
+    expect(reminders).toHaveTextContent('半导体 接近 60 日均线支撑 1010.00（偏离 +0.25%）');
+    expect(reminders).toHaveTextContent('银行、白酒接近压力位');
+    expect(reminders).toHaveTextContent('技术位基于 2026-07-30 及之前已完成日线');
+  });
 
   it('filters background task events by task name and status', async () => {
     getTaskEvents

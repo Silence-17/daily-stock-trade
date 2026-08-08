@@ -38,6 +38,24 @@ _DISABLE_REQUEST_PROXIES = {"http": None, "https": None}
 _DNS_GUARD_LOCK = threading.Lock()
 _BUILTIN_SOURCE_TEMPLATES = [
     {
+        "template_id": "federal-reserve-monetary-policy",
+        "name": "Federal Reserve Monetary Policy",
+        "source_type": "rss",
+        "url": "https://www.federalreserve.gov/feeds/press_monetary.xml",
+        "scope_type": "market",
+        "market": "global",
+        "description": "Official Federal Reserve monetary-policy press release RSS feed.",
+    },
+    {
+        "template_id": "federal-reserve-speeches-testimony",
+        "name": "Federal Reserve Speeches and Testimony",
+        "source_type": "rss",
+        "url": "https://www.federalreserve.gov/feeds/speeches_and_testimony.xml",
+        "scope_type": "market",
+        "market": "global",
+        "description": "Official Federal Reserve speeches and testimony RSS feed.",
+    },
+    {
         "template_id": "sec-company-news",
         "name": "SEC Latest Filings",
         "source_type": "rss",
@@ -199,6 +217,43 @@ class IntelligenceService:
             "source": self._redact_source_fields(fields),
             "fetched_count": len(entries),
             "sample_items": [self._feed_entry_to_dict(entry) for entry in entries[:5]],
+        }
+
+    def fetch_template_items(
+        self,
+        template_id: str,
+        *,
+        limit: int = 50,
+    ) -> Dict[str, Any]:
+        """Fetch one built-in source without mutating source or item storage."""
+
+        selected = next(
+            (
+                dict(template)
+                for template in self._builtin_source_templates()
+                if template["template_id"] == str(template_id or "").strip()
+            ),
+            None,
+        )
+        if selected is None:
+            raise IntelligenceServiceError(
+                f"Intelligence source template not found: {template_id}"
+            )
+        safe_limit = max(1, min(int(limit or 1), 1000))
+        selected.pop("template_id", None)
+        fields = self._normalize_source_fields(selected)
+        entries = self._fetch_feed_entries(fields, limit=safe_limit)
+        return {
+            "ok": True,
+            "template_id": str(template_id),
+            "source": self._redact_source_fields(fields),
+            "requested_limit": safe_limit,
+            "fetched_count": len(entries),
+            "exhausted": (
+                fields["source_type"] != "newsnow"
+                and len(entries) < safe_limit
+            ),
+            "items": [self._feed_entry_to_dict(entry) for entry in entries],
         }
 
     def fetch_source(self, source_id: int, *, dry_run: bool = False) -> Dict[str, Any]:
@@ -627,7 +682,7 @@ class IntelligenceService:
             "summary": item.summary,
             "url": item.url,
             "source": item.source,
-            "published_at": IntelligenceService._iso(item.published_at),
+            "published_at": IntelligenceService._utc_iso(item.published_at),
             "fetched_at": IntelligenceService._iso(item.fetched_at),
             "scope_type": item.scope_type,
             "scope_value": None if (
@@ -643,7 +698,7 @@ class IntelligenceService:
             "summary": entry.summary,
             "url": entry.url,
             "source": entry.source,
-            "published_at": IntelligenceService._iso(entry.published_at),
+            "published_at": IntelligenceService._utc_iso(entry.published_at),
         }
 
     @staticmethod
@@ -721,7 +776,17 @@ class IntelligenceService:
         query["id"] = source_id
         return urlunparse(parsed._replace(query=urlencode(query)))
 
-
     @staticmethod
     def _iso(value: Optional[datetime]) -> Optional[str]:
         return value.isoformat() if value else None
+
+    @staticmethod
+    def _utc_iso(value: Optional[datetime]) -> Optional[str]:
+        if value is None:
+            return None
+        normalized = value
+        if normalized.tzinfo is None or normalized.utcoffset() is None:
+            normalized = normalized.replace(tzinfo=timezone.utc)
+        else:
+            normalized = normalized.astimezone(timezone.utc)
+        return normalized.isoformat()

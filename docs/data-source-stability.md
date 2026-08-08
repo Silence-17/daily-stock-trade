@@ -21,7 +21,7 @@
 | A 股日线 / 技术面 | Efinance、Tencent、AkShare、Tushare、Pytdx、Baostock、YFinance | `DataFetcherManager` 按优先级尝试；配置 `TUSHARE_TOKEN` 后 Tushare 自动进入候选源 | 单源失败后尝试下一个源；连续失败会短期熔断该源 |
 | A 股实时行情 | Tencent、AkShare Sina、Efinance、AkShare EM、Tushare | `REALTIME_SOURCE_PRIORITY` 控制顺序，默认偏向 Tencent / Sina 这类轻量源 | 失败源记录 `fallback_from`，成功源继续返回 |
 | A 股大盘复盘 | TickFlow、AkShare、Tushare、Efinance | 配置 `TICKFLOW_API_KEY` 后，主指数和市场宽度优先尝试 TickFlow | TickFlow 权限不足或失败时回退 AkShare / Tushare / Efinance 链路 |
-| A 股行业 / 所属板块 | Efinance、AStockDataFetcher（EastMoney 直连，参考 a-stock-data 接口形态）、EastMoney reportapi、离线行业种子 | `GET /api/v1/stocks/industry-boards` 优先返回实时行业板块；实时端点失败时回退行业目录；个股所属板块优先复用 Efinance，失败或缺失时回退 AStockDataFetcher | 免费源失败时保持 fail-open，行业板块接口至少返回稳定目录；单股分析继续降级 |
+| A 股行业 / 所属板块 | Efinance、AStockDataFetcher（EastMoney 直连，参考 a-stock-data 接口形态）、EastMoney reportapi、离线行业种子 | 选股与个股分析内部复用行业板块能力；个股所属板块优先复用 Efinance，失败或缺失时回退 AStockDataFetcher | 免费源失败时保持 fail-open；选股与单股分析继续按既有降级链运行 |
 | AlphaSift 选股快照 | Tushare、Sina、Efinance、AkShare EM、EastMoney Datacenter、DSA screen last-good cache | 有 `TUSHARE_TOKEN` 时自动把 `tushare` 放入快照优先级；否则使用免费源链路 | AlphaSift 维护 source health；DSA 状态接口透出 snapshot/daily health；adapter 故障或空候选带错误时回退 24 小时内的同策略/同市场 last-good 候选并标记 `quality_status=stale` |
 | AlphaSift 日线补特征 | DSA `DataFetcherManager` | AlphaSift 调用 DSA provider context，优先复用 DSA 日线与缓存链路 | DSA 链路失败后才回到 AlphaSift 原始日线源 |
 | AlphaSift 热点题材 | DSA EastMoney provider、AlphaSift hotspot、last-good cache | 未指定 provider 时默认使用 DSA EastMoney provider | 实时失败时回退热点缓存；无缓存时返回稳定空态和可读错误 |
@@ -30,6 +30,8 @@
 AlphaSift screen 会在每个候选上追加 `data_quality`、`missing_fields`、`data_sources` 和 `quality_notes`：`data_quality=ok` 表示关键字段完整；`partial` 表示候选仍可展示但缺少价格、成交额、行业或交易状态等字段；`unavailable` 表示缺少代码等不可用字段。若候选来自 screen last-good cache，候选级还会带上 `cache_used=true`、`stale=true`、`cached_at`、`stale_age_hours` 和 `data_quality=stale`。Web 选股页展示这些字段，自动模拟交易的 `risk_review.candidate_data_quality` 也会保存同一份快照，便于审计数据不足时为何观察、跳过或继续生成计划。
 
 Web 选股页会读取 `/api/v1/alphasift/status` 的 `source_health`，展示 snapshot / daily 数据源的状态、失败次数、冷却时间和最近错误摘要。该视图用于快速判断当前降级是单源冷却、网络中断还是上游数据为空；跨 run 统一指标和长期趋势仍属于后续增强。
+
+日线数据源优先级可通过各 Fetcher 的 `*_PRIORITY` 环境变量显式覆盖。`EFINANCE_PRIORITY` 在实例创建、`.env` 加载完成后解析；未设置 `TUSHARE_PRIORITY` 时，已配置 Token 的 Tushare 仍自动提升为 `-1`，显式设置后则以该值为准。这样可将权限不足或暂时不稳定的数据源保留为后备，而不阻塞更稳定的免费日线源。
 
 ## 总体链路图
 

@@ -362,7 +362,7 @@ class EfinanceFetcher(BaseFetcher):
     """
     
     name = "EfinanceFetcher"
-    priority = int(os.getenv("EFINANCE_PRIORITY", "0"))  # 最高优先级，排在 AkshareFetcher 之前
+    priority = 0
     
     def __init__(self, sleep_min: float = 1.5, sleep_max: float = 3.0):
         """
@@ -372,11 +372,22 @@ class EfinanceFetcher(BaseFetcher):
             sleep_min: 最小休眠时间（秒）
             sleep_max: 最大休眠时间（秒）
         """
+        config = get_config()
+        raw_priority = (os.getenv("EFINANCE_PRIORITY") or "0").strip()
+        try:
+            self.priority = int(raw_priority)
+        except ValueError:
+            logger.warning(
+                "Invalid EFINANCE_PRIORITY=%r; using default priority 0",
+                raw_priority,
+            )
+            self.priority = 0
+
         self.sleep_min = sleep_min
         self.sleep_max = sleep_max
         self._last_request_time: Optional[float] = None
         # 东财补丁开启才执行打补丁操作
-        if get_config().enable_eastmoney_patch:
+        if config.enable_eastmoney_patch:
             eastmoney_patch()
 
     @staticmethod

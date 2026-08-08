@@ -168,8 +168,8 @@ def test_get_belong_board_parses_slist_and_preserves_extended_fields():
         {
             "data": {
                 "diff": {
-                    "0": {"f12": "BK0438", "f14": "食品饮料", "f3": 0.66, "f128": "贵州茅台"},
-                    "1": {"f12": "BK0896", "f14": "酿酒概念", "f3": 1.23, "f128": "五粮液"},
+                    "0": {"f12": "BK0438", "f14": "食品饮料", "f3": 0.66, "f10": 1.6, "f128": "贵州茅台"},
+                    "1": {"f12": "BK0896", "f14": "酿酒概念", "f3": 1.23, "f10": 1.2, "f128": "五粮液"},
                 }
             }
         }
@@ -183,6 +183,7 @@ def test_get_belong_board_parses_slist_and_preserves_extended_fields():
             "name": "食品饮料",
             "code": "BK0438",
             "change_pct": 0.66,
+            "volume_ratio": 1.6,
             "lead_stock": "贵州茅台",
             "source": "a_stock_data_eastmoney",
         },
@@ -190,12 +191,14 @@ def test_get_belong_board_parses_slist_and_preserves_extended_fields():
             "name": "酿酒概念",
             "code": "BK0896",
             "change_pct": 1.23,
+            "volume_ratio": 1.2,
             "lead_stock": "五粮液",
             "source": "a_stock_data_eastmoney",
         },
     ]
     assert session.calls[0]["params"]["secid"] == "1.600519"
     assert session.calls[0]["params"]["spt"] == "3"
+    assert "f10" in session.calls[0]["params"]["fields"]
 
 
 def test_get_main_indices_preserves_eastmoney_provider_as_of():

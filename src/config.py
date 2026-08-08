@@ -70,6 +70,7 @@ from src.llm.hermes import (
     route_has_hermes,
 )
 from src.scheduler import normalize_schedule_times
+from src.utils.ssl_certificates import ensure_ascii_ca_bundle
 
 logger = logging.getLogger(__name__)
 
@@ -681,6 +682,12 @@ def setup_env(override: bool = False):
     }
     load_dotenv(dotenv_path=env_path, override=override)
     try:
+        ca_status = ensure_ascii_ca_bundle()
+        if ca_status.get("copied"):
+            logger.info("Configured an ASCII-safe TLS CA bundle for native HTTP clients")
+    except Exception as exc:
+        logger.warning("Unable to configure an ASCII-safe TLS CA bundle: %s", type(exc).__name__)
+    try:
         raw_env_values = dotenv_values(env_path, interpolate=False)
     except Exception as exc:  # pragma: no cover - defensive branch
         logger.warning("Failed to read raw .env values from %s: %s", env_path, exc)
@@ -725,6 +732,10 @@ class Config:
     tickflow_batch_size: int = 100
     finnhub_api_key: Optional[str] = None
     alphavantage_api_key: Optional[str] = None
+    kis_app_key: Optional[str] = None
+    kis_app_secret: Optional[str] = None
+    kis_base_url: str = "https://openapi.koreainvestment.com:9443"
+    kis_timeout_seconds: float = 10.0
     longbridge_app_key: Optional[str] = None
     longbridge_app_secret: Optional[str] = None
     longbridge_access_token: Optional[str] = None
@@ -1617,6 +1628,18 @@ class Config:
             tickflow_batch_size=parse_env_int(os.getenv('TICKFLOW_BATCH_SIZE'), 100, field_name='TICKFLOW_BATCH_SIZE', minimum=1),
             finnhub_api_key=os.getenv('FINNHUB_API_KEY') or None,
             alphavantage_api_key=os.getenv('ALPHAVANTAGE_API_KEY') or None,
+            kis_app_key=os.getenv('KIS_APP_KEY') or None,
+            kis_app_secret=os.getenv('KIS_APP_SECRET') or None,
+            kis_base_url=(
+                os.getenv('KIS_BASE_URL')
+                or "https://openapi.koreainvestment.com:9443"
+            ).strip(),
+            kis_timeout_seconds=parse_env_float(
+                os.getenv('KIS_TIMEOUT_SECONDS'),
+                10.0,
+                field_name='KIS_TIMEOUT_SECONDS',
+                minimum=1.0,
+            ),
             longbridge_app_key=os.getenv('LONGBRIDGE_APP_KEY') or None,
             longbridge_app_secret=os.getenv('LONGBRIDGE_APP_SECRET') or None,
             longbridge_access_token=os.getenv('LONGBRIDGE_ACCESS_TOKEN') or None,

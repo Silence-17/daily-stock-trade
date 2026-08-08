@@ -48,18 +48,6 @@ describe('SidebarNav', () => {
     expect(screen.queryByRole('link', { name: '选股' })).not.toBeInTheDocument();
   });
 
-  it('shows the industry boards navigation item regardless of AlphaSift status', () => {
-    mockGetAlphaSiftStatus.mockResolvedValueOnce({ enabled: false, available: false, installSpecIsDefault: false });
-
-    render(
-      <MemoryRouter initialEntries={['/']}>
-        <SidebarNav />
-      </MemoryRouter>,
-    );
-
-    expect(screen.getByRole('link', { name: '行业板块' })).toHaveAttribute('href', '/industry-boards');
-  });
-
   it('shows the paper trading navigation item regardless of AlphaSift status', () => {
     mockGetAlphaSiftStatus.mockResolvedValueOnce({ enabled: false, available: false, installSpecIsDefault: false });
 
@@ -107,11 +95,10 @@ describe('SidebarNav', () => {
 
     await screen.findByRole('link', { name: '选股' });
     const hrefs = screen.getAllByRole('link').map((link) => link.getAttribute('href'));
-    expect(hrefs.slice(0, 7)).toEqual([
+    expect(hrefs.slice(0, 6)).toEqual([
       '/',
       '/chat',
       '/screening',
-      '/industry-boards',
       '/portfolio',
       '/paper-trading',
       '/agent-console',
@@ -153,7 +140,7 @@ describe('SidebarNav', () => {
 
     await screen.findByRole('link', { name: '选股' });
     const hrefs = screen.getAllByRole('link').map((link) => link.getAttribute('href'));
-    expect(hrefs.slice(5, 7)).toEqual(['/paper-trading', '/agent-console']);
+    expect(hrefs.slice(4, 6)).toEqual(['/paper-trading', '/agent-console']);
   });
 
   it('refreshes the screening navigation item after any config save event', async () => {

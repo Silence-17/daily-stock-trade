@@ -7,7 +7,7 @@ import json
 import logging
 from collections import Counter
 from datetime import date, datetime, time, timedelta
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 from sqlalchemy import desc, func, select
 
@@ -678,6 +678,7 @@ class StockSelectionAgentRepository:
         strategy: Optional[str] = None,
         market: Optional[str] = None,
         status: Optional[str] = None,
+        excluded_trigger_sources: Optional[Sequence[str]] = None,
         created_from: Optional[datetime] = None,
         created_to: Optional[datetime] = None,
     ) -> Dict[str, Any]:
@@ -693,6 +694,15 @@ class StockSelectionAgentRepository:
                 query = query.where(StockSelectionAgentRun.market == str(market).strip())
             if status:
                 query = query.where(StockSelectionAgentRun.status == str(status).strip())
+            excluded_sources = {
+                str(item).strip()
+                for item in excluded_trigger_sources or []
+                if str(item).strip()
+            }
+            if excluded_sources:
+                query = query.where(
+                    StockSelectionAgentRun.trigger_source.not_in(sorted(excluded_sources))
+                )
             created_from_norm = self._datetime_filter_value(created_from)
             created_to_norm = self._datetime_filter_value(created_to)
             if created_from_norm is not None:
@@ -726,6 +736,7 @@ class StockSelectionAgentRepository:
         market: Optional[str] = None,
         limit: int = 20,
         before_run_id: Optional[int] = None,
+        created_from: Optional[datetime] = None,
     ) -> List[Dict[str, Any]]:
         limit = max(1, min(100, int(limit or 20)))
         with self.db.get_session() as session:
@@ -738,6 +749,9 @@ class StockSelectionAgentRepository:
                 query = query.where(StockSelectionAgentRun.market == str(market))
             if before_run_id is not None:
                 query = query.where(StockSelectionAgentRun.id < int(before_run_id))
+            created_from_norm = self._datetime_filter_value(created_from)
+            if created_from_norm is not None:
+                query = query.where(StockSelectionAgentRun.created_at >= created_from_norm)
             rows = session.execute(
                 query.order_by(desc(StockSelectionAgentRun.created_at), desc(StockSelectionAgentRun.id))
                 .limit(limit)
@@ -1555,6 +1569,27 @@ class StockSelectionAgentRepository:
                 payload["diagnostics"] = diagnostics
             payload["timeline"] = self._build_timeline(payload, payload["decisions"], payload["trade_plans"])
             return payload
+
+    def get_run_by_id(self, run_id: int) -> Optional[Dict[str, Any]]:
+        with self.db.get_session() as session:
+            row = session.get(StockSelectionAgentRun, int(run_id))
+            return self._run_to_dict(row) if row is not None else None
+
+    def update_run_settings(
+        self,
+        *,
+        run_id: int,
+        settings: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        with self.db.get_session() as session:
+            row = session.get(StockSelectionAgentRun, int(run_id))
+            if row is None:
+                return None
+            row.settings_json = self._json_dumps(settings)
+            row.updated_at = datetime.now()
+            session.commit()
+            session.refresh(row)
+            return self._run_to_dict(row)
 
     @classmethod
     def _build_portfolio_change(

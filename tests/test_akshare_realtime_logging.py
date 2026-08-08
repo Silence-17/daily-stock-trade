@@ -55,6 +55,10 @@ def _make_tencent_payload(
     circ_mv_yi: str = "0.93",
     total_mv_yi: str = "1.20",
     provider_timestamp: str = "20260308150000",
+    limit_up_price: str = "5.50",
+    limit_down_price: str = "4.50",
+    bid_price: str = "5.18",
+    ask_price: str = "5.20",
 ) -> str:
     fields = ["0"] * 50
     fields[1] = "大秦铁路"
@@ -63,6 +67,10 @@ def _make_tencent_payload(
     fields[4] = "5.00"
     fields[5] = "5.10"
     fields[6] = volume
+    fields[9] = bid_price
+    fields[10] = "100"
+    fields[19] = ask_price
+    fields[20] = "100"
     fields[30] = provider_timestamp
     fields[31] = "0.19"
     fields[32] = "3.80"
@@ -77,6 +85,8 @@ def _make_tencent_payload(
     fields[44] = circ_mv_yi
     fields[45] = total_mv_yi
     fields[46] = "1.20"
+    fields[47] = limit_up_price
+    fields[48] = limit_down_price
     fields[49] = "0.63"
     return f'v_sh601006="{"~".join(fields)}";'
 
@@ -102,6 +112,8 @@ def test_sina_realtime_success_logs_endpoint(caplog, monkeypatch, akshare_fetche
     assert quote is not None
     assert quote.name == "大秦铁路"
     assert quote.price == 5.19
+    assert quote.bid_price == 5.18
+    assert quote.ask_price == 5.19
     assert quote.provider_timestamp == "2026-03-08T07:00:00+00:00"
     assert breaker.successes == ["akshare_sina"]
     assert f"endpoint={SINA_REALTIME_ENDPOINT}" in caplog.text
@@ -163,8 +175,13 @@ def test_tencent_realtime_success_logs_endpoint(caplog, monkeypatch, akshare_fet
     assert quote is not None
     assert quote.name == "大秦铁路"
     assert quote.price == 5.19
+    assert quote.bid_price == 5.18
+    assert quote.ask_price == 5.2
+    assert quote.bid_price <= quote.ask_price
     assert quote.volume == 123400
     assert quote.amount == 6404500
+    assert quote.limit_up_price == 5.5
+    assert quote.limit_down_price == 4.5
     assert quote.provider_timestamp == "2026-03-08T07:00:00+00:00"
     assert breaker.successes == ["akshare_tencent"]
     assert f"endpoint={TENCENT_REALTIME_ENDPOINT}" in caplog.text

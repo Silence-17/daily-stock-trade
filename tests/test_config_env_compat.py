@@ -33,6 +33,29 @@ class ConfigEnvCompatibilityTestCase(unittest.TestCase):
 
     @patch("src.config.setup_env")
     @patch.object(Config, "_parse_litellm_yaml", return_value=[])
+    def test_load_from_env_reads_kis_realtime_credentials_and_endpoint(
+        self, _mock_parse_litellm_yaml, _mock_setup_env
+    ):
+        with patch.dict(
+            os.environ,
+            {
+                "STOCK_LIST": "600519",
+                "KIS_APP_KEY": "kis-key",
+                "KIS_APP_SECRET": "kis-secret",
+                "KIS_BASE_URL": "https://kis.example.test:9443/",
+                "KIS_TIMEOUT_SECONDS": "7.5",
+            },
+            clear=True,
+        ):
+            config = Config._load_from_env()
+
+        self.assertEqual(config.kis_app_key, "kis-key")
+        self.assertEqual(config.kis_app_secret, "kis-secret")
+        self.assertEqual(config.kis_base_url, "https://kis.example.test:9443/")
+        self.assertEqual(config.kis_timeout_seconds, 7.5)
+
+    @patch("src.config.setup_env")
+    @patch.object(Config, "_parse_litellm_yaml", return_value=[])
     def test_market_review_region_accepts_comma_separated_supported_values(
         self, _mock_parse_litellm_yaml, _mock_setup_env
     ):

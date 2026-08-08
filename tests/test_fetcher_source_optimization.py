@@ -126,6 +126,18 @@ class TestFetcherSourceOptimization(unittest.TestCase):
             "data_provider.a_stock_data_fetcher.AStockDataFetcher",
             return_value=_StubFetcher("AStockDataFetcher", 2),
         ), patch(
+            "data_provider.naver_korea_fetcher.NaverKoreaFetcher",
+            return_value=_StubFetcher("NaverKoreaFetcher", 2),
+        ), patch(
+            "data_provider.japan_index_fetcher.JapanIndexFetcher",
+            return_value=_StubFetcher("JapanIndexFetcher", 2),
+        ), patch(
+            "data_provider.asia_equity_fetcher.AsiaEquityFetcher",
+            return_value=_StubFetcher("AsiaEquityFetcher", 2),
+        ), patch(
+            "data_provider.global_futures_fetcher.GlobalFuturesFetcher",
+            return_value=_StubFetcher("GlobalFuturesFetcher", 2),
+        ), patch(
             "data_provider.pytdx_fetcher.PytdxFetcher",
             return_value=_StubFetcher("PytdxFetcher", 3),
         ), patch(
@@ -151,6 +163,10 @@ class TestFetcherSourceOptimization(unittest.TestCase):
                 "TencentFetcher",
                 "AkshareFetcher",
                 "AStockDataFetcher",
+                "NaverKoreaFetcher",
+                "JapanIndexFetcher",
+                "AsiaEquityFetcher",
+                "GlobalFuturesFetcher",
                 "PytdxFetcher",
                 "BaostockFetcher",
                 "YfinanceFetcher",

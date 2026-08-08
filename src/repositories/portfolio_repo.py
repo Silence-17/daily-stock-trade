@@ -90,6 +90,51 @@ class PortfolioRepository:
             rows = session.execute(query.order_by(PortfolioAccount.id.asc())).scalars().all()
             return list(rows)
 
+    def get_account_activity_summary(
+        self,
+        *,
+        account_id: int,
+        include_inactive: bool = False,
+    ) -> Optional[Dict[str, int]]:
+        """Read ledger activity without activating an archived account."""
+
+        with self.db.get_session() as session:
+            account_conditions = [PortfolioAccount.id == int(account_id)]
+            if not include_inactive:
+                account_conditions.append(PortfolioAccount.is_active.is_(True))
+            account = session.execute(
+                select(PortfolioAccount.id)
+                .where(and_(*account_conditions))
+                .limit(1)
+            ).scalar_one_or_none()
+            if account is None:
+                return None
+            trade_count = int(
+                session.execute(
+                    select(func.count())
+                    .select_from(PortfolioTrade)
+                    .where(PortfolioTrade.account_id == int(account_id))
+                ).scalar_one()
+                or 0
+            )
+            position_count = int(
+                session.execute(
+                    select(func.count())
+                    .select_from(PortfolioPosition)
+                    .where(
+                        and_(
+                            PortfolioPosition.account_id == int(account_id),
+                            PortfolioPosition.quantity > 0,
+                        )
+                    )
+                ).scalar_one()
+                or 0
+            )
+            return {
+                "trade_count": trade_count,
+                "position_count": position_count,
+            }
+
     def get_account_in_session(
         self,
         *,

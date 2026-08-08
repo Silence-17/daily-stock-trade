@@ -8,10 +8,12 @@ local and credential-free.
 
 from __future__ import annotations
 
+import math
+import os
 from copy import copy
-from datetime import datetime
+from datetime import datetime, timezone
 from threading import RLock, Timer
-from typing import Any
+from typing import Any, Callable, Optional
 from uuid import uuid4
 
 from vnpy.trader.constant import Direction, Exchange, Status
@@ -26,6 +28,19 @@ from vnpy.trader.object import (
     TradeData,
 )
 
+from src.services.cross_market_paper_strategy import (
+    MinuteBar,
+    PaperOrder,
+    RealisticMinuteExecutionModel,
+)
+
+
+FIXED_DELAY_MATCHING_MODE = "fixed_delay_limit"
+NEXT_MINUTE_MATCHING_MODE = "next_minute_vwap"
+SUPPORTED_MATCHING_MODES = {FIXED_DELAY_MATCHING_MODE, NEXT_MINUTE_MATCHING_MODE}
+NEXT_MINUTE_MIN_PROVIDER_SPAN_SECONDS = 45.0
+NEXT_MINUTE_MAX_PROVIDER_SPAN_SECONDS = 90.0
+
 
 class DsaSimulatedGateway(BaseGateway):
     """Credential-free vn.py gateway that fills valid orders after a short delay."""
@@ -34,11 +49,18 @@ class DsaSimulatedGateway(BaseGateway):
     default_setting = {
         "initial_balance": 1_000_000.0,
         "fill_delay_ms": 500,
+        "matching_mode": FIXED_DELAY_MATCHING_MODE,
         "preserve_state_on_reconnect": True,
         "reject_every_nth_order": 0,
         "duplicate_trade_event_count": 1,
     }
-    exchanges = [Exchange.SSE, Exchange.SZSE, Exchange.SEHK, Exchange.SMART]
+    exchanges = [
+        Exchange.SSE,
+        Exchange.SZSE,
+        Exchange.BSE,
+        Exchange.SEHK,
+        Exchange.SMART,
+    ]
     connect_without_settings = True
 
     def __init__(self, event_engine: Any, gateway_name: str) -> None:
@@ -53,11 +75,17 @@ class DsaSimulatedGateway(BaseGateway):
         self._trade_count = 0
         self._balance = 1_000_000.0
         self._fill_delay_seconds = 0.5
+        self._matching_mode = FIXED_DELAY_MATCHING_MODE
+        self._max_evidence_age_seconds = 120.0
         self._reject_every_nth_order = 0
         self._duplicate_trade_event_count = 1
         self._orders: dict[str, OrderData] = {}
         self._timers: dict[str, Timer] = {}
         self._positions: dict[str, dict[str, Any]] = {}
+        self._quote_provider: Optional[Callable[[str], Any]] = None
+        self._quote_manager: Any = None
+        self._order_quote_baselines: dict[str, dict[str, Any]] = {}
+        self._execution_model = RealisticMinuteExecutionModel()
 
     def connect(self, setting: dict) -> None:
         """Start the local simulator and publish its initial account snapshot."""
@@ -80,8 +108,41 @@ class DsaSimulatedGateway(BaseGateway):
                 self._trade_count = 0
                 self._orders.clear()
                 self._positions.clear()
-            delay_ms = min(10_000.0, max(10.0, _as_float(payload.get("fill_delay_ms"), 500.0)))
+                self._order_quote_baselines.clear()
+            matching_mode = str(
+                payload.get("matching_mode")
+                or os.getenv("DSA_SIM_MATCHING_MODE")
+                or FIXED_DELAY_MATCHING_MODE
+            ).strip().lower()
+            self._matching_mode = (
+                matching_mode
+                if matching_mode in SUPPORTED_MATCHING_MODES
+                else FIXED_DELAY_MATCHING_MODE
+            )
+            default_delay_ms = (
+                65_000.0
+                if self._matching_mode == NEXT_MINUTE_MATCHING_MODE
+                else 500.0
+            )
+            configured_delay_ms = payload.get("fill_delay_ms")
+            if configured_delay_ms is None and self._matching_mode == NEXT_MINUTE_MATCHING_MODE:
+                configured_delay_ms = os.getenv("DSA_SIM_NEXT_MINUTE_DELAY_MS")
+            maximum_delay_ms = (
+                120_000.0
+                if self._matching_mode == NEXT_MINUTE_MATCHING_MODE
+                else 10_000.0
+            )
+            delay_ms = min(
+                maximum_delay_ms,
+                max(10.0, _as_float(configured_delay_ms, default_delay_ms)),
+            )
             self._fill_delay_seconds = delay_ms / 1000.0
+            self._max_evidence_age_seconds = min(
+                300.0,
+                max(30.0, _as_float(payload.get("max_evidence_age_seconds"), 120.0)),
+            )
+            quote_provider = payload.get("quote_provider")
+            self._quote_provider = quote_provider if callable(quote_provider) else None
             self._reject_every_nth_order = min(
                 10_000,
                 max(0, _as_int(payload.get("reject_every_nth_order"), 0)),
@@ -124,7 +185,7 @@ class DsaSimulatedGateway(BaseGateway):
         return None
 
     def send_order(self, req: OrderRequest) -> str:
-        """Create a vn.py order and schedule a deterministic full fill."""
+        """Create an order and schedule the configured simulated matcher."""
 
         with self._lock:
             self._order_count += 1
@@ -143,13 +204,46 @@ class DsaSimulatedGateway(BaseGateway):
             if rejection:
                 order.status = Status.REJECTED
                 order.rejected_reason = rejection
-                self.on_order(copy(order))
-                return order.vt_orderid
+                snapshot = copy(order)
+                vt_orderid = order.vt_orderid
+            else:
+                snapshot = None
+                vt_orderid = order.vt_orderid
 
-            order.status = Status.NOTTRADED
-            self.on_order(copy(order))
+        if snapshot is not None:
+            self.on_order(snapshot)
+            return vt_orderid
+
+        if self._matching_mode == NEXT_MINUTE_MATCHING_MODE:
+            baseline, reason = self._capture_quote_snapshot(order.symbol)
+            if baseline is None:
+                with self._lock:
+                    current = self._orders.get(orderid)
+                    if current is None:  # pragma: no cover - defensive only.
+                        return vt_orderid
+                    current.status = Status.REJECTED
+                    current.rejected_reason = reason or "simulated_baseline_evidence_unavailable"
+                    current.datetime = datetime.now()
+                    snapshot = copy(current)
+                self.on_order(snapshot)
+                return vt_orderid
+
+            with self._lock:
+                current = self._orders[orderid]
+                current.status = Status.NOTTRADED
+                self._order_quote_baselines[orderid] = baseline
+                snapshot = copy(current)
+                self._schedule_fill_locked(orderid)
+            self.on_order(snapshot)
+            return vt_orderid
+
+        with self._lock:
+            current = self._orders[orderid]
+            current.status = Status.NOTTRADED
+            snapshot = copy(current)
             self._schedule_fill_locked(orderid)
-            return order.vt_orderid
+        self.on_order(snapshot)
+        return vt_orderid
 
     def cancel_order(self, req: CancelRequest) -> None:
         """Cancel an order that has not reached the delayed fill callback."""
@@ -161,6 +255,7 @@ class DsaSimulatedGateway(BaseGateway):
             timer = self._timers.pop(order.orderid, None)
             if timer is not None:
                 timer.cancel()
+            self._order_quote_baselines.pop(order.orderid, None)
             order.status = Status.CANCELLED
             order.datetime = datetime.now()
             snapshot = copy(order)
@@ -196,6 +291,14 @@ class DsaSimulatedGateway(BaseGateway):
                     "reject_every_nth_order": self._reject_every_nth_order,
                     "duplicate_trade_event_count": self._duplicate_trade_event_count,
                 },
+                "matching": {
+                    "mode": self._matching_mode,
+                    "fill_delay_seconds": self._fill_delay_seconds,
+                    "min_provider_span_seconds": NEXT_MINUTE_MIN_PROVIDER_SPAN_SECONDS,
+                    "max_provider_span_seconds": NEXT_MINUTE_MAX_PROVIDER_SPAN_SECONDS,
+                    "spread_source": "normalized_best_bid_ask_with_4bp_fallback",
+                    "pending_baseline_count": len(self._order_quote_baselines),
+                },
             }
 
     def _schedule_fill(self, orderid: str) -> None:
@@ -225,6 +328,10 @@ class DsaSimulatedGateway(BaseGateway):
         return None
 
     def _fill_order(self, orderid: str) -> None:
+        if self._matching_mode == NEXT_MINUTE_MATCHING_MODE:
+            self._match_next_minute_order(orderid)
+            return
+
         with self._lock:
             self._timers.pop(orderid, None)
             order = self._orders.get(orderid)
@@ -254,6 +361,229 @@ class DsaSimulatedGateway(BaseGateway):
             self.on_trade(copy(trade))
         self._publish_account()
         self.query_position()
+
+    def _match_next_minute_order(self, orderid: str) -> None:
+        with self._lock:
+            self._timers.pop(orderid, None)
+            order = self._orders.get(orderid)
+            baseline = self._order_quote_baselines.get(orderid)
+            if order is None or baseline is None or not order.is_active() or self._closed:
+                return
+            order_snapshot = copy(order)
+
+        current, evidence_reason = self._capture_quote_snapshot(order_snapshot.symbol)
+        if current is None:
+            self._cancel_for_matching_evidence(orderid, evidence_reason)
+            return
+        if current["provider_at"] <= baseline["provider_at"]:
+            self._cancel_for_matching_evidence(
+                orderid,
+                "simulated_next_minute_timestamp_not_advanced",
+            )
+            return
+        provider_span_seconds = (
+            current["provider_at"] - baseline["provider_at"]
+        ).total_seconds()
+        if provider_span_seconds < NEXT_MINUTE_MIN_PROVIDER_SPAN_SECONDS:
+            self._cancel_for_matching_evidence(
+                orderid,
+                "simulated_next_minute_provider_span_too_short",
+            )
+            return
+        if provider_span_seconds > NEXT_MINUTE_MAX_PROVIDER_SPAN_SECONDS:
+            self._cancel_for_matching_evidence(
+                orderid,
+                "simulated_next_minute_provider_span_too_long",
+            )
+            return
+        if current["provider"] != baseline["provider"]:
+            self._cancel_for_matching_evidence(
+                orderid,
+                "simulated_quote_provider_changed",
+            )
+            return
+        volume_delta = float(current["volume"]) - float(baseline["volume"])
+        amount_delta = float(current["amount"]) - float(baseline["amount"])
+        if volume_delta < 0 or amount_delta < 0:
+            self._cancel_for_matching_evidence(orderid, "simulated_cumulative_quote_regressed")
+            return
+        if (volume_delta > 0) != (amount_delta > 0):
+            self._cancel_for_matching_evidence(
+                orderid,
+                "simulated_cumulative_quote_delta_inconsistent",
+            )
+            return
+
+        start_price = float(baseline["price"])
+        end_price = float(current["price"])
+        vwap = amount_delta / volume_delta if volume_delta > 0 and amount_delta > 0 else end_price
+        high = max(start_price, end_price, vwap)
+        low = min(start_price, end_price, vwap)
+        bar = MinuteBar(
+            timestamp=current["provider_at"],
+            open=start_price,
+            high=high,
+            low=low,
+            close=end_price,
+            volume=volume_delta,
+            amount=amount_delta if amount_delta > 0 else None,
+            bid_ask_spread_bps=_quote_spread_bps(current),
+            atr_1m_pct=abs(end_price - start_price) / start_price * 100.0,
+            suspended=volume_delta <= 0,
+            limit_up_price=current.get("limit_up_price") or baseline.get("limit_up_price"),
+            limit_down_price=current.get("limit_down_price") or baseline.get("limit_down_price"),
+        )
+        side = "buy" if order_snapshot.direction == Direction.LONG else "sell"
+        requested = max(0.0, float(order_snapshot.volume) - float(order_snapshot.traded))
+        fill = self._execution_model.execute(
+            PaperOrder(
+                symbol=order_snapshot.symbol,
+                side=side,
+                quantity=requested,
+                signal_at=baseline["provider_at"],
+                declared_quantity=float(order_snapshot.volume),
+                limit_price=float(order_snapshot.price),
+                instrument_type=_instrument_type(order_snapshot.symbol),
+                market=(
+                    "cn"
+                    if order_snapshot.exchange
+                    in {Exchange.SSE, Exchange.SZSE, Exchange.BSE}
+                    else "other"
+                ),
+                sellable_quantity=requested if side == "sell" else None,
+                previous_close=current.get("pre_close"),
+            ),
+            bar,
+        )
+        if fill.filled_quantity <= 0 or fill.fill_price is None:
+            with self._lock:
+                order = self._orders.get(orderid)
+                if order is None or not order.is_active() or self._closed:
+                    return
+                order.rejected_reason = fill.reason or "simulated_next_minute_unfilled"
+                order.datetime = datetime.now()
+                self._order_quote_baselines[orderid] = current
+                snapshot = copy(order)
+                self._schedule_fill_locked(orderid)
+            self.on_order(snapshot)
+            return
+
+        with self._lock:
+            order = self._orders.get(orderid)
+            if order is None or not order.is_active() or self._closed:
+                return
+            order.traded = min(
+                float(order.volume),
+                float(order.traded) + float(fill.filled_quantity),
+            )
+            order.status = (
+                Status.ALLTRADED
+                if float(order.volume) - float(order.traded) <= 1e-9
+                else Status.PARTTRADED
+            )
+            order.datetime = datetime.now()
+            self._trade_count += 1
+            trade = TradeData(
+                gateway_name=self.gateway_name,
+                symbol=order.symbol,
+                exchange=order.exchange,
+                orderid=order.orderid,
+                tradeid=f"{self._session_id}-{self._trade_count}",
+                direction=order.direction,
+                offset=order.offset,
+                price=float(fill.fill_price),
+                volume=float(fill.filled_quantity),
+                datetime=order.datetime,
+            )
+            trade.dsa_execution_mode = NEXT_MINUTE_MATCHING_MODE
+            trade.dsa_reference_price = fill.reference_price
+            trade.dsa_slippage_bps = fill.slippage_bps
+            trade.dsa_provider_span_seconds = provider_span_seconds
+            trade.dsa_minute_volume = volume_delta
+            trade.dsa_participation_rate = (
+                float(fill.filled_quantity) / volume_delta
+                if volume_delta > 0
+                else None
+            )
+            trade.dsa_bid_ask_spread_bps = bar.bid_ask_spread_bps
+            trade.dsa_atr_1m_pct = bar.atr_1m_pct
+            self._apply_fill(trade)
+            if order.status == Status.ALLTRADED:
+                self._order_quote_baselines.pop(orderid, None)
+            else:
+                self._order_quote_baselines[orderid] = current
+                self._schedule_fill_locked(orderid)
+            order_snapshot = copy(order)
+            duplicate_trade_event_count = self._duplicate_trade_event_count
+        self.on_order(order_snapshot)
+        for _ in range(duplicate_trade_event_count):
+            self.on_trade(copy(trade))
+        self._publish_account()
+        self.query_position()
+
+    def _cancel_for_matching_evidence(self, orderid: str, reason: Optional[str]) -> None:
+        with self._lock:
+            order = self._orders.get(orderid)
+            if order is None or not order.is_active():
+                return
+            order.status = Status.CANCELLED
+            order.rejected_reason = reason or "simulated_next_minute_evidence_unavailable"
+            order.datetime = datetime.now()
+            self._order_quote_baselines.pop(orderid, None)
+            snapshot = copy(order)
+        self.on_order(snapshot)
+
+    def _capture_quote_snapshot(self, symbol: str) -> tuple[Optional[dict[str, Any]], Optional[str]]:
+        try:
+            provider = self._quote_provider or self._default_quote_provider
+            quote = provider(symbol)
+        except Exception as exc:  # noqa: BLE001 - simulated execution must fail closed.
+            return None, f"simulated_quote_error:{type(exc).__name__}"
+        if quote is None:
+            return None, "simulated_quote_unavailable"
+        provider_at = _as_utc_datetime(getattr(quote, "provider_timestamp", None))
+        if provider_at is None:
+            return None, "simulated_quote_timestamp_unavailable"
+        age_seconds = (datetime.now(timezone.utc) - provider_at).total_seconds()
+        if age_seconds < -1 or age_seconds > self._max_evidence_age_seconds:
+            return None, "simulated_quote_timestamp_stale"
+        price = _finite_positive(getattr(quote, "price", None))
+        volume = _finite_nonnegative(getattr(quote, "volume", None))
+        amount = _finite_nonnegative(getattr(quote, "amount", None))
+        provider = _provider_identity(quote)
+        if price is None or volume is None or amount is None or provider is None:
+            return None, "simulated_quote_cumulative_fields_unavailable"
+        pre_close = _finite_positive(getattr(quote, "pre_close", None))
+        limit_up_price = _finite_positive(getattr(quote, "limit_up_price", None))
+        limit_down_price = _finite_positive(getattr(quote, "limit_down_price", None))
+        bid_price = _finite_positive(getattr(quote, "bid_price", None))
+        ask_price = _finite_positive(getattr(quote, "ask_price", None))
+        if bid_price is None or ask_price is None or ask_price < bid_price:
+            bid_price = None
+            ask_price = None
+        if _is_cn_symbol(symbol) and pre_close is None and (
+            limit_up_price is None or limit_down_price is None
+        ):
+            return None, "simulated_cn_price_limit_evidence_unavailable"
+        return {
+            "provider_at": provider_at,
+            "provider": provider,
+            "price": price,
+            "volume": volume,
+            "amount": amount,
+            "pre_close": pre_close,
+            "limit_up_price": limit_up_price,
+            "limit_down_price": limit_down_price,
+            "bid_price": bid_price,
+            "ask_price": ask_price,
+        }, None
+
+    def _default_quote_provider(self, symbol: str) -> Any:
+        if self._quote_manager is None:
+            from data_provider.base import DataFetcherManager
+
+            self._quote_manager = DataFetcherManager()
+        return self._quote_manager.get_realtime_quote_with_provider_timestamp(symbol)
 
     def _apply_fill(self, trade: TradeData) -> None:
         notional = float(trade.price) * float(trade.volume)
@@ -323,3 +653,55 @@ def _as_int(value: Any, default: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _as_utc_datetime(value: Any) -> Optional[datetime]:
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
+def _finite_positive(value: Any) -> Optional[float]:
+    parsed = _as_float(value, float("nan"))
+    return parsed if math.isfinite(parsed) and parsed > 0 else None
+
+
+def _finite_nonnegative(value: Any) -> Optional[float]:
+    parsed = _as_float(value, float("nan"))
+    return parsed if math.isfinite(parsed) and parsed >= 0 else None
+
+
+def _quote_spread_bps(snapshot: dict[str, Any]) -> Optional[float]:
+    bid = _finite_positive(snapshot.get("bid_price"))
+    ask = _finite_positive(snapshot.get("ask_price"))
+    if bid is None or ask is None or ask < bid:
+        return None
+    midpoint = (bid + ask) / 2.0
+    return (ask - bid) / midpoint * 10000.0 if midpoint > 0 else None
+
+
+def _instrument_type(symbol: str) -> str:
+    code = str(symbol or "").strip().upper().split(".", 1)[0]
+    return "etf" if code.startswith(("15", "16", "50", "51", "52", "56", "58")) else "stock"
+
+
+def _is_cn_symbol(symbol: str) -> bool:
+    code = str(symbol or "").strip().upper().split(".", 1)[0]
+    return len(code) == 6 and code.isdigit()
+
+
+def _provider_identity(quote: Any) -> Optional[str]:
+    value = getattr(quote, "source", None) or getattr(quote, "provider", None)
+    value = getattr(value, "value", value)
+    text = str(value or "").strip().lower()
+    return text or None

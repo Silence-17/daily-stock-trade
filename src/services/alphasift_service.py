@@ -31,6 +31,10 @@ import yaml
 
 from src.auth import COOKIE_NAME, is_auth_enabled, refresh_auth_state, verify_session
 from src.config import Config, DEFAULT_ALPHASIFT_INSTALL_SPEC, get_configured_llm_models
+from src.services.cross_market_paper_strategy import (
+    A_SHARE_THEME_KEYWORDS,
+    contains_theme_keyword,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1287,12 +1291,41 @@ class AlphaSiftService:
         strategy: str,
         market: str,
         max_results: int,
+        candidate_scope: str = "",
         source_health_trends: Optional[List[Dict[str, Any]]] = None,
         use_llm: bool = True,
         llm_timeout_seconds: Optional[int] = None,
         llm_max_retries: Optional[int] = None,
     ) -> Dict[str, Any]:
+        normalized_scope = str(candidate_scope or "").strip().lower()
+        if normalized_scope == "cross_market_target_themes":
+            if market != "cn" or strategy != "momentum_quality":
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "error": "alphasift_candidate_scope_rejected",
+                        "message": (
+                            "The cross-market target-theme scope requires "
+                            "market=cn and strategy=momentum_quality."
+                        ),
+                    },
+                )
+            return _build_cross_market_target_theme_screen(
+                strategy=strategy,
+                market=market,
+                max_results=max_results,
+            )
+
         _ensure_alphasift_enabled(self.config)
+        if normalized_scope:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "alphasift_candidate_scope_rejected",
+                    "message": f"Unsupported candidate scope: {normalized_scope}",
+                },
+            )
+
         _ensure_alphasift_available_for_use()
         _ensure_supported_strategy(strategy)
 
@@ -3071,6 +3104,32 @@ def _resolve_hotspot_provider(provider: str) -> Tuple[str, Any]:
     return "akshare", DsaEastMoneyHotspotProvider()
 
 
+def _build_cross_market_target_theme_screen(
+    *,
+    strategy: str,
+    market: str,
+    max_results: int,
+) -> Dict[str, Any]:
+    provider = DsaEastMoneyHotspotProvider()
+    candidates = provider.cross_market_theme_leader_candidates(
+        max_results=max_results,
+    )
+    return {
+        "strategy": strategy,
+        "market": market,
+        "candidate_scope": "cross_market_target_themes",
+        "candidates": candidates,
+        "candidate_count": len(candidates),
+        "quality_status": "ok" if candidates else "unavailable",
+        "source": "dsa_eastmoney_board_change_leaders",
+        "source_errors": [] if candidates else ["cross_market_target_themes_unavailable"],
+        "warnings": [],
+        "fallback_used": False,
+        "llm_used": False,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 class DsaEastMoneyHotspotProvider:
     """Minimal EastMoney board provider for AlphaSift hotspot scoring."""
 
@@ -3288,6 +3347,123 @@ class DsaEastMoneyHotspotProvider:
                 "leaders": leaders,
             })
         return rows
+
+    def cross_market_theme_leader_candidates(
+        self,
+        *,
+        max_results: int = 50,
+    ) -> List[Dict[str, Any]]:
+        """Return one current board leader per strategy family, then alternates."""
+
+        frame = self._fetch_board_changes_raw()
+        records = frame.to_dict("records") if frame is not None and not frame.empty else []
+        family_order = (
+            "semiconductor",
+            "memory",
+            "equipment",
+            "materials",
+            "cpo",
+            "artificial_intelligence",
+            "compute_services",
+            "gaming",
+            "pharma",
+            "mlcc",
+            "ccl",
+            "gold",
+        )
+        buckets: Dict[str, List[Dict[str, Any]]] = {
+            family: [] for family in family_order
+        }
+        seen_rows = set()
+        for row in records:
+            board_name = _env_text(row.get("\u677f\u5757\u540d\u79f0"))
+            symbol = _env_text(
+                row.get(
+                    "\u677f\u5757\u5f02\u52a8\u6700\u9891\u7e41\u4e2a\u80a1\u53ca\u6240\u5c5e\u7c7b\u578b-\u80a1\u7968\u4ee3\u7801"
+                )
+            )
+            name = _env_text(
+                row.get(
+                    "\u677f\u5757\u5f02\u52a8\u6700\u9891\u7e41\u4e2a\u80a1\u53ca\u6240\u5c5e\u7c7b\u578b-\u80a1\u7968\u540d\u79f0"
+                )
+            )
+            theme = self._cross_market_board_theme(board_name)
+            family = theme
+            if family not in buckets or not symbol or not name:
+                continue
+            symbol = symbol.split(".", 1)[0].zfill(6)
+            row_key = (family, board_name, symbol)
+            if row_key in seen_rows:
+                continue
+            seen_rows.add(row_key)
+            change_pct = _safe_float(row.get("\u6da8\u8dcc\u5e45"))
+            event_count = int(
+                _safe_float(row.get("\u677f\u5757\u5f02\u52a8\u603b\u6b21\u6570")) or 0
+            )
+            score = min(100.0, max(0.0, 70.0 + 5.0 * float(change_pct or 0.0)))
+            buckets[family].append({
+                "code": symbol,
+                "symbol": symbol,
+                "name": name,
+                "score": round(score, 2),
+                "is_core_stock": True,
+                "concepts": [board_name],
+                "belong_boards": [{
+                    "name": board_name,
+                    "type": "concept",
+                    "change_pct": change_pct,
+                    "source": "dsa_eastmoney_board_change",
+                }],
+                "data_quality": "partial",
+                "data_sources": ["dsa_eastmoney_board_change"],
+                "source": "dsa_eastmoney_board_change_leader",
+                "_cross_market_source_theme": theme,
+                "_cross_market_board_event_count": event_count,
+            })
+
+        def sort_key(item: Dict[str, Any]) -> Tuple[float, int, str]:
+            board = item.get("belong_boards", [{}])[0]
+            return (
+                -float(_safe_float(board.get("change_pct")) or -999.0),
+                -int(item.get("_cross_market_board_event_count") or 0),
+                str(item.get("code") or ""),
+            )
+
+        for rows in buckets.values():
+            rows.sort(key=sort_key)
+
+        selected: List[Dict[str, Any]] = []
+        seen_symbols = set()
+        while any(buckets[family] for family in family_order):
+            made_progress = False
+            for family in family_order:
+                while buckets[family]:
+                    candidate = buckets[family].pop(0)
+                    symbol = str(candidate.get("code") or "")
+                    if symbol in seen_symbols:
+                        continue
+                    seen_symbols.add(symbol)
+                    selected.append(candidate)
+                    made_progress = True
+                    break
+                if len(selected) >= max(1, min(int(max_results or 1), 50)):
+                    return selected
+            if not made_progress:
+                break
+        return selected
+
+    @staticmethod
+    def _cross_market_board_theme(board_name: str) -> str:
+        text = str(board_name or "").strip().lower()
+        for theme, keywords in A_SHARE_THEME_KEYWORDS:
+            if any(contains_theme_keyword(text, keyword) for keyword in keywords):
+                return theme
+        if any(
+            contains_theme_keyword(text, keyword)
+            for keyword in ("gold", "\u9ec4\u91d1", "\u8d35\u91d1\u5c5e")
+        ):
+            return "gold"
+        return "other"
 
     def stock_board_concept_cons_em(self, symbol: str = "") -> Any:
         cached = self._get_constituent_cache("concept", symbol)

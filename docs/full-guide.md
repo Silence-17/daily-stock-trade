@@ -855,7 +855,7 @@ python main.py --schedule --no-run-immediately
 >
 > 配置 `auto_max_drawdown_pct` 后，账户最大回撤以按账户持久化的已观测权益峰值为基准，而不是只比较初始资金。完整状态的 `diagnostics.account_drawdown`、Agent run 的 `diagnostics.account_risk` 和 Web“账户回撤”健康组件会展示峰值权益、当前权益、回撤比例与阈值；达到阈值时只阻断新买入。
 
-> 可选 `auto_consecutive_loss_limit` 按本地 paper 账本 FIFO 已实现盈亏统计连续亏损，与任务失败熔断分离；达到上限后只暂停新买入。`auto_consecutive_loss_cooldown_minutes` 到期，或后续盈利/持平平仓清零连亏时自动恢复。完整状态的 `diagnostics.consecutive_losses`、系统健康组件和 Agent run 会展示当前连亏、最后平仓、恢复时间与门禁状态。
+> 可选 `auto_consecutive_loss_limit` 按本地 paper 账本 FIFO 已实现盈亏统计连续亏损，与任务失败熔断分离；达到上限后只暂停新买入。一般策略在 `auto_consecutive_loss_cooldown_minutes` 到期后恢复；`cross_market_global_sector_rotation_v1.3_aggressive` 固定冷却后续 3 个完整 A 股交易日并在第 4 个交易日恢复，Web 设置显示只读的 3 个 A 股交易日。后续盈利/持平平仓会清零连亏。完整状态的 `diagnostics.consecutive_losses`、系统健康组件和 Agent run 会展示当前连亏、最后平仓、恢复时间与门禁状态。
 
 #### 环境变量方式
 

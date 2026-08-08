@@ -107,6 +107,7 @@ class _ResolvedPositionPrice:
     is_stale: bool
     is_available: bool
     provider: Optional[str] = None
+    provider_timestamp: Optional[str] = None
 
 
 class PortfolioService:
@@ -284,6 +285,72 @@ class PortfolioService:
                 note=(note or "").strip() or None,
             )
             return {"id": int(row.id)}
+
+    def get_sellable_quantity(
+        self,
+        *,
+        account_id: int,
+        symbol: str,
+        trade_date: date,
+        market: str = "cn",
+        currency: str = "CNY",
+        enforce_t_plus_one: bool = True,
+    ) -> float:
+        """Return remaining quantity eligible for sale on a given trade date."""
+
+        key = (
+            self._normalize_symbol_for_position(symbol),
+            self._normalize_market(market),
+            self._normalize_currency(currency),
+        )
+        trades = self.repo.list_trades(account_id, as_of=trade_date)
+        actions = self.repo.list_corporate_actions(account_id, as_of=trade_date)
+        events = []
+        for row in actions:
+            event_key = (
+                self._normalize_symbol_for_position(row.symbol),
+                self._normalize_market(row.market),
+                self._normalize_currency(row.currency),
+            )
+            if event_key == key:
+                events.append((row.effective_date, 0, row.id, "corp", row))
+        for row in trades:
+            event_key = (
+                self._normalize_symbol_for_position(row.symbol),
+                self._normalize_market(row.market),
+                self._normalize_currency(row.currency),
+            )
+            if event_key == key:
+                events.append((row.trade_date, 1, row.id, "trade", row))
+        events.sort(key=lambda item: (item[0], item[1], item[2]))
+
+        sellable = 0.0
+        for event_date, _priority, _event_id, event_type, event in events:
+            if event_type == "corp":
+                if str(event.action_type or "").strip().lower() == "split_adjustment":
+                    ratio = float(event.split_ratio or 0.0)
+                    if ratio <= 0:
+                        raise ValueError(f"Invalid split_ratio for {key[0]}")
+                    sellable *= ratio
+                continue
+            quantity = float(event.quantity or 0.0)
+            side = str(event.side or "").strip().lower()
+            if side == "buy":
+                if not enforce_t_plus_one or event_date < trade_date:
+                    sellable += quantity
+            elif side == "sell":
+                sellable -= quantity
+            else:
+                raise ValueError(f"Unsupported trade side: {event.side}")
+            if sellable < -EPS:
+                raise PortfolioOversellError(
+                    symbol=key[0],
+                    trade_date=event_date,
+                    requested_quantity=quantity,
+                    available_quantity=max(0.0, sellable + quantity),
+                )
+            sellable = max(0.0, sellable)
+        return round(sellable, 8)
 
     def record_corporate_action(
         self,
@@ -477,6 +544,8 @@ class PortfolioService:
         account_id: Optional[int] = None,
         as_of: Optional[date] = None,
         cost_method: str = "fifo",
+        persist: bool = True,
+        realtime_price_overrides: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         as_of_date = as_of or date.today()
         method = self._normalize_cost_method(cost_method)
@@ -502,26 +571,32 @@ class PortfolioService:
         }
 
         for account in account_rows:
-            account_snapshot = self._replay_account(account=account, as_of_date=as_of_date, cost_method=method)
-
-            self.repo.replace_positions_lots_and_snapshot(
-                account_id=account.id,
-                snapshot_date=as_of_date,
+            account_snapshot = self._replay_account(
+                account=account,
+                as_of_date=as_of_date,
                 cost_method=method,
-                base_currency=account.base_currency,
-                total_cash=account_snapshot["total_cash"],
-                total_market_value=account_snapshot["total_market_value"],
-                total_equity=account_snapshot["total_equity"],
-                unrealized_pnl=account_snapshot["unrealized_pnl"],
-                realized_pnl=account_snapshot["realized_pnl"],
-                fee_total=account_snapshot["fee_total"],
-                tax_total=account_snapshot["tax_total"],
-                fx_stale=account_snapshot["fx_stale"],
-                payload=json.dumps(account_snapshot["payload"], ensure_ascii=False),
-                positions=account_snapshot["positions_cache"],
-                lots=account_snapshot["lots_cache"],
-                valuation_currency=account.base_currency,
+                realtime_price_overrides=realtime_price_overrides,
             )
+
+            if persist:
+                self.repo.replace_positions_lots_and_snapshot(
+                    account_id=account.id,
+                    snapshot_date=as_of_date,
+                    cost_method=method,
+                    base_currency=account.base_currency,
+                    total_cash=account_snapshot["total_cash"],
+                    total_market_value=account_snapshot["total_market_value"],
+                    total_equity=account_snapshot["total_equity"],
+                    unrealized_pnl=account_snapshot["unrealized_pnl"],
+                    realized_pnl=account_snapshot["realized_pnl"],
+                    fee_total=account_snapshot["fee_total"],
+                    tax_total=account_snapshot["tax_total"],
+                    fx_stale=account_snapshot["fx_stale"],
+                    payload=json.dumps(account_snapshot["payload"], ensure_ascii=False),
+                    positions=account_snapshot["positions_cache"],
+                    lots=account_snapshot["lots_cache"],
+                    valuation_currency=account.base_currency,
+                )
 
             accounts_payload.append(account_snapshot["public"])
             aggregate["limitations"] = _merge_portfolio_limitations(
@@ -868,7 +943,14 @@ class PortfolioService:
 
         return quantity_held
 
-    def _replay_account(self, *, account: Any, as_of_date: date, cost_method: str) -> Dict[str, Any]:
+    def _replay_account(
+        self,
+        *,
+        account: Any,
+        as_of_date: date,
+        cost_method: str,
+        realtime_price_overrides: Optional[Dict[str, Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
         trades = self.repo.list_trades(account.id, as_of=as_of_date)
         cash_ledger = self.repo.list_cash_ledger(account.id, as_of=as_of_date)
         corporate_actions = self.repo.list_corporate_actions(account.id, as_of=as_of_date)
@@ -1027,6 +1109,7 @@ class PortfolioService:
             cost_method=cost_method,
             fifo_lots=fifo_lots,
             avg_state=avg_state,
+            realtime_price_overrides=realtime_price_overrides,
         )
         fx_stale = fx_stale or stale_pos
 
@@ -1098,6 +1181,7 @@ class PortfolioService:
         cost_method: str,
         fifo_lots: Dict[Tuple[str, str, str], List[Dict[str, Any]]],
         avg_state: Dict[Tuple[str, str, str], _AvgState],
+        realtime_price_overrides: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], float, float, bool]:
         position_rows: List[Dict[str, Any]] = []
         lot_rows: List[Dict[str, Any]] = []
@@ -1127,7 +1211,7 @@ class PortfolioService:
                     active_symbols.append(symbol)
         realtime_prices = (
             self._prefetch_realtime_position_prices(active_symbols)
-            if active_symbols
+            if active_symbols and realtime_price_overrides is None
             else None
         )
 
@@ -1165,6 +1249,11 @@ class PortfolioService:
                 symbol=symbol,
                 as_of_date=as_of_date,
                 realtime_prices=realtime_prices,
+                realtime_price_override=(
+                    realtime_price_overrides.get(symbol)
+                    if realtime_price_overrides is not None
+                    else None
+                ),
             )
             last_price = price_info.price
             limitations = _portfolio_limitations_for_market(market)
@@ -1209,6 +1298,7 @@ class PortfolioService:
                     "valuation_currency": account.base_currency,
                     "price_source": price_info.source,
                     "price_provider": price_info.provider,
+                    "price_provider_timestamp": price_info.provider_timestamp,
                     "price_date": price_info.price_date.isoformat() if price_info.price_date else None,
                     "price_stale": price_info.is_stale,
                     "price_available": price_info.is_available,
@@ -1228,14 +1318,26 @@ class PortfolioService:
         symbol: str,
         as_of_date: date,
         realtime_prices: Optional[Dict[str, Tuple[Optional[float], Optional[str]]]] = None,
+        realtime_price_override: Optional[Dict[str, Any]] = None,
     ) -> _ResolvedPositionPrice:
         today = date.today()
 
         if as_of_date == today:
-            if realtime_prices is None:
+            if realtime_price_override is not None:
+                try:
+                    realtime_price = float(realtime_price_override.get("price"))
+                except (TypeError, ValueError):
+                    realtime_price = None
+                provider = realtime_price_override.get("provider")
+                provider_timestamp = realtime_price_override.get(
+                    "provider_timestamp"
+                )
+            elif realtime_prices is None:
                 realtime_price, provider = self._fetch_realtime_position_price(symbol)
+                provider_timestamp = None
             else:
                 realtime_price, provider = realtime_prices.get(symbol, (None, None))
+                provider_timestamp = None
             if realtime_price is not None and realtime_price > 0:
                 return _ResolvedPositionPrice(
                     price=float(realtime_price),
@@ -1244,6 +1346,11 @@ class PortfolioService:
                     is_stale=False,
                     is_available=True,
                     provider=provider,
+                    provider_timestamp=(
+                        str(provider_timestamp).strip()
+                        if provider_timestamp is not None
+                        else None
+                    ),
                 )
 
         close = self.repo.get_latest_close_with_date(symbol=symbol, as_of=as_of_date)

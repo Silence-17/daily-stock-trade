@@ -50,6 +50,12 @@ class _DummyCapitalFlowFetcher:
 
 
 class TestFundamentalContext(unittest.TestCase):
+
+    def test_explicit_empty_fetcher_list_does_not_load_defaults(self) -> None:
+        manager = DataFetcherManager(fetchers=[])
+
+        self.assertEqual(manager._get_fetchers_snapshot(), [])
+
     def test_offshore_market_returns_not_supported_when_adapter_empty(self) -> None:
         """When yfinance adapter has no data, offshore (US/HK) status is not_supported.
 
@@ -707,6 +713,7 @@ class TestFundamentalContext(unittest.TestCase):
                     "name": "食品饮料",
                     "code": "BK0438",
                     "change_pct": 0.0,
+                    "volume_ratio": 1.6,
                     "lead_stock": "贵州茅台",
                     "source": "a_stock_data_eastmoney",
                 },
@@ -721,6 +728,7 @@ class TestFundamentalContext(unittest.TestCase):
                     "name": "食品饮料",
                     "code": "BK0438",
                     "change_pct": 0.0,
+                    "volume_ratio": 1.6,
                     "lead_stock": "贵州茅台",
                     "source": "a_stock_data_eastmoney",
                 },

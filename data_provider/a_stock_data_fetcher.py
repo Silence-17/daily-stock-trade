@@ -496,7 +496,7 @@ class AStockDataFetcher(BaseFetcher):
             "pi": "0",
             "pz": "200",
             "po": "1",
-            "fields": "f12,f14,f3,f128",
+            "fields": "f12,f14,f3,f10,f128",
         }
         try:
             response = self._eastmoney_get(
@@ -514,6 +514,7 @@ class AStockDataFetcher(BaseFetcher):
                         "name": name,
                         "code": str(item.get("f12") or "").strip(),
                         "change_pct": _safe_float(item.get("f3")),
+                        "volume_ratio": _safe_float(item.get("f10")),
                         "lead_stock": str(item.get("f128") or "").strip(),
                         "source": "a_stock_data_eastmoney",
                     }

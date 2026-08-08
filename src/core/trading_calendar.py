@@ -189,8 +189,76 @@ def get_market_now(
     return current_time.astimezone(tz)
 
 
+def get_market_session_bounds(
+    market: Optional[str],
+    current_time: Optional[datetime] = None,
+    *,
+    strict: bool = False,
+) -> Tuple[Optional[datetime], Optional[datetime]]:
+    """Return the exchange-calendar open and close for the local session day."""
+
+    market_now = get_market_now(market, current_time=current_time)
+    if market not in MARKET_EXCHANGE or market not in MARKET_TIMEZONE:
+        if strict:
+            raise ValueError(f"unsupported_market_calendar:{market}")
+        return None, None
+    if not _XCALS_AVAILABLE:
+        if strict:
+            raise RuntimeError("exchange_calendar_unavailable")
+        return None, None
+    try:
+        return _session_open_close_for_today(str(market), market_now)
+    except Exception as exc:
+        if strict:
+            raise RuntimeError(
+                f"trading_calendar_lookup_failed:{market}"
+            ) from exc
+        logger.warning("trading_calendar.session_bounds fail-closed: %s", exc)
+        return None, None
+
+
+def get_market_session_break_bounds(
+    market: Optional[str],
+    current_time: Optional[datetime] = None,
+    *,
+    strict: bool = False,
+) -> Tuple[Optional[datetime], Optional[datetime]]:
+    """Return the exchange-calendar break window for the local session day."""
+
+    market_now = get_market_now(market, current_time=current_time)
+    if market not in MARKET_EXCHANGE or market not in MARKET_TIMEZONE:
+        if strict:
+            raise ValueError(f"unsupported_market_calendar:{market}")
+        return None, None
+    if not _XCALS_AVAILABLE:
+        if strict:
+            raise RuntimeError("exchange_calendar_unavailable")
+        return None, None
+    try:
+        cal = xcals.get_calendar(MARKET_EXCHANGE[str(market)])
+        local_date = market_now.date()
+        if not cal.is_session(local_date):
+            return None, None
+        session = cal.date_to_session(local_date, direction="previous")
+        return _session_break_window(
+            cal,
+            session,
+            MARKET_TIMEZONE[str(market)],
+        )
+    except Exception as exc:
+        if strict:
+            raise RuntimeError(
+                f"trading_calendar_break_lookup_failed:{market}"
+            ) from exc
+        logger.warning("trading_calendar.session_break_bounds fail-closed: %s", exc)
+        return None, None
+
+
 def get_effective_trading_date(
-    market: Optional[str], current_time: Optional[datetime] = None
+    market: Optional[str],
+    current_time: Optional[datetime] = None,
+    *,
+    strict: bool = False,
 ) -> date:
     """
     Resolve the latest reusable daily-bar date for checkpoint/resume logic.
@@ -199,17 +267,22 @@ def get_effective_trading_date(
     - Non-trading day / holiday: previous trading session
     - Trading day before market close: previous completed trading session
     - Trading day after market close: current trading session
-    - Calendar lookup failure: fail-open to market-local natural date
+    - Calendar lookup failure: fail-open to market-local natural date unless
+      ``strict=True``, in which case the caller receives an exception
     """
     market_now = get_market_now(market, current_time=current_time)
     fallback_date = market_now.date()
 
     if not _XCALS_AVAILABLE:
+        if strict:
+            raise RuntimeError("exchange_calendar_unavailable")
         return fallback_date
 
     ex = MARKET_EXCHANGE.get(market or "")
     tz_name = MARKET_TIMEZONE.get(market or "")
     if not ex or not tz_name:
+        if strict:
+            raise ValueError(f"unsupported_market_calendar:{market}")
         return fallback_date
 
     try:
@@ -233,6 +306,10 @@ def get_effective_trading_date(
 
         return cal.previous_session(session).date()
     except Exception as e:
+        if strict:
+            raise RuntimeError(
+                f"trading_calendar_lookup_failed:{market}"
+            ) from e
         logger.warning("trading_calendar.get_effective_trading_date fail-open: %s", e)
         return fallback_date
 

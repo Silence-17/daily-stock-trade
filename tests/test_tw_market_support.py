@@ -7,11 +7,13 @@ with a 4-6 digit base (wider than JP ``.T``'s 4-5 to cover ETFs like 00878 /
 006208). Bare numeric codes keep their existing A-share semantics.
 """
 
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pandas as pd
 from data_provider.base import BaseFetcher, DataFetchError, DataFetcherManager, normalize_stock_code
 from data_provider.yfinance_fetcher import YfinanceFetcher
+from data_provider.realtime_types import UnifiedRealtimeQuote
 from src.core.trading_calendar import MARKET_EXCHANGE, MARKET_TIMEZONE, get_market_for_stock
 from src.market_context import detect_market, get_market_guidelines
 from src.services.stock_code_utils import is_code_like, normalize_code
@@ -125,6 +127,39 @@ def test_data_fetcher_manager_routes_tw_daily_only_to_yfinance() -> None:
     assert efinance.calls == []
     assert akshare.calls == []
     assert yfinance.calls == ["2330.TW", "6505.TWO"]
+
+
+def test_data_fetcher_manager_prefers_asia_equity_for_tw_realtime() -> None:
+    provider_timestamp = "2026-08-03T05:29:45+00:00"
+
+    class _RealtimeFetcher(_FakeFetcher):
+        def get_realtime_quote(self, stock_code):
+            self.calls.append(stock_code)
+            return UnifiedRealtimeQuote(
+                code=stock_code,
+                market="tw",
+                currency="TWD",
+                price=4980.0,
+                change_pct=4.95,
+                provider_timestamp=provider_timestamp,
+            )
+
+    asia_equity = _RealtimeFetcher("AsiaEquityFetcher")
+    yfinance = _RealtimeFetcher("YfinanceFetcher")
+    manager = DataFetcherManager(fetchers=[asia_equity, yfinance])
+    config = SimpleNamespace(enable_realtime_quote=True, realtime_cache_ttl=120)
+    DataFetcherManager.reset_realtime_source_health()
+
+    with patch("src.config.get_config", return_value=config):
+        quote = manager.get_realtime_quote(
+            "2383.TW",
+            require_provider_timestamp=True,
+        )
+
+    assert quote is not None
+    assert quote.provider_timestamp == provider_timestamp
+    assert asia_equity.calls == ["2383.TW"]
+    assert yfinance.calls == []
 
 
 def test_trading_calendar_registers_tw_exchange_and_timezone() -> None:

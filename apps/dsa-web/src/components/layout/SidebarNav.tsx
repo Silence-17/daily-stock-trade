@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Activity, BarChart3, Bell, Bot, BriefcaseBusiness, Building2, Gauge, Home, LogOut, MessageSquareQuote, Search, Settings2, WalletCards } from 'lucide-react';
+import { Activity, BarChart3, Bell, Bot, BriefcaseBusiness, Gauge, Home, LogOut, MessageSquareQuote, Search, Settings2, WalletCards } from 'lucide-react';
 import { NavLink } from 'react-router-dom';
 import { ALPHASIFT_CONFIG_CHANGED_EVENT, SYSTEM_CONFIG_CHANGED_EVENT, alphasiftApi } from '../../api/alphasift';
 import { useAuth } from '../../contexts/AuthContext';
@@ -31,7 +31,6 @@ const NAV_ITEMS: NavItem[] = [
   { key: 'home', labelKey: 'layout.nav.home', to: '/', icon: Home, exact: true },
   { key: 'chat', labelKey: 'layout.nav.chat', to: '/chat', icon: MessageSquareQuote, badge: 'completion' },
   { key: 'screening', labelKey: 'layout.nav.screening', to: '/screening', icon: Search },
-  { key: 'industry-boards', labelKey: 'layout.nav.industryBoards', to: '/industry-boards', icon: Building2 },
   { key: 'portfolio', labelKey: 'layout.nav.portfolio', to: '/portfolio', icon: BriefcaseBusiness },
   { key: 'paper-trading', labelKey: 'layout.nav.paperTrading', to: '/paper-trading', icon: WalletCards },
   { key: 'agent-console', labelKey: 'layout.nav.agentConsole', to: '/agent-console', icon: Bot },

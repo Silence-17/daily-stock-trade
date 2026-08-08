@@ -10,6 +10,7 @@ from __future__ import annotations
 import importlib
 import json
 import logging
+import math
 import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -55,6 +56,7 @@ class VnpyRuntimeHandle:
         event_bridge: Optional[Any] = None,
         diagnostics: Optional[Dict[str, Any]] = None,
         event_sink: Optional[Callable[..., None]] = None,
+        config_path: Optional[Path] = None,
     ) -> None:
         self.settings = settings
         self.event_engine = event_engine
@@ -65,6 +67,7 @@ class VnpyRuntimeHandle:
         self._auto_reconnect_stop = Event()
         self._auto_reconnect_thread: Optional[Thread] = None
         self._event_sink = event_sink
+        self._config_path = config_path
         self._event_queue: Queue[Optional[Dict[str, Any]]] = Queue()
         self._event_thread: Optional[Thread] = None
 
@@ -235,6 +238,7 @@ class VnpyRuntimeHandle:
                     self.settings.production_preflight_enabled
                 ),
                 diagnostics=self.diagnostics,
+                paper_config_path=self._config_path,
             )
             _refresh_gateway_connection(
                 main_engine=self.main_engine,
@@ -541,6 +545,7 @@ def bootstrap_vnpy_runtime(
             gateway_class_path=settings.gateway_class,
             production_preflight_enabled=settings.production_preflight_enabled,
             diagnostics=diagnostics,
+            paper_config_path=config_path,
         )
 
     event_bridge = None
@@ -569,6 +574,7 @@ def bootstrap_vnpy_runtime(
         event_bridge=event_bridge,
         diagnostics=diagnostics,
         event_sink=event_sink,
+        config_path=config_path,
     )
     handle.start_auto_reconnect()
     return handle
@@ -640,6 +646,7 @@ def _connect_gateway(
     gateway_class_path: Optional[str],
     production_preflight_enabled: bool,
     diagnostics: Dict[str, Any],
+    paper_config_path: Optional[Path] = None,
 ) -> None:
     connect = getattr(main_engine, "connect", None)
     if not callable(connect):
@@ -772,6 +779,23 @@ def _connect_gateway(
             ),
         }
         return
+    builtin_payload_info: Optional[Dict[str, Any]] = None
+    if _uses_builtin_simulated_gateway_class(gateway_class_path):
+        try:
+            payload, builtin_payload_info = _prepare_builtin_simulated_gateway_payload(
+                payload,
+                paper_config_path=paper_config_path,
+            )
+        except Exception as exc:  # noqa: BLE001 - a mismatched paper balance must fail closed.
+            diagnostics["connect"] = {
+                "attempted": False,
+                "request_accepted": False,
+                "connected": False,
+                "status": "failed",
+                "reason": "simulated_initial_balance_unavailable",
+                "error_type": type(exc).__name__,
+            }
+            return
     if production_preflight_enabled:
         preflight = _evaluate_production_connect_preflight(
             main_engine=main_engine,
@@ -802,6 +826,8 @@ def _connect_gateway(
         "settings_source": "file" if path is not None else "gateway_defaults",
         "gateway_name": gateway_name,
     }
+    if builtin_payload_info is not None:
+        diagnostics["connect"]["builtin_simulated_gateway"] = builtin_payload_info
     try:
         connect(payload, gateway_name)
     except Exception as exc:  # noqa: BLE001 - optional runtime must not block API startup.
@@ -824,6 +850,42 @@ def _connect_gateway(
         gateway_name=gateway_name,
         diagnostics=diagnostics,
     )
+
+
+def _uses_builtin_simulated_gateway_class(gateway_class_path: Optional[str]) -> bool:
+    return str(gateway_class_path or "").strip().casefold() == (
+        BUILTIN_SIMULATED_GATEWAY_CLASS.casefold()
+    )
+
+
+def _prepare_builtin_simulated_gateway_payload(
+    payload: Dict[str, Any],
+    *,
+    paper_config_path: Optional[Path],
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    allowed_keys = {
+        "duplicate_trade_event_count",
+        "fill_delay_ms",
+        "initial_balance",
+        "matching_mode",
+        "preserve_state_on_reconnect",
+        "reject_every_nth_order",
+    }
+    sanitized = {
+        key: value
+        for key, value in payload.items()
+        if str(key) in allowed_keys
+    }
+    settings = VnpyPaperTradingService(config_path=paper_config_path).get_settings()
+    initial_balance = float(settings.initial_cash)
+    if not math.isfinite(initial_balance) or initial_balance <= 0:
+        raise ValueError("paper_initial_cash_invalid")
+    sanitized["initial_balance"] = initial_balance
+    return sanitized, {
+        "initial_balance": initial_balance,
+        "initial_balance_source": "vnpy_paper_settings",
+        "ignored_setting_count": max(0, len(payload) - len(sanitized.keys() & payload.keys())),
+    }
 
 
 def _evaluate_production_connect_preflight(

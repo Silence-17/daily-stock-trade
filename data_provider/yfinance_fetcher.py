@@ -15,12 +15,16 @@ YfinanceFetcher - 兜底数据源 (Priority 4)
 """
 
 import csv
+import json
 import logging
+import math
+import threading
 from datetime import datetime, timezone
 from io import StringIO
 from typing import Optional, List, Dict, Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+from urllib.parse import quote as url_quote
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -34,7 +38,11 @@ from tenacity import (
 
 from .base import BaseFetcher, DataFetchError, STANDARD_COLUMNS, is_bse_code
 from .realtime_types import UnifiedRealtimeQuote, RealtimeSource
-from .us_index_mapping import get_us_index_yf_symbol, is_us_stock_code
+from .us_index_mapping import (
+    get_us_index_yf_symbol,
+    get_us_yfinance_alias,
+    is_us_stock_code,
+)
 from src.services.market_symbol_utils import get_suffix_market, is_suffix_market_symbol
 
 # 可选导入本地股票映射补丁，若缺失则使用空字典兜底
@@ -53,6 +61,23 @@ except (ImportError, ModuleNotFoundError):
 import os
 
 logger = logging.getLogger(__name__)
+CROSS_MARKET_US_HTTP_TIMEOUT_SECONDS = 5.0
+CROSS_MARKET_US_STREAM_IDLE_SECONDS = 90.0
+
+
+def _safe_number(value: object) -> Optional[float]:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+GLOBAL_INDEX_REALTIME_MAPPING = {
+    "N225": ("^N225", "Nikkei 225", "jp", "JPY"),
+    "TOPX": ("^TOPX", "TOPIX", "jp", "JPY"),
+    "KS11": ("^KS11", "KOSPI", "kr", "KRW"),
+    "KQ11": ("^KQ11", "KOSDAQ", "kr", "KRW"),
+}
 
 
 class YfinanceFetcher(BaseFetcher):
@@ -75,10 +100,29 @@ class YfinanceFetcher(BaseFetcher):
 
     name = "YfinanceFetcher"
     priority = int(os.getenv("YFINANCE_PRIORITY", "4"))
+    concurrent_safe_methods = frozenset({
+        "get_cross_market_us_premarket_quote",
+        "get_cross_market_us_premarket_quotes",
+        "get_cross_market_us_realtime_quote",
+    })
 
     def __init__(self):
         """初始化 YfinanceFetcher"""
-        pass
+        self._premarket_stream_lock = threading.RLock()
+        self._premarket_stream_start_lock = threading.Lock()
+        self._premarket_stream_websocket = None
+        self._premarket_stream_thread: Optional[threading.Thread] = None
+        self._premarket_stream_quotes: Dict[str, UnifiedRealtimeQuote] = {}
+        self._premarket_stream_code_by_symbol: Dict[str, str] = {}
+        self._premarket_stream_completed = threading.Event()
+        self._premarket_stream_idle_timer: Optional[threading.Timer] = None
+        self._premarket_stream_generation = 0
+        self._premarket_stream_idle_generation = 0
+
+    def close(self) -> None:
+        """Release the persistent cross-market premarket stream, if any."""
+
+        self._stop_cross_market_us_premarket_stream()
 
     @staticmethod
     def _is_jp_kr_suffix_stock(stock_code: str) -> bool:
@@ -93,6 +137,23 @@ class YfinanceFetcher(BaseFetcher):
         e.g. 00878 / 006208), wider than the JP `.T` range.
         """
         return is_suffix_market_symbol(stock_code, "tw")
+
+    @staticmethod
+    def _latest_minute_provider_timestamp(ticker) -> Optional[str]:
+        """Return Yahoo's latest minute timestamp without inventing freshness."""
+        try:
+            minute_history = ticker.history(period="1d", interval="1m")
+            if minute_history is None or minute_history.empty:
+                return None
+            latest = minute_history.index[-1]
+            if hasattr(latest, "to_pydatetime"):
+                latest = latest.to_pydatetime()
+            if not isinstance(latest, datetime) or latest.tzinfo is None:
+                return None
+            return latest.astimezone(timezone.utc).isoformat()
+        except Exception as exc:
+            logger.debug("[Yfinance] latest minute provider timestamp unavailable: %s", exc)
+            return None
 
     def _convert_stock_code(self, stock_code: str) -> str:
         """
@@ -119,6 +180,10 @@ class YfinanceFetcher(BaseFetcher):
             'AAPL'
         """
         code = stock_code.strip().upper()
+
+        alias_symbol, _ = get_us_yfinance_alias(code)
+        if alias_symbol:
+            return alias_symbol
 
         # 美股指数：映射到 Yahoo Finance 符号（如 SPX -> ^GSPC）
         yf_symbol, _ = get_us_index_yf_symbol(code)
@@ -683,7 +748,12 @@ class YfinanceFetcher(BaseFetcher):
             logger.warning(f"[Stooq] 解析美股 {symbol} 行情失败: {exc}")
             return None
 
-    def _get_us_stock_quote_from_tencent(self, stock_code: str) -> Optional[UnifiedRealtimeQuote]:
+    def _get_us_stock_quote_from_tencent(
+        self,
+        stock_code: str,
+        *,
+        timeout_seconds: float = 15.0,
+    ) -> Optional[UnifiedRealtimeQuote]:
         """Fetch one US quote from Tencent before falling back to delayed Stooq data."""
 
         symbol = stock_code.strip().upper()
@@ -696,7 +766,7 @@ class YfinanceFetcher(BaseFetcher):
             },
         )
         try:
-            with urlopen(request, timeout=15) as response:
+            with urlopen(request, timeout=max(1.0, float(timeout_seconds))) as response:
                 payload = response.read().decode("gbk", "ignore").strip()
         except (HTTPError, URLError, TimeoutError) as exc:
             logger.warning(f"[Tencent] 获取美股 {symbol} 实时行情失败: {exc}")
@@ -771,17 +841,412 @@ class YfinanceFetcher(BaseFetcher):
             logger.warning(f"[Tencent] 解析美股 {symbol} 行情失败: {exc}")
             return None
 
+    @staticmethod
+    def _has_usable_provider_timestamp(quote: Optional[UnifiedRealtimeQuote]) -> bool:
+        if quote is None or not quote.has_basic_data():
+            return False
+        raw_timestamp = getattr(quote, "provider_timestamp", None)
+        if not raw_timestamp:
+            return False
+        try:
+            parsed = datetime.fromisoformat(str(raw_timestamp).replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        return parsed.tzinfo is not None
+
+    def get_cross_market_us_realtime_quote(
+        self,
+        stock_code: str,
+    ) -> Optional[UnifiedRealtimeQuote]:
+        """Return timestamped US evidence with Tencent first and Yahoo as fallback."""
+
+        symbol = stock_code.strip().upper()
+        quote = self._get_us_stock_quote_from_tencent(
+            symbol,
+            timeout_seconds=CROSS_MARKET_US_HTTP_TIMEOUT_SECONDS,
+        )
+        if self._has_usable_provider_timestamp(quote):
+            return quote
+
+        quote = self._get_yahoo_chart_realtime_quote(
+            user_code=symbol,
+            yf_symbol=self._convert_stock_code(symbol),
+            name=STOCK_NAME_MAP.get(symbol, ""),
+            market="us",
+            currency="USD",
+            request_timeout_seconds=CROSS_MARKET_US_HTTP_TIMEOUT_SECONDS,
+        )
+        return quote if self._has_usable_provider_timestamp(quote) else None
+
+    def get_cross_market_us_premarket_quote(
+        self,
+        stock_code: str,
+    ) -> Optional[UnifiedRealtimeQuote]:
+        """Return a timestamped extended-hours minute for premarket evidence."""
+
+        symbol = stock_code.strip().upper()
+        quote = self._get_yahoo_chart_realtime_quote(
+            user_code=symbol,
+            yf_symbol=self._convert_stock_code(symbol),
+            name=STOCK_NAME_MAP.get(symbol, ""),
+            market="us",
+            currency="USD",
+            include_pre_post=True,
+            request_timeout_seconds=CROSS_MARKET_US_HTTP_TIMEOUT_SECONDS,
+        )
+        return quote if self._has_usable_provider_timestamp(quote) else None
+
+    def get_cross_market_us_premarket_quotes(
+        self,
+        stock_codes: List[str],
+        *,
+        timeout_seconds: float = CROSS_MARKET_US_HTTP_TIMEOUT_SECONDS,
+    ) -> Dict[str, UnifiedRealtimeQuote]:
+        """Return live Yahoo ticks while retaining the stream between scheduler polls."""
+
+        import yfinance as yf
+
+        code_by_stream_symbol = {
+            self._convert_stock_code(str(code or "").strip().upper()): str(code or "").strip().upper()
+            for code in stock_codes
+            if str(code or "").strip()
+        }
+        code_by_stream_symbol = {
+            symbol: code
+            for symbol, code in code_by_stream_symbol.items()
+            if symbol
+        }
+        if not code_by_stream_symbol:
+            return {}
+
+        with self._premarket_stream_start_lock:
+            with self._premarket_stream_lock:
+                listener = self._premarket_stream_thread
+                current_mapping = dict(self._premarket_stream_code_by_symbol)
+                compatible = bool(
+                    listener is not None
+                    and listener.is_alive()
+                    and all(
+                        current_mapping.get(symbol) == code
+                        for symbol, code in code_by_stream_symbol.items()
+                    )
+                )
+            if not compatible:
+                self._stop_cross_market_us_premarket_stream()
+                self._start_cross_market_us_premarket_stream(
+                    yf,
+                    code_by_stream_symbol,
+                )
+
+        self._refresh_cross_market_us_premarket_stream_idle_timer()
+        with self._premarket_stream_lock:
+            completed = self._premarket_stream_completed
+        completed.wait(max(1.0, float(timeout_seconds)))
+        with self._premarket_stream_lock:
+            return {
+                code: self._premarket_stream_quotes[code]
+                for code in code_by_stream_symbol.values()
+                if code in self._premarket_stream_quotes
+            }
+
+    def _start_cross_market_us_premarket_stream(
+        self,
+        yf,
+        code_by_stream_symbol: Dict[str, str],
+    ) -> None:
+        websocket = yf.WebSocket(verbose=False)
+        completed = threading.Event()
+        with self._premarket_stream_lock:
+            self._premarket_stream_generation += 1
+            generation = self._premarket_stream_generation
+
+        def handle_message(message: Dict[str, Any]) -> None:
+            stream_symbol = str(message.get("id") or "").strip().upper()
+            code = code_by_stream_symbol.get(stream_symbol)
+            price = _safe_number(message.get("price"))
+            raw_time = _safe_number(message.get("time"))
+            if code is None or price is None or price <= 0 or raw_time is None:
+                return
+            timestamp_seconds = (
+                raw_time / 1000.0
+                if raw_time >= 10_000_000_000
+                else raw_time
+            )
+            provider_at = datetime.fromtimestamp(timestamp_seconds, tz=timezone.utc)
+            change_amount = _safe_number(message.get("change"))
+            change_pct = _safe_number(message.get("change_percent"))
+            pre_close = (
+                price - change_amount
+                if change_amount is not None and price - change_amount > 0
+                else None
+            )
+            quote = UnifiedRealtimeQuote(
+                code=code,
+                name=STOCK_NAME_MAP.get(code, ""),
+                source=RealtimeSource.YAHOO_STREAMER,
+                fetched_at=datetime.now(timezone.utc).isoformat(),
+                provider_timestamp=provider_at.isoformat(),
+                market="us",
+                currency="USD",
+                data_quality="partial",
+                missing_fields=["volume", "amount"],
+                price=price,
+                change_pct=change_pct,
+                change_amount=change_amount,
+                pre_close=pre_close,
+            )
+            with self._premarket_stream_lock:
+                if generation != self._premarket_stream_generation:
+                    return
+                self._premarket_stream_quotes[code] = quote
+                if len(self._premarket_stream_quotes) >= len(code_by_stream_symbol):
+                    completed.set()
+
+        def listen() -> None:
+            try:
+                websocket.listen(handle_message)
+            except Exception as exc:  # noqa: BLE001 - the next poll restarts the stream.
+                logger.warning("Yahoo premarket streamer stopped: %s", exc)
+
+        websocket.subscribe(list(code_by_stream_symbol))
+        listener = threading.Thread(
+            target=listen,
+            daemon=True,
+            name="dsa-yahoo-premarket-stream",
+        )
+        with self._premarket_stream_lock:
+            self._premarket_stream_websocket = websocket
+            self._premarket_stream_thread = listener
+            self._premarket_stream_quotes = {}
+            self._premarket_stream_code_by_symbol = dict(code_by_stream_symbol)
+            self._premarket_stream_completed = completed
+        listener.start()
+
+    def _refresh_cross_market_us_premarket_stream_idle_timer(self) -> None:
+        with self._premarket_stream_lock:
+            previous = self._premarket_stream_idle_timer
+            self._premarket_stream_idle_generation += 1
+            generation = self._premarket_stream_idle_generation
+            timer = threading.Timer(
+                CROSS_MARKET_US_STREAM_IDLE_SECONDS,
+                self._expire_cross_market_us_premarket_stream,
+                args=(generation,),
+            )
+            timer.daemon = True
+            self._premarket_stream_idle_timer = timer
+        if previous is not None:
+            previous.cancel()
+        timer.start()
+
+    def _expire_cross_market_us_premarket_stream(self, generation: int) -> None:
+        self._stop_cross_market_us_premarket_stream(
+            expected_idle_generation=generation,
+        )
+
+    def _stop_cross_market_us_premarket_stream(
+        self,
+        *,
+        expected_idle_generation: Optional[int] = None,
+    ) -> None:
+        with self._premarket_stream_lock:
+            if (
+                expected_idle_generation is not None
+                and expected_idle_generation
+                != self._premarket_stream_idle_generation
+            ):
+                return
+            websocket = self._premarket_stream_websocket
+            listener = self._premarket_stream_thread
+            idle_timer = self._premarket_stream_idle_timer
+            self._premarket_stream_generation += 1
+            self._premarket_stream_idle_generation += 1
+            self._premarket_stream_websocket = None
+            self._premarket_stream_thread = None
+            self._premarket_stream_quotes = {}
+            self._premarket_stream_code_by_symbol = {}
+            self._premarket_stream_completed = threading.Event()
+            self._premarket_stream_idle_timer = None
+        if idle_timer is not None:
+            idle_timer.cancel()
+        if websocket is None:
+            return
+        websocket_logger = getattr(websocket, "logger", None)
+        logger_was_disabled = bool(getattr(websocket_logger, "disabled", False))
+        try:
+            if websocket_logger is not None:
+                websocket_logger.disabled = True
+            websocket.close()
+        except Exception as exc:  # noqa: BLE001 - shutdown is best effort.
+            logger.debug("Yahoo premarket streamer close failed: %s", exc)
+        finally:
+            if (
+                listener is not None
+                and listener is not threading.current_thread()
+                and listener.is_alive()
+            ):
+                listener.join(timeout=1.0)
+            if websocket_logger is not None:
+                websocket_logger.disabled = logger_was_disabled
+
     def _get_us_stock_quote_fallback(self, stock_code: str) -> Optional[UnifiedRealtimeQuote]:
         return (
-            self._get_us_stock_quote_from_tencent(stock_code)
+            self._get_yahoo_chart_realtime_quote(
+                user_code=stock_code,
+                yf_symbol=self._convert_stock_code(stock_code),
+                name=STOCK_NAME_MAP.get(stock_code.strip().upper(), ""),
+                market="us",
+                currency="USD",
+            )
+            or self._get_us_stock_quote_from_tencent(stock_code)
             or self._get_us_stock_quote_from_stooq(stock_code)
         )
+
+    def _get_yahoo_chart_realtime_quote(
+        self,
+        *,
+        user_code: str,
+        yf_symbol: str,
+        name: str,
+        market: Optional[str],
+        currency: Optional[str],
+        include_pre_post: bool = False,
+        request_timeout_seconds: float = 15.0,
+    ) -> Optional[UnifiedRealtimeQuote]:
+        """Fetch the latest real provider minute without yfinance crumb state."""
+
+        encoded_symbol = url_quote(str(yf_symbol or "").strip(), safe="")
+        if not encoded_symbol:
+            return None
+        include_pre_post_text = "true" if include_pre_post else "false"
+        urls = [
+            (
+                f"https://{host}/v8/finance/chart/{encoded_symbol}"
+                f"?interval=1m&range=1d&includePrePost={include_pre_post_text}"
+            )
+            for host in ("query1.finance.yahoo.com", "query2.finance.yahoo.com")
+        ]
+        try:
+            payload = None
+            last_error: Optional[Exception] = None
+            for url in urls:
+                request = Request(
+                    url,
+                    headers={
+                        "User-Agent": "Mozilla/5.0 (compatible; DSA/1.0; +https://github.com/ZhuLinsen/daily_stock_analysis)",
+                        "Accept": "application/json",
+                    },
+                )
+                try:
+                    with urlopen(
+                        request,
+                        timeout=max(1.0, float(request_timeout_seconds)),
+                    ) as response:
+                        payload = json.loads(response.read().decode("utf-8"))
+                    break
+                except (HTTPError, URLError, TimeoutError, ValueError, TypeError, json.JSONDecodeError) as exc:
+                    last_error = exc
+            if payload is None:
+                raise last_error or ValueError("yahoo_chart_payload_unavailable")
+            chart = payload.get("chart") if isinstance(payload, dict) else None
+            results = chart.get("result") if isinstance(chart, dict) else None
+            result = results[0] if isinstance(results, list) and results else None
+            if not isinstance(result, dict):
+                return None
+            timestamps = result.get("timestamp")
+            indicators = result.get("indicators")
+            quote_rows = indicators.get("quote") if isinstance(indicators, dict) else None
+            values = quote_rows[0] if isinstance(quote_rows, list) and quote_rows else None
+            closes = values.get("close") if isinstance(values, dict) else None
+            if not isinstance(timestamps, list) or not isinstance(closes, list):
+                return None
+            usable = [
+                index
+                for index, (timestamp, close) in enumerate(zip(timestamps, closes))
+                if _safe_number(timestamp) is not None and _safe_number(close) is not None
+            ]
+            if not usable:
+                return None
+            latest_index = usable[-1]
+            price = float(closes[latest_index])
+            provider_timestamp = datetime.fromtimestamp(
+                float(timestamps[latest_index]),
+                tz=timezone.utc,
+            ).isoformat()
+            meta = result.get("meta") if isinstance(result.get("meta"), dict) else {}
+            previous_close = _safe_number(
+                meta.get("chartPreviousClose") or meta.get("previousClose")
+            )
+
+            def available_numbers(field: str) -> List[float]:
+                raw = values.get(field) if isinstance(values, dict) else None
+                if not isinstance(raw, list):
+                    return []
+                return [
+                    float(item)
+                    for item in raw[: latest_index + 1]
+                    if _safe_number(item) is not None
+                ]
+
+            opens = available_numbers("open")
+            highs = available_numbers("high")
+            lows = available_numbers("low")
+            volumes = available_numbers("volume")
+            change_amount = price - previous_close if previous_close and previous_close > 0 else None
+            change_pct = change_amount / previous_close * 100.0 if change_amount is not None else None
+            amplitude = (
+                (max(highs) - min(lows)) / previous_close * 100.0
+                if highs and lows and previous_close and previous_close > 0
+                else None
+            )
+            missing_fields = [
+                field
+                for field, value in {
+                    "prev_close": previous_close,
+                    "volume": sum(volumes) if volumes else None,
+                    "amount": None,
+                    "pe_ratio": None,
+                    "pb_ratio": None,
+                }.items()
+                if value is None
+            ]
+            return UnifiedRealtimeQuote(
+                code=str(user_code or "").strip().upper(),
+                name=str(name or meta.get("shortName") or user_code or "").strip(),
+                source=RealtimeSource.YAHOO_CHART,
+                provider_timestamp=provider_timestamp,
+                market=market,
+                currency=str(meta.get("currency") or currency or "").strip().upper() or None,
+                data_quality="partial" if missing_fields else "ok",
+                missing_fields=missing_fields or None,
+                price=price,
+                change_pct=round(change_pct, 6) if change_pct is not None else None,
+                change_amount=round(change_amount, 6) if change_amount is not None else None,
+                volume=int(sum(volumes)) if volumes else None,
+                amount=None,
+                volume_ratio=None,
+                turnover_rate=None,
+                amplitude=round(amplitude, 6) if amplitude is not None else None,
+                open_price=opens[0] if opens else None,
+                high=max(highs) if highs else None,
+                low=min(lows) if lows else None,
+                pre_close=previous_close,
+                pe_ratio=None,
+                pb_ratio=None,
+                total_mv=None,
+                circ_mv=None,
+            )
+        except (HTTPError, URLError, TimeoutError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            logger.warning("[Yahoo Chart] 获取 %s 分钟行情失败: %s", yf_symbol, exc)
+            return None
 
     def _get_us_index_realtime_quote(
         self,
         user_code: str,
         yf_symbol: str,
         index_name: str,
+        *,
+        market: str = "us",
+        currency: Optional[str] = None,
     ) -> Optional[UnifiedRealtimeQuote]:
         """
         Get realtime quote for US index (e.g. SPX -> ^GSPC).
@@ -794,6 +1259,16 @@ class YfinanceFetcher(BaseFetcher):
         Returns:
             UnifiedRealtimeQuote or None
         """
+        direct_quote = self._get_yahoo_chart_realtime_quote(
+            user_code=user_code,
+            yf_symbol=yf_symbol,
+            name=index_name,
+            market=market,
+            currency=currency,
+        )
+        if direct_quote is not None:
+            return direct_quote
+
         import yfinance as yf
 
         try:
@@ -815,7 +1290,13 @@ class YfinanceFetcher(BaseFetcher):
                 hist = ticker.history(period='2d')
                 if hist.empty:
                     logger.warning(f"[Yfinance] 无法获取 {yf_symbol} 的数据")
-                    return None
+                    return self._get_yahoo_chart_realtime_quote(
+                        user_code=user_code,
+                        yf_symbol=yf_symbol,
+                        name=index_name,
+                        market=market,
+                        currency=currency,
+                    )
                 today = hist.iloc[-1]
                 prev = hist.iloc[-2] if len(hist) > 1 else today
                 price = float(today['Close'])
@@ -839,6 +1320,17 @@ class YfinanceFetcher(BaseFetcher):
                 ticker_info = ticker.info or {}
             except Exception:
                 ticker_info = {}
+            provider_timestamp = self._latest_minute_provider_timestamp(ticker)
+            if provider_timestamp is None:
+                direct_quote = self._get_yahoo_chart_realtime_quote(
+                    user_code=user_code,
+                    yf_symbol=yf_symbol,
+                    name=index_name,
+                    market=market,
+                    currency=currency,
+                )
+                if direct_quote is not None:
+                    return direct_quote
             missing_fields = [
                 field
                 for field, value in {
@@ -856,8 +1348,9 @@ class YfinanceFetcher(BaseFetcher):
                 code=user_code,
                 name=index_name or user_code,
                 source=RealtimeSource.FALLBACK,
-                market="us",
-                currency=str(ticker_info.get("currency") or "").upper() or None,
+                provider_timestamp=provider_timestamp,
+                market=market,
+                currency=str(ticker_info.get("currency") or currency or "").upper() or None,
                 data_quality="partial" if missing_fields else "ok",
                 missing_fields=missing_fields or None,
                 price=price,
@@ -881,7 +1374,13 @@ class YfinanceFetcher(BaseFetcher):
             return quote
         except Exception as e:
             logger.warning(f"[Yfinance] 获取美股指数 {user_code} 实时行情失败: {e}")
-            return None
+            return self._get_yahoo_chart_realtime_quote(
+                user_code=user_code,
+                yf_symbol=yf_symbol,
+                name=index_name,
+                market=market,
+                currency=currency,
+            )
 
     def get_realtime_quote(self, stock_code: str) -> Optional[UnifiedRealtimeQuote]:
         """
@@ -899,6 +1398,27 @@ class YfinanceFetcher(BaseFetcher):
         import yfinance as yf
 
         # 美股指数：使用映射（SPX -> ^GSPC）
+        normalized_code = str(stock_code or "").strip().upper()
+        alias_symbol, alias_name = get_us_yfinance_alias(normalized_code)
+        if alias_symbol:
+            return self._get_us_index_realtime_quote(
+                user_code=normalized_code,
+                yf_symbol=alias_symbol,
+                index_name=alias_name,
+                market="us",
+                currency="USD",
+            )
+        global_index = GLOBAL_INDEX_REALTIME_MAPPING.get(normalized_code)
+        if global_index:
+            yf_symbol, index_name, market, currency = global_index
+            return self._get_us_index_realtime_quote(
+                user_code=normalized_code,
+                yf_symbol=yf_symbol,
+                index_name=index_name,
+                market=market,
+                currency=currency,
+            )
+
         yf_symbol, index_name = get_us_index_yf_symbol(stock_code)
         if yf_symbol:
             return self._get_us_index_realtime_quote(
@@ -920,6 +1440,16 @@ class YfinanceFetcher(BaseFetcher):
             symbol = self._convert_stock_code(stock_code)
             is_us_symbol = self._is_us_stock(symbol)
             suffix_market = get_suffix_market(symbol)
+            if suffix_market in {"jp", "kr", "tw"}:
+                direct_quote = self._get_yahoo_chart_realtime_quote(
+                    user_code=stock_code,
+                    yf_symbol=symbol,
+                    name=STOCK_NAME_MAP.get(symbol, ""),
+                    market=suffix_market,
+                    currency=None,
+                )
+                if direct_quote is not None:
+                    return direct_quote
             logger.debug(f"[Yfinance] 获取 {symbol} 实时行情")
 
             ticker = yf.Ticker(symbol)
@@ -947,7 +1477,13 @@ class YfinanceFetcher(BaseFetcher):
                         logger.warning(f"[Yfinance] 无法获取 {symbol} 的数据，尝试 Tencent/Stooq 兜底")
                         return self._get_us_stock_quote_fallback(symbol)
                     logger.warning(f"[Yfinance] 无法获取 {symbol} 的数据")
-                    return None
+                    return self._get_yahoo_chart_realtime_quote(
+                        user_code=stock_code,
+                        yf_symbol=symbol,
+                        name=STOCK_NAME_MAP.get(symbol, ""),
+                        market=suffix_market,
+                        currency=None,
+                    )
 
                 today = hist.iloc[-1]
                 prev = hist.iloc[-2] if len(hist) > 1 else today
@@ -995,10 +1531,22 @@ class YfinanceFetcher(BaseFetcher):
                 }.items()
                 if value is None
             ]
+            provider_timestamp = self._latest_minute_provider_timestamp(ticker)
+            if provider_timestamp is None:
+                direct_quote = self._get_yahoo_chart_realtime_quote(
+                    user_code=stock_code,
+                    yf_symbol=symbol,
+                    name=name,
+                    market=suffix_market or ("us" if is_us_symbol else None),
+                    currency=str(ticker_info.get("currency") or "").upper() or None,
+                )
+                if direct_quote is not None:
+                    return direct_quote
             quote = UnifiedRealtimeQuote(
                 code=symbol,
                 name=name,
                 source=RealtimeSource.FALLBACK,
+                provider_timestamp=provider_timestamp,
                 market=suffix_market or ("us" if is_us_symbol else None),
                 currency=str(ticker_info.get("currency") or "").upper() or None,
                 data_quality="partial" if missing_fields else "ok",
@@ -1031,7 +1579,14 @@ class YfinanceFetcher(BaseFetcher):
                 )
                 return self._get_us_stock_quote_fallback(stock_code)
             logger.warning(f"[Yfinance] 获取 {stock_code} 实时行情失败: {e}")
-            return None
+            symbol = self._convert_stock_code(stock_code)
+            return self._get_yahoo_chart_realtime_quote(
+                user_code=stock_code,
+                yf_symbol=symbol,
+                name=STOCK_NAME_MAP.get(symbol, ""),
+                market=get_suffix_market(symbol),
+                currency=None,
+            )
 
 
 if __name__ == "__main__":

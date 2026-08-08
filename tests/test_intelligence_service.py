@@ -285,6 +285,20 @@ class IntelligenceServiceTestCase(unittest.TestCase):
         self.assertEqual(created["market"], "hk")
         self.assertFalse(created["enabled"])
 
+    def test_fetch_template_items_is_stateless_and_emits_utc_timestamps(self) -> None:
+        with patch(
+            "src.services.intelligence_service.requests.get",
+            return_value=self._mock_json_response(),
+        ):
+            result = self.service.fetch_template_items("newsnow-jin10", limit=20)
+
+        self.assertEqual(result["requested_limit"], 20)
+        self.assertEqual(result["fetched_count"], 2)
+        self.assertFalse(result["exhausted"])
+        self.assertTrue(result["items"][0]["published_at"].endswith("+00:00"))
+        self.assertEqual(self.service.list_sources()["total"], 0)
+        self.assertEqual(self.service.list_items()["total"], 0)
+
     def test_newsnow_source_fetches_json_items(self) -> None:
         source = self.service.create_source({
             "name": "newsnow-cls",
