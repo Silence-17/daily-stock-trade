@@ -18,6 +18,7 @@ from urllib.request import Request, urlopen
 
 
 ACTIVE_VNPY_PLAN_STATUSES = {"planned", "submitted", "part_filled", "cancel_requested"}
+CROSS_MARKET_STRATEGY_ID = "cross_market_global_sector_rotation_v1.4_staged"
 
 
 def _utc_iso() -> str:
@@ -140,11 +141,29 @@ def _agent_run_uids(payload: Dict[str, Any]) -> set[str]:
     }
 
 
+def _scheduler_execution_task_name(
+    status: Dict[str, Any],
+    *,
+    execution_mode_override: str | None = None,
+) -> str:
+    settings = status.get("settings")
+    settings = settings if isinstance(settings, dict) else {}
+    strategy = str(settings.get("auto_strategy") or "").strip()
+    execution_mode = str(
+        execution_mode_override or settings.get("auto_execution_mode") or ""
+    ).strip()
+    if strategy == CROSS_MARKET_STRATEGY_ID and execution_mode == "vnpy_paper":
+        return "cross_market_intraday_entry_scan"
+    return "vnpy_paper_auto_trade"
+
+
 def _matching_scheduler_event(
-    payload: Dict[str, Any], run_uid: str
+    payload: Dict[str, Any],
+    run_uid: str,
+    task_name: str = "vnpy_paper_auto_trade",
 ) -> Dict[str, Any] | None:
     for item in reversed(payload.get("items") or []):
-        if not isinstance(item, dict) or item.get("name") != "vnpy_paper_auto_trade":
+        if not isinstance(item, dict) or item.get("name") != task_name:
             continue
         details = item.get("details") if isinstance(item.get("details"), dict) else {}
         if (
@@ -155,11 +174,14 @@ def _matching_scheduler_event(
     return None
 
 
-def _scheduler_auto_trade_is_running(status: Dict[str, Any]) -> bool:
+def _scheduler_auto_trade_is_running(
+    status: Dict[str, Any],
+    task_name: str = "vnpy_paper_auto_trade",
+) -> bool:
     scheduler = status.get("scheduler")
     scheduler = scheduler if isinstance(scheduler, dict) else {}
     for item in scheduler.get("background_tasks") or []:
-        if not isinstance(item, dict) or item.get("name") != "vnpy_paper_auto_trade":
+        if not isinstance(item, dict) or item.get("name") != task_name:
             continue
         return bool(item.get("running") or item.get("previous_generation_running"))
     return False
@@ -495,6 +517,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     original_auto_trade = False
     original_auto_interval = 1440
     original_execution_mode = "paper"
+    scheduler_task_name = "vnpy_paper_auto_trade"
     errors: list[str] = []
     try:
         original_status = _request_json(
@@ -511,8 +534,15 @@ def main(argv: Iterable[str] | None = None) -> int:
 
         settings = original_status.get("settings")
         settings = settings if isinstance(settings, dict) else {}
+        scheduler_task_name = _scheduler_execution_task_name(
+            original_status,
+            execution_mode_override=(
+                args.execution_mode if args.trigger_mode == "scheduler" else None
+            ),
+        )
         if args.trigger_mode == "scheduler" and _scheduler_auto_trade_is_running(
-            original_status
+            original_status,
+            scheduler_task_name,
         ):
             raise ValueError("scheduler acceptance requires an idle auto-trade task")
         if args.trigger_mode == "scheduler" and not {
@@ -660,10 +690,15 @@ def main(argv: Iterable[str] | None = None) -> int:
                 if args.trigger_mode == "scheduler":
                     events = _request_json(
                         base_url,
-                        "/api/v1/vnpy-paper/task-events?name=vnpy_paper_auto_trade&limit=100",
+                        "/api/v1/vnpy-paper/task-events?"
+                        f"name={scheduler_task_name}&limit=100",
                         timeout_seconds=request_timeout,
                     )
-                    scheduler_event = _matching_scheduler_event(events, run_uid) or {}
+                    scheduler_event = _matching_scheduler_event(
+                        events,
+                        run_uid,
+                        scheduler_task_name,
+                    ) or {}
                     run_ready = run_ready and bool(scheduler_event)
                 if run_ready:
                     break

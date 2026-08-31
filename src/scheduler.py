@@ -23,6 +23,8 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Union
 
 logger = logging.getLogger(__name__)
 
+BACKGROUND_POLL_INTERVAL_SECONDS = 15
+
 
 def normalize_schedule_times(
     schedule_times: Optional[Union[Sequence[str], str]],
@@ -306,15 +308,16 @@ class Scheduler:
     ) -> None:
         """Register a periodic background task executed inside the scheduler loop.
 
-        Note: The scheduler loop polls every 30 seconds, so *interval_seconds*
-        below 30 will be clamped to 30 to avoid promising unreachable precision.
+        Note: Intervals below the scheduler polling precision are clamped so
+        task-health diagnostics do not promise an unreachable cadence.
         """
-        clamped_interval = max(30, int(interval_seconds))
-        if int(interval_seconds) < 30:
+        clamped_interval = max(BACKGROUND_POLL_INTERVAL_SECONDS, int(interval_seconds))
+        if int(interval_seconds) < BACKGROUND_POLL_INTERVAL_SECONDS:
             logger.warning(
-                "后台任务 %s 请求间隔 %ds，但调度循环每 30s 轮询一次，已自动调整为 30s",
+                "后台任务 %s 请求间隔 %ds，但调度循环每 %ds 轮询一次，已自动调整",
                 name or getattr(task, "__name__", "background_task"),
                 interval_seconds,
+                BACKGROUND_POLL_INTERVAL_SECONDS,
             )
         entry = {
             "task": task,
@@ -357,7 +360,6 @@ class Scheduler:
 
         def _runner() -> None:
             try:
-                logger.info("后台任务开始执行: %s", entry["name"])
                 entry["task"]()
             except Exception as exc:
                 logger.exception("后台任务执行失败 [%s]: %s", entry["name"], exc)
@@ -425,10 +427,13 @@ class Scheduler:
             self._refresh_daily_schedule_if_needed()
             self.schedule.run_pending()
             self._run_background_tasks()
-            time.sleep(30)  # 每30秒检查一次
+            time.sleep(BACKGROUND_POLL_INTERVAL_SECONDS)
 
             # 每小时打印一次心跳
-            if datetime.now().minute == 0 and datetime.now().second < 30:
+            if (
+                datetime.now().minute == 0
+                and datetime.now().second < BACKGROUND_POLL_INTERVAL_SECONDS
+            ):
                 logger.info(f"调度器运行中... 下次执行: {self._get_next_run_time()}")
 
         logger.info("调度器已停止")

@@ -25,6 +25,7 @@ if __package__:
         _matching_scheduler_event,
         _run_is_terminal_and_coherent,
         _runtime_view,
+        _scheduler_execution_task_name,
         evaluate_acceptance,
     )
 else:
@@ -33,6 +34,7 @@ else:
         _matching_scheduler_event,
         _run_is_terminal_and_coherent,
         _runtime_view,
+        _scheduler_execution_task_name,
         evaluate_acceptance,
     )
 
@@ -206,11 +208,12 @@ def _event_handler_failures(status: Dict[str, Any]) -> int:
         return 0
 
 
-def _registered_auto_trade_task(status: Dict[str, Any]) -> Dict[str, Any] | None:
+def _registered_execution_task(status: Dict[str, Any]) -> Dict[str, Any] | None:
     scheduler = status.get("scheduler")
     scheduler = scheduler if isinstance(scheduler, dict) else {}
+    task_name = _scheduler_execution_task_name(status)
     for task in scheduler.get("background_tasks") or []:
-        if isinstance(task, dict) and task.get("name") == "vnpy_paper_auto_trade":
+        if isinstance(task, dict) and task.get("name") == task_name:
             return task
     return None
 
@@ -241,7 +244,8 @@ def evaluate_external_scheduled_acceptance(
     after_settings = _settings_view(after_status)
     runtime = _runtime_view(after_status)
     preflight = _production_preflight(after_status)
-    task = _registered_auto_trade_task(after_status)
+    execution_task_name = _scheduler_execution_task_name(after_status)
+    task = _registered_execution_task(after_status)
     event_details = (
         scheduler_event.get("details")
         if isinstance(scheduler_event.get("details"), dict)
@@ -326,6 +330,7 @@ def evaluate_external_scheduled_acceptance(
         "scheduled_cardinality_ready": scheduled_cardinality_ready,
         "scheduled_cardinality": scheduled_cardinality,
         "auto_trade_task_registered": task is not None,
+        "execution_task_name": execution_task_name,
     }
 
 
@@ -387,6 +392,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     scheduler_event: Dict[str, Any] = {}
     run_uid = ""
     baseline_run_uids: set[str] = set()
+    execution_task_name = "vnpy_paper_auto_trade"
     sample_count = 0
     successful_sample_count = 0
     error_counts: Dict[str, int] = {}
@@ -426,6 +432,7 @@ def main(argv: Iterable[str] | None = None) -> int:
             "/api/v1/vnpy-paper/status?include_snapshot=true&include_recent_trades=false",
             timeout_seconds=request_timeout,
         )
+        execution_task_name = _scheduler_execution_task_name(before_status)
         baseline_runs = _request_json(
             base_url,
             "/api/v1/vnpy-paper/agent-runs?limit=100&trigger_source=vnpy_paper_auto",
@@ -461,10 +468,14 @@ def main(argv: Iterable[str] | None = None) -> int:
                     events = _request_json(
                         base_url,
                         "/api/v1/vnpy-paper/task-events?"
-                        + urlencode({"name": "vnpy_paper_auto_trade", "limit": 100}),
+                        + urlencode({"name": execution_task_name, "limit": 100}),
                         timeout_seconds=request_timeout,
                     )
-                    scheduler_event = _matching_scheduler_event(events, run_uid) or {}
+                    scheduler_event = _matching_scheduler_event(
+                        events,
+                        run_uid,
+                        execution_task_name,
+                    ) or {}
                 successful_sample_count += 1
                 if (
                     run_uid

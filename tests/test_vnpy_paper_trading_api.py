@@ -1768,6 +1768,63 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
         self.assertEqual(restored_accounts_payload["items"][1]["id"], payload["account"]["id"])
         self.assertTrue(restored_accounts_payload["items"][1]["archived"])
 
+    def test_strategy_dashboard_lists_accounts_and_updates_cross_market_factors(self) -> None:
+        service = self._service()
+        execution = service.ensure_account()
+        execution_id = int(execution["id"])
+        service.portfolio.update_account(
+            execution_id,
+            owner_id=CROSS_MARKET_STRATEGY_ID,
+        )
+        hotspot = service.portfolio.create_account(
+            name="30日模拟｜热点超跌反转09:45",
+            broker="paper_0945",
+            market="cn",
+            base_currency="CNY",
+            owner_id="hotspot_oversold_reversal_0945_v1",
+        )
+
+        with patch(
+            "api.v1.endpoints.vnpy_paper_trading.VnpyPaperTradingService",
+            side_effect=self._service,
+        ):
+            accounts_response = self.client.get(
+                "/api/v1/vnpy-paper/strategy-dashboard/accounts"
+            )
+            dashboard_response = self.client.get(
+                f"/api/v1/vnpy-paper/strategy-dashboard/accounts/{execution_id}"
+            )
+            update_response = self.client.put(
+                f"/api/v1/vnpy-paper/strategy-dashboard/accounts/{execution_id}/factors",
+                json={
+                    "overrides": {"entry_score_a": 80},
+                    "replace_existing": True,
+                },
+            )
+
+        self.assertEqual(accounts_response.status_code, 200)
+        self.assertEqual(dashboard_response.status_code, 200)
+        self.assertEqual(update_response.status_code, 200)
+        account_payload = accounts_response.json()
+        self.assertEqual(account_payload["execution_account_id"], execution_id)
+        self.assertEqual(
+            {int(item["id"]) for item in account_payload["items"]},
+            {execution_id, int(hotspot["id"])},
+        )
+        dashboard_payload = dashboard_response.json()
+        self.assertEqual(dashboard_payload["account"]["id"], execution_id)
+        self.assertEqual(len(dashboard_payload["factor_profile"]["items"]), 84)
+        updated_factors = {
+            item["key"]: item
+            for item in update_response.json()["factor_profile"]["items"]
+        }
+        self.assertEqual(updated_factors["entry_score_a"]["value"], 80)
+        self.assertTrue(updated_factors["entry_score_a"]["overridden"])
+        self.assertEqual(
+            self._service().get_settings().account_id,
+            execution_id,
+        )
+
     def test_status_includes_runtime_scheduler_status(self) -> None:
         scheduler = MagicMock()
         scheduler.status.return_value = {
@@ -2076,12 +2133,12 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
             "enabled": True,
             "running": False,
             "loop_running": True,
-            "next_run_at": "2026-08-04T09:35:00+08:00",
+            "next_run_at": "2026-08-04T09:30:00+08:00",
             "background_tasks": [{
-                "name": "vnpy_paper_auto_trade",
-                "interval_seconds": 86400,
+                "name": "cross_market_intraday_entry_scan",
+                "interval_seconds": 15,
                 "running": False,
-                "next_run_at": "2026-08-04T09:35:00+08:00",
+                "next_run_at": "2026-08-04T09:30:00+08:00",
             }],
             "task_events": [],
         }
@@ -2167,6 +2224,10 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
         self.assertEqual(
             readiness["latest_recorded_run"]["agent_run_uid"],
             "observation-latest",
+        )
+        self.assertEqual(
+            readiness["timing_alignment"]["reason"],
+            "cross_market_entry_watch_owns_formal_execution",
         )
         component = next(
             item for item in readiness["components"] if item["key"] == "last_auto_run"
@@ -2440,10 +2501,6 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
                 "loop_running": True,
                 "background_tasks": [
                     {
-                        "name": "vnpy_paper_auto_trade",
-                        "next_run_at": "2026-07-29T09:35:00+08:00",
-                    },
-                    {
                         "name": "vnpy_paper_auto_retry",
                         "next_run_at": "2026-07-28T19:00:00+08:00",
                     },
@@ -2466,6 +2523,8 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
             "cross_market_cn_open_signal",
         }
         self.assertEqual(payload["overall_health"], "error")
+        self.assertFalse(items["vnpy_paper_auto_trade"]["required"])
+        self.assertEqual(items["vnpy_paper_auto_trade"]["health"], "disabled")
         for name in required_cross_market:
             self.assertTrue(items[name]["required"], name)
             self.assertEqual(items[name]["health"], "error", name)
@@ -2501,7 +2560,6 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
             items["cross_market_pending_order_revalidation"]["required"]
         )
         self.assertFalse(items["cross_market_intraday_sell_monitor"]["required"])
-        self.assertFalse(items["cross_market_formal_recovery"]["required"])
 
     def test_task_health_warns_when_completed_asia_collection_is_degraded(self) -> None:
         payload = _task_health_payload({
@@ -2617,31 +2675,6 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
             "outside_gold_signal_window",
         )
         self.assertEqual(items["cross_market_gold_signal"]["label"], "黄金信号采集")
-
-        scheduler.status.return_value["background_tasks"][2]["name"] = (
-            "cross_market_formal_recovery"
-        )
-        scheduler.status.return_value["task_events"][0].update({
-            "name": "cross_market_formal_recovery",
-            "message": "outside recovery session",
-            "details": {"reason": "outside_cn_formal_recovery_session"},
-        })
-        with patch(
-            "api.v1.endpoints.vnpy_paper_trading.VnpyPaperTradingService",
-            return_value=service,
-        ):
-            recovery_response = self.client.get("/api/v1/vnpy-paper/task-health")
-        recovery_items = {
-            item["name"]: item for item in recovery_response.json()["items"]
-        }
-        self.assertEqual(
-            recovery_items["cross_market_formal_recovery"]["health"],
-            "healthy",
-        )
-        self.assertEqual(
-            recovery_items["cross_market_formal_recovery"]["label"],
-            "跨市场正式轮次恢复",
-        )
 
         scheduler.status.return_value["background_tasks"][2]["name"] = (
             "cross_market_paper_observation"
@@ -3210,7 +3243,7 @@ class VnpyPaperTradingApiTestCase(unittest.TestCase):
                     "amount": 200000000,
                 },
                 {
-                    "code": "300750",
+                    "code": "600000",
                     "name": "宁德时代",
                     "score": 80,
                     "price": 20.0,

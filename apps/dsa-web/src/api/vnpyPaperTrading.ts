@@ -96,6 +96,7 @@ export type VnpyPaperAccount = {
   id: number;
   name: string;
   broker?: string | null;
+  ownerId?: string | null;
   market?: string;
   baseCurrency?: string;
   isActive?: boolean;
@@ -661,6 +662,49 @@ export type VnpyPaperAgentRunDetail = VnpyPaperAgentRunSummary & {
   tradePlans: VnpyPaperAgentTradePlan[];
   portfolioChange?: VnpyPaperAgentPortfolioChange;
   timeline: VnpyPaperAgentTimelineEvent[];
+};
+
+export type VnpyPaperStrategyAccount = VnpyPaperAccount & {
+  strategyId: string;
+  strategyFamily: 'cross_market' | 'hotspot_0945' | string;
+  isExecutionAccount: boolean;
+};
+
+export type VnpyPaperStrategyDashboardAccountListResponse = {
+  items: VnpyPaperStrategyAccount[];
+  count: number;
+  executionAccountId?: number | null;
+};
+
+export type VnpyPaperStrategyFactor = {
+  key: string;
+  label: string;
+  description?: string;
+  group: string;
+  groupLabel: string;
+  value: number | boolean;
+  defaultValue: number | boolean;
+  overridden: boolean;
+  editable: boolean;
+  valueType: 'number' | 'integer' | 'boolean';
+  unit?: string;
+  min?: number | null;
+  max?: number | null;
+  step?: number | null;
+};
+
+export type VnpyPaperStrategyAccountDashboardResponse = {
+  account: VnpyPaperStrategyAccount;
+  snapshot?: VnpyPaperSnapshot | null;
+  snapshotError?: string | null;
+  progress: Record<string, unknown>;
+  factorProfile: {
+    strategyId: string;
+    strategyFamily: string;
+    items: VnpyPaperStrategyFactor[];
+    editable: boolean;
+    effectiveFrom: string;
+  };
 };
 
 export type VnpyPaperAgentPortfolioChangeItem = {
@@ -1814,6 +1858,40 @@ export const vnpyPaperTradingApi = {
       params: { include_inactive: includeInactive, include_hidden: includeHidden },
     });
     return toCamelCase<VnpyPaperAccountListResponse>(response.data);
+  },
+
+  async listStrategyDashboardAccounts(
+    includeInactive = false,
+  ): Promise<VnpyPaperStrategyDashboardAccountListResponse> {
+    const response = await apiClient.get<Record<string, unknown>>(
+      '/api/v1/vnpy-paper/strategy-dashboard/accounts',
+      { params: { include_inactive: includeInactive } },
+    );
+    return toCamelCase<VnpyPaperStrategyDashboardAccountListResponse>(response.data);
+  },
+
+  async getStrategyAccountDashboard(
+    accountId: number,
+  ): Promise<VnpyPaperStrategyAccountDashboardResponse> {
+    const response = await apiClient.get<Record<string, unknown>>(
+      `/api/v1/vnpy-paper/strategy-dashboard/accounts/${accountId}`,
+    );
+    return toCamelCase<VnpyPaperStrategyAccountDashboardResponse>(response.data);
+  },
+
+  async updateStrategyAccountFactors(
+    accountId: number,
+    overrides: Record<string, number | boolean>,
+    replaceExisting = true,
+  ): Promise<VnpyPaperStrategyAccountDashboardResponse> {
+    const response = await apiClient.put<Record<string, unknown>>(
+      `/api/v1/vnpy-paper/strategy-dashboard/accounts/${accountId}/factors`,
+      {
+        overrides,
+        replace_existing: replaceExisting,
+      },
+    );
+    return toCamelCase<VnpyPaperStrategyAccountDashboardResponse>(response.data);
   },
 
   async cleanupArchivedAccounts(

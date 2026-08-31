@@ -974,10 +974,6 @@ class TickFlowFetcher(BaseFetcher):
                 entries.append({"symbol": symbol, "name": str(name).strip() if name else ""})
         return entries
 
-    @staticmethod
-    def _extract_universe_symbols(universe: Any) -> List[str]:
-        return [entry["symbol"] for entry in TickFlowFetcher._extract_universe_entries(universe)]
-
     def get_main_indices(self, region: str = "cn") -> Optional[List[Dict[str, Any]]]:
         """Fetch main A-share indices via TickFlow quotes."""
         if region != "cn":

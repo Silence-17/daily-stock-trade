@@ -47,6 +47,9 @@ import {
   type VnpyPaperSchedulerTaskEvent,
   type VnpyPaperSide,
   type VnpyPaperSettingsUpdate,
+  type VnpyPaperStrategyAccount,
+  type VnpyPaperStrategyAccountDashboardResponse,
+  type VnpyPaperStrategyFactor,
   type VnpyPaperStatusResponse,
   type VnpyPaperTaskEventSummaryResponse,
   type VnpyPaperTaskHealthResponse,
@@ -66,7 +69,7 @@ const TEXTAREA_CLASS =
   'min-h-20 w-full rounded-xl border border-border bg-surface px-3 py-2 text-sm text-foreground outline-none transition-colors focus:border-cyan disabled:cursor-not-allowed disabled:opacity-60';
 const CHECKBOX_CLASS = 'h-4 w-4 rounded border-border bg-surface text-cyan focus:ring-cyan/30';
 const EXPECTED_VNPY_PAPER_CONTRACT_VERSION = 3;
-const CROSS_MARKET_STRATEGY_ID = 'cross_market_global_sector_rotation_v1.3_aggressive';
+const CROSS_MARKET_STRATEGY_ID = 'cross_market_global_sector_rotation_v1.4_staged';
 const CROSS_MARKET_TECHNICAL_WINDOWS = [5, 10, 20, 30, 60] as const;
 const LEGACY_CROSS_MARKET_STRATEGY_IDS = new Set([
   'cross_market_semiconductor_gold_v1.1',
@@ -421,6 +424,10 @@ function formatCampaignDecisionReason(value: string): string {
     sector_resistance_chasing_blocked: '板块接近压力位且尚未确认突破，禁止追高',
     sector_signal_too_weak: 'A 股对应板块实时强度不足',
     asia_market_buy_signal_unconfirmed: '韩日市场联动信号未确认',
+    asia_market_evidence_unavailable: '韩日市场证据不可用',
+    asia_market_severe_downside: '韩日市场出现明显下跌',
+    asia_supply_chain_unconfirmed: '亚洲供应链强度未确认',
+    pharma_domestic_rotation_entry_confirmed: '医药国内轮动入场条件已确认',
     flat_open_range_or_intraday_dip_signal_required: '平开时震荡低吸或日内回撤信号未确认',
     low_open_reclaim_unconfirmed: '低开后尚未站回开盘价或 VWAP',
     legacy_cross_market_strategy_requires_explicit_migration: '旧版跨市场活动需要显式迁移，当前已停止选股和委托',
@@ -569,7 +576,7 @@ function isCrossMarketStrategyId(value: string): boolean {
 }
 
 function formatEntryPhase(value: string): string {
-  if (value === 'opening') return '09:35 开盘判断';
+  if (value === 'opening') return '09:30 开盘判断';
   if (value === 'intraday_dip') return '日内回撤判断';
   return value || '-';
 }
@@ -1232,6 +1239,13 @@ const VnpyPaperTradingPage: React.FC = () => {
   const [paperAccountsError, setPaperAccountsError] = useState('');
   const [paperAccountsHiddenCount, setPaperAccountsHiddenCount] = useState(0);
   const [paperAccountFilter, setPaperAccountFilter] = useState<PaperAccountHistoryFilter>('all');
+  const [strategyAccounts, setStrategyAccounts] = useState<VnpyPaperStrategyAccount[]>([]);
+  const [selectedStrategyAccountId, setSelectedStrategyAccountId] = useState<number | null>(null);
+  const [strategyDashboard, setStrategyDashboard] = useState<VnpyPaperStrategyAccountDashboardResponse | null>(null);
+  const [strategyDashboardLoading, setStrategyDashboardLoading] = useState(false);
+  const [strategyDashboardSaving, setStrategyDashboardSaving] = useState(false);
+  const [strategyDashboardError, setStrategyDashboardError] = useState('');
+  const [strategyFactorDraft, setStrategyFactorDraft] = useState<Record<string, string | boolean>>({});
   const selectedRiskSummary = useMemo(() => riskFlagSummary(selectedAgentRun), [selectedAgentRun]);
   const selectedBoardReminders = useMemo(
     () => crossMarketBoardReminders(selectedAgentRun),
@@ -1416,6 +1430,57 @@ const VnpyPaperTradingPage: React.FC = () => {
     }
   }, []);
 
+  const applyStrategyDashboard = useCallback((
+    next: VnpyPaperStrategyAccountDashboardResponse,
+  ) => {
+    setStrategyDashboard(next);
+    setStrategyFactorDraft(Object.fromEntries(
+      next.factorProfile.items.map((item) => [
+        item.key,
+        item.valueType === 'boolean' ? Boolean(item.value) : String(item.value),
+      ]),
+    ));
+  }, []);
+
+  const loadStrategyAccountDashboard = useCallback(async (accountId: number) => {
+    setStrategyDashboardLoading(true);
+    setStrategyDashboardError('');
+    try {
+      applyStrategyDashboard(
+        await vnpyPaperTradingApi.getStrategyAccountDashboard(accountId),
+      );
+    } catch (err) {
+      setStrategyDashboardError(toApiErrorMessage(err, '策略账户看板加载失败'));
+    } finally {
+      setStrategyDashboardLoading(false);
+    }
+  }, [applyStrategyDashboard]);
+
+  const loadStrategyAccounts = useCallback(async () => {
+    setStrategyDashboardLoading(true);
+    setStrategyDashboardError('');
+    try {
+      const result = await vnpyPaperTradingApi.listStrategyDashboardAccounts(false);
+      setStrategyAccounts(result.items);
+      const selected = result.items.find((item) => item.isExecutionAccount)
+        ?? result.items[0];
+      if (!selected) {
+        setSelectedStrategyAccountId(null);
+        setStrategyDashboard(null);
+        setStrategyFactorDraft({});
+        return;
+      }
+      setSelectedStrategyAccountId(selected.id);
+      applyStrategyDashboard(
+        await vnpyPaperTradingApi.getStrategyAccountDashboard(selected.id),
+      );
+    } catch (err) {
+      setStrategyDashboardError(toApiErrorMessage(err, '策略账户列表加载失败'));
+    } finally {
+      setStrategyDashboardLoading(false);
+    }
+  }, [applyStrategyDashboard]);
+
   const loadTradePlanRecovery = useCallback(async () => {
     setTradePlanRecoveryLoading(true);
     setTradePlanRecoveryError('');
@@ -1501,6 +1566,7 @@ const VnpyPaperTradingPage: React.FC = () => {
   useEffect(() => {
     void loadStatus();
     void loadPaperAccounts();
+    void loadStrategyAccounts();
     void loadAgentRuns();
     void loadPerformance();
     void loadCrossMarketCampaign();
@@ -1511,6 +1577,7 @@ const VnpyPaperTradingPage: React.FC = () => {
   }, [
     loadStatus,
     loadPaperAccounts,
+    loadStrategyAccounts,
     loadAgentRuns,
     loadPerformance,
     loadCrossMarketCampaign,
@@ -2429,6 +2496,80 @@ const VnpyPaperTradingPage: React.FC = () => {
     }
   };
 
+  const strategyFactorGroups = useMemo(() => {
+    const groups = new Map<string, { label: string; items: VnpyPaperStrategyFactor[] }>();
+    for (const factor of strategyDashboard?.factorProfile.items ?? []) {
+      const group = groups.get(factor.group) ?? {
+        label: factor.groupLabel || factor.group,
+        items: [],
+      };
+      group.items.push(factor);
+      groups.set(factor.group, group);
+    }
+    return Array.from(groups.entries()).map(([key, value]) => ({ key, ...value }));
+  }, [strategyDashboard?.factorProfile.items]);
+
+  const handleSelectStrategyAccount = async (accountId: number) => {
+    setSelectedStrategyAccountId(accountId);
+    await loadStrategyAccountDashboard(accountId);
+  };
+
+  const strategyFactorOverrides = () => {
+    const overrides: Record<string, number | boolean> = {};
+    for (const factor of strategyDashboard?.factorProfile.items ?? []) {
+      const draft = strategyFactorDraft[factor.key];
+      if (factor.valueType === 'boolean') {
+        const value = Boolean(draft);
+        if (value !== Boolean(factor.defaultValue)) overrides[factor.key] = value;
+        continue;
+      }
+      const value = Number(draft);
+      if (!Number.isFinite(value)) {
+        throw new Error(`${factor.label} 不是有效数字`);
+      }
+      if (value !== Number(factor.defaultValue)) overrides[factor.key] = value;
+    }
+    return overrides;
+  };
+
+  const handleSaveStrategyFactors = async () => {
+    if (!selectedStrategyAccountId || !strategyDashboard?.factorProfile.editable) return;
+    setStrategyDashboardSaving(true);
+    setStrategyDashboardError('');
+    try {
+      const next = await vnpyPaperTradingApi.updateStrategyAccountFactors(
+        selectedStrategyAccountId,
+        strategyFactorOverrides(),
+        true,
+      );
+      applyStrategyDashboard(next);
+      setSuccess(`账户 #${selectedStrategyAccountId} 的因子已保存，将从下一次策略判断开始生效`);
+    } catch (err) {
+      setStrategyDashboardError(toApiErrorMessage(err, '策略因子保存失败'));
+    } finally {
+      setStrategyDashboardSaving(false);
+    }
+  };
+
+  const handleResetStrategyFactors = async () => {
+    if (!selectedStrategyAccountId || !strategyDashboard?.factorProfile.editable) return;
+    setStrategyDashboardSaving(true);
+    setStrategyDashboardError('');
+    try {
+      const next = await vnpyPaperTradingApi.updateStrategyAccountFactors(
+        selectedStrategyAccountId,
+        {},
+        true,
+      );
+      applyStrategyDashboard(next);
+      setSuccess(`账户 #${selectedStrategyAccountId} 已恢复策略默认因子`);
+    } catch (err) {
+      setStrategyDashboardError(toApiErrorMessage(err, '恢复默认因子失败'));
+    } finally {
+      setStrategyDashboardSaving(false);
+    }
+  };
+
   const handleApplyPerformanceFilters = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setPerformanceFilters(performanceFilterForm);
@@ -2451,6 +2592,19 @@ const VnpyPaperTradingPage: React.FC = () => {
     taskEventFiltersRef.current = defaultTaskEventFilterForm;
     await loadTaskEvents(defaultTaskEventFilterForm);
   };
+
+  const selectedStrategySnapshotAccount = strategyDashboard?.snapshot?.accounts?.find(
+    (item) => item.accountId === selectedStrategyAccountId,
+  ) ?? strategyDashboard?.snapshot?.accounts?.[0];
+  const strategyProgressCompleted = Number(
+    strategyDashboard?.progress?.completedSessionCount ?? 0,
+  );
+  const strategyProgressTarget = Number(
+    strategyDashboard?.progress?.targetSessions ?? 30,
+  );
+  const strategyProgressPct = strategyProgressTarget > 0
+    ? Math.min(100, Math.max(0, (strategyProgressCompleted / strategyProgressTarget) * 100))
+    : 0;
 
   return (
     <AppPage className="space-y-4">
@@ -2517,6 +2671,7 @@ const VnpyPaperTradingPage: React.FC = () => {
       {taskEventSummaryError ? <InlineAlert variant="warning" title="后台任务趋势加载失败" message={taskEventSummaryError} /> : null}
       {taskMetricsError ? <InlineAlert variant="warning" title="后台任务长期指标加载失败" message={taskMetricsError} /> : null}
       {paperAccountsError ? <InlineAlert variant="warning" title="账户历史加载失败" message={paperAccountsError} /> : null}
+      {strategyDashboardError ? <InlineAlert variant="warning" title="策略账户看板" message={strategyDashboardError} /> : null}
       {crossMarketCampaignError ? <InlineAlert variant="warning" title="30 日模拟状态加载失败" message={crossMarketCampaignError} /> : null}
       {success ? <InlineAlert variant="success" message={success} /> : null}
       {gatewayPreflight ? (
@@ -2546,6 +2701,246 @@ const VnpyPaperTradingPage: React.FC = () => {
           message={schedulerStatus.lastError}
         />
       ) : null}
+
+      <section className="overflow-hidden rounded-lg border border-cyan/25 bg-card/95" data-testid="strategy-account-dashboard">
+        <div className="flex flex-col gap-3 border-b border-border px-4 py-4 lg:flex-row lg:items-end lg:justify-between">
+          <div>
+            <h2 className="flex items-center gap-2 text-base font-semibold text-foreground">
+              <Layers3 className="h-4 w-4 text-cyan" />
+              策略账户看板
+            </h2>
+            <p className="mt-1 text-xs text-secondary-text">
+              切换这里只改变查看账户，不会改变当前自动交易的执行账户。
+            </p>
+          </div>
+          <div className="flex w-full flex-col gap-2 sm:flex-row lg:w-auto lg:items-end">
+            <label className="min-w-72 text-xs text-secondary-text">
+              查看账户
+              <select
+                aria-label="选择策略账户"
+                className={`${SELECT_CLASS} mt-1`}
+                data-testid="strategy-account-select"
+                disabled={strategyDashboardLoading || strategyAccounts.length === 0}
+                value={selectedStrategyAccountId ?? ''}
+                onChange={(event) => void handleSelectStrategyAccount(Number(event.target.value))}
+              >
+                {strategyAccounts.length === 0 ? <option value="">暂无可用策略账户</option> : null}
+                {strategyAccounts.map((account) => (
+                  <option key={account.id} value={account.id}>
+                    #{account.id} · {account.name}{account.isExecutionAccount ? '（当前执行）' : ''}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <Button
+              variant="outline"
+              isLoading={strategyDashboardLoading}
+              loadingText="加载中..."
+              disabled={!selectedStrategyAccountId}
+              onClick={() => {
+                if (selectedStrategyAccountId) void loadStrategyAccountDashboard(selectedStrategyAccountId);
+              }}
+            >
+              <RefreshCw className="h-4 w-4" />
+              刷新看板
+            </Button>
+          </div>
+        </div>
+
+        {strategyDashboard ? (
+          <div className="space-y-4 px-4 py-4">
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <p className="text-sm font-semibold text-foreground">
+                  #{strategyDashboard.account.id} · {strategyDashboard.account.name}
+                </p>
+                <p className="mt-1 break-all font-mono text-xs text-secondary-text">
+                  {strategyDashboard.factorProfile.strategyId}
+                </p>
+              </div>
+              <span className={`w-fit rounded-full border px-2.5 py-1 text-xs font-semibold ${
+                strategyDashboard.account.isExecutionAccount
+                  ? 'border-cyan/30 bg-cyan/10 text-cyan'
+                  : 'border-border bg-surface text-secondary-text'
+              }`}>
+                {strategyDashboard.account.isExecutionAccount ? '当前执行账户' : '仅切换查看范围'}
+              </span>
+            </div>
+
+            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+              {[
+                ['总权益', formatMoney(selectedStrategySnapshotAccount?.totalEquity, selectedStrategySnapshotAccount?.baseCurrency || 'CNY')],
+                ['可用现金', formatMoney(selectedStrategySnapshotAccount?.totalCash, selectedStrategySnapshotAccount?.baseCurrency || 'CNY')],
+                ['持仓市值', formatMoney(selectedStrategySnapshotAccount?.totalMarketValue, selectedStrategySnapshotAccount?.baseCurrency || 'CNY')],
+                ['浮动盈亏', formatMoney(selectedStrategySnapshotAccount?.unrealizedPnl, selectedStrategySnapshotAccount?.baseCurrency || 'CNY')],
+                ['持仓数量', `${selectedStrategySnapshotAccount?.positions?.length ?? 0} 只`],
+              ].map(([label, value]) => (
+                <div key={label} className="rounded-lg border border-border bg-surface/70 px-3 py-3">
+                  <p className="text-xs text-secondary-text">{label}</p>
+                  <p className="mt-1 text-sm font-semibold text-foreground">{value}</p>
+                </div>
+              ))}
+            </div>
+
+            {strategyProgressTarget > 0 ? (
+              <div className="rounded-lg border border-border bg-surface/50 px-3 py-3">
+                <div className="flex items-center justify-between gap-3 text-xs">
+                  <span className="font-semibold text-foreground">
+                    30 日模拟进度 · {strategyProgressCompleted}/{strategyProgressTarget} 日
+                  </span>
+                  <span className="text-secondary-text">
+                    {String(strategyDashboard.progress.status ?? '待运行')}
+                  </span>
+                </div>
+                <div className="mt-2 h-2 overflow-hidden rounded-full bg-border/70">
+                  <div className="h-full rounded-full bg-cyan" style={{ width: `${strategyProgressPct}%` }} />
+                </div>
+              </div>
+            ) : null}
+
+            {strategyDashboard.snapshotError ? (
+              <InlineAlert variant="warning" title="账户估值暂不可用" message={strategyDashboard.snapshotError} />
+            ) : null}
+
+            <div className="overflow-x-auto rounded-lg border border-border">
+              <table className="min-w-full divide-y divide-border text-left text-xs">
+                <thead className="bg-surface/70 text-secondary-text">
+                  <tr>
+                    <th className="px-3 py-2 font-medium">代码</th>
+                    <th className="px-3 py-2 font-medium">数量</th>
+                    <th className="px-3 py-2 font-medium">成本</th>
+                    <th className="px-3 py-2 font-medium">现价</th>
+                    <th className="px-3 py-2 font-medium">市值</th>
+                    <th className="px-3 py-2 font-medium">浮盈亏</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-border">
+                  {(selectedStrategySnapshotAccount?.positions ?? []).map((position) => (
+                    <tr key={`${position.market || ''}-${position.symbol}`}>
+                      <td className="px-3 py-2 font-mono text-foreground">{position.symbol}</td>
+                      <td className="px-3 py-2 text-foreground">{formatNumber(position.quantity, 0)}</td>
+                      <td className="px-3 py-2 text-foreground">{formatNumber(position.avgCost)}</td>
+                      <td className="px-3 py-2 text-foreground">{formatNumber(position.lastPrice)}</td>
+                      <td className="px-3 py-2 text-foreground">{formatMoney(position.marketValueBase, selectedStrategySnapshotAccount?.baseCurrency || 'CNY')}</td>
+                      <td className="px-3 py-2 text-foreground">{formatMoney(position.unrealizedPnlBase, selectedStrategySnapshotAccount?.baseCurrency || 'CNY')}</td>
+                    </tr>
+                  ))}
+                  {(selectedStrategySnapshotAccount?.positions?.length ?? 0) === 0 ? (
+                    <tr>
+                      <td className="px-3 py-4 text-center text-secondary-text" colSpan={6}>当前账户暂无持仓</td>
+                    </tr>
+                  ) : null}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="rounded-lg border border-border bg-surface/35">
+              <div className="flex flex-col gap-3 border-b border-border px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <h3 className="text-sm font-semibold text-foreground">影响因子配置</h3>
+                  <p className="mt-1 text-xs text-secondary-text">
+                    已列出当前策略全部 {strategyDashboard.factorProfile.items.length} 个运行因子；蓝色标记表示人工覆盖默认值。
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    size="xsm"
+                    variant="outline"
+                    disabled={!strategyDashboard.factorProfile.editable || strategyDashboardSaving}
+                    onClick={() => void handleResetStrategyFactors()}
+                  >
+                    <RotateCcw className="h-3.5 w-3.5" />
+                    恢复默认
+                  </Button>
+                  <Button
+                    size="xsm"
+                    isLoading={strategyDashboardSaving}
+                    loadingText="保存中..."
+                    disabled={!strategyDashboard.factorProfile.editable}
+                    onClick={() => void handleSaveStrategyFactors()}
+                  >
+                    <Save className="h-3.5 w-3.5" />
+                    保存因子
+                  </Button>
+                </div>
+              </div>
+              <div className="space-y-3 p-3">
+                {strategyFactorGroups.map((group) => (
+                  <details key={group.key} className="rounded-lg border border-border bg-card" open>
+                    <summary className="cursor-pointer px-3 py-2 text-sm font-semibold text-foreground">
+                      {group.label} · {group.items.length} 项
+                    </summary>
+                    <div className="grid gap-3 border-t border-border p-3 md:grid-cols-2 xl:grid-cols-3">
+                      {group.items.map((factor) => {
+                        const draft = strategyFactorDraft[factor.key];
+                        return (
+                          <label key={factor.key} className="rounded-lg border border-border bg-surface/45 p-3">
+                            <span className="flex items-start justify-between gap-2">
+                              <span>
+                                <span className="block text-xs font-semibold text-foreground">{factor.label}</span>
+                                <span className="mt-1 block break-all font-mono text-[11px] text-secondary-text">{factor.key}</span>
+                              </span>
+                              {factor.overridden ? (
+                                <span className="rounded-full border border-cyan/30 bg-cyan/10 px-2 py-0.5 text-[10px] font-semibold text-cyan">已覆盖</span>
+                              ) : null}
+                            </span>
+                            {factor.valueType === 'boolean' ? (
+                              <span className="mt-3 flex h-10 items-center gap-2 rounded-xl border border-border bg-surface px-3 text-xs text-foreground">
+                                <input
+                                  checked={Boolean(draft)}
+                                  className={CHECKBOX_CLASS}
+                                  data-testid={`strategy-factor-${factor.key}`}
+                                  disabled={!strategyDashboard.factorProfile.editable || strategyDashboardSaving}
+                                  type="checkbox"
+                                  onChange={(event) => setStrategyFactorDraft((current) => ({
+                                    ...current,
+                                    [factor.key]: event.target.checked,
+                                  }))}
+                                />
+                                {draft ? '启用' : '关闭'}
+                              </span>
+                            ) : (
+                              <span className="mt-3 flex items-center gap-2">
+                                <input
+                                  className={INPUT_CLASS}
+                                  data-testid={`strategy-factor-${factor.key}`}
+                                  disabled={!strategyDashboard.factorProfile.editable || strategyDashboardSaving}
+                                  max={factor.max ?? undefined}
+                                  min={factor.min ?? undefined}
+                                  step={factor.step ?? 'any'}
+                                  type="number"
+                                  value={typeof draft === 'string' ? draft : String(factor.value)}
+                                  onChange={(event) => setStrategyFactorDraft((current) => ({
+                                    ...current,
+                                    [factor.key]: event.target.value,
+                                  }))}
+                                />
+                                {factor.unit ? <span className="shrink-0 text-xs text-secondary-text">{factor.unit}</span> : null}
+                              </span>
+                            )}
+                            <span className="mt-2 block text-[11px] text-secondary-text">
+                              默认值：{String(factor.defaultValue)}
+                              {factor.min !== null && factor.min !== undefined ? ` · 最小 ${factor.min}` : ''}
+                              {factor.max !== null && factor.max !== undefined ? ` · 最大 ${factor.max}` : ''}
+                            </span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </details>
+                ))}
+              </div>
+              <p className="border-t border-border px-4 py-3 text-xs text-secondary-text">
+                保存后从下一次策略判断开始生效，不追溯改写历史成交；归档账户只能查看。
+              </p>
+            </div>
+          </div>
+        ) : (
+          <div className="px-4 py-8 text-center text-sm text-secondary-text">
+            {strategyDashboardLoading ? '正在加载策略账户看板…' : '没有可展示的活跃策略账户'}
+          </div>
+        )}
+      </section>
 
       {campaignObservation?.campaignActive ? (
         <section className="rounded-lg border border-border bg-card/95" data-testid="cross-market-campaign-panel">

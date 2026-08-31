@@ -26,6 +26,7 @@ def _status(
     auto_trade=False,
     auto_interval=1440,
     execution_mode="paper",
+    strategy="dual_low",
 ):
     diagnostics = {}
     if runtime:
@@ -46,6 +47,7 @@ def _status(
             "auto_trade_time_gate_enabled": time_gate,
             "auto_interval_minutes": auto_interval,
             "auto_execution_mode": execution_mode,
+            "auto_strategy": strategy,
         },
         "snapshot": {
             "total_cash": cash,
@@ -59,6 +61,19 @@ def _status(
         },
         "diagnostics": diagnostics,
     }
+
+
+def test_scheduler_task_name_uses_cross_market_entry_watch_for_vnpy_mode():
+    status = _status(
+        execution_mode="paper",
+        strategy=e2e.CROSS_MARKET_STRATEGY_ID,
+    )
+
+    assert e2e._scheduler_execution_task_name(
+        status,
+        execution_mode_override="vnpy_paper",
+    ) == "cross_market_intraday_entry_scan"
+    assert e2e._scheduler_execution_task_name(status) == "vnpy_paper_auto_trade"
 
 
 def _decision(*, status="planned", trade_id=None):

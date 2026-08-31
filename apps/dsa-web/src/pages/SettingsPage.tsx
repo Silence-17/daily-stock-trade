@@ -520,6 +520,7 @@ const SchedulerSettingsCard: React.FC<SchedulerSettingsCardProps> = ({
   const [runNowError, setRunNowError] = useState<ParsedApiError | null>(null);
   const [runNowSuccess, setRunNowSuccess] = useState('');
   const [scheduleEnabledOverride, setScheduleEnabledOverride] = useState<boolean | null>(null);
+  const pendingStatusRefreshTokenRef = useRef<number | null>(null);
 
   const refreshSchedulerStatus = useCallback(async () => {
     setStatusError(null);
@@ -542,15 +543,21 @@ const SchedulerSettingsCard: React.FC<SchedulerSettingsCardProps> = ({
   }, [hasSchedulerSettings, refreshSchedulerStatus, statusRefreshToken]);
 
   useEffect(() => {
-    const isRuntimeDerived = isEnabledConfigValue(scheduleEnabledItem?.value) === status?.enabled;
-    if (!status) {
-      return;
-    }
+    pendingStatusRefreshTokenRef.current = statusRefreshToken;
+  }, [statusRefreshToken]);
 
-    if (scheduleEnabledOverride === null && isRuntimeDerived) {
+  useEffect(() => {
+    const refreshCompleted = pendingStatusRefreshTokenRef.current === statusRefreshToken;
+    if (
+      refreshCompleted
+      && statusRefreshToken > 0
+      && status
+      && isEnabledConfigValue(scheduleEnabledItem?.value) === status.enabled
+    ) {
+      pendingStatusRefreshTokenRef.current = null;
       setScheduleEnabledOverride(null);
     }
-  }, [scheduleEnabledItem?.value, scheduleEnabledOverride, statusRefreshToken]);
+  }, [scheduleEnabledItem?.value, status, statusRefreshToken]);
 
   useEffect(() => {
     if (!onSchedulerStateChange) {
@@ -1737,4 +1744,5 @@ const SettingsPage: React.FC = () => {
   );
 };
 
+export { SchedulerSettingsCard };
 export default SettingsPage;

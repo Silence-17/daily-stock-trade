@@ -486,8 +486,34 @@ class PortfolioServiceTestCase(unittest.TestCase):
         self.assertEqual(pos["price_source"], "missing")
         self.assertFalse(pos["price_available"])
         self.assertTrue(pos["price_stale"])
+        self.assertEqual(pos["data_quality"], "partial")
+        self.assertEqual(pos["limitations"], ["position_price_unavailable:600519"])
+        self.assertEqual(snapshot["accounts"][0]["data_quality"], "partial")
         self.assertEqual(snapshot["accounts"][0]["total_market_value"], 0.0)
         self.assertEqual(snapshot["accounts"][0]["unrealized_pnl"], 0.0)
+
+    def test_historical_snapshot_does_not_refresh_current_position_cache(self) -> None:
+        snapshot_date = date(2026, 1, 3)
+        account_id = self._create_account_with_position(
+            market="cn",
+            currency="CNY",
+            symbol="600519",
+            close=105.0,
+            close_date=snapshot_date,
+        )
+
+        with patch.object(
+            self.service.repo,
+            "replace_positions_lots_and_snapshot",
+            wraps=self.service.repo.replace_positions_lots_and_snapshot,
+        ) as replace_snapshot:
+            self.service.get_portfolio_snapshot(
+                account_id=account_id,
+                as_of=snapshot_date,
+                persist=True,
+            )
+
+        self.assertFalse(replace_snapshot.call_args.kwargs["refresh_positions"])
 
     def test_snapshot_fifo_vs_avg_on_partial_sell(self) -> None:
         account = self.service.create_account(name="Main", broker="Demo", market="cn", base_currency="CNY")
@@ -1127,8 +1153,8 @@ class PortfolioServiceTestCase(unittest.TestCase):
                 select(PortfolioPositionLot).where(PortfolioPositionLot.account_id == aid)
             ).scalars().all()
         self.assertEqual(len(snapshot_count), 1)
-        self.assertEqual(len(position_count), 1)
-        self.assertEqual(len(lot_count), 1)
+        self.assertEqual(len(position_count), 0)
+        self.assertEqual(len(lot_count), 0)
 
         self.service.record_trade(
             account_id=aid,

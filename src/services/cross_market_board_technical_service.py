@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import re
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -15,6 +16,7 @@ from src.services.cross_market_paper_strategy import ROTATION_REFERENCE_KEYWORDS
 
 
 HistoryLoader = Callable[[str, str, str, str], Any]
+FallbackHistoryLoader = Callable[[str, str, str, str, str], Any]
 IntradayLoader = Callable[[str, str], Any]
 
 TECHNICAL_WINDOWS: Tuple[int, ...] = (5, 10, 20, 30, 60)
@@ -49,19 +51,44 @@ class CrossMarketBoardTechnicalService:
         self,
         *,
         history_loader: Optional[HistoryLoader] = None,
+        fallback_history_loader: Optional[FallbackHistoryLoader] = None,
         intraday_loader: Optional[IntradayLoader] = None,
         cache_seconds: int = 6 * 60 * 60,
         intraday_cache_seconds: int = 30,
+        history_retry_attempts: Optional[int] = None,
+        history_retry_backoff_seconds: float = 0.25,
         support_tolerance_pct: float = 1.5,
         resistance_warning_pct: float = 2.0,
         breakout_confirmation_pct: float = 1.0,
         breakout_min_volume_ratio: float = 1.5,
         breakout_required_5m_closes: int = 2,
     ) -> None:
+        using_default_history_loader = history_loader is None
         self.history_loader = history_loader or self._default_history_loader
+        self.fallback_history_loader = (
+            fallback_history_loader
+            if fallback_history_loader is not None
+            else (
+                self._default_fallback_history_loader
+                if using_default_history_loader
+                else None
+            )
+        )
         self.intraday_loader = intraday_loader or self._default_intraday_loader
         self.cache_seconds = max(60, int(cache_seconds))
         self.intraday_cache_seconds = max(1, int(intraday_cache_seconds))
+        self.history_retry_attempts = max(
+            1,
+            int(
+                history_retry_attempts
+                if history_retry_attempts is not None
+                else (2 if using_default_history_loader else 1)
+            ),
+        )
+        self.history_retry_backoff_seconds = max(
+            0.0,
+            float(history_retry_backoff_seconds),
+        )
         self.support_tolerance_pct = max(0.1, float(support_tolerance_pct))
         self.resistance_warning_pct = max(0.1, float(resistance_warning_pct))
         self.breakout_confirmation_pct = max(
@@ -80,6 +107,7 @@ class CrossMarketBoardTechnicalService:
         self._intraday_cache: Dict[
             Tuple[str, str], Tuple[float, pd.DataFrame]
         ] = {}
+        self._fallback_board_name_cache: Dict[str, Tuple[str, ...]] = {}
         self._lock = threading.RLock()
 
     @staticmethod
@@ -167,11 +195,148 @@ class CrossMarketBoardTechnicalService:
             raise errors[-1]
         return pd.DataFrame()
 
+    def _default_fallback_history_loader(
+        self,
+        board_name: str,
+        identifier: str,
+        board_type: str,
+        start_date: str,
+        end_date: str,
+    ) -> Any:
+        """Load an independently sourced THS proxy when EastMoney is unavailable."""
+
+        import akshare as ak
+
+        normalized_type = str(board_type or "").strip().lower()
+        ordered_types = (
+            ("concept", "industry")
+            if normalized_type == "concept"
+            else ("industry", "concept")
+        )
+        errors = []
+        for fallback_type in ordered_types:
+            try:
+                available_names = self._ths_board_names(
+                    ak=ak,
+                    board_type=fallback_type,
+                )
+                fallback_name = self._match_ths_board_name(
+                    board_name,
+                    available_names,
+                )
+                if not fallback_name:
+                    continue
+                if fallback_type == "industry":
+                    raw = ak.stock_board_industry_index_ths(
+                        symbol=fallback_name,
+                        start_date=start_date,
+                        end_date=end_date,
+                    )
+                else:
+                    raw = ak.stock_board_concept_index_ths(
+                        symbol=fallback_name,
+                        start_date=start_date,
+                        end_date=end_date,
+                    )
+                frame = pd.DataFrame(raw).copy()
+                if frame.empty:
+                    continue
+                frame.attrs.update({
+                    "dsa_history_source": "ths_fallback",
+                    "dsa_history_requested_board_name": str(board_name or "").strip(),
+                    "dsa_history_fallback_board_name": fallback_name,
+                    "dsa_history_fallback_board_type": fallback_type,
+                    "dsa_history_fallback_identifier": str(identifier or "").strip(),
+                })
+                return frame
+            except Exception as exc:  # noqa: BLE001 - the next independent route may work.
+                errors.append(exc)
+        if errors:
+            raise errors[-1]
+        return pd.DataFrame()
+
+    def _ths_board_names(
+        self,
+        *,
+        ak: Any,
+        board_type: str,
+    ) -> Tuple[str, ...]:
+        normalized_type = str(board_type or "").strip().lower()
+        with self._lock:
+            cached = self._fallback_board_name_cache.get(normalized_type)
+            if cached is not None:
+                return cached
+        if normalized_type == "industry":
+            frame = pd.DataFrame(ak.stock_board_industry_name_ths()).copy()
+        else:
+            frame = pd.DataFrame(ak.stock_board_concept_name_ths()).copy()
+        if frame.empty:
+            return ()
+        name_column = next(
+            (
+                column
+                for column in ("name", "板块名称", "概念名称", "行业名称")
+                if column in frame.columns
+            ),
+            frame.columns[0],
+        )
+        names = tuple(dict.fromkeys(
+            str(value).strip()
+            for value in frame[name_column]
+            if str(value).strip()
+        ))
+        with self._lock:
+            self._fallback_board_name_cache[normalized_type] = names
+        return names
+
+    @staticmethod
+    def _match_ths_board_name(
+        board_name: str,
+        available_names: Iterable[str],
+    ) -> Optional[str]:
+        requested = re.sub(r"\s+", "", str(board_name or "").strip())
+        if not requested:
+            return None
+        names = [
+            str(value).strip()
+            for value in available_names
+            if str(value).strip()
+        ]
+        by_compact = {re.sub(r"\s+", "", value): value for value in names}
+        if requested in by_compact:
+            return by_compact[requested]
+
+        normalized = re.sub(r"(?:[ⅠⅡⅢⅣⅤ]+|I{1,5})$", "", requested).strip()
+        if normalized in by_compact:
+            return by_compact[normalized]
+
+        keyword_aliases = (
+            (("旅游", "酒店", "餐饮", "景区"), ("旅游概念", "旅游及酒店")),
+            (("银行",), ("银行",)),
+        )
+        for keywords, aliases in keyword_aliases:
+            if not any(keyword in normalized for keyword in keywords):
+                continue
+            for alias in aliases:
+                if alias in by_compact:
+                    return by_compact[alias]
+
+        contained = [
+            (compact_name, original_name)
+            for compact_name, original_name in by_compact.items()
+            if len(compact_name) >= 2
+            and (compact_name in normalized or normalized in compact_name)
+        ]
+        if not contained:
+            return None
+        return max(contained, key=lambda item: len(item[0]))[1]
+
     def analyze_boards(
         self,
         boards: Iterable[Dict[str, Any]],
         *,
         observed_at: Optional[datetime] = None,
+        primary_board_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         current = (observed_at or datetime.now(timezone.utc)).astimezone(timezone.utc)
         results = []
@@ -215,14 +380,37 @@ class CrossMarketBoardTechnicalService:
                 "boards": [],
                 "errors": errors,
             }
-        primary = max(
-            results,
-            key=lambda item: (
-                int(item.get("supportive") is True),
-                float(item.get("support_score") or 0.0),
-                float(item.get("live_change_pct") or 0.0),
+        requested_primary = str(primary_board_name or "").strip().casefold()
+        primary = next(
+            (
+                item
+                for item in results
+                if requested_primary
+                and str(item.get("name") or "").strip().casefold()
+                == requested_primary
             ),
+            None,
         )
+        if requested_primary and primary is None:
+            return {
+                "available": False,
+                "supportive": False,
+                "near_resistance": False,
+                "reason": "board_technical_evidence_unavailable",
+                "observed_at": current.isoformat(),
+                "requested_primary_board": str(primary_board_name or "").strip(),
+                "boards": results,
+                "errors": errors,
+            }
+        if primary is None:
+            primary = max(
+                results,
+                key=lambda item: (
+                    int(item.get("supportive") is True),
+                    float(item.get("support_score") or 0.0),
+                    float(item.get("live_change_pct") or 0.0),
+                ),
+            )
         alerts = [
             {"board": item.get("name"), **alert}
             for item in results
@@ -234,7 +422,45 @@ class CrossMarketBoardTechnicalService:
             if item.get("near_resistance") is True
             and str(item.get("name") or "").strip()
         ]
-        near_resistance = bool(pressure_boards)
+        all_pressure_evidence = [
+            {
+                "name": str(item.get("name") or "").strip(),
+                "windows": list(item.get("pressure_windows") or []),
+                "levels": list(item.get("pressure_levels") or []),
+                "short_cycle_absorbable": bool(
+                    item.get("short_cycle_resistance_absorbable")
+                ),
+                "breakout_reference": item.get("breakout_reference"),
+                "breakout_reference_windows": list(
+                    item.get("breakout_reference_windows") or []
+                ),
+                "breakout_reason": dict(
+                    item.get("breakout_confirmation") or {}
+                ).get("reason"),
+            }
+            for item in results
+            if item.get("near_resistance") is True
+            and str(item.get("name") or "").strip()
+        ]
+        primary_name = str(primary.get("name") or "").strip()
+        pressure_evidence = [
+            item for item in all_pressure_evidence if item["name"] == primary_name
+        ]
+        secondary_pressure_evidence = [
+            item for item in all_pressure_evidence if item["name"] != primary_name
+        ]
+        short_pressure_boards = [
+            item["name"]
+            for item in pressure_evidence
+            if item["windows"]
+            and set(item["windows"]).issubset({5, 10})
+        ]
+        medium_long_pressure_boards = [
+            item["name"]
+            for item in pressure_evidence
+            if set(item["windows"]) & {20, 30, 60}
+        ]
+        near_resistance = bool(primary.get("near_resistance"))
         return {
             "available": True,
             "supportive": bool(primary.get("supportive")),
@@ -252,6 +478,26 @@ class CrossMarketBoardTechnicalService:
             "observed_at": current.isoformat(),
             "primary_board": primary,
             "pressure_boards": pressure_boards,
+            "pressure_evidence": pressure_evidence,
+            "secondary_pressure_evidence": secondary_pressure_evidence,
+            "secondary_pressure_boards": [
+                item["name"] for item in secondary_pressure_evidence
+            ],
+            "pressure_windows": sorted({
+                window
+                for item in pressure_evidence
+                for window in item["windows"]
+            }),
+            "short_pressure_boards": short_pressure_boards,
+            "medium_long_pressure_boards": medium_long_pressure_boards,
+            "short_resistance_only": bool(
+                pressure_evidence
+                and len(short_pressure_boards) == len(pressure_evidence)
+                and all(
+                    item["short_cycle_absorbable"]
+                    for item in pressure_evidence
+                )
+            ),
             "boards": results,
             "alerts": alerts,
             "errors": errors,
@@ -273,11 +519,24 @@ class CrossMarketBoardTechnicalService:
         start_date = (completed_through - timedelta(days=180)).strftime("%Y%m%d")
         end_date = completed_through.strftime("%Y%m%d")
         frame = self._history(
+            name=name,
             identifier=identifier,
             board_type=board_type,
             start_date=start_date,
             end_date=end_date,
         )
+        history_source = str(
+            frame.attrs.get("dsa_history_source") or "provider"
+        )
+        history_cache_age_seconds = _number(
+            frame.attrs.get("dsa_history_cache_age_seconds")
+        )
+        history_fallback_board_name = str(
+            frame.attrs.get("dsa_history_fallback_board_name") or ""
+        ).strip()
+        history_fallback_board_type = str(
+            frame.attrs.get("dsa_history_fallback_board_type") or ""
+        ).strip()
         normalized = self._normalize_history(frame, completed_through=completed_through)
         if len(normalized) < 60:
             return {
@@ -286,6 +545,9 @@ class CrossMarketBoardTechnicalService:
                 "name": name,
                 "identifier": identifier,
                 "history_count": len(normalized),
+                "history_source": history_source,
+                "history_fallback_board_name": history_fallback_board_name or None,
+                "history_fallback_board_type": history_fallback_board_type or None,
             }
         recent60 = normalized.tail(max(TECHNICAL_WINDOWS))
         previous_close = float(recent60.iloc[-1]["close"])
@@ -388,7 +650,28 @@ class CrossMarketBoardTechnicalService:
             if current_level > 0
             else 999.0
         )
-        breakout_reference = max(resistance_levels.values())
+        crossed = [
+            item for item in resistance_candidates if item[1] <= current_level
+        ]
+        nearest_crossed_window, nearest_crossed = (
+            max(crossed, key=lambda item: (item[1], -item[0]))
+            if crossed
+            else (nearest_resistance_window, nearest_resistance)
+        )
+        # Confirm the resistance that is actually being tested. Requiring a
+        # five-day high to clear the unrelated 60-day ceiling made short-cycle
+        # breakouts impossible to prove during a recovering trend.
+        if crossed:
+            breakout_reference = nearest_crossed
+            breakout_reference_window = nearest_crossed_window
+        else:
+            breakout_reference = nearest_resistance
+            breakout_reference_window = nearest_resistance_window
+        breakout_reference_windows = sorted({
+            window
+            for window, level in resistance_candidates
+            if math.isclose(level, breakout_reference, rel_tol=1e-9, abs_tol=1e-9)
+        })
         breakout_pct = (
             (current_level / breakout_reference - 1.0) * 100.0
             if breakout_reference > 0
@@ -413,14 +696,41 @@ class CrossMarketBoardTechnicalService:
         unconfirmed_price_breakout = bool(
             price_breakout_confirmed and not breakout_confirmed
         )
-        near_resistance = bool(
-            (
+        pressure_windows = {
+            window
+            for window, level in resistance_candidates
+            if current_level > 0
+            and -self.breakout_confirmation_pct
+            <= (level / current_level - 1.0) * 100.0
+            <= self.resistance_warning_pct
+        }
+        if unconfirmed_price_breakout:
+            pressure_windows.update(breakout_reference_windows)
+        if breakout_confirmed:
+            pressure_windows.difference_update(breakout_reference_windows)
+        pressure_windows = sorted(pressure_windows)
+        pressure_levels = [
+            {
+                "window_days": window,
+                "level": round(resistance_levels[window], 6),
+                "distance_pct": round(
+                    (resistance_levels[window] / current_level - 1.0) * 100.0,
+                    6,
+                ),
+            }
+            for window in pressure_windows
+        ]
+        short_cycle_resistance_absorbable = bool(
+            pressure_levels
+            and {item["window_days"] for item in pressure_levels}.issubset({5, 10})
+            and all(
                 -self.breakout_confirmation_pct
-                <= resistance_distance_pct
+                <= float(item["distance_pct"])
                 <= self.resistance_warning_pct
+                for item in pressure_levels
             )
-            or unconfirmed_price_breakout
-        ) and not breakout_confirmed
+        )
+        near_resistance = bool(pressure_windows)
         support_candidates = [
             MA_SUPPORT_SCORES[window]
             for window in TECHNICAL_WINDOWS
@@ -453,15 +763,43 @@ class CrossMarketBoardTechnicalService:
                     "distance_pct": round(distances[f"low{window}"], 6),
                 })
         if near_resistance:
+            if unconfirmed_price_breakout:
+                alert_level = breakout_reference
+                alert_windows = breakout_reference_windows
+            else:
+                nearest_pressure = min(
+                    pressure_levels,
+                    key=lambda item: (
+                        abs(float(item["distance_pct"])),
+                        int(item["window_days"]),
+                    ),
+                )
+                alert_level = float(nearest_pressure["level"])
+                alert_windows = [
+                    int(item["window_days"])
+                    for item in pressure_levels
+                    if math.isclose(
+                        float(item["level"]),
+                        alert_level,
+                        rel_tol=1e-9,
+                        abs_tol=1e-6,
+                    )
+                ]
+            alert_distance_pct = (
+                (alert_level / current_level - 1.0) * 100.0
+                if current_level > 0
+                else 999.0
+            )
             alerts.append({
                 "kind": (
                     "unconfirmed_board_breakout"
                     if unconfirmed_price_breakout
                     else "near_board_resistance"
                 ),
-                "window_days": nearest_resistance_window,
-                "level": round(nearest_resistance, 6),
-                "distance_pct": round(resistance_distance_pct, 6),
+                "window_days": min(alert_windows),
+                "pressure_windows": pressure_windows,
+                "level": round(alert_level, 6),
+                "distance_pct": round(alert_distance_pct, 6),
                 "breakout_reason": breakout_evidence.get("reason"),
             })
         reason = (
@@ -480,6 +818,14 @@ class CrossMarketBoardTechnicalService:
             "observed_at": observed_at.astimezone(timezone.utc).isoformat(),
             "history_through_date": completed_through.isoformat(),
             "history_count": len(normalized),
+            "history_source": history_source,
+            "history_cache_age_seconds": (
+                round(history_cache_age_seconds, 3)
+                if history_cache_age_seconds is not None
+                else None
+            ),
+            "history_fallback_board_name": history_fallback_board_name or None,
+            "history_fallback_board_type": history_fallback_board_type or None,
             "live_change_pct": round(float(live_change_pct), 6),
             "previous_close": round(previous_close, 6),
             "current_level": round(current_level, 6),
@@ -518,6 +864,9 @@ class CrossMarketBoardTechnicalService:
             },
             "nearest_resistance": round(nearest_resistance, 6),
             "nearest_resistance_window": nearest_resistance_window,
+            "breakout_reference": round(breakout_reference, 6),
+            "breakout_reference_window": breakout_reference_window,
+            "breakout_reference_windows": breakout_reference_windows,
             "distance_pct": {
                 key: round(value, 6) for key, value in distances.items()
             },
@@ -541,6 +890,11 @@ class CrossMarketBoardTechnicalService:
                 for window in TECHNICAL_WINDOWS
             },
             "near_resistance": near_resistance,
+            "pressure_windows": pressure_windows,
+            "pressure_levels": pressure_levels,
+            "short_cycle_resistance_absorbable": (
+                short_cycle_resistance_absorbable
+            ),
             "price_breakout_confirmed": price_breakout_confirmed,
             "breakout_confirmed": breakout_confirmed,
             "breakout_confirmation": breakout_evidence,
@@ -753,6 +1107,7 @@ class CrossMarketBoardTechnicalService:
     def _history(
         self,
         *,
+        name: str,
         identifier: str,
         board_type: str,
         start_date: str,
@@ -763,9 +1118,69 @@ class CrossMarketBoardTechnicalService:
         with self._lock:
             cached = self._cache.get(cache_key)
             if cached is not None and now - cached[0] <= self.cache_seconds:
-                return cached[1].copy()
-        raw = self.history_loader(identifier, board_type, start_date, end_date)
-        frame = pd.DataFrame(raw).copy()
+                frame = cached[1].copy()
+                frame.attrs["dsa_history_source"] = "memory_cache"
+                frame.attrs["dsa_history_cache_age_seconds"] = max(
+                    0.0,
+                    now - cached[0],
+                )
+                return frame
+        raw: Any = None
+        primary_errors = []
+        for attempt in range(self.history_retry_attempts):
+            try:
+                raw = self.history_loader(
+                    identifier,
+                    board_type,
+                    start_date,
+                    end_date,
+                )
+                if not pd.DataFrame(raw).empty:
+                    break
+            except Exception as exc:  # noqa: BLE001 - retry/fallback remains bounded.
+                primary_errors.append(exc)
+                raw = None
+            if (
+                attempt + 1 < self.history_retry_attempts
+                and self.history_retry_backoff_seconds > 0
+            ):
+                time.sleep(
+                    self.history_retry_backoff_seconds * (2 ** attempt)
+                )
+
+        frame = pd.DataFrame(raw).copy() if raw is not None else pd.DataFrame()
+        if isinstance(raw, pd.DataFrame):
+            frame.attrs.update(raw.attrs)
+        if frame.empty and self.fallback_history_loader is not None:
+            try:
+                fallback_raw = self.fallback_history_loader(
+                    name,
+                    identifier,
+                    board_type,
+                    start_date,
+                    end_date,
+                )
+                frame = pd.DataFrame(fallback_raw).copy()
+                if isinstance(fallback_raw, pd.DataFrame):
+                    frame.attrs.update(fallback_raw.attrs)
+            except Exception as exc:  # noqa: BLE001 - stale cache remains the final safe fallback.
+                primary_errors.append(exc)
+
+        if frame.empty and cached is not None and not cached[1].empty:
+            frame = cached[1].copy()
+            frame.attrs["dsa_history_source"] = "stale_memory_cache"
+            frame.attrs["dsa_history_cache_age_seconds"] = max(
+                0.0,
+                now - cached[0],
+            )
+            return frame
+        if frame.empty and primary_errors:
+            raise primary_errors[-1]
+
+        frame.attrs["dsa_history_source"] = str(
+            frame.attrs.get("dsa_history_source") or "provider"
+        )
+        frame.attrs["dsa_history_cache_age_seconds"] = 0.0
         with self._lock:
             self._cache[cache_key] = (now, frame.copy())
         return frame
@@ -777,9 +1192,9 @@ class CrossMarketBoardTechnicalService:
             return pd.DataFrame(columns=["date", "close", "high", "low"])
         aliases = {
             "date": ("date", "\u65e5\u671f"),
-            "close": ("close", "Close", "\u6536\u76d8"),
-            "high": ("high", "High", "\u6700\u9ad8"),
-            "low": ("low", "Low", "\u6700\u4f4e"),
+            "close": ("close", "Close", "\u6536\u76d8", "\u6536\u76d8\u4ef7"),
+            "high": ("high", "High", "\u6700\u9ad8", "\u6700\u9ad8\u4ef7"),
+            "low": ("low", "Low", "\u6700\u4f4e", "\u6700\u4f4e\u4ef7"),
         }
         selected: Dict[str, Any] = {}
         for target, names in aliases.items():

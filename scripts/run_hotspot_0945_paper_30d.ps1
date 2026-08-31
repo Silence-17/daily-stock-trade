@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet("Auto", "Open", "Close", "Status")]
+    [ValidateSet("Auto", "Watch-Exit", "Open", "Close", "Status")]
     [string]$Phase = "Auto"
 )
 
@@ -18,4 +18,3 @@ if (-not $python) {
 Set-Location -LiteralPath $repoRoot
 & $python (Join-Path $PSScriptRoot "run_hotspot_0945_paper_30d.py") --phase $Phase.ToLowerInvariant()
 exit $LASTEXITCODE
-

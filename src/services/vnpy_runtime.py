@@ -558,6 +558,18 @@ def bootstrap_vnpy_runtime(
             )
             event_bridge = service.attach_vnpy_event_engine(event_engine)
             diagnostics["event_bridge"] = event_bridge.status()
+            if (
+                settings.connect_on_start
+                and _uses_builtin_simulated_gateway_class(settings.gateway_class)
+                and diagnostics.get("connect", {}).get("connected") is True
+            ):
+                diagnostics["builtin_simulated_gateway_sync"] = (
+                    _refresh_builtin_simulated_gateway_snapshot(
+                        service=service,
+                        main_engine=main_engine,
+                        gateway_name=settings.gateway_name,
+                    )
+                )
         except Exception as exc:  # noqa: BLE001 - order routing can still be diagnosed without event attach.
             diagnostics["event_bridge"] = {
                 "registered": False,
@@ -792,7 +804,7 @@ def _connect_gateway(
                 "request_accepted": False,
                 "connected": False,
                 "status": "failed",
-                "reason": "simulated_initial_balance_unavailable",
+                "reason": "simulated_initial_state_unavailable",
                 "error_type": type(exc).__name__,
             }
             return
@@ -876,16 +888,126 @@ def _prepare_builtin_simulated_gateway_payload(
         for key, value in payload.items()
         if str(key) in allowed_keys
     }
-    settings = VnpyPaperTradingService(config_path=paper_config_path).get_settings()
-    initial_balance = float(settings.initial_cash)
-    if not math.isfinite(initial_balance) or initial_balance <= 0:
-        raise ValueError("paper_initial_cash_invalid")
+    accepted_payload_keys = set(sanitized)
+    service = VnpyPaperTradingService(config_path=paper_config_path)
+    settings = service.get_settings()
+    account_id = settings.account_id
+    initial_positions: Optional[list[Dict[str, Any]]] = None
+    initial_balance_source = "vnpy_paper_settings"
+
+    if account_id is None:
+        initial_balance = float(settings.initial_cash)
+        if not math.isfinite(initial_balance) or initial_balance <= 0:
+            raise ValueError("paper_initial_cash_invalid")
+    else:
+        snapshot = service.portfolio.get_portfolio_snapshot(
+            account_id=int(account_id),
+            persist=False,
+        )
+        accounts = snapshot.get("accounts") if isinstance(snapshot, dict) else None
+        if not isinstance(accounts, list) or len(accounts) != 1:
+            raise ValueError("paper_account_snapshot_unavailable")
+        account = accounts[0]
+        if not isinstance(account, dict) or int(account.get("account_id") or 0) != int(account_id):
+            raise ValueError("paper_account_snapshot_mismatch")
+        initial_balance = float(account.get("total_cash"))
+        if not math.isfinite(initial_balance) or initial_balance < 0:
+            raise ValueError("paper_account_cash_invalid")
+        initial_positions = _paper_account_initial_positions(account.get("positions"))
+        initial_balance_source = "vnpy_paper_account_cash"
+
     sanitized["initial_balance"] = initial_balance
-    return sanitized, {
+    if initial_positions is not None:
+        sanitized["initial_positions"] = initial_positions
+    diagnostics = {
         "initial_balance": initial_balance,
-        "initial_balance_source": "vnpy_paper_settings",
-        "ignored_setting_count": max(0, len(payload) - len(sanitized.keys() & payload.keys())),
+        "initial_balance_source": initial_balance_source,
+        "ignored_setting_count": max(0, len(payload) - len(accepted_payload_keys)),
     }
+    if account_id is not None:
+        diagnostics.update(
+            {
+                "account_id": int(account_id),
+                "position_count": len(initial_positions or []),
+            }
+        )
+    return sanitized, diagnostics
+
+
+def _paper_account_initial_positions(value: Any) -> list[Dict[str, Any]]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError("paper_account_positions_invalid")
+
+    positions: list[Dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            raise ValueError("paper_account_position_invalid")
+        symbol = str(item.get("symbol") or "").strip().upper()
+        market = str(item.get("market") or "").strip().lower()
+        quantity = float(item.get("quantity"))
+        avg_cost = float(item.get("avg_cost"))
+        if not symbol or not math.isfinite(quantity) or quantity <= 0:
+            raise ValueError("paper_account_position_quantity_invalid")
+        if not math.isfinite(avg_cost) or avg_cost < 0:
+            raise ValueError("paper_account_position_cost_invalid")
+        positions.append(
+            {
+                "symbol": symbol,
+                "market": market,
+                "quantity": quantity,
+                "avg_cost": avg_cost,
+            }
+        )
+    return positions
+
+
+def _refresh_builtin_simulated_gateway_snapshot(
+    *,
+    service: VnpyPaperTradingService,
+    main_engine: Any,
+    gateway_name: Optional[str],
+) -> Dict[str, Any]:
+    """Publish the hydrated simulator state after event handlers are attached."""
+
+    result = {
+        "attempted": True,
+        "positions_cleared": False,
+        "account_queried": False,
+        "positions_queried": False,
+        "status": "failed",
+        "reason": "gateway_unavailable",
+    }
+    get_gateway = getattr(main_engine, "get_gateway", None)
+    gateway = get_gateway(gateway_name) if callable(get_gateway) and gateway_name else None
+    if gateway is None:
+        return result
+
+    try:
+        service.sync_vnpy_positions_callback(
+            positions=[],
+            raw={"source": "vnpy_runtime_bootstrap"},
+        )
+        result["positions_cleared"] = True
+        query_account = getattr(gateway, "query_account", None)
+        if callable(query_account):
+            query_account()
+            result["account_queried"] = True
+        query_position = getattr(gateway, "query_position", None)
+        if callable(query_position):
+            query_position()
+            result["positions_queried"] = True
+        result.update({"status": "completed", "reason": None})
+    except Exception as exc:  # noqa: BLE001 - diagnostics refresh must not crash startup.
+        result.update(
+            {
+                "status": "failed",
+                "reason": "snapshot_query_failed",
+                "error_type": type(exc).__name__,
+            }
+        )
+    return result
 
 
 def _evaluate_production_connect_preflight(

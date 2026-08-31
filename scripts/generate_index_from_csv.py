@@ -47,42 +47,6 @@ def require_pypinyin() -> bool:
     return False
 
 
-def load_csv_data(csv_path: Path) -> List[Dict[str, Any]]:
-    """
-    Load stock data from AkShare format CSV file
-
-    Args:
-        csv_path: CSV file path
-
-    Returns:
-        List of stock data
-    """
-    stocks = []
-
-    with open(csv_path, 'r', encoding='utf-8-sig') as f:
-        reader = csv.DictReader(f)
-
-        for row in reader:
-            ts_code = row['ts_code'].strip()
-            symbol = row['symbol'].strip()
-            name = row['name'].strip()
-
-            # Skip invalid rows.
-            if not ts_code or not symbol or not name:
-                continue
-
-            stocks.append({
-                'ts_code': ts_code,
-                'symbol': symbol,
-                'name': name,
-                'area': row.get('area', ''),
-                'industry': row.get('industry', ''),
-                'list_date': row.get('list_date', ''),
-            })
-
-    return stocks
-
-
 def load_tushare_data(data_dir: Path) -> List[Dict[str, Any]]:
     """
     从 Tushare CSV 文件加载多市场股票数据

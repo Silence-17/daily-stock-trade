@@ -22,7 +22,7 @@ from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass, field, replace
 from datetime import date, datetime, time as datetime_time, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -49,15 +49,22 @@ from src.services.cross_market_board_technical_service import (
 )
 from src.services.cross_market_paper_strategy import (
     AccountRiskState,
+    CN_MAIN_BOARD_PREFIXES,
     CrossMarketSignalEngine,
+    DOMESTIC_ROTATION_THEMES,
     GLOBAL_MARKET_LINKED_THEMES,
     KR_LINKED_THEMES,
     NASDAQ_FUTURES_LINKED_THEMES,
     STRATEGY_ID as CROSS_MARKET_STRATEGY_ID,
+    StrategyConfig as CrossMarketStrategyConfig,
     StrategyDecision,
     StrategyDecisionInput,
+    TECHNOLOGY_WEIGHTED_THEMES,
     TRADEABLE_THEMES,
     TradeFeeSchedule,
+    is_cn_main_board_symbol,
+    strategy_config_from_overrides,
+    strategy_factor_catalog,
 )
 from src.services.cross_market_signal_service import CrossMarketSignalService
 from src.services.market_light_service import load_previous_snapshot
@@ -131,6 +138,7 @@ SUPPORTED_AUTO_STRATEGIES = ALPHASIFT_FALLBACK_STRATEGIES + (CROSS_MARKET_STRATE
 LEGACY_CROSS_MARKET_STRATEGY_IDS = frozenset({
     "cross_market_semiconductor_gold_v1.1",
     "cross_market_semiconductor_gold_v1.2_aggressive",
+    "cross_market_global_sector_rotation_v1.3_aggressive",
 })
 CROSS_MARKET_BASE_SCREEN_STRATEGY = "momentum_quality"
 DEFAULT_AUTO_ALPHASIFT_LLM_TIMEOUT_SECONDS = 45
@@ -153,17 +161,16 @@ CROSS_MARKET_CLOSING_SNAPSHOT_INTERVAL_SECONDS = 5 * 60
 CROSS_MARKET_CLOSING_SNAPSHOT_CUTOFF = datetime_time(14, 55)
 CROSS_MARKET_CLOSING_SNAPSHOT_QUOTE_MAX_AGE_SECONDS = 120
 CROSS_MARKET_OBSERVATION_AUTO_TRADE_STAGGER_SECONDS = 2 * 60
-CROSS_MARKET_FORMAL_RECOVERY_STAGGER_SECONDS = 60
 CROSS_MARKET_OBSERVATION_TRIGGER_SOURCE = "cross_market_paper_observation"
 CROSS_MARKET_INTRADAY_SELL_TRIGGER_SOURCE = "cross_market_intraday_sell_monitor"
 CROSS_MARKET_INTRADAY_ENTRY_TRIGGER_SOURCE = "cross_market_intraday_entry_scan"
-CROSS_MARKET_INTRADAY_ENTRY_TIMES = (
-    datetime_time(10, 40),
-    datetime_time(13, 30),
-    datetime_time(14, 30),
-)
-CROSS_MARKET_INTRADAY_ENTRY_WINDOW_SECONDS = 120
+CROSS_MARKET_ENTRY_WATCH_INTERVAL_SECONDS = 15
+CROSS_MARKET_INTRADAY_ENTRY_TIMES = (datetime_time(10, 40),)
+CROSS_MARKET_INTRADAY_ENTRY_WINDOW_SECONDS = 2 * 60
 CROSS_MARKET_INTRADAY_ENTRY_RECHECK_REASONS = {
+    "asia_market_evidence_unavailable",
+    "asia_supply_chain_unconfirmed",
+    "board_technical_evidence_unavailable",
     "candidate_provider_timestamp_required",
     "cn_open_signal_unavailable",
     "flat_open_range_signal_required",
@@ -178,18 +185,11 @@ CROSS_MARKET_INTRADAY_ENTRY_RECHECK_REASONS = {
     "nasdaq_futures_downtrend_blocks_entry",
     "sector_resistance_chasing_blocked",
     "sector_signal_too_weak",
+    "entry_score_below_threshold",
+    "entry_score_late_probe_only",
 }
 CROSS_MARKET_DSA_SIM_MATCHING_MODE = "next_minute_vwap"
-CROSS_MARKET_CN_MAIN_BOARD_PREFIXES = (
-    "000",
-    "001",
-    "002",
-    "003",
-    "600",
-    "601",
-    "603",
-    "605",
-)
+CROSS_MARKET_CN_MAIN_BOARD_PREFIXES = CN_MAIN_BOARD_PREFIXES
 CROSS_MARKET_MIN_BUY_TRADES_FOR_EVALUATION = 8
 CROSS_MARKET_MIN_CLOSED_TRADES_FOR_EVALUATION = 5
 CROSS_MARKET_MIN_DAILY_TURNOVER = 100_000_000.0
@@ -197,6 +197,21 @@ CROSS_MARKET_THEME_CACHE_SECONDS = 6 * 60 * 60
 AUTO_TRADE_RUN_LOCK_WAIT_SECONDS = 120
 CROSS_MARKET_OBSERVATION_LOCK_WAIT_SECONDS = 60
 CALIBRATION_SHADOW_AUTO_TRADE_STAGGER_SECONDS = 5 * 60
+
+
+def cross_market_entry_watch_owns_formal_execution(settings: Any) -> bool:
+    """Return whether the cross-market entry watcher is the formal run owner."""
+
+    def setting(name: str, default: Any = None) -> Any:
+        if isinstance(settings, dict):
+            return settings.get(name, default)
+        return getattr(settings, name, default)
+
+    return bool(
+        str(setting("auto_strategy") or "").strip() == CROSS_MARKET_STRATEGY_ID
+        and bool(setting("auto_trade_enabled"))
+        and str(setting("auto_execution_mode") or "").strip() == "vnpy_paper"
+    )
 
 
 class CalibrationShadowPartialFailureError(RuntimeError):
@@ -449,10 +464,16 @@ class VnpyPaperTradingService:
         self.vnpy_main_engine = vnpy_main_engine
         self.vnpy_event_engine = vnpy_event_engine or getattr(vnpy_main_engine, "event_engine", None)
         self.decision_signal_service = decision_signal_service
-        self.cross_market_signal_service = cross_market_signal_service or CrossMarketSignalService(
-            data_fetcher_manager=self.data_fetcher_manager,
-        )
-        self.cross_market_signal_engine = CrossMarketSignalEngine()
+        cross_market_config = self._cross_market_factor_config()
+        self.cross_market_signal_engine = CrossMarketSignalEngine(cross_market_config)
+        if cross_market_signal_service is None:
+            self.cross_market_signal_service = CrossMarketSignalService(
+                data_fetcher_manager=self.data_fetcher_manager,
+                engine=self.cross_market_signal_engine,
+            )
+        else:
+            self.cross_market_signal_service = cross_market_signal_service
+            self.cross_market_signal_service.engine = self.cross_market_signal_engine
         self.cross_market_board_technical_service = (
             cross_market_board_technical_service
             or CrossMarketBoardTechnicalService(
@@ -1101,6 +1122,8 @@ class VnpyPaperTradingService:
                 "auto_sell_position_pct",
                 "auto_no_progress_days",
                 "auto_no_progress_min_return_pct",
+                "auto_allocation_budget",
+                "auto_consecutive_loss_limit",
                 "vnpy_gateway_name",
             }
             update_fields = {
@@ -1423,6 +1446,12 @@ class VnpyPaperTradingService:
                 broker=VNPY_PAPER_BROKER,
                 market="cn",
                 base_currency="CNY",
+                owner_id=(
+                    settings.auto_strategy
+                    if settings.auto_strategy
+                    in {CROSS_MARKET_STRATEGY_ID, *LEGACY_CROSS_MARKET_STRATEGY_IDS}
+                    else None
+                ),
             )
             new_account_id = int(new_account["id"])
             self.portfolio.record_cash_ledger(
@@ -1466,7 +1495,7 @@ class VnpyPaperTradingService:
         include_snapshot: bool = True,
         include_recent_trades: bool = True,
     ) -> Dict[str, Any]:
-        """Move a clean legacy campaign onto a clean V1.3 paper account."""
+        """Move a legacy campaign onto V1.4, adopting proven same-account lots."""
 
         with self._lock:
             settings = self.get_settings()
@@ -1492,13 +1521,29 @@ class VnpyPaperTradingService:
             )
             if active_plans:
                 raise ValueError("cross_market_strategy_migration_active_orders")
-            if current_account_id is not None and self._paper_account_has_positions(
-                current_account_id
-            ):
+            requested_target_id = _safe_int(target_account_id)
+            current_has_positions = bool(
+                current_account_id is not None
+                and self._paper_account_has_positions(current_account_id)
+            )
+            adopt_current_account = bool(
+                current_has_positions
+                and (
+                    requested_target_id is None
+                    or requested_target_id == current_account_id
+                )
+            )
+            adopted_symbols: List[str] = []
+            if adopt_current_account:
+                adopted_symbols = self._cross_market_migration_owned_symbols(
+                    account_id=int(current_account_id),
+                )
+            elif current_has_positions:
                 raise ValueError("cross_market_strategy_migration_open_positions")
 
-            requested_target_id = _safe_int(target_account_id)
-            if requested_target_id is not None:
+            if adopt_current_account:
+                migrated_account_id = int(current_account_id)
+            elif requested_target_id is not None:
                 target = self._find_account(
                     requested_target_id,
                     include_inactive=True,
@@ -1546,6 +1591,7 @@ class VnpyPaperTradingService:
             migrated_account = self.portfolio.update_account(
                 int(migrated_account_id),
                 owner_id=CROSS_MARKET_STRATEGY_ID,
+                name="vn.py paper V1.4 staged",
             )
             if migrated_account is None:
                 raise RuntimeError("cross_market_strategy_migration_account_update_failed")
@@ -1571,9 +1617,50 @@ class VnpyPaperTradingService:
                 "previous_account_id": current_account_id,
                 "account_id": migrated_account_id,
                 "target_account_reused": requested_target_id is not None,
+                "same_account_adopted": adopt_current_account,
+                "positions_adopted": adopted_symbols,
                 "migrated_at": _utc_now_iso(),
             }
             return status
+
+    def _cross_market_migration_owned_symbols(self, *, account_id: int) -> List[str]:
+        snapshot = self.portfolio.get_portfolio_snapshot(
+            account_id=int(account_id),
+            persist=False,
+        )
+        accounts = [
+            item for item in list(snapshot.get("accounts") or [])
+            if isinstance(item, dict)
+        ]
+        account_snapshot = accounts[0] if accounts else snapshot
+        as_of = datetime.now(ZoneInfo("Asia/Shanghai")).date()
+        owned_symbols: List[str] = []
+        for position in list(account_snapshot.get("positions") or []):
+            if not isinstance(position, dict):
+                continue
+            quantity = _safe_float(position.get("quantity")) or 0.0
+            symbol = self._normalize_symbol(position.get("symbol") or "")
+            market = str(position.get("market") or "cn").strip().lower()
+            if not symbol or quantity <= PAPER_EPS:
+                continue
+            strategy_position = self._cross_market_strategy_position(
+                account_id=int(account_id),
+                symbol=symbol,
+                market=market,
+                as_of=as_of,
+            )
+            attributed = _safe_float(strategy_position.get("quantity")) or 0.0
+            if (
+                strategy_position.get("status") != "available"
+                or abs(attributed - quantity) > max(PAPER_EPS, quantity * 1e-8)
+            ):
+                raise ValueError(
+                    "cross_market_strategy_migration_unowned_open_positions"
+                )
+            owned_symbols.append(symbol)
+        if not owned_symbols:
+            raise ValueError("cross_market_strategy_migration_open_positions")
+        return sorted(set(owned_symbols))
 
     def _paper_account_has_positions(self, account_id: int) -> bool:
         snapshot = self.portfolio.get_portfolio_snapshot(
@@ -1630,6 +1717,209 @@ class VnpyPaperTradingService:
             "current_account_id": current_account_id,
             "hidden_count": len(hidden_ids),
         }
+
+    def _cross_market_factor_overrides(self) -> Dict[str, Any]:
+        payload = self._read_config_payload()
+        root = payload.get("strategy_factor_overrides") if isinstance(payload, dict) else None
+        raw = root.get(CROSS_MARKET_STRATEGY_ID) if isinstance(root, dict) else None
+        return dict(raw) if isinstance(raw, dict) else {}
+
+    def _cross_market_factor_config(self) -> CrossMarketStrategyConfig:
+        return strategy_config_from_overrides(self._cross_market_factor_overrides())
+
+    def _apply_cross_market_factor_config(
+        self,
+        config: CrossMarketStrategyConfig,
+    ) -> None:
+        self.cross_market_signal_engine.config = config
+        self.cross_market_signal_service.engine = self.cross_market_signal_engine
+        board_service = self.cross_market_board_technical_service
+        board_service.support_tolerance_pct = max(0.1, float(config.board_support_tolerance_pct))
+        board_service.resistance_warning_pct = max(0.1, float(config.board_resistance_warning_pct))
+        board_service.breakout_confirmation_pct = max(0.1, float(config.board_breakout_confirmation_pct))
+        board_service.breakout_min_volume_ratio = max(0.1, float(config.board_breakout_min_volume_ratio))
+        board_service.breakout_required_5m_closes = max(2, int(config.board_breakout_required_5m_closes))
+
+    def list_strategy_dashboard_accounts(
+        self,
+        *,
+        include_inactive: bool = False,
+    ) -> Dict[str, Any]:
+        """List strategy-owned paper accounts without changing the execution account."""
+
+        from src.services.hotspot_0945_paper_service import STRATEGY_SPECS
+
+        hotspot_ids = {item.strategy_id for item in STRATEGY_SPECS}
+        execution_account_id = _safe_int(self.get_settings().account_id)
+        items: List[Dict[str, Any]] = []
+        for account in self.portfolio.list_accounts(include_inactive=include_inactive):
+            owner_id = str(account.get("owner_id") or "").strip()
+            broker = str(account.get("broker") or "").strip()
+            if owner_id == CROSS_MARKET_STRATEGY_ID and broker == VNPY_PAPER_BROKER:
+                family = "cross_market"
+            elif owner_id in hotspot_ids and broker == "paper_0945":
+                family = "hotspot_0945"
+            else:
+                continue
+            item = dict(account)
+            item.update(
+                {
+                    "strategy_id": owner_id,
+                    "strategy_family": family,
+                    "is_execution_account": (
+                        execution_account_id is not None
+                        and int(account.get("id") or 0) == execution_account_id
+                    ),
+                    "archived": not bool(account.get("is_active", False)),
+                }
+            )
+            items.append(item)
+        items.sort(
+            key=lambda item: (
+                not bool(item.get("is_execution_account")),
+                not bool(item.get("is_active")),
+                int(item.get("id") or 0),
+            )
+        )
+        return {
+            "items": items,
+            "count": len(items),
+            "execution_account_id": execution_account_id,
+        }
+
+    def get_strategy_account_dashboard(self, account_id: int) -> Dict[str, Any]:
+        target_id = _safe_int(account_id)
+        if target_id is None or target_id <= 0:
+            raise ValueError("account_id is required")
+        accounts = self.list_strategy_dashboard_accounts(include_inactive=True)["items"]
+        account = next(
+            (item for item in accounts if int(item.get("id") or 0) == target_id),
+            None,
+        )
+        if account is None:
+            raise ValueError("strategy_dashboard_account_not_found")
+
+        snapshot: Optional[Dict[str, Any]] = None
+        snapshot_error: Optional[str] = None
+        try:
+            snapshot = self.portfolio.get_portfolio_snapshot(
+                account_id=target_id,
+                as_of=date.today(),
+                persist=False,
+            )
+        except Exception as exc:  # noqa: BLE001 - factors and progress must remain visible.
+            snapshot_error = f"{type(exc).__name__}: {exc}"[:300]
+
+        strategy_id = str(account.get("strategy_id") or "")
+        family = str(account.get("strategy_family") or "")
+        progress: Dict[str, Any] = {}
+        if family == "cross_market":
+            factors = strategy_factor_catalog(
+                self.cross_market_signal_engine.config,
+                self._cross_market_factor_overrides(),
+            )
+            acceptance_path = self.config_path.parent / "cross_market_strategy_acceptance.json"
+            acceptance = CrossMarketAcceptanceService(
+                repository=self.agent_repo,
+                state_path=acceptance_path,
+                current_account_id=target_id,
+            ).get_status()
+            observation = acceptance.get("paper_observation")
+            if isinstance(observation, dict):
+                progress = {
+                    "status": (
+                        "completed"
+                        if observation.get("ready") is True
+                        else "active"
+                        if observation.get("campaign_active") is True
+                        else "inactive"
+                    ),
+                    "target_sessions": observation.get("required_trading_days"),
+                    "completed_session_count": observation.get(
+                        "qualified_paper_trading_days"
+                    ),
+                    "remaining_sessions": observation.get(
+                        "remaining_trading_days"
+                    ),
+                    "started_on": observation.get("campaign_started_at"),
+                    "last_completed_session": observation.get(
+                        "latest_observation_date"
+                    ),
+                }
+        else:
+            from src.services.hotspot_0945_paper_service import Hotspot0945PaperService
+
+            hotspot_service = Hotspot0945PaperService(portfolio=self.portfolio)
+            factor_payload = hotspot_service.get_factor_catalog(strategy_id)
+            factors = factor_payload["items"]
+            hotspot_status = hotspot_service.status().get("strategies", {}).get(strategy_id, {})
+            progress = {
+                "status": hotspot_status.get("status"),
+                "target_sessions": 30,
+                "completed_session_count": hotspot_status.get("completed_session_count"),
+                "remaining_sessions": hotspot_status.get("remaining_sessions"),
+                "started_on": hotspot_status.get("started_on"),
+                "last_completed_session": hotspot_status.get("last_completed_session"),
+            }
+
+        return {
+            "account": account,
+            "snapshot": snapshot,
+            "snapshot_error": snapshot_error,
+            "progress": progress,
+            "factor_profile": {
+                "strategy_id": strategy_id,
+                "strategy_family": family,
+                "items": factors,
+                "editable": bool(account.get("is_active", False)),
+                "effective_from": "next_decision",
+            },
+        }
+
+    def update_strategy_account_factors(
+        self,
+        account_id: int,
+        overrides: Dict[str, Any],
+        *,
+        replace_existing: bool = True,
+    ) -> Dict[str, Any]:
+        dashboard = self.get_strategy_account_dashboard(account_id)
+        account = dashboard["account"]
+        if not bool(account.get("is_active", False)):
+            raise ValueError("archived_strategy_factors_read_only")
+        strategy_id = str(account.get("strategy_id") or "")
+        family = str(account.get("strategy_family") or "")
+        if family == "cross_market":
+            with self._lock:
+                payload = self._read_config_payload()
+                root = payload.get("strategy_factor_overrides")
+                if not isinstance(root, dict):
+                    root = {}
+                    payload["strategy_factor_overrides"] = root
+                existing = root.get(strategy_id, {})
+                merged = (
+                    dict(overrides)
+                    if replace_existing
+                    else {**dict(existing or {}), **dict(overrides)}
+                )
+                config = strategy_config_from_overrides(merged)
+                normalized = {
+                    key: getattr(config, key)
+                    for key in merged
+                }
+                root[strategy_id] = normalized
+                payload["updated_at"] = _utc_now_iso()
+                self._write_config_payload(payload)
+                self._apply_cross_market_factor_config(config)
+        else:
+            from src.services.hotspot_0945_paper_service import Hotspot0945PaperService
+
+            Hotspot0945PaperService(portfolio=self.portfolio).update_factor_overrides(
+                strategy_id,
+                overrides,
+                replace_existing=replace_existing,
+            )
+        return self.get_strategy_account_dashboard(account_id)
 
     def cleanup_archived_paper_accounts(
         self,
@@ -2884,6 +3174,9 @@ class VnpyPaperTradingService:
             if isinstance(paper_performance.get("trade_metrics"), dict)
             else {}
         )
+        unmatched_strategy_sell = bool(
+            (_safe_float(trade_metrics.get("unmatched_sell_quantity")) or 0.0) > 0
+        )
         explicit_cost = _safe_float(
             trade_metrics.get("total_transaction_cost")
         ) or 0.0
@@ -2923,6 +3216,8 @@ class VnpyPaperTradingService:
         warnings: List[str] = []
         if non_strategy_trades:
             warnings.append("campaign_account_contains_non_strategy_transactions")
+        if unmatched_strategy_sell:
+            warnings.append("campaign_contains_unmatched_strategy_sells")
         if int(observation.get("degraded_trading_days") or 0) > 0:
             warnings.append("campaign_contains_degraded_observation_days")
         if int(
@@ -2960,6 +3255,7 @@ class VnpyPaperTradingService:
         is_final = bool(
             acceptance_ready
             and not non_strategy_trades
+            and not unmatched_strategy_sell
             and execution_evidence_complete
         )
         report_status = (
@@ -2968,7 +3264,7 @@ class VnpyPaperTradingService:
             else "final_insufficient_sample"
             if is_final
             else "account_contaminated"
-            if acceptance_ready and non_strategy_trades
+            if acceptance_ready and (non_strategy_trades or unmatched_strategy_sell)
             else "execution_evidence_incomplete"
             if acceptance_ready and not execution_evidence_complete
             else "in_progress"
@@ -2991,7 +3287,9 @@ class VnpyPaperTradingService:
             },
             "transactions": campaign_trades,
             "transaction_count": len(campaign_trades),
-            "non_strategy_transaction_count": len(non_strategy_trades),
+            "non_strategy_transaction_count": (
+                len(non_strategy_trades) + int(unmatched_strategy_sell)
+            ),
             "statistical_sample": statistical_sample,
             "warnings": warnings,
         })
@@ -3380,6 +3678,12 @@ class VnpyPaperTradingService:
             int(formal.get("planned_count") or 0) > 0
             or int(formal.get("submitted_count") or 0) > 0
         ):
+            if allow_intraday_entry_recheck:
+                return self._cross_market_intraday_entry_recheck_guard(
+                    settings,
+                    window=window,
+                    formal_evidence=formal,
+                )
             return {
                 "block": True,
                 "reason": "formal_execution_activity_blocks_recovery",
@@ -3480,18 +3784,31 @@ class VnpyPaperTradingService:
                     "reason": "formal_execution_run_in_progress",
                     "formal_evidence": formal_evidence,
                 }
-            if any(
-                int(run.get("planned_count") or 0) > 0
-                or int(run.get("submitted_count") or 0) > 0
-                for run in matching_runs
-            ):
-                return {
-                    "block": True,
-                    "reason": "formal_execution_activity_blocks_recovery",
-                    "formal_evidence": formal_evidence,
-                }
-            run_uid = str(formal_evidence.get("run_uid") or "").strip()
-            detail = self.agent_repo.get_run_detail(run_uid) if run_uid else None
+            activity_symbols: set[str] = set()
+            audited_details: List[Dict[str, Any]] = []
+            for matching_run in matching_runs:
+                matching_uid = str(matching_run.get("run_uid") or "").strip()
+                matching_detail = (
+                    self.agent_repo.get_run_detail(matching_uid)
+                    if matching_uid
+                    else None
+                )
+                if not isinstance(matching_detail, dict):
+                    continue
+                audited_details.append(matching_detail)
+                for plan in list(matching_detail.get("trade_plans") or []):
+                    if not isinstance(plan, dict):
+                        continue
+                    if str(plan.get("side") or "").strip().lower() != "buy":
+                        continue
+                    if str(plan.get("status") or "").strip().lower() in {
+                        "skipped",
+                        "failed",
+                    }:
+                        continue
+                    symbol = self._normalize_symbol(plan.get("symbol") or "")
+                    if symbol:
+                        activity_symbols.add(symbol)
         except Exception as exc:  # noqa: BLE001 - duplicate order protection fails closed.
             return {
                 "block": True,
@@ -3499,18 +3816,23 @@ class VnpyPaperTradingService:
                 "formal_evidence": formal_evidence,
                 "error_type": type(exc).__name__,
             }
-        if not isinstance(detail, dict):
+        if not audited_details:
             return {
                 "block": True,
                 "reason": "formal_entry_recheck_audit_unavailable",
                 "formal_evidence": formal_evidence,
             }
-        skip_reasons = {
-            str(item.get("reason") or "").strip()
+        skipped_decisions = [
+            item
+            for detail in audited_details
             for item in list(detail.get("decisions") or [])
             if isinstance(item, dict)
             and str(item.get("action") or "").strip().lower() in {"hold", "skip"}
             and str(item.get("reason") or "").strip()
+        ]
+        skip_reasons = {
+            str(item.get("reason") or "").strip()
+            for item in skipped_decisions
         }
         recoverable_reasons = sorted(
             skip_reasons & CROSS_MARKET_INTRADAY_ENTRY_RECHECK_REASONS
@@ -3518,12 +3840,44 @@ class VnpyPaperTradingService:
         non_recoverable_reasons = sorted(
             skip_reasons - CROSS_MARKET_INTRADAY_ENTRY_RECHECK_REASONS
         )
+        candidate_reasons: Dict[str, set[str]] = {}
+        recoverable_identity_missing = False
+        non_recoverable_identity_missing = False
+        for item in skipped_decisions:
+            reason = str(item.get("reason") or "").strip()
+            symbol = self._normalize_symbol(item.get("symbol") or "")
+            if symbol:
+                candidate_reasons.setdefault(symbol, set()).add(reason)
+            elif reason in CROSS_MARKET_INTRADAY_ENTRY_RECHECK_REASONS:
+                recoverable_identity_missing = True
+            else:
+                non_recoverable_identity_missing = True
+        candidate_local_non_recoverable = {
+            symbol: sorted(reasons - CROSS_MARKET_INTRADAY_ENTRY_RECHECK_REASONS)
+            for symbol, reasons in candidate_reasons.items()
+            if reasons - CROSS_MARKET_INTRADAY_ENTRY_RECHECK_REASONS
+        }
+        recoverable_before_activity = {
+            symbol
+            for symbol, reasons in candidate_reasons.items()
+            if reasons
+            and not (reasons - CROSS_MARKET_INTRADAY_ENTRY_RECHECK_REASONS)
+        }
+        recoverable_candidate_symbols = sorted(
+            recoverable_before_activity - activity_symbols
+        )
         evidence_level_recovery = bool(
             formal_evidence.get("ready") is not True
             and not skip_reasons
         )
-        if non_recoverable_reasons or (
-            not recoverable_reasons and not evidence_level_recovery
+        if (
+            non_recoverable_identity_missing
+            or (not recoverable_reasons and not evidence_level_recovery)
+            or (
+                recoverable_reasons
+                and not recoverable_before_activity
+                and not recoverable_identity_missing
+            )
         ):
             return {
                 "block": True,
@@ -3531,6 +3885,25 @@ class VnpyPaperTradingService:
                 "formal_evidence": formal_evidence,
                 "entry_skip_reasons": sorted(skip_reasons),
                 "non_recoverable_reasons": non_recoverable_reasons,
+                "candidate_local_non_recoverable_reasons": (
+                    candidate_local_non_recoverable
+                ),
+            }
+        if recoverable_identity_missing:
+            return {
+                "block": True,
+                "reason": "formal_recovery_candidate_identity_unavailable",
+                "formal_evidence": formal_evidence,
+                "entry_skip_reasons": sorted(skip_reasons),
+                "non_recoverable_reasons": non_recoverable_reasons,
+            }
+        if recoverable_before_activity and not recoverable_candidate_symbols:
+            return {
+                "block": True,
+                "reason": "formal_recovery_candidates_already_active",
+                "formal_evidence": formal_evidence,
+                "activity_symbols": sorted(activity_symbols),
+                "entry_skip_reasons": sorted(skip_reasons),
             }
         return {
             "block": False,
@@ -3539,6 +3912,12 @@ class VnpyPaperTradingService:
             "intraday_entry_recheck": True,
             "formal_evidence": formal_evidence,
             "recoverable_reasons": recoverable_reasons,
+            "recoverable_candidate_symbols": recoverable_candidate_symbols,
+            "activity_symbols": sorted(activity_symbols),
+            "non_recoverable_reasons": non_recoverable_reasons,
+            "candidate_local_non_recoverable_reasons": (
+                candidate_local_non_recoverable
+            ),
             "evidence_level_recovery": evidence_level_recovery,
         }
 
@@ -3666,6 +4045,50 @@ class VnpyPaperTradingService:
         side_norm = (side or "").strip().lower()
         if side_norm not in {"buy", "sell"}:
             raise ValueError("side must be buy or sell")
+        source_norm = str(source or "").strip().lower()
+        strategy_payload = (
+            (raw or {}).get("cross_market_strategy")
+            if isinstance((raw or {}).get("cross_market_strategy"), dict)
+            else {}
+        )
+        is_manual_cross_market = source_norm in {
+            "cross_market_manual_entry",
+            "cross_market_manual_exit",
+        }
+        if is_manual_cross_market:
+            if (
+                settings.auto_strategy != CROSS_MARKET_STRATEGY_ID
+                or str(strategy_payload.get("strategy_id") or "").strip()
+                != CROSS_MARKET_STRATEGY_ID
+            ):
+                return self._skipped_order(
+                    symbol=symbol_norm,
+                    side=side_norm,
+                    reason="cross_market_strategy_inactive",
+                    message="The order cannot be attributed to an inactive strategy.",
+                )
+            if str(market or "").strip().lower() != "cn":
+                return self._skipped_order(
+                    symbol=symbol_norm,
+                    side=side_norm,
+                    reason="cross_market_manual_cn_only",
+                    message="Cross-market manual attribution is limited to A shares.",
+                )
+            theme = str(strategy_payload.get("theme") or "").strip().lower()
+            if side_norm == "buy" and theme not in TRADEABLE_THEMES:
+                return self._skipped_order(
+                    symbol=symbol_norm,
+                    side=side_norm,
+                    reason="cross_market_manual_theme_required",
+                    message="A valid cross-market theme is required for a strategy entry.",
+                )
+            if side_norm == "buy" and not is_cn_main_board_symbol(symbol_norm):
+                return self._skipped_order(
+                    symbol=symbol_norm,
+                    side=side_norm,
+                    reason="trading_permission_main_board_only",
+                    message="The paper account currently permits main-board A shares only.",
+                )
 
         fill_price, price_source = self._resolve_order_price(symbol_norm, price)
         if fill_price is None or fill_price <= 0:
@@ -3834,7 +4257,32 @@ class VnpyPaperTradingService:
 
         trade_uid = f"vnpy-paper-{uuid.uuid4().hex}"
         dedup_hash = self._dedup_hash(dedup_key) if dedup_key else None
-        trade_note = self._build_trade_note(source=source, note=note, price_source=price_source)
+        ledger_source = source
+        ledger_note = note
+        if is_manual_cross_market:
+            ledger_source = (
+                "cross_market_auto_entry"
+                if side_norm == "buy"
+                else "cross_market_auto_exit"
+            )
+            if side_norm == "buy":
+                decision = (
+                    strategy_payload.get("decision")
+                    if isinstance(strategy_payload.get("decision"), dict)
+                    else {}
+                )
+                reason = str(
+                    decision.get("reason") or "user_directed_manual_entry"
+                ).replace(";", "")[:128]
+                theme = str(strategy_payload.get("theme") or "").replace(";", "")[:32]
+                ledger_note = (
+                    f"{note}; " if str(note or "").strip() else ""
+                ) + f"entry_reason={reason}; entry_theme={theme}"
+        trade_note = self._build_trade_note(
+            source=ledger_source,
+            note=ledger_note,
+            price_source=price_source,
+        )
         try:
             created = self.portfolio.record_trade(
                 account_id=account_id,
@@ -3999,8 +4447,10 @@ class VnpyPaperTradingService:
                 message=str(exc),
                 raw={"error_type": type(exc).__name__, **(raw or {})},
             )
-        if str(source or "").strip().lower() == "manual":
+        source_norm = str(source or "").strip().lower()
+        if source_norm == "manual" or source_norm.startswith("cross_market_manual_"):
             now = _utc_now_iso()
+            raw_payload = dict(raw or {})
             self._record_vnpy_order_state(
                 str(submitted["vt_orderid"]),
                 {
@@ -4008,7 +4458,12 @@ class VnpyPaperTradingService:
                     "status": "submitted",
                     "managed_submission": {
                         "version": 1,
-                        "kind": "manual",
+                        "kind": (
+                            "cross_market_manual"
+                            if source_norm.startswith("cross_market_manual_")
+                            else "manual"
+                        ),
+                        "source": source_norm,
                         "account_id": account_id,
                         "symbol": symbol,
                         "side": side,
@@ -4018,6 +4473,8 @@ class VnpyPaperTradingService:
                         "cash_amount": round(float(cash_amount), 6),
                         "gateway_name": str(submitted.get("gateway_name") or "").strip(),
                         "order_request_payload": submitted.get("order_request_payload") or {},
+                        "cross_market_strategy": raw_payload.get("cross_market_strategy"),
+                        "execution_costs": raw_payload.get("execution_costs"),
                         "created_at": now,
                         "fill_sync": {
                             "target_quantity": round(float(quantity), 8),
@@ -4689,6 +5146,59 @@ class VnpyPaperTradingService:
 
             fee_value = _safe_float(fee) or 0.0
             tax_value = _safe_float(tax) or 0.0
+            strategy_payload = managed.get("cross_market_strategy")
+            is_cross_market_fill = (
+                isinstance(strategy_payload, dict)
+                and str(strategy_payload.get("strategy_id") or "").strip()
+                == CROSS_MARKET_STRATEGY_ID
+            )
+            if is_cross_market_fill:
+                instrument_type = str(
+                    (managed.get("execution_costs") or {}).get("instrument_type")
+                    if isinstance(managed.get("execution_costs"), dict)
+                    else "stock"
+                ).strip().lower() or "stock"
+                previous_costs = (
+                    TradeFeeSchedule().calculate(
+                        side=side_norm,
+                        notional=previous_notional,
+                        instrument_type=instrument_type,
+                    )
+                    if previous_notional > 0
+                    else {"commission": 0.0, "stamp_tax": 0.0, "transfer_fee": 0.0}
+                )
+                cumulative_costs = TradeFeeSchedule().calculate(
+                    side=side_norm,
+                    notional=previous_notional + trade_quantity * trade_price,
+                    instrument_type=instrument_type,
+                )
+                if fee_value <= 0:
+                    fee_value = (
+                        float(cumulative_costs["commission"])
+                        - float(previous_costs["commission"])
+                        + float(cumulative_costs["transfer_fee"])
+                        - float(previous_costs["transfer_fee"])
+                    )
+                if tax_value <= 0:
+                    tax_value = (
+                        float(cumulative_costs["stamp_tax"])
+                        - float(previous_costs["stamp_tax"])
+                    )
+                fee_value = round(max(0.0, fee_value), 6)
+                tax_value = round(max(0.0, tax_value), 6)
+            callback_source = (
+                "cross_market_auto_entry"
+                if is_cross_market_fill and side_norm == "buy"
+                else "cross_market_auto_exit"
+                if is_cross_market_fill
+                else "vnpy_manual_callback"
+            )
+            callback_note = f"vn.py manual callback vt_orderid={vt_orderid}"
+            if is_cross_market_fill and side_norm == "buy":
+                decision = strategy_payload.get("decision") if isinstance(strategy_payload.get("decision"), dict) else {}
+                entry_reason = str(decision.get("reason") or "user_directed_manual_entry").replace(";", "")[:128]
+                entry_theme = str(strategy_payload.get("theme") or "").strip().lower().replace(";", "")[:32]
+                callback_note += f"; entry_reason={entry_reason}; entry_theme={entry_theme}"
             trade_uid = f"vnpy-trade-{self._dedup_hash(trade_identity)}"
             try:
                 created = self.portfolio.record_trade(
@@ -4705,8 +5215,8 @@ class VnpyPaperTradingService:
                     trade_uid=trade_uid,
                     dedup_hash=self._dedup_hash(f"vnpy-trade:{trade_identity}"),
                     note=self._build_trade_note(
-                        source="vnpy_manual_callback",
-                        note=f"vn.py manual callback vt_orderid={vt_orderid}",
+                        source=callback_source,
+                        note=callback_note,
                         price_source="callback",
                     ),
                 )
@@ -5244,6 +5754,55 @@ class VnpyPaperTradingService:
             "raw": snapshot,
         }
 
+    def _sync_vnpy_position_event_callback(
+        self,
+        *,
+        position: Dict[str, Any],
+        raw: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Merge one vn.py position event into the persisted diagnostic snapshot."""
+
+        normalized = self._normalize_vnpy_position(position)
+        if not normalized or normalized.get("volume") is None:
+            raise ValueError("vn.py position event is incomplete")
+
+        with self._lock:
+            state = self._read_vnpy_sync_state()
+            current = state.get("positions") if isinstance(state.get("positions"), list) else []
+            merged: List[Dict[str, Any]] = []
+            replaced = False
+            for item in current:
+                existing = self._normalize_vnpy_position(item)
+                if existing and self._same_vnpy_position(existing, normalized):
+                    if not replaced and abs(float(normalized["volume"])) > 1e-9:
+                        merged.append(normalized)
+                    replaced = True
+                    continue
+                if existing:
+                    merged.append(existing)
+            if not replaced and abs(float(normalized["volume"])) > 1e-9:
+                merged.append(normalized)
+            merged.sort(
+                key=lambda item: (
+                    str(item.get("vt_symbol") or item.get("symbol") or ""),
+                    str(item.get("direction") or ""),
+                )
+            )
+            snapshot = {
+                "positions": merged,
+                "count": len(merged),
+                "raw": raw or {},
+                "updated_at": _utc_now_iso(),
+            }
+            self._record_vnpy_positions_state(snapshot)
+        return {
+            "accepted": True,
+            "status": "synced",
+            "message": "vn.py position event merged for diagnostics.",
+            "reason": None,
+            "raw": snapshot,
+        }
+
     def attach_vnpy_event_engine(self, event_engine: Optional[Any] = None) -> VnpyEventSubscriptionBridge:
         """Register this service on a vn.py EventEngine-like object."""
 
@@ -5272,6 +5831,8 @@ class VnpyPaperTradingService:
         calibration_shadow: bool = False,
         trigger_source_override: Optional[str] = None,
         allow_cross_market_intraday_entry_recheck: bool = False,
+        analysis_slot_override: Optional[str] = None,
+        candidate_symbols_override: Optional[Sequence[str]] = None,
     ) -> Dict[str, Any]:
         run_timing_started = time.monotonic()
         stage_timing_started = run_timing_started
@@ -5374,6 +5935,21 @@ class VnpyPaperTradingService:
                 auto_failure_fuse_enabled=False,
                 auto_failure_fuse_auto_recovery_enabled=False,
             )
+        run_analysis_slot = str(analysis_slot_override or "").strip()
+        if run_analysis_slot and run_analysis_slot not in {
+            FORMAL_ENTRY_TIME.strftime("%H:%M"),
+            "10:40",
+            "13:30",
+            "14:30",
+        }:
+            raise ValueError("analysis_slot_override must be a known cross-market audit slot")
+        if not run_analysis_slot and run_trigger_source == "vnpy_paper_auto":
+            run_analysis_slot = FORMAL_ENTRY_TIME.strftime("%H:%M")
+        run_candidate_symbols = {
+            self._normalize_symbol(symbol)
+            for symbol in list(candidate_symbols_override or [])
+            if self._normalize_symbol(symbol)
+        }
         if settings.auto_strategy in LEGACY_CROSS_MARKET_STRATEGY_IDS:
             finish_timing_stage("legacy_strategy_guard")
             result = {
@@ -5391,13 +5967,16 @@ class VnpyPaperTradingService:
                 "orders": [],
                 "messages": [
                     "The saved cross-market strategy belongs to an older campaign. "
-                    "Start the V1.3 campaign through an explicit account migration."
+                    "Start the V1.4 campaign through an explicit account migration."
                 ],
             }
             record_last_run(result)
             return result
         settings = self._apply_cross_market_strategy_settings(settings)
         if settings.auto_strategy == CROSS_MARKET_STRATEGY_ID:
+            self._apply_cross_market_factor_config(
+                self._cross_market_factor_config()
+            )
             campaign_guard = self._cross_market_campaign_execution_guard(settings)
             if campaign_guard.get("block") is True:
                 finish_timing_stage("campaign_guard")
@@ -5512,6 +6091,8 @@ class VnpyPaperTradingService:
                 "intraday_entry_recheck": bool(
                     allow_cross_market_intraday_entry_recheck
                 ),
+                "analysis_slot": run_analysis_slot or None,
+                "candidate_symbols_override": sorted(run_candidate_symbols),
                 "runtime_overrides": {
                     "market": override_market or None,
                     "strategy": override_strategy or None,
@@ -5753,9 +6334,20 @@ class VnpyPaperTradingService:
         run_diagnostics["same_run_exit_symbols"] = sorted(same_run_exit_orders)
 
         cross_market_global_entry_gate: Dict[str, Any] = {}
+        cross_market_entry_phase = ""
         if settings.auto_strategy == CROSS_MARKET_STRATEGY_ID:
+            cross_market_entry_phase = (
+                "intraday_dip"
+                if (
+                    run_trigger_source == CROSS_MARKET_INTRADAY_ENTRY_TRIGGER_SOURCE
+                    or allow_cross_market_intraday_entry_recheck
+                    or run_analysis_slot in {"10:40", "13:30", "14:30"}
+                )
+                else "opening"
+            )
             cross_market_global_entry_gate = self._cross_market_global_entry_gate(
-                cross_market_observation
+                cross_market_observation,
+                entry_phase=cross_market_entry_phase,
             )
             cross_market_global_entry_gate.update({
                 "sell_checks_completed_before_gate": True,
@@ -5941,16 +6533,30 @@ class VnpyPaperTradingService:
         run_diagnostics["llm_parse_errors"] = list(screen.get("llm_parse_errors") or [])
         screened_candidates = list(screen.get("candidates") or [])
         if settings.auto_strategy == CROSS_MARKET_STRATEGY_ID:
-            entry_phase = (
-                "intraday_dip"
-                if (
-                    run_trigger_source == CROSS_MARKET_INTRADAY_ENTRY_TRIGGER_SOURCE
-                    or allow_cross_market_intraday_entry_recheck
-                )
-                else "opening"
-            )
+            if run_candidate_symbols:
+                screened_candidates = [
+                    candidate
+                    for candidate in screened_candidates
+                    if isinstance(candidate, dict)
+                    and self._normalize_symbol(
+                        candidate.get("code") or candidate.get("symbol") or ""
+                    )
+                    in run_candidate_symbols
+                ]
+            entry_phase = cross_market_entry_phase or "opening"
+            screened_candidate_themes = {
+                str(
+                    candidate.get("_cross_market_source_theme")
+                    or self.cross_market_signal_engine.classify_theme(candidate)
+                ).strip().lower()
+                for candidate in screened_candidates
+                if isinstance(candidate, dict)
+            }
             active_theme_scores, active_theme_evidence = (
-                self._cross_market_active_theme_scores(entry_phase=entry_phase)
+                self._cross_market_active_theme_scores(
+                    entry_phase=entry_phase,
+                    domestic_candidate_themes=screened_candidate_themes,
+                )
             )
             candidate_decision_limit = self._auto_candidate_decision_limit(settings)
             (
@@ -5977,6 +6583,7 @@ class VnpyPaperTradingService:
                 {
                     **candidate,
                     "_cross_market_entry_phase": entry_phase,
+                    "_cross_market_analysis_slot": run_analysis_slot or None,
                 }
                 if isinstance(candidate, dict)
                 else candidate
@@ -6107,11 +6714,64 @@ class VnpyPaperTradingService:
         currency_budget_reason = None if currency_budget.get("available") else "fx_rate_unavailable"
         exposure_state = self._position_exposure_state(settings)
         held_symbols = set(exposure_state.get("held_symbols") or set())
+        position_values = (
+            exposure_state.get("position_values")
+            if isinstance(exposure_state.get("position_values"), dict)
+            else {}
+        )
+        position_symbols = {
+            self._normalize_symbol(symbol)
+            for symbol, value in position_values.items()
+            if self._normalize_symbol(symbol)
+            and float(_safe_float(value) or 0.0) > PAPER_EPS
+        }
+        occupied_themes: set[str] = set()
         blacklisted_symbols = set(settings.auto_symbol_blacklist or [])
         daily_usage = self._daily_auto_trade_usage(settings)
         daily_order_count = int(daily_usage["order_count"])
         daily_cash_used = float(daily_usage["cash_amount"])
         daily_usage_fx_unavailable = bool(daily_usage.get("fx_unavailable"))
+        active_plan_usage = (
+            daily_usage.get("active_plan_usage")
+            if isinstance(daily_usage.get("active_plan_usage"), dict)
+            else {}
+        )
+        for active_symbol in list(active_plan_usage.get("symbols") or []):
+            normalized_active_symbol = self._normalize_symbol(active_symbol)
+            if normalized_active_symbol:
+                held_symbols.add(normalized_active_symbol)
+        if active_plan_usage:
+            run_diagnostics["cross_market_active_buy_plan_usage"] = active_plan_usage
+            occupied_themes.update(
+                str(theme).strip().lower()
+                for theme in list(active_plan_usage.get("themes") or [])
+                if str(theme).strip().lower() in TRADEABLE_THEMES
+            )
+        if settings.auto_strategy == CROSS_MARKET_STRATEGY_ID and held_symbols:
+            occupied_themes.update(
+                self._cross_market_open_position_themes(
+                    settings=settings,
+                    symbols=sorted(held_symbols),
+                )
+            )
+            if occupied_themes:
+                candidates = sorted(
+                    candidates,
+                    key=lambda candidate: (
+                        str(
+                            candidate.get("_cross_market_prefilter_theme")
+                            or candidate.get("_cross_market_source_theme")
+                            or ""
+                        ).strip().lower()
+                        in occupied_themes
+                        if isinstance(candidate, dict)
+                        else True,
+                    ),
+                )
+                run_diagnostics["cross_market_theme_diversification"] = {
+                    "policy": "prefer_different_theme_same_theme_new_symbol_requires_grade_a",
+                    "occupied_themes": sorted(occupied_themes),
+                }
         portfolio_allocation = self._candidate_portfolio_allocation(
             settings=settings,
             candidates=candidates[: settings.auto_max_results],
@@ -6344,6 +7004,33 @@ class VnpyPaperTradingService:
                         order=order,
                         reason=reason,
                         risk_flags=[reason],
+                    )
+                    continue
+                diversification_reason = self._cross_market_theme_diversification_reason(
+                    symbol=symbol,
+                    theme=cross_market_entry_theme,
+                    entry_grade=cross_market_decision.entry_grade,
+                    position_symbols=position_symbols,
+                    occupied_themes=occupied_themes,
+                )
+                if diversification_reason:
+                    order = self._skipped_order(
+                        symbol=symbol,
+                        side="buy",
+                        reason=diversification_reason,
+                        raw=candidate,
+                    )
+                    orders.append(order)
+                    self._record_agent_decision(
+                        run_id=run_id,
+                        sequence=index,
+                        candidate=candidate,
+                        symbol=symbol,
+                        settings=settings,
+                        action="skip",
+                        order=order,
+                        reason=diversification_reason,
+                        risk_flags=[diversification_reason],
                     )
                     continue
             same_run_exit = same_run_exit_orders.get(symbol)
@@ -6768,7 +7455,13 @@ class VnpyPaperTradingService:
                     risk_flags=[llm_reason],
                 )
                 continue
-            dedup_key = f"{date.today().isoformat()}:{settings.auto_strategy}:{settings.auto_market}:{symbol}"
+            analysis_slot = str(
+                candidate.get("_cross_market_analysis_slot") or "unslotted"
+            ).strip().replace(":", "")
+            dedup_key = (
+                f"{date.today().isoformat()}:{settings.auto_strategy}:"
+                f"{settings.auto_market}:{symbol}:{analysis_slot}"
+            )
             if settings.auto_execution_mode in {"dry_run", "manual_approval"}:
                 plan_reason = "pending_approval" if settings.auto_execution_mode == "manual_approval" else "dry_run"
                 order = self._planned_order(
@@ -6782,6 +7475,37 @@ class VnpyPaperTradingService:
                         "fx_conversion": candidate_currency_budget,
                         "portfolio_allocation": allocation_entry,
                         "target_weight_sizing": target_sizing,
+                    },
+                )
+            elif (
+                settings.auto_strategy == CROSS_MARKET_STRATEGY_ID
+                and settings.auto_execution_mode == "vnpy_paper"
+                and _cross_market_active_entry_slot() is None
+            ):
+                order = self._skipped_order(
+                    symbol=symbol,
+                    side="buy",
+                    cash_amount=float(candidate_currency_budget["quote_cash_amount"]),
+                    price=candidate_price,
+                    reason="cross_market_entry_watch_window_closed",
+                    message=(
+                        "Cross-market buys are allowed only from 09:30 to 09:35 "
+                        "or for the bounded 10:40 recovery scan in Asia/Shanghai."
+                    ),
+                    raw={
+                        **candidate,
+                        "fx_conversion": candidate_currency_budget,
+                        "portfolio_allocation": allocation_entry,
+                        "target_weight_sizing": target_sizing,
+                        "entry_watch_start": FORMAL_ENTRY_TIME.strftime("%H:%M"),
+                        "entry_watch_window_seconds": FORMAL_ENTRY_WINDOW_SECONDS,
+                        "recovery_entry_times": [
+                            value.strftime("%H:%M")
+                            for value in CROSS_MARKET_INTRADAY_ENTRY_TIMES
+                        ],
+                        "recovery_entry_window_seconds": (
+                            CROSS_MARKET_INTRADAY_ENTRY_WINDOW_SECONDS
+                        ),
                     },
                 )
             elif (
@@ -6855,6 +7579,8 @@ class VnpyPaperTradingService:
             )
             if order.get("accepted") or order.get("status") == "planned":
                 held_symbols.add(symbol)
+                if cross_market_entry_theme:
+                    occupied_themes.add(cross_market_entry_theme)
                 self._apply_planned_exposure(exposure_state, symbol, order, settings=settings, candidate=candidate)
             if order.get("accepted") or order.get("status") == "planned":
                 buy_activity_count += 1
@@ -6929,6 +7655,7 @@ class VnpyPaperTradingService:
         """Run the strategy's risk-reducing exits without screening new buys."""
 
         settings = self._apply_cross_market_strategy_settings(self.get_settings())
+        self._apply_cross_market_factor_config(self._cross_market_factor_config())
         if not settings.enabled:
             return {"accepted": False, "skipped": True, "reason": "vnpy_paper_disabled"}
         if not settings.auto_trade_enabled:
@@ -6960,16 +7687,6 @@ class VnpyPaperTradingService:
 
         account = self.ensure_account(settings=settings)
         account_id = int(account["id"])
-        corporate_action_sync = self._sync_cross_market_corporate_actions(
-            settings=settings,
-        )
-        if corporate_action_sync.get("available") is not True:
-            return {
-                "accepted": False,
-                "skipped": True,
-                "reason": "cross_market_corporate_action_evidence_unavailable",
-                "corporate_action_sync": corporate_action_sync,
-            }
         try:
             snapshot = self.portfolio.get_portfolio_snapshot(
                 account_id=account_id,
@@ -6988,6 +7705,7 @@ class VnpyPaperTradingService:
         account_snapshot = accounts[0] if accounts and isinstance(accounts[0], dict) else snapshot
         positions = [item for item in account_snapshot.get("positions", []) if isinstance(item, dict)]
         owned_symbols: List[str] = []
+        sellable_symbols: List[str] = []
         attribution_unavailable = False
         for position in positions:
             symbol = self._normalize_symbol(position.get("symbol") or "")
@@ -7004,8 +7722,17 @@ class VnpyPaperTradingService:
             if strategy_position.get("status") != "available":
                 attribution_unavailable = True
                 continue
-            if min(quantity, float(strategy_position.get("quantity") or 0.0)) > PAPER_EPS:
+            strategy_quantity = min(
+                quantity,
+                float(strategy_position.get("quantity") or 0.0),
+            )
+            if strategy_quantity > PAPER_EPS:
                 owned_symbols.append(symbol)
+                if min(
+                    strategy_quantity,
+                    float(strategy_position.get("sellable_quantity") or 0.0),
+                ) > PAPER_EPS:
+                    sellable_symbols.append(symbol)
 
         if not owned_symbols:
             if not attribution_unavailable and self._load_trailing_peaks():
@@ -7020,6 +7747,24 @@ class VnpyPaperTradingService:
                 ),
                 "account_position_count": len(positions),
             }
+        if not sellable_symbols:
+            return {
+                "accepted": False,
+                "skipped": True,
+                "reason": "no_cross_market_sellable_positions",
+                "account_position_count": len(positions),
+                "strategy_position_count": len(set(owned_symbols)),
+            }
+        corporate_action_sync = self._sync_cross_market_corporate_actions(
+            settings=settings,
+        )
+        if corporate_action_sync.get("available") is not True:
+            return {
+                "accepted": False,
+                "skipped": True,
+                "reason": "cross_market_corporate_action_evidence_unavailable",
+                "corporate_action_sync": corporate_action_sync,
+            }
 
         run_uid = (
             f"ss-agent-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-"
@@ -7031,7 +7776,7 @@ class VnpyPaperTradingService:
             "trigger_source": CROSS_MARKET_INTRADAY_SELL_TRIGGER_SOURCE,
             "sell_only": True,
             "places_buy_orders": False,
-            "owned_symbols": sorted(set(owned_symbols)),
+            "owned_symbols": sorted(set(sellable_symbols)),
             "trading_window": window,
         }
         with self._lock:
@@ -7054,7 +7799,7 @@ class VnpyPaperTradingService:
             self.agent_repo.complete_run(
                 run_id=run_id,
                 status="failed",
-                candidate_count=len(owned_symbols),
+                candidate_count=len(sellable_symbols),
                 planned_count=0,
                 submitted_count=0,
                 skipped_count=0,
@@ -7085,7 +7830,7 @@ class VnpyPaperTradingService:
             "strategy": settings.auto_strategy,
             "market": settings.auto_market,
             "sell_only": True,
-            "candidate_count": len(owned_symbols),
+            "candidate_count": len(sellable_symbols),
             "planned_count": planned_count,
             "submitted_count": submitted_count,
             "skipped_count": skipped_count,
@@ -7095,7 +7840,7 @@ class VnpyPaperTradingService:
         self.agent_repo.complete_run(
             run_id=run_id,
             status="completed",
-            candidate_count=len(owned_symbols),
+            candidate_count=len(sellable_symbols),
             planned_count=planned_count,
             submitted_count=submitted_count,
             skipped_count=skipped_count,
@@ -7549,6 +8294,7 @@ class VnpyPaperTradingService:
             "cross_market_count": 0,
             "continued_count": 0,
             "cancel_requested_count": 0,
+            "reprice_requested_count": 0,
             "protected_count": 0,
             "failed_count": 0,
             "orders": [],
@@ -7634,13 +8380,35 @@ class VnpyPaperTradingService:
                 and remaining_quantity > PAPER_EPS
                 and float(allowed_quantity or 0.0) + PAPER_EPS < remaining_quantity
             )
-            if reason is None and not quantity_reduced:
+            sell_order_pricing = (
+                evidence.get("sell_order_pricing")
+                if isinstance(evidence.get("sell_order_pricing"), dict)
+                else {}
+            )
+            submitted_price = (
+                _safe_float(plan.get("submitted_price"))
+                or _safe_float(plan.get("planned_price"))
+            )
+            replacement_price = _safe_float(sell_order_pricing.get("limit_price"))
+            rejection_reason = str(raw.get("rejected_reason") or "").strip().lower()
+            reprice_required = bool(
+                reason is None
+                and str(plan.get("side") or "").strip().lower() == "sell"
+                and str(evidence.get("sell_reason") or "").strip() == "hard_stop_loss"
+                and rejection_reason == "limit_not_touched"
+                and submitted_price is not None
+                and replacement_price is not None
+                and replacement_price + 0.005 < submitted_price
+            )
+            if reason is None and not quantity_reduced and not reprice_required:
                 result["continued_count"] = int(result["continued_count"]) + 1
                 continue
 
             cancel_reason = (
                 "paper_campaign_completed"
                 if reason == "paper_campaign_completed"
+                else "cross_market_active_sell_reprice_required"
+                if reprice_required
                 else "cross_market_active_quantity_reduced"
                 if quantity_reduced
                 else "cross_market_active_signal_expired"
@@ -7652,6 +8420,9 @@ class VnpyPaperTradingService:
                 "revalidation_reason": reason,
                 "remaining_quantity": remaining_quantity,
                 "allowed_quantity": allowed_quantity,
+                "submitted_price": submitted_price,
+                "replacement_price": replacement_price,
+                "rejection_reason": rejection_reason or None,
                 "evidence": evidence,
             }
             try:
@@ -7675,12 +8446,20 @@ class VnpyPaperTradingService:
             result["orders"].append(cancelled)
             if cancelled.get("accepted") and self._trade_plan_status(cancelled) == "cancel_requested":
                 result["cancel_requested_count"] = int(result["cancel_requested_count"]) + 1
+                if reprice_required:
+                    result["reprice_requested_count"] = int(
+                        result["reprice_requested_count"]
+                    ) + 1
             else:
                 result["protected_count"] = int(result["protected_count"]) + 1
                 result["failed_count"] = int(result["failed_count"]) + 1
         if int(result["cancel_requested_count"]):
             result["messages"].append(
                 f"cross_market_active_cancel_requested:{result['cancel_requested_count']}"
+            )
+        if int(result["reprice_requested_count"]):
+            result["messages"].append(
+                f"cross_market_active_sell_reprice_requested:{result['reprice_requested_count']}"
             )
         return result
 
@@ -8469,10 +9248,31 @@ class VnpyPaperTradingService:
                     current_price = _safe_float(
                         ((revalidation.get("current") or {}).get("candidate_intraday") or {}).get("price")
                         if side == "buy"
-                        else (revalidation.get("quote") or {}).get("price")
+                        else (revalidation.get("sell_order_pricing") or {}).get("limit_price")
+                        or (revalidation.get("quote") or {}).get("price")
                     )
                     if current_price is not None and current_price > 0:
                         submission_price = current_price
+                if (
+                    not revalidation_reason
+                    and side == "buy"
+                    and _cross_market_active_entry_slot() is None
+                ):
+                    revalidation_reason = "cross_market_entry_watch_window_closed"
+                    planned_quantity = 0.0
+                    revalidation = {
+                        **revalidation,
+                        "checked_at": _utc_now_iso(),
+                        "entry_watch_start": FORMAL_ENTRY_TIME.strftime("%H:%M"),
+                        "entry_watch_window_seconds": FORMAL_ENTRY_WINDOW_SECONDS,
+                        "recovery_entry_times": [
+                            value.strftime("%H:%M")
+                            for value in CROSS_MARKET_INTRADAY_ENTRY_TIMES
+                        ],
+                        "recovery_entry_window_seconds": (
+                            CROSS_MARKET_INTRADAY_ENTRY_WINDOW_SECONDS
+                        ),
+                    }
             if revalidation_reason:
                 order = self._skipped_order(
                     symbol=symbol,
@@ -8792,6 +9592,13 @@ class VnpyPaperTradingService:
 
         evidence["sell_reason"] = sell_reason
         evidence["sell_fraction"] = sell_fraction
+        sell_limit_price, sell_order_pricing = self._cross_market_sell_limit_price(
+            quote=quote,
+            reason=sell_reason,
+        )
+        evidence["sell_order_pricing"] = sell_order_pricing
+        if sell_limit_price is None:
+            return "cross_market_plan_sell_price_unavailable", quantity, evidence
         account_quantity = float(_safe_float(position.get("quantity")) or 0.0)
         currency = str(position.get("currency") or self._currency_for_market(market)).strip().upper()
         account_sellable = (
@@ -9011,8 +9818,23 @@ class VnpyPaperTradingService:
     def _handle_vnpy_position_event(self, event: Any) -> bool:
         try:
             data = self._event_data(event)
-            self.sync_vnpy_positions_callback(
-                positions=[self._event_raw(event, data)],
+            position = self._event_raw(event, data)
+            position.update(
+                {
+                    "symbol": self._event_value(data, "symbol"),
+                    "vt_symbol": self._event_value(data, "vt_symbol", "vtSymbol"),
+                    "market": self._market_from_vnpy_exchange(
+                        self._event_value(data, "exchange")
+                    ),
+                    "direction": self._event_text(
+                        self._event_value(data, "direction")
+                    ),
+                    "volume": self._event_value(data, "volume", "quantity"),
+                    "price": self._event_value(data, "price", "avg_price", "avgPrice"),
+                }
+            )
+            self._sync_vnpy_position_event_callback(
+                position=position,
                 raw={"event_type": self._event_value(event, "type")},
             )
             return True
@@ -9264,12 +10086,13 @@ class VnpyPaperTradingService:
         symbol = self._normalize_symbol(symbol)
         if not symbol:
             return {}
-        volume = (
-            _safe_float(position.get("volume"))
-            or _safe_float(position.get("quantity"))
-            or _safe_float(position.get("net_position"))
-            or _safe_float(position.get("netPosition"))
-        )
+        volume = None
+        for key in ("volume", "quantity", "net_position", "netPosition"):
+            if key not in position:
+                continue
+            volume = _safe_float(position.get(key))
+            if volume is not None:
+                break
         return {
             "symbol": symbol,
             "vt_symbol": vt_symbol or None,
@@ -9282,6 +10105,20 @@ class VnpyPaperTradingService:
             "pnl": _safe_float(position.get("pnl") or position.get("holding_pnl") or position.get("holdingPnl")),
             "raw": position.get("raw") if isinstance(position.get("raw"), dict) else position,
         }
+
+    @staticmethod
+    def _same_vnpy_position(left: Dict[str, Any], right: Dict[str, Any]) -> bool:
+        left_direction = str(left.get("direction") or "").strip().casefold()
+        right_direction = str(right.get("direction") or "").strip().casefold()
+        if left_direction != right_direction:
+            return False
+        left_vt_symbol = str(left.get("vt_symbol") or "").strip().casefold()
+        right_vt_symbol = str(right.get("vt_symbol") or "").strip().casefold()
+        if left_vt_symbol and right_vt_symbol:
+            return left_vt_symbol == right_vt_symbol
+        return str(left.get("symbol") or "").strip().casefold() == str(
+            right.get("symbol") or ""
+        ).strip().casefold()
 
     def _read_config_payload(self) -> Dict[str, Any]:
         last_error: Optional[Exception] = None
@@ -10095,13 +10932,7 @@ class VnpyPaperTradingService:
     @staticmethod
     def _cross_market_cn_main_board_symbol(symbol: str) -> bool:
         """Limit new strategy entries to Shanghai and Shenzhen main boards."""
-
-        normalized = str(symbol or "").strip()
-        return bool(
-            len(normalized) == 6
-            and normalized.isdigit()
-            and normalized.startswith(CROSS_MARKET_CN_MAIN_BOARD_PREFIXES)
-        )
+        return is_cn_main_board_symbol(symbol)
 
     def _cross_market_theme_prefilter(
         self,
@@ -10247,13 +11078,22 @@ class VnpyPaperTradingService:
         *,
         entry_phase: str = "opening",
         now: Optional[datetime] = None,
+        domestic_candidate_themes: Optional[Sequence[str]] = None,
     ) -> Tuple[Dict[str, float], Dict[str, Any]]:
         """Resolve close-led opening themes or premarket-led intraday dips."""
 
         current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
         normalized_phase = str(entry_phase or "opening").strip().lower()
+        domestic_themes = {
+            str(theme or "").strip().lower()
+            for theme in list(domestic_candidate_themes or [])
+            if str(theme or "").strip()
+        }
         scores: Dict[str, float] = {}
-        evidence: Dict[str, Any] = {"entry_phase": normalized_phase}
+        evidence: Dict[str, Any] = {
+            "entry_phase": normalized_phase,
+            "domestic_candidate_themes": sorted(domestic_themes),
+        }
         regular_us = self.cross_market_signal_service.get_us_tech_signal_for_cn_trade(
             now=current
         )
@@ -10386,6 +11226,25 @@ class VnpyPaperTradingService:
                     if native_premarket_ready
                     else "asia_supply_chain"
                 )
+            elif (
+                theme in domestic_themes
+                and theme in DOMESTIC_ROTATION_THEMES
+            ):
+                scores[theme] = 0.0
+                evidence[theme]["active_score_source"] = (
+                    "domestic_candidate_fallback"
+                )
+                evidence[theme]["domestic_rotation_fallback"] = True
+
+        for theme in sorted(domestic_themes & DOMESTIC_ROTATION_THEMES):
+            if theme in evidence:
+                continue
+            scores[theme] = 0.0
+            evidence[theme] = {
+                "active_score_source": "domestic_candidate_fallback",
+                "domestic_rotation_fallback": True,
+                "regular_us_technology_required": False,
+            }
 
         cpo = self.cross_market_signal_service.get_cpo_signal_for_cn_trade(now=current)
         evidence["cpo_independent"] = cpo
@@ -10620,20 +11479,7 @@ class VnpyPaperTradingService:
                 filtered[0].get("_cross_market_prefilter_theme") or "other"
             ).strip().lower()
             actual_family = actual_theme
-            if actual_family not in {
-                "semiconductor",
-                "memory",
-                "equipment",
-                "materials",
-                "cpo",
-                "artificial_intelligence",
-                "compute_services",
-                "gaming",
-                "pharma",
-                "mlcc",
-                "ccl",
-                "gold",
-            }:
+            if actual_family not in TRADEABLE_THEMES:
                 unsupported_count += 1
                 continue
             if active_scores and actual_family not in active_scores:
@@ -12129,11 +12975,11 @@ class VnpyPaperTradingService:
         if CROSS_MARKET_STRATEGY_ID not in seen:
             strategies.append({
                 "id": CROSS_MARKET_STRATEGY_ID,
-                "name": "Cross-market global sector rotation V1.3",
+                "name": "Cross-market global sector rotation V1.4 staged",
                 "category": "cross_market",
                 "description": (
-                    "Global technology, pharma, MLCC, CCL, independent CPO, "
-                    "COMEX gold and A-share range trading."
+                    "Global technology, domestic defensive rotation, MLCC, CCL, "
+                    "independent CPO, COMEX gold and A-share range trading."
                 ),
                 "market_scope": ["cn"],
             })
@@ -13974,6 +14820,21 @@ class VnpyPaperTradingService:
                 else:
                     state["industry_available"] = False
 
+        active_buy_plan_usage: Dict[str, Any] = {}
+        if settings.auto_strategy == CROSS_MARKET_STRATEGY_ID:
+            active_buy_plan_usage = self._cross_market_active_buy_plan_usage(
+                settings=settings,
+                session_date=datetime.now(ZoneInfo("Asia/Shanghai")).date(),
+            )
+            if active_buy_plan_usage.get("available") is not True:
+                state["available"] = False
+                state["active_buy_plan_usage"] = active_buy_plan_usage
+                return state
+            for symbol in list(active_buy_plan_usage.get("symbols") or []):
+                normalized_symbol = self._normalize_symbol(symbol)
+                if normalized_symbol:
+                    held_symbols.add(normalized_symbol)
+
         total_market_value = _safe_float(account_snapshot.get("total_market_value"))
         if total_market_value is None:
             total_market_value = _safe_float(snapshot.get("total_market_value"))
@@ -13990,6 +14851,7 @@ class VnpyPaperTradingService:
                 else _safe_float(snapshot.get("total_cash")),
                 "base_currency": account_snapshot.get("base_currency"),
                 "fx_stale": fx_stale,
+                "active_buy_plan_usage": active_buy_plan_usage,
             }
         )
         return state
@@ -14197,7 +15059,7 @@ class VnpyPaperTradingService:
         exposure_state: Dict[str, Any],
         candidate: Dict[str, Any],
     ) -> Tuple[float, Dict[str, Any]]:
-        """Resolve a V1.3 order tranche from current equity, not initial cash."""
+        """Resolve a V1.4 order tranche from current equity, not initial cash."""
 
         configured_amount = max(0.0, float(settings.auto_cash_per_order or 0.0))
         target_position_pct = _safe_float(
@@ -14546,19 +15408,7 @@ class VnpyPaperTradingService:
         nasdaq_futures_signal: Dict[str, Any] = {}
         gold_signal: Dict[str, Any] = {}
         cpo_signal: Dict[str, Any] = {}
-        global_linked_themes = {
-            "semiconductor",
-            "memory",
-            "equipment",
-            "materials",
-            "cpo",
-            "artificial_intelligence",
-            "compute_services",
-            "gaming",
-            "pharma",
-            "mlcc",
-            "ccl",
-        }
+        global_linked_themes = GLOBAL_MARKET_LINKED_THEMES
         if theme in global_linked_themes:
             try:
                 # A live refresh must own its completion clock. Passing the
@@ -14619,12 +15469,14 @@ class VnpyPaperTradingService:
             }
         price = _safe_float(getattr(quote, "price", None))
         open_price = _safe_float(getattr(quote, "open_price", None))
+        pre_close = _safe_float(getattr(quote, "pre_close", None))
         intraday_high = _safe_float(getattr(quote, "high", None))
         intraday_low = _safe_float(getattr(quote, "low", None))
         amount = _safe_float(getattr(quote, "amount", None))
         volume = _safe_float(getattr(quote, "volume", None))
+        quote_volume_ratio = _safe_float(getattr(quote, "volume_ratio", None))
         volume_ratio = _safe_float(
-            candidate.get("volume_ratio") or getattr(quote, "volume_ratio", None)
+            candidate.get("volume_ratio") or quote_volume_ratio
         )
         if price is None or price <= 0:
             return StrategyDecision(action="blocked", reason="candidate_realtime_price_unavailable"), {
@@ -14894,6 +15746,19 @@ class VnpyPaperTradingService:
             ),
             "required_rebound_pct": 0.3,
         }
+        core_leader_signal = self._cross_market_core_leader_signal(
+            candidate=candidate,
+            theme=theme,
+            candidate_score=candidate_score,
+            price=float(price),
+            pre_close=pre_close,
+            turnover_amount=amount,
+            volume_ratio=quote_volume_ratio,
+            sector_signal_score=sector_signal_score,
+            sector_evidence=sector_evidence,
+            intraday_pullback_signal=intraday_pullback_signal,
+            above_vwap=above_vwap,
+        )
         technical_boards = [
             item
             for item in live_boards
@@ -14906,9 +15771,23 @@ class VnpyPaperTradingService:
                 if self.cross_market_signal_engine.classify_theme(item)
                 == "semiconductor"
             ]
+        source_board_name = self._pick_primary_board_name(
+            [item for item in candidate_boards if isinstance(item, dict)]
+        )
+        if source_board_name:
+            technical_boards = sorted(
+                technical_boards,
+                key=lambda item: (
+                    0
+                    if str(item.get("name") or "").strip().casefold()
+                    == source_board_name.casefold()
+                    else 1
+                ),
+            )
         board_technical_signal = self.cross_market_board_technical_service.analyze_boards(
             technical_boards,
             observed_at=now,
+            primary_board_name=source_board_name,
         )
         if board_technical_signal.get("available") is not True:
             return StrategyDecision(action="blocked", reason="board_technical_evidence_unavailable"), {
@@ -14917,6 +15796,37 @@ class VnpyPaperTradingService:
                 "boards": boards,
                 "board_technical": board_technical_signal,
             }
+        analysis_slot = str(
+            candidate.get("_cross_market_analysis_slot") or ""
+        ).strip() or (
+            FORMAL_ENTRY_TIME.strftime("%H:%M")
+            if entry_phase == "opening"
+            else None
+        )
+        failed_breakout_signal = self._cross_market_failed_breakout_signal(
+            board_technical_signal=board_technical_signal,
+            above_vwap=above_vwap,
+        )
+        entry_score, entry_score_components = self._cross_market_entry_score(
+            theme=theme,
+            entry_phase=entry_phase,
+            candidate_score=candidate_score,
+            sector_signal_score=float(sector_signal_score or 0.0),
+            us_close_theme_signal=us_close_theme_signal,
+            us_premarket_signal=us_premarket_signal,
+            nasdaq_futures_signal=nasdaq_futures_signal,
+            asia_market_gate=asia_market_gate,
+            gold_signal=(
+                gold_signal.get("signal")
+                if isinstance(gold_signal.get("signal"), dict)
+                else gold_signal
+            ),
+            cpo_signal=cpo_signal,
+            intraday_pullback_signal=intraday_pullback_signal,
+            reclaimed_open=reclaimed_open,
+            above_vwap=above_vwap,
+            board_technical_signal=board_technical_signal,
+        )
         expected_edge, expected_edge_source = self._cross_market_expected_gross_edge_pct(
             candidate=candidate,
             price=float(price),
@@ -14960,6 +15870,7 @@ class VnpyPaperTradingService:
             reclaimed_open=reclaimed_open,
             above_vwap=above_vwap,
             sector_signal_score=float(sector_signal_score or 0.0),
+            core_leader_signal=core_leader_signal,
             us_tech_score=_safe_float(us_signal.get("score")),
             us_close_theme_signal=us_close_theme_signal,
             us_premarket_signal=us_premarket_signal,
@@ -14980,6 +15891,9 @@ class VnpyPaperTradingService:
             range_signal=range_signal,
             expected_gross_edge_pct=float(expected_edge),
             estimated_round_trip_cost_pct=0.0,
+            entry_score=entry_score,
+            analysis_slot=analysis_slot,
+            failed_breakout_signal=failed_breakout_signal,
             risk=risk,
         )
         decision = self.cross_market_signal_engine.decide(decision_input)
@@ -15042,11 +15956,17 @@ class VnpyPaperTradingService:
             "korea": korea_gate,
             "asia_market": asia_market_gate,
             "board_technical": board_technical_signal,
+            "source_board_name": source_board_name,
+            "failed_breakout": failed_breakout_signal,
+            "entry_score": entry_score,
+            "entry_score_components": entry_score_components,
+            "analysis_slot": analysis_slot,
             "rotation": rotation_signal,
             "gold": gold_signal,
             "cpo": cpo_signal,
             "core_stock": core_evidence if theme == "cpo" else {},
             "sector": sector_evidence,
+            "core_leader": core_leader_signal,
             "candidate_score": candidate_score,
             "range": range_signal,
             "strategy_position": {
@@ -15063,6 +15983,359 @@ class VnpyPaperTradingService:
             "strategy_cost_basis_pct": round(strategy_cost_basis_pct, 6),
             "strategy_cost_basis_equity_reference": round(total_equity, 6),
             "risk": asdict(risk),
+        }
+
+    @staticmethod
+    def _cross_market_failed_breakout_signal(
+        *,
+        board_technical_signal: Dict[str, Any],
+        above_vwap: bool,
+    ) -> Dict[str, Any]:
+        primary = (
+            board_technical_signal.get("primary_board")
+            if isinstance(board_technical_signal.get("primary_board"), dict)
+            else {}
+        )
+        pressure_windows = {
+            int(value)
+            for value in list(primary.get("pressure_windows") or [])
+            if _safe_int(value) is not None
+        }
+        breakout = (
+            primary.get("breakout_confirmation")
+            if isinstance(primary.get("breakout_confirmation"), dict)
+            else {}
+        )
+        long_pressure = bool(pressure_windows & {20, 30, 60})
+        failed_breakout = bool(
+            primary.get("price_breakout_confirmed") is True
+            and primary.get("breakout_confirmed") is not True
+        )
+        confirmed = bool(long_pressure and failed_breakout and not above_vwap)
+        return {
+            "available": bool(primary),
+            "confirmed": confirmed,
+            "reason": (
+                "long_pressure_failed_breakout_below_vwap"
+                if confirmed
+                else "composite_failed_breakout_not_confirmed"
+            ),
+            "primary_board": primary.get("name"),
+            "pressure_windows": sorted(pressure_windows),
+            "long_pressure": long_pressure,
+            "price_breakout_confirmed": bool(
+                primary.get("price_breakout_confirmed")
+            ),
+            "breakout_confirmed": bool(primary.get("breakout_confirmed")),
+            "breakout_reason": breakout.get("reason"),
+            "above_vwap": bool(above_vwap),
+        }
+
+    def _cross_market_entry_score(
+        self,
+        *,
+        theme: str,
+        entry_phase: str,
+        candidate_score: float,
+        sector_signal_score: float,
+        us_close_theme_signal: Dict[str, Any],
+        us_premarket_signal: Dict[str, Any],
+        nasdaq_futures_signal: Dict[str, Any],
+        asia_market_gate: Dict[str, Any],
+        gold_signal: Dict[str, Any],
+        cpo_signal: Dict[str, Any],
+        intraday_pullback_signal: Dict[str, Any],
+        reclaimed_open: bool,
+        above_vwap: bool,
+        board_technical_signal: Dict[str, Any],
+    ) -> Tuple[float, Dict[str, Any]]:
+        """Build a normalized, theme-aware V1.4 entry score."""
+
+        def bounded_score(value: Any) -> float:
+            number = _safe_float(value)
+            return max(0.0, min(100.0, float(number or 0.0)))
+
+        def directional_strength(value: Any) -> Optional[float]:
+            number = _safe_float(value)
+            if number is None:
+                return None
+            return max(0.0, min(100.0, (float(number) + 100.0) / 2.0))
+
+        normalized_theme = str(theme or "").strip().lower()
+        normalized_phase = str(entry_phase or "").strip().lower()
+        close_score = directional_strength(us_close_theme_signal.get("score")) or 0.0
+        premarket_score = directional_strength(us_premarket_signal.get("score")) or 0.0
+        nq_score = bounded_score(nasdaq_futures_signal.get("score"))
+        if nq_score <= 0 and nasdaq_futures_signal.get("buy_allowed") is True:
+            nq_score = 75.0
+        asia_score = bounded_score(asia_market_gate.get("score"))
+        if asia_score <= 0 and asia_market_gate.get("buy_allowed") is True:
+            asia_score = 75.0
+        theme_stage_score = (
+            (close_score + premarket_score) / 2.0
+            if normalized_phase == "intraday_dip"
+            else close_score
+        )
+        if normalized_theme == "gold":
+            cross_raw = directional_strength(gold_signal.get("score")) or 0.0
+        elif normalized_theme == "cpo":
+            cpo_raw = directional_strength(cpo_signal.get("score")) or 0.0
+            cross_raw = (theme_stage_score + cpo_raw + nq_score) / 3.0
+        else:
+            linked_scores = [theme_stage_score]
+            if normalized_theme != "pharma":
+                linked_scores.append(nq_score)
+            linked_scores.append(asia_score)
+            cross_raw = sum(linked_scores) / len(linked_scores)
+        config = self.cross_market_signal_engine.config
+        if normalized_theme in DOMESTIC_ROTATION_THEMES:
+            raw_weights = {
+                "cross_market": config.domestic_entry_cross_market_weight_pct,
+                "a_share_sector": config.domestic_entry_sector_weight_pct,
+                "stock_leader_liquidity": config.domestic_entry_stock_weight_pct,
+                "intraday_pullback_vwap": config.domestic_entry_intraday_weight_pct,
+                "technical": config.domestic_entry_technical_weight_pct,
+            }
+            weight_profile = "domestic_rotation"
+        else:
+            raw_weights = {
+                "cross_market": config.entry_cross_market_weight_pct,
+                "a_share_sector": config.entry_sector_weight_pct,
+                "stock_leader_liquidity": config.entry_stock_weight_pct,
+                "intraday_pullback_vwap": config.entry_intraday_weight_pct,
+                "technical": config.entry_technical_weight_pct,
+            }
+            weight_profile = "global_linked_or_gold"
+        weight_total = sum(max(0.0, float(value)) for value in raw_weights.values())
+        weights = {
+            key: max(0.0, float(value)) / weight_total * 100.0
+            for key, value in raw_weights.items()
+        }
+        sector_raw = min(100.0, 1.25 * bounded_score(sector_signal_score))
+        cross_market_points = weights["cross_market"] / 100.0 * cross_raw
+        sector_points = (
+            weights["a_share_sector"] / 100.0
+            * sector_raw
+        )
+        stock_points = (
+            weights["stock_leader_liquidity"] / 100.0
+            * bounded_score(candidate_score)
+        )
+
+        pullback_confirmed = bool(
+            intraday_pullback_signal.get("available") is True
+            and intraday_pullback_signal.get("confirmed") is True
+        )
+        if normalized_phase == "intraday_dip" and pullback_confirmed:
+            intraday_raw = 100.0 if above_vwap else 86.666667
+        elif reclaimed_open and above_vwap:
+            intraday_raw = 80.0
+        elif reclaimed_open or above_vwap:
+            intraday_raw = 60.0
+        else:
+            intraday_raw = 0.0
+
+        primary = (
+            board_technical_signal.get("primary_board")
+            if isinstance(board_technical_signal.get("primary_board"), dict)
+            else {}
+        )
+        pressure_windows = {
+            int(value)
+            for value in list(primary.get("pressure_windows") or [])
+            if _safe_int(value) is not None
+        }
+        if primary.get("breakout_confirmed") is True:
+            technical_raw = 100.0
+        elif pressure_windows & {20, 30, 60}:
+            technical_raw = 30.0
+        elif pressure_windows & {5, 10}:
+            technical_raw = 60.0
+        elif primary.get("supportive") is True:
+            technical_raw = 90.0
+        else:
+            technical_raw = 70.0
+        if list(board_technical_signal.get("secondary_pressure_boards") or []):
+            technical_raw = max(0.0, technical_raw - 10.0)
+        intraday_points = (
+            weights["intraday_pullback_vwap"] / 100.0 * intraday_raw
+        )
+        technical_points = weights["technical"] / 100.0 * technical_raw
+
+        components = {
+            "cross_market": round(cross_market_points, 6),
+            "a_share_sector": round(sector_points, 6),
+            "stock_leader_liquidity": round(stock_points, 6),
+            "intraday_pullback_vwap": round(intraday_points, 6),
+            "technical": round(technical_points, 6),
+            "weight_profile": weight_profile,
+            "weights_pct": {
+                key: round(value, 6) for key, value in weights.items()
+            },
+            "raw": {
+                "cross_market": round(cross_raw, 6),
+                "sector": round(bounded_score(sector_signal_score), 6),
+                "sector_normalized": round(sector_raw, 6),
+                "candidate": round(bounded_score(candidate_score), 6),
+                "pressure_windows": sorted(pressure_windows),
+            },
+        }
+        total = sum(
+            float(components[key])
+            for key in (
+                "cross_market",
+                "a_share_sector",
+                "stock_leader_liquidity",
+                "intraday_pullback_vwap",
+                "technical",
+            )
+        )
+        return round(max(0.0, min(100.0, total)), 6), components
+
+    def _cross_market_core_leader_signal(
+        self,
+        *,
+        candidate: Dict[str, Any],
+        theme: str,
+        candidate_score: float,
+        price: float,
+        pre_close: Optional[float],
+        turnover_amount: Optional[float],
+        volume_ratio: Optional[float],
+        sector_signal_score: Optional[float],
+        sector_evidence: Dict[str, Any],
+        intraday_pullback_signal: Dict[str, Any],
+        above_vwap: bool,
+    ) -> Dict[str, Any]:
+        """Build the strict leader-versus-board divergence evidence."""
+
+        config = self.cross_market_signal_engine.config
+        source = str(candidate.get("source") or "").strip().lower()
+        source_theme = str(
+            candidate.get("_cross_market_source_theme")
+            or candidate.get("_cross_market_prefilter_theme")
+            or ""
+        ).strip().lower()
+        sector_change_pct = _safe_float(sector_evidence.get("mean_change_pct"))
+        stock_change_pct = (
+            (float(price) / float(pre_close) - 1.0) * 100.0
+            if pre_close is not None and pre_close > 0
+            else None
+        )
+        relative_strength_pct = (
+            stock_change_pct - sector_change_pct
+            if stock_change_pct is not None and sector_change_pct is not None
+            else None
+        )
+        required_values_available = all(
+            value is not None
+            for value in (
+                pre_close,
+                turnover_amount,
+                volume_ratio,
+                sector_signal_score,
+                sector_change_pct,
+                stock_change_pct,
+                relative_strength_pct,
+            )
+        )
+        source_confirmed = bool(
+            candidate.get("is_core_stock") is True
+            and source == "dsa_eastmoney_board_change_leader"
+            and source_theme == theme
+        )
+        confirmed = bool(
+            required_values_available
+            and source_confirmed
+            and float(candidate_score) >= config.core_leader_min_candidate_score
+            and float(turnover_amount or 0.0) >= config.core_leader_min_turnover
+            and float(volume_ratio or 0.0) >= config.core_leader_min_volume_ratio
+            and float(stock_change_pct or 0.0) >= config.core_leader_min_change_pct
+            and float(relative_strength_pct or 0.0)
+            >= config.core_leader_min_relative_strength_pct
+            and float(sector_change_pct or 0.0)
+            >= config.core_leader_min_sector_change_pct
+            and intraday_pullback_signal.get("available") is True
+            and intraday_pullback_signal.get("confirmed") is True
+            and above_vwap
+        )
+        blockers = []
+        checks = {
+            "source_confirmed": source_confirmed,
+            "candidate_score_confirmed": (
+                float(candidate_score) >= config.core_leader_min_candidate_score
+            ),
+            "turnover_confirmed": (
+                turnover_amount is not None
+                and turnover_amount >= config.core_leader_min_turnover
+            ),
+            "volume_ratio_confirmed": (
+                volume_ratio is not None
+                and volume_ratio >= config.core_leader_min_volume_ratio
+            ),
+            "stock_change_confirmed": (
+                stock_change_pct is not None
+                and stock_change_pct >= config.core_leader_min_change_pct
+            ),
+            "relative_strength_confirmed": (
+                relative_strength_pct is not None
+                and relative_strength_pct
+                >= config.core_leader_min_relative_strength_pct
+            ),
+            "sector_not_negative": (
+                sector_change_pct is not None
+                and sector_change_pct >= config.core_leader_min_sector_change_pct
+            ),
+            "intraday_pullback_confirmed": (
+                intraday_pullback_signal.get("available") is True
+                and intraday_pullback_signal.get("confirmed") is True
+            ),
+            "above_vwap": bool(above_vwap),
+        }
+        blockers.extend(key for key, passed in checks.items() if not passed)
+        return {
+            "available": required_values_available,
+            "confirmed": confirmed,
+            "reason": (
+                "core_leader_divergence_confirmed"
+                if confirmed
+                else "core_leader_divergence_unconfirmed"
+            ),
+            "source": source or None,
+            "source_theme": source_theme or None,
+            "candidate_score": round(float(candidate_score), 6),
+            "stock_change_pct": (
+                round(stock_change_pct, 6)
+                if stock_change_pct is not None
+                else None
+            ),
+            "sector_change_pct": (
+                round(sector_change_pct, 6)
+                if sector_change_pct is not None
+                else None
+            ),
+            "sector_signal_score": (
+                round(float(sector_signal_score), 6)
+                if sector_signal_score is not None
+                else None
+            ),
+            "relative_strength_pct": (
+                round(relative_strength_pct, 6)
+                if relative_strength_pct is not None
+                else None
+            ),
+            "turnover_amount": turnover_amount,
+            "volume_ratio": volume_ratio,
+            "checks": checks,
+            "blockers": blockers,
+            "thresholds": {
+                "candidate_score": config.core_leader_min_candidate_score,
+                "turnover_amount": config.core_leader_min_turnover,
+                "volume_ratio": config.core_leader_min_volume_ratio,
+                "stock_change_pct": config.core_leader_min_change_pct,
+                "relative_strength_pct": config.core_leader_min_relative_strength_pct,
+                "sector_change_pct": config.core_leader_min_sector_change_pct,
+            },
         }
 
     def _cross_market_low_position_signal(
@@ -15458,42 +16731,27 @@ class VnpyPaperTradingService:
                 )
                 return round(edge, 6), "range_bollinger_upper"
 
-        pullback = intraday_pullback_signal or {}
-        if (
-            pullback.get("available") is True
-            and pullback.get("confirmed") is True
-            and intraday_high is not None
-            and intraday_high > price > 0
-        ):
-            edge = (float(intraday_high) / price - 1.0) * 100.0
-            return (
-                round(
-                    min(
-                        edge,
-                        self.cross_market_signal_engine.config.take_profit_pct,
-                    ),
-                    6,
-                ),
-                "confirmed_intraday_rebound_target",
-            )
-
-        technical = board_technical_signal or {}
-        primary = (
-            technical.get("primary_board")
-            if isinstance(technical.get("primary_board"), dict)
-            else {}
+        atr_pct = next(
+            (
+                value
+                for value in (
+                    _safe_float(candidate.get("atr_20_pct")),
+                    self._cross_market_completed_atr_20_pct(symbol)
+                    if symbol
+                    else None,
+                )
+                if value is not None and value > 0
+            ),
+            None,
         )
-        resistance_distance = _safe_float(primary.get("resistance_distance_pct"))
-        if resistance_distance is not None and resistance_distance > 0:
+        if atr_pct is not None:
+            edge = min(
+                self.cross_market_signal_engine.config.take_profit_pct,
+                max(0.0, float(atr_pct) * 0.75),
+            )
             return (
-                round(
-                    min(
-                        resistance_distance,
-                        self.cross_market_signal_engine.config.take_profit_pct,
-                    ),
-                    6,
-                ),
-                "board_nearest_resistance_distance",
+                round(edge, 6),
+                "stock_completed_atr_20_target",
             )
         return None, None
 
@@ -15835,6 +17093,54 @@ class VnpyPaperTradingService:
             int(config.range_max_tranches),
             max(1, math.ceil(gross_cost_basis / first_tranche_cash - PAPER_EPS)),
         )
+
+    def _cross_market_open_position_themes(
+        self,
+        *,
+        settings: VnpyPaperSettings,
+        symbols: Sequence[str],
+    ) -> set[str]:
+        """Resolve strategy-owned themes for current holdings and active buys."""
+
+        if settings.account_id is None:
+            return set()
+        as_of = datetime.now(ZoneInfo("Asia/Shanghai")).date()
+        themes: set[str] = set()
+        for symbol in symbols:
+            normalized = self._normalize_symbol(symbol)
+            if not normalized:
+                continue
+            position = self._cross_market_strategy_position(
+                account_id=int(settings.account_id),
+                symbol=normalized,
+                market="cn",
+                as_of=as_of,
+            )
+            entry_theme = str(position.get("entry_theme") or "").strip().lower()
+            if entry_theme in TRADEABLE_THEMES:
+                themes.add(entry_theme)
+        return themes
+
+    @staticmethod
+    def _cross_market_theme_diversification_reason(
+        *,
+        symbol: str,
+        theme: Optional[str],
+        entry_grade: Optional[str],
+        position_symbols: set[str],
+        occupied_themes: set[str],
+    ) -> Optional[str]:
+        """Prefer another theme; only an A-grade signal may open a same-theme peer."""
+
+        normalized_theme = str(theme or "").strip().lower()
+        if (
+            not normalized_theme
+            or symbol in position_symbols
+            or normalized_theme not in occupied_themes
+            or str(entry_grade or "").strip().upper() == "A"
+        ):
+            return None
+        return "same_theme_new_position_requires_grade_a"
 
     @staticmethod
     def _cross_market_corporate_action_key(
@@ -16289,6 +17595,39 @@ class VnpyPaperTradingService:
             "sellable_fraction": sellable_fraction,
         }
 
+    @staticmethod
+    def _cross_market_sell_limit_price(
+        *,
+        quote: Any,
+        reason: str,
+    ) -> Tuple[Optional[float], Dict[str, Any]]:
+        """Return a marketable protective limit for hard stops."""
+
+        last_price = _safe_float(getattr(quote, "price", None))
+        bid_price = _safe_float(getattr(quote, "bid_price", None))
+        limit_down_price = _safe_float(getattr(quote, "limit_down_price", None))
+        limit_price = last_price
+        mode = "last_price_limit"
+        if str(reason or "").strip() == "hard_stop_loss":
+            if limit_down_price is not None and limit_down_price > 0:
+                limit_price = limit_down_price
+                mode = "hard_stop_limit_down_protection"
+            elif bid_price is not None and bid_price > 0:
+                limit_price = min(last_price or bid_price, bid_price)
+                mode = "hard_stop_best_bid_protection"
+        if limit_price is not None and limit_price > 0:
+            limit_price = round(float(limit_price), 2)
+        else:
+            limit_price = None
+        return limit_price, {
+            "mode": mode,
+            "reason": str(reason or "").strip() or None,
+            "observed_price": last_price,
+            "bid_price": bid_price,
+            "limit_down_price": limit_down_price,
+            "limit_price": limit_price,
+        }
+
     def _run_cross_market_sell_checks(
         self,
         settings: VnpyPaperSettings,
@@ -16437,6 +17776,11 @@ class VnpyPaperTradingService:
             if sell_fraction <= 0:
                 continue
 
+            execution_price, sell_order_pricing = self._cross_market_sell_limit_price(
+                quote=quote,
+                reason=reason,
+            )
+
             currency = str(position.get("currency") or self._currency_for_market(market)).strip().upper()
             account_sellable = (
                 self.portfolio.get_sellable_quantity(
@@ -16465,7 +17809,8 @@ class VnpyPaperTradingService:
             candidate = {
                 "code": symbol,
                 "name": position.get("name") or symbol,
-                "price": price,
+                "price": execution_price,
+                "observed_price": price,
                 "provider_timestamp": provider_at.isoformat(),
                 "quote_validated_at": quote_validated_at.isoformat(),
                 "quote_age_seconds": round(quote_age_seconds, 3),
@@ -16487,6 +17832,7 @@ class VnpyPaperTradingService:
                     "range": range_signal,
                     "external_exit": external_evidence,
                     "account_drawdown": drawdown,
+                    "sell_order_pricing": sell_order_pricing,
                 },
             }
             if requested_quantity <= PAPER_EPS:
@@ -16496,6 +17842,14 @@ class VnpyPaperTradingService:
                     quantity=quantity * sell_fraction,
                     price=price,
                     reason="t_plus_one_no_sellable_quantity",
+                    raw=candidate,
+                )
+            elif execution_price is None or execution_price <= 0:
+                order = self._skipped_order(
+                    symbol=symbol,
+                    side="sell",
+                    quantity=requested_quantity,
+                    reason="sell_price_unavailable",
                     raw=candidate,
                 )
             else:
@@ -16514,7 +17868,7 @@ class VnpyPaperTradingService:
                         symbol=symbol,
                         market=market,
                         quantity=requested_quantity,
-                        price=price,
+                        price=execution_price,
                         reason=(
                             "pending_approval"
                             if settings.auto_execution_mode == "manual_approval"
@@ -16541,7 +17895,7 @@ class VnpyPaperTradingService:
                         side="sell",
                         market=market,
                         quantity=requested_quantity,
-                        price=price,
+                        price=execution_price,
                         source="cross_market_auto_exit",
                         dedup_key=f"{date.today().isoformat()}:cross-market-exit:{symbol}:{reason}",
                         note=f"cross-market exit {reason}",
@@ -17325,10 +18679,170 @@ class VnpyPaperTradingService:
             if page * int(payload.get("page_size") or 100) >= int(payload.get("total") or 0):
                 break
             page += 1
+        if settings.auto_strategy == CROSS_MARKET_STRATEGY_ID:
+            active_usage = self._cross_market_active_buy_plan_usage(
+                settings=settings,
+                session_date=today,
+            )
+            if active_usage.get("available") is not True:
+                return {
+                    "order_count": float(settings.auto_daily_max_orders or order_count),
+                    "cash_amount": float(settings.auto_daily_budget or cash_amount),
+                    "fx_unavailable": True,
+                    "active_plan_usage": active_usage,
+                }
+            order_count += int(active_usage.get("order_count") or 0)
+            cash_amount += float(active_usage.get("cash_amount") or 0.0)
+        else:
+            active_usage = None
         return {
             "order_count": float(order_count),
             "cash_amount": cash_amount,
             "fx_unavailable": False,
+            "active_plan_usage": active_usage,
+        }
+
+    def _cross_market_active_buy_plan_usage(
+        self,
+        *,
+        settings: VnpyPaperSettings,
+        session_date: date,
+    ) -> Dict[str, Any]:
+        """Count outstanding V1.4 buy intents that have not reached the ledger."""
+
+        shanghai = ZoneInfo("Asia/Shanghai")
+        created_from = datetime.combine(
+            session_date,
+            datetime_time.min,
+            tzinfo=shanghai,
+        ).astimezone(timezone.utc)
+        created_to = created_from + timedelta(days=1)
+        account_id = int(settings.account_id) if settings.account_id is not None else None
+        try:
+            payload = self.agent_repo.list_trade_plans(
+                limit=500,
+                offset=0,
+                statuses=sorted(ACTIVE_VNPY_TRADE_PLAN_STATUSES),
+                execution_modes=["vnpy_paper"],
+                created_from=created_from,
+                created_to=created_to,
+            )
+            if int(payload.get("total") or 0) > len(payload.get("items") or []):
+                return {
+                    "available": False,
+                    "reason": "active_buy_plan_scan_limit_exceeded",
+                }
+            counted_orders: set[str] = set()
+            symbols: set[str] = set()
+            themes: set[str] = set()
+            cash_amount = 0.0
+            plans = []
+            for plan in list(payload.get("items") or []):
+                if not isinstance(plan, dict):
+                    continue
+                if str(plan.get("side") or "").strip().lower() != "buy":
+                    continue
+                if _safe_int(plan.get("trade_id")) is not None:
+                    # A partially filled plan is already represented by the
+                    # strategy trade ledger and must consume one order, not two.
+                    continue
+                run_id = _safe_int(plan.get("run_id"))
+                run = self.agent_repo.get_run_by_id(run_id) if run_id is not None else None
+                if not isinstance(run, dict):
+                    continue
+                run_settings = run.get("settings") if isinstance(run.get("settings"), dict) else {}
+                run_diagnostics = (
+                    run.get("diagnostics")
+                    if isinstance(run.get("diagnostics"), dict)
+                    else {}
+                )
+                run_account_id = _safe_int(run_settings.get("account_id"))
+                run_mode = str(
+                    run_settings.get("auto_execution_mode")
+                    or run_diagnostics.get("execution_mode")
+                    or ""
+                ).strip().lower()
+                if (
+                    str(run.get("strategy") or "").strip()
+                    != CROSS_MARKET_STRATEGY_ID
+                    or run_mode != "vnpy_paper"
+                    or (account_id is not None and run_account_id != account_id)
+                ):
+                    continue
+                order_result = (
+                    plan.get("order_result")
+                    if isinstance(plan.get("order_result"), dict)
+                    else {}
+                )
+                raw = (
+                    order_result.get("raw")
+                    if isinstance(order_result.get("raw"), dict)
+                    else {}
+                )
+                order_key = str(
+                    raw.get("vt_orderid")
+                    or raw.get("vtOrderid")
+                    or raw.get("order_id")
+                    or plan.get("plan_uid")
+                    or ""
+                ).strip()
+                if not order_key or order_key in counted_orders:
+                    continue
+                counted_orders.add(order_key)
+                symbol = self._normalize_symbol(plan.get("symbol") or "")
+                if symbol:
+                    symbols.add(symbol)
+                strategy_evidence = (
+                    order_result.get("strategy_evidence")
+                    if isinstance(order_result.get("strategy_evidence"), dict)
+                    else {}
+                )
+                cross_market_evidence = (
+                    strategy_evidence.get("cross_market")
+                    if isinstance(strategy_evidence.get("cross_market"), dict)
+                    else {}
+                )
+                raw_candidate = (
+                    order_result.get("raw")
+                    if isinstance(order_result.get("raw"), dict)
+                    else {}
+                )
+                raw_strategy = (
+                    raw_candidate.get("cross_market_strategy")
+                    if isinstance(raw_candidate.get("cross_market_strategy"), dict)
+                    else {}
+                )
+                theme = str(
+                    cross_market_evidence.get("theme")
+                    or raw_strategy.get("theme")
+                    or ""
+                ).strip().lower()
+                if theme in TRADEABLE_THEMES:
+                    themes.add(theme)
+                plan_cash = _safe_float(plan.get("planned_cash_amount"))
+                if plan_cash is not None and plan_cash > 0:
+                    cash_amount += plan_cash
+                plans.append({
+                    "plan_uid": plan.get("plan_uid"),
+                    "order_key": order_key,
+                    "symbol": symbol or None,
+                    "theme": theme or None,
+                    "status": plan.get("status"),
+                })
+        except Exception as exc:  # noqa: BLE001 - order limits fail closed.
+            return {
+                "available": False,
+                "reason": "active_buy_plan_usage_unavailable",
+                "error_type": type(exc).__name__,
+            }
+        return {
+            "available": True,
+            "reason": "active_buy_plan_usage_ready",
+            "order_count": len(counted_orders),
+            "cash_amount": round(cash_amount, 6),
+            "symbols": sorted(symbols),
+            "themes": sorted(themes),
+            "plans": plans,
         }
 
     @staticmethod
@@ -17347,10 +18861,6 @@ class VnpyPaperTradingService:
         ):
             return "daily_budget_exceeded"
         return None
-
-    def _account_pre_trade_risk_reason(self, settings: VnpyPaperSettings) -> Optional[str]:
-        reason, _diagnostics = self._account_pre_trade_risk(settings)
-        return reason
 
     def _account_pre_trade_risk(self, settings: VnpyPaperSettings) -> Tuple[Optional[str], Dict[str, Any]]:
         diagnostics: Dict[str, Any] = {
@@ -18668,6 +20178,8 @@ class VnpyPaperTradingService:
     def _cross_market_global_entry_gate(
         self,
         observation: Dict[str, Any],
+        *,
+        entry_phase: str = "opening",
     ) -> Dict[str, Any]:
         """Resolve session-wide A-share entry blocks before stock screening."""
 
@@ -18692,8 +20204,14 @@ class VnpyPaperTradingService:
             )
             regime = str(classification.get("regime") or "").strip().lower()
             classification_source = "gap_pct"
+        normalized_phase = str(entry_phase or "opening").strip().lower()
+        intraday_recheck = normalized_phase == "intraday_dip"
         blocked = bool(
-            available and regime in {"high_open", "extreme_low_open"}
+            available
+            and (
+                regime == "extreme_low_open"
+                or (regime == "high_open" and not intraday_recheck)
+            )
         )
         reason = (
             f"cn_{regime}_buy_blocked"
@@ -18715,6 +20233,10 @@ class VnpyPaperTradingService:
             "gap_pct": gap_pct,
             "classification_source": classification_source,
             "source": "cross_market_observation.evidence.cn_open",
+            "entry_phase": normalized_phase,
+            "high_open_pullback_recheck": bool(
+                available and regime == "high_open" and intraday_recheck
+            ),
         }
 
     def _cross_market_observation_snapshot(self) -> Dict[str, Any]:
@@ -19761,6 +21283,9 @@ class VnpyPaperTradingService:
                         "nearest_resistance",
                         "nearest_resistance_window",
                         "resistance_distance_pct",
+                        "breakout_reference",
+                        "breakout_reference_window",
+                        "short_cycle_resistance_absorbable",
                         "supportive",
                         "support_score",
                         "support_resonance_count",
@@ -19783,6 +21308,8 @@ class VnpyPaperTradingService:
                         "support_windows",
                         "near_ma_support_windows",
                         "near_swing_support_windows",
+                        "breakout_reference_windows",
+                        "pressure_windows",
                     ):
                         values = primary_value.get(key)
                         if isinstance(values, (list, tuple)):
@@ -19797,6 +21324,21 @@ class VnpyPaperTradingService:
                         values = bounded_mapping(primary_value.get(key), limit=10)
                         if values:
                             primary_board[key] = values
+                    pressure_level_values = primary_value.get("pressure_levels")
+                    if isinstance(pressure_level_values, list):
+                        primary_board["pressure_levels"] = [
+                            {
+                                key: bounded_scalar(value.get(key))
+                                for key in (
+                                    "window_days",
+                                    "level",
+                                    "distance_pct",
+                                )
+                                if value.get(key) is not None
+                            }
+                            for value in pressure_level_values[:10]
+                            if isinstance(value, dict)
+                        ]
                 alerts: List[Dict[str, Any]] = []
                 alert_values = board_value.get("alerts")
                 if isinstance(alert_values, list):
@@ -19805,7 +21347,11 @@ class VnpyPaperTradingService:
                         key=lambda item: (
                             0
                             if isinstance(item[1], dict)
-                            and item[1].get("kind") == "near_board_resistance"
+                            and item[1].get("kind")
+                            in {
+                                "near_board_resistance",
+                                "unconfirmed_board_breakout",
+                            }
                             else 1,
                             item[0],
                         ),
@@ -19825,7 +21371,59 @@ class VnpyPaperTradingService:
                             if alert_value.get(key) is not None
                         }
                         if alert:
+                            pressure_windows = alert_value.get("pressure_windows")
+                            if isinstance(pressure_windows, (list, tuple)):
+                                alert["pressure_windows"] = [
+                                    bounded_scalar(value)
+                                    for value in list(pressure_windows)[:10]
+                                ]
+                            breakout_reason = alert_value.get("breakout_reason")
+                            if breakout_reason is not None:
+                                alert["breakout_reason"] = bounded_scalar(
+                                    breakout_reason
+                                )
                             alerts.append(alert)
+                pressure_evidence: List[Dict[str, Any]] = []
+                pressure_values = board_value.get("pressure_evidence")
+                if isinstance(pressure_values, list):
+                    for pressure_value in pressure_values[:12]:
+                        if not isinstance(pressure_value, dict):
+                            continue
+                        pressure_item = {
+                            key: bounded_scalar(pressure_value.get(key))
+                            for key in (
+                                "name",
+                                "short_cycle_absorbable",
+                                "breakout_reference",
+                                "breakout_reason",
+                            )
+                            if pressure_value.get(key) is not None
+                        }
+                        for key in ("windows", "breakout_reference_windows"):
+                            values = pressure_value.get(key)
+                            if isinstance(values, (list, tuple)):
+                                pressure_item[key] = [
+                                    bounded_scalar(value)
+                                    for value in list(values)[:10]
+                                ]
+                        levels = pressure_value.get("levels")
+                        if isinstance(levels, list):
+                            pressure_item["levels"] = [
+                                {
+                                    key: bounded_scalar(value.get(key))
+                                    for key in (
+                                        "window_days",
+                                        "level",
+                                        "distance_pct",
+                                    )
+                                    if value.get(key) is not None
+                                }
+                                for value in levels[:10]
+                                if isinstance(value, dict)
+                            ]
+                        if pressure_item:
+                            pressure_evidence.append(pressure_item)
+                aggregate_pressure_windows = board_value.get("pressure_windows")
                 board_technical = {
                     "available": bounded_scalar(board_value.get("available")),
                     "supportive": bounded_scalar(board_value.get("supportive")),
@@ -19839,6 +21437,24 @@ class VnpyPaperTradingService:
                     "pressure_boards": cls._candidate_quality_text_list(
                         board_value.get("pressure_boards")
                     )[:12],
+                    "pressure_windows": [
+                        bounded_scalar(value)
+                        for value in list(aggregate_pressure_windows)[:10]
+                    ]
+                    if isinstance(aggregate_pressure_windows, (list, tuple))
+                    else [],
+                    "short_pressure_boards": cls._candidate_quality_text_list(
+                        board_value.get("short_pressure_boards")
+                    )[:12],
+                    "medium_long_pressure_boards": (
+                        cls._candidate_quality_text_list(
+                            board_value.get("medium_long_pressure_boards")
+                        )[:12]
+                    ),
+                    "short_resistance_only": bounded_scalar(
+                        board_value.get("short_resistance_only")
+                    ),
+                    "pressure_evidence": pressure_evidence,
                     "reason": bounded_scalar(board_value.get("reason")),
                     "observed_at": bounded_scalar(board_value.get("observed_at")),
                     "primary_board": primary_board,
@@ -19914,6 +21530,11 @@ class VnpyPaperTradingService:
         candidate: Dict[str, Any],
         settings: VnpyPaperSettings,
     ) -> Optional[str]:
+        symbol = self._normalize_symbol(
+            candidate.get("code") or candidate.get("symbol") or ""
+        )
+        if settings.auto_market == "cn" and not is_cn_main_board_symbol(symbol):
+            return "trading_permission_main_board_only"
         if settings.auto_exclude_st and self._candidate_has_st_risk(candidate):
             return "st_or_delisting_risk"
         if settings.auto_exclude_suspended and self._candidate_is_suspended(candidate):
@@ -21096,7 +22717,6 @@ def build_vnpy_paper_trading_background_tasks(
     if not settings.enabled:
         return []
     shadow_config = _calibration_shadow_config(settings)
-    intraday_entry_attempted_slots: set[str] = set()
 
     def run_auto_trade() -> Dict[str, Any]:
         if not _AUTO_AGENT_RUN_LOCK.acquire(timeout=AUTO_TRADE_RUN_LOCK_WAIT_SECONDS):
@@ -21119,22 +22739,35 @@ def build_vnpy_paper_trading_background_tasks(
         return result
 
     def run_cross_market_intraday_entry_scan() -> Dict[str, Any]:
-        slot = _cross_market_intraday_entry_slot()
+        """Run the opening watch or the bounded 10:40 candidate recovery."""
+
+        formal_slot = _cross_market_formal_entry_slot()
+        recovery_slot = (
+            None if formal_slot is not None else _cross_market_intraday_entry_slot()
+        )
+        slot = formal_slot or recovery_slot
         if slot is None:
             return {
                 "accepted": True,
                 "skipped": True,
                 "reason": "outside_cross_market_entry_analysis_slot",
                 "configured_times": [
-                    target.strftime("%H:%M")
-                    for target in CROSS_MARKET_INTRADAY_ENTRY_TIMES
+                    FORMAL_ENTRY_TIME.strftime("%H:%M"),
+                    *[
+                        value.strftime("%H:%M")
+                        for value in CROSS_MARKET_INTRADAY_ENTRY_TIMES
+                    ],
                 ],
+                "formal_window_seconds": FORMAL_ENTRY_WINDOW_SECONDS,
+                "recovery_window_seconds": (
+                    CROSS_MARKET_INTRADAY_ENTRY_WINDOW_SECONDS
+                ),
             }
         slot_name, slot_start, slot_end = slot
-        slot_key = f"{slot_start.isoformat()}:{slot_name}"
+        is_formal_slot = formal_slot is not None
         if (
-            slot_key in intraday_entry_attempted_slots
-            or _cross_market_intraday_entry_slot_audited(
+            not is_formal_slot
+            and _cross_market_intraday_entry_slot_audited(
                 service,
                 settings,
                 start=slot_start,
@@ -21149,8 +22782,12 @@ def build_vnpy_paper_trading_background_tasks(
             }
         formal: Dict[str, Any] = {}
         recovery_guard: Dict[str, Any] = {}
-        session_order_activity: Dict[str, Any] = {}
         recover_formal = False
+        execution_trigger_source = (
+            "vnpy_paper_auto"
+            if is_formal_slot
+            else CROSS_MARKET_INTRADAY_ENTRY_TRIGGER_SOURCE
+        )
         if not _AUTO_AGENT_RUN_LOCK.acquire(timeout=AUTO_TRADE_RUN_LOCK_WAIT_SECONDS):
             return {
                 "accepted": False,
@@ -21160,101 +22797,120 @@ def build_vnpy_paper_trading_background_tasks(
             }
         try:
             if (
-                slot_key in intraday_entry_attempted_slots
-                or _cross_market_intraday_entry_slot_audited(
+                not is_formal_slot
+                and _cross_market_intraday_entry_slot_audited(
                     service,
                     settings,
                     start=slot_start,
                     end=slot_end,
                 )
             ):
-                return {
+                result = {
                     "accepted": True,
                     "skipped": True,
                     "reason": "cross_market_entry_analysis_slot_already_audited",
                     "analysis_slot": slot_name,
                 }
+                return result
             window = service._trading_window_diagnostics(settings)
-            session_order_activity = _cross_market_session_order_activity_status(
+            formal = _cross_market_daily_evidence_status(
                 service,
                 settings,
                 window,
+                formal_only=True,
             )
-            if session_order_activity.get("available") is not True:
+            if formal.get("reason") == "daily_evidence_lookup_unavailable":
                 result = {
                     "accepted": False,
                     "skipped": True,
-                    "reason": "cross_market_session_order_activity_audit_unavailable",
+                    "reason": "formal_execution_audit_unavailable",
                     "analysis_slot": slot_name,
-                    "session_order_activity": session_order_activity,
+                    "formal_evidence": formal,
                 }
-            elif session_order_activity.get("has_activity") is True:
+            elif is_formal_slot and formal.get("run_observed") is not True:
+                result = service.run_auto_trade_once(
+                    trigger_source_override="vnpy_paper_auto",
+                    allow_cross_market_intraday_entry_recheck=False,
+                    analysis_slot_override=slot_name,
+                    max_results_override=2,
+                )
+            elif formal.get("run_observed") is not True:
                 result = {
                     "accepted": True,
                     "skipped": True,
-                    "reason": "cross_market_session_order_activity_blocks_later_entry",
-                    "analysis_slot": slot_name,
-                    "session_order_activity": session_order_activity,
+                    "reason": "formal_recovery_requires_opening_baseline",
+                    "candidate_count": 0,
+                    "planned_count": 0,
+                    "submitted_count": 0,
+                    "skipped_count": 0,
+                    "orders": [],
                 }
             else:
-                formal = _cross_market_daily_evidence_status(
-                    service,
+                recover_formal = True
+                recovery_guard = service._cross_market_formal_run_cadence_guard(
                     settings,
-                    window,
-                    formal_only=True,
+                    trigger_source="vnpy_paper_auto",
+                    allow_intraday_entry_recheck=True,
                 )
-                recover_formal = bool(
-                    formal.get("run_observed") is True
-                    and formal.get("ready") is not True
-                    and int(formal.get("planned_count") or 0) == 0
-                    and int(formal.get("submitted_count") or 0) == 0
-                )
-                if recover_formal:
-                    recovery_guard = service._cross_market_formal_run_cadence_guard(
-                        settings,
-                        trigger_source="vnpy_paper_auto",
-                        allow_intraday_entry_recheck=True,
+                if recovery_guard.get("block") is True:
+                    result = {
+                        "accepted": True,
+                        "skipped": True,
+                        "reason": recovery_guard.get("reason"),
+                        "candidate_count": 0,
+                        "planned_count": 0,
+                        "submitted_count": 0,
+                        "skipped_count": 0,
+                        "orders": [],
+                    }
+                else:
+                    raw_recovery_symbols = recovery_guard.get(
+                        "recoverable_candidate_symbols"
                     )
-                    if recovery_guard.get("block") is True:
+                    recovery_symbols = (
+                        list(raw_recovery_symbols)
+                        if isinstance(raw_recovery_symbols, (list, tuple, set))
+                        else None
+                    )
+                    if not is_formal_slot and not recovery_symbols:
                         result = {
                             "accepted": True,
                             "skipped": True,
-                            "reason": recovery_guard.get("reason"),
-                            "analysis_slot": slot_name,
-                            "formal_recovery": True,
-                            "formal_evidence": formal,
-                            "entry_recheck_guard": recovery_guard,
+                            "reason": "formal_recovery_candidates_unavailable",
+                            "candidate_count": 0,
+                            "planned_count": 0,
+                            "submitted_count": 0,
+                            "skipped_count": 0,
+                            "orders": [],
                         }
                     else:
-                        result = service.run_auto_trade_once(
-                            trigger_source_override="vnpy_paper_auto",
-                            allow_cross_market_intraday_entry_recheck=True,
-                            max_results_override=2,
+                        execution_trigger_source = (
+                            "vnpy_paper_auto"
+                            if is_formal_slot
+                            else CROSS_MARKET_INTRADAY_ENTRY_TRIGGER_SOURCE
                         )
-                else:
-                    result = service.run_auto_trade_once(
-                        trigger_source_override=CROSS_MARKET_INTRADAY_ENTRY_TRIGGER_SOURCE,
-                        allow_cross_market_intraday_entry_recheck=False,
-                        max_results_override=2,
-                    )
+                        result = service.run_auto_trade_once(
+                            trigger_source_override=execution_trigger_source,
+                            allow_cross_market_intraday_entry_recheck=True,
+                            analysis_slot_override=slot_name,
+                            max_results_override=2,
+                            candidate_symbols_override=recovery_symbols or None,
+                        )
         finally:
             _AUTO_AGENT_RUN_LOCK.release()
-        intraday_entry_attempted_slots.add(slot_key)
-        execution_trigger_source = (
-            "vnpy_paper_auto"
-            if recover_formal
-            else CROSS_MARKET_INTRADAY_ENTRY_TRIGGER_SOURCE
-        )
         result.update({
             "analysis_slot": slot_name,
             "formal_recovery": recover_formal,
             "execution_mode": "vnpy_paper",
             "trigger_source": execution_trigger_source,
             "entry_recheck_guard": recovery_guard,
-            "session_order_activity": session_order_activity,
+            "formal_evidence": formal,
+            "entry_watch_started_at": slot_start.isoformat(),
+            "entry_watch_ends_at": slot_end.isoformat(),
+            "bounded_recovery": not is_formal_slot,
         })
         logger.info(
-            "Cross-market intraday entry scan finished: slot=%s submitted=%s reason=%s",
+            "Cross-market continuous entry watch finished: slot=%s submitted=%s reason=%s",
             slot_name,
             result.get("submitted_count"),
             result.get("reason"),
@@ -21276,6 +22932,24 @@ def build_vnpy_paper_trading_background_tasks(
                 "execution_mode": "dry_run",
                 "submits_orders": False,
                 "trading_window": window,
+            }
+        formal_entry_slot = _cross_market_formal_entry_slot()
+        if (
+            settings.auto_trade_enabled
+            and settings.auto_strategy == CROSS_MARKET_STRATEGY_ID
+            and settings.auto_execution_mode == "vnpy_paper"
+            and formal_entry_slot is not None
+        ):
+            slot_name, slot_start, slot_end = formal_entry_slot
+            return {
+                "accepted": True,
+                "skipped": True,
+                "reason": "formal_auto_trade_has_priority",
+                "analysis_slot": slot_name,
+                "formal_entry_started_at": slot_start.isoformat(),
+                "formal_entry_ends_at": slot_end.isoformat(),
+                "execution_mode": "dry_run",
+                "submits_orders": False,
             }
         if not _AUTO_AGENT_RUN_LOCK.acquire(
             timeout=CROSS_MARKET_OBSERVATION_LOCK_WAIT_SECONDS
@@ -21324,105 +22998,6 @@ def build_vnpy_paper_trading_background_tasks(
             "Cross-market paper observation finished: accepted=%s skipped=%s reason=%s",
             result.get("accepted"),
             result.get("skipped"),
-            result.get("reason"),
-        )
-        return result
-
-    def run_cross_market_formal_recovery() -> Dict[str, Any]:
-        window = service._trading_window_diagnostics(settings)
-        if window.get("is_market_open_now") is not True:
-            return {
-                "accepted": False,
-                "skipped": True,
-                "reason": "outside_cn_formal_recovery_session",
-                "execution_mode": "vnpy_paper",
-                "formal_recovery": True,
-            }
-        if not _AUTO_AGENT_RUN_LOCK.acquire(
-            timeout=CROSS_MARKET_OBSERVATION_LOCK_WAIT_SECONDS
-        ):
-            return {
-                "accepted": False,
-                "skipped": True,
-                "reason": "formal_recovery_agent_run_lock_timeout",
-                "lock_wait_seconds": CROSS_MARKET_OBSERVATION_LOCK_WAIT_SECONDS,
-                "execution_mode": "vnpy_paper",
-                "formal_recovery": True,
-            }
-        try:
-            formal_evidence = _cross_market_daily_evidence_status(
-                service,
-                settings,
-                window,
-                formal_only=True,
-            )
-            if formal_evidence.get("run_observed") is not True:
-                return {
-                    "accepted": True,
-                    "skipped": True,
-                    "reason": "formal_execution_not_observed_today",
-                    "execution_mode": "vnpy_paper",
-                    "formal_recovery": True,
-                    "formal_evidence": formal_evidence,
-                }
-            session_order_activity = _cross_market_session_order_activity_status(
-                service,
-                settings,
-                window,
-            )
-            if session_order_activity.get("available") is not True:
-                return {
-                    "accepted": False,
-                    "skipped": True,
-                    "reason": "formal_recovery_order_activity_audit_unavailable",
-                    "execution_mode": "vnpy_paper",
-                    "formal_recovery": True,
-                    "formal_evidence": formal_evidence,
-                    "session_order_activity": session_order_activity,
-                }
-            if session_order_activity.get("has_activity") is True:
-                return {
-                    "accepted": True,
-                    "skipped": True,
-                    "reason": "formal_recovery_order_activity_already_recorded",
-                    "execution_mode": "vnpy_paper",
-                    "formal_recovery": True,
-                    "formal_evidence": formal_evidence,
-                    "session_order_activity": session_order_activity,
-                }
-            recheck_guard = service._cross_market_formal_run_cadence_guard(
-                settings,
-                trigger_source="vnpy_paper_auto",
-                allow_intraday_entry_recheck=True,
-            )
-            if recheck_guard.get("block") is True:
-                return {
-                    "accepted": True,
-                    "skipped": True,
-                    "reason": recheck_guard.get("reason"),
-                    "execution_mode": "vnpy_paper",
-                    "formal_recovery": True,
-                    "formal_evidence": formal_evidence,
-                    "entry_recheck_guard": recheck_guard,
-                }
-            current_evidence = dict(recheck_guard.get("current_evidence") or {})
-            result = service.run_auto_trade_once(
-                allow_cross_market_intraday_entry_recheck=True,
-            )
-        finally:
-            _AUTO_AGENT_RUN_LOCK.release()
-        result.update({
-            "execution_mode": "vnpy_paper",
-            "formal_recovery": True,
-            "formal_evidence": formal_evidence,
-            "recovery_evidence": current_evidence,
-            "intraday_entry_recheck": True,
-            "entry_recheck_guard": recheck_guard,
-        })
-        logger.info(
-            "Cross-market formal recovery finished: accepted=%s submitted=%s reason=%s",
-            result.get("accepted"),
-            result.get("submitted_count"),
             result.get("reason"),
         )
         return result
@@ -21556,14 +23131,35 @@ def build_vnpy_paper_trading_background_tasks(
                 "submits_orders": False,
             }
         result["calibration_alert_retry"] = calibration_alert_retry
-        logger.info(
-            "vn.py paper auto retry finished: attempted=%s submitted=%s skipped=%s failed=%s calibration_alert=%s",
-            result.get("attempted_count"),
-            result.get("submitted_count"),
-            result.get("skipped_count"),
-            result.get("failed_count"),
-            calibration_alert_retry.get("reason"),
+        retry_work = any(
+            int(result.get(key) or 0) > 0
+            for key in (
+                "expired_count",
+                "cancel_requested_count",
+                "reconciled_count",
+                "protected_count",
+                "reconciliation_failed_count",
+                "attempted_count",
+                "submitted_count",
+                "failed_count",
+            )
         )
+        alert_work = bool(
+            isinstance(calibration_alert_retry, dict)
+            and calibration_alert_retry.get("accepted") is True
+            and calibration_alert_retry.get("skipped") is not True
+        )
+        if retry_work or alert_work:
+            logger.info(
+                "vn.py paper auto retry finished: attempted=%s submitted=%s skipped=%s failed=%s calibration_alert=%s",
+                result.get("attempted_count"),
+                result.get("submitted_count"),
+                result.get("skipped_count"),
+                result.get("failed_count"),
+                calibration_alert_retry.get("reason"),
+            )
+        else:
+            result.update({"skipped": True, "reason": "no_retry_work"})
         return result
 
     def collect_cross_market_korea_signal() -> Dict[str, Any]:
@@ -21611,61 +23207,32 @@ def build_vnpy_paper_trading_background_tasks(
             "component_status": "degraded" if degraded_components else "ready",
             "degraded_components": degraded_components,
         }
-        logger.info(
-            "Cross-market Asia signal collection finished: skipped=%s reason=%s japan=%s supply=%s degraded=%s",
-            result.get("skipped"),
-            result.get("reason"),
-            japan.get("reason"),
-            asia_supply_chain.get("reason"),
-            degraded_components,
-        )
         return result
 
     def collect_cross_market_us_tech_signal() -> Dict[str, Any]:
-        result = service.cross_market_signal_service.collect_us_tech_snapshot_if_open()
-        logger.info(
-            "Cross-market US tech signal collection finished: skipped=%s reason=%s",
-            result.get("skipped"),
-            result.get("reason"),
-        )
-        return result
+        return service.cross_market_signal_service.collect_us_tech_snapshot_if_open()
 
     def collect_cross_market_cpo_signal() -> Dict[str, Any]:
-        result = service.cross_market_signal_service.collect_cpo_snapshot_if_open()
-        logger.info(
-            "Cross-market CPO signal collection finished: skipped=%s reason=%s",
-            result.get("skipped"),
-            result.get("reason"),
-        )
-        return result
+        return service.cross_market_signal_service.collect_cpo_snapshot_if_open()
 
     def collect_cross_market_gold_signal() -> Dict[str, Any]:
-        result = service.cross_market_signal_service.collect_gold_snapshot_if_window()
-        logger.info(
-            "Cross-market gold signal collection finished: skipped=%s reason=%s",
-            result.get("skipped"),
-            result.get("reason"),
-        )
-        return result
+        return service.cross_market_signal_service.collect_gold_snapshot_if_window()
 
     def collect_cross_market_cn_open_signal() -> Dict[str, Any]:
-        result = service.cross_market_signal_service.collect_cn_open_snapshot_if_window()
-        logger.info(
-            "Cross-market CN open signal collection finished: skipped=%s reason=%s",
-            result.get("skipped"),
-            result.get("reason"),
-        )
-        return result
+        return service.cross_market_signal_service.collect_cn_open_snapshot_if_window()
 
     def revalidate_cross_market_pending_orders() -> Dict[str, Any]:
         result = service.revalidate_active_cross_market_trade_plans()
-        logger.info(
-            "Cross-market pending-order revalidation finished: scanned=%s continued=%s cancelled=%s failed=%s",
-            result.get("cross_market_count"),
-            result.get("continued_count"),
-            result.get("cancel_requested_count"),
-            result.get("failed_count"),
-        )
+        if isinstance(result, dict) and not any(
+            int(result.get(key) or 0) > 0
+            for key in (
+                "cancel_requested_count",
+                "reprice_requested_count",
+                "protected_count",
+                "failed_count",
+            )
+        ):
+            result.update({"skipped": True, "reason": "no_pending_order_changes"})
         return result
 
     def run_cross_market_intraday_sell_monitor() -> Dict[str, Any]:
@@ -21687,22 +23254,10 @@ def build_vnpy_paper_trading_background_tasks(
             result = service.run_cross_market_intraday_sell_monitor()
         finally:
             _AUTO_AGENT_RUN_LOCK.release()
-        logger.info(
-            "Cross-market intraday sell monitor finished: skipped=%s submitted=%s reason=%s",
-            result.get("skipped"),
-            result.get("submitted_count"),
-            result.get("reason"),
-        )
         return result
 
     def capture_cross_market_campaign_closing_snapshot() -> Dict[str, Any]:
-        result = service.capture_cross_market_campaign_closing_snapshot()
-        logger.info(
-            "Cross-market campaign closing snapshot finished: skipped=%s reason=%s",
-            result.get("skipped"),
-            result.get("reason"),
-        )
-        return result
+        return service.capture_cross_market_campaign_closing_snapshot()
 
     def run_calibration_evidence_monitor() -> Dict[str, Any]:
         markets = sorted({market for market, _strategy in shadow_config["pairs"]})
@@ -21790,6 +23345,9 @@ def build_vnpy_paper_trading_background_tasks(
     cross_market_strategy_active = (
         getattr(settings, "auto_strategy", "") == CROSS_MARKET_STRATEGY_ID
     )
+    entry_watch_owns_formal_execution = (
+        cross_market_entry_watch_owns_formal_execution(settings)
+    )
     observation_enabled = bool(
         getattr(settings, "cross_market_observation_enabled", False)
     )
@@ -21810,18 +23368,14 @@ def build_vnpy_paper_trading_background_tasks(
             if settings.auto_execution_mode == "vnpy_paper":
                 tasks.append({
                     "task": run_cross_market_intraday_entry_scan,
-                    "interval_seconds": 60,
+                    "interval_seconds": CROSS_MARKET_ENTRY_WATCH_INTERVAL_SECONDS,
                     "run_immediately": True,
                     "name": "cross_market_intraday_entry_scan",
                 })
-                tasks.append({
-                    "task": run_cross_market_formal_recovery,
-                    "interval_seconds": CROSS_MARKET_OBSERVATION_INTERVAL_SECONDS,
-                    "run_immediately": False,
-                    "name": "cross_market_formal_recovery",
-                    "initial_delay_seconds": CROSS_MARKET_FORMAL_RECOVERY_STAGGER_SECONDS,
-                })
-    if settings.auto_trade_enabled:
+    if (
+        settings.auto_trade_enabled
+        and not entry_watch_owns_formal_execution
+    ):
         auto_trade_task = {
             "task": run_auto_trade,
             "interval_seconds": auto_trade_interval_seconds,
@@ -21950,7 +23504,14 @@ def _cross_market_intraday_sell_reserved_window(
     now: Optional[datetime] = None,
 ) -> bool:
     current = (now or datetime.now(timezone.utc)).astimezone(ZoneInfo("Asia/Shanghai"))
-    return datetime_time(9, 34) <= current.time() <= datetime_time(9, 38)
+    entry_start = datetime.combine(
+        current.date(),
+        FORMAL_ENTRY_TIME,
+        tzinfo=current.tzinfo,
+    )
+    reserved_start = entry_start - timedelta(minutes=1)
+    reserved_end = entry_start + timedelta(seconds=FORMAL_ENTRY_WINDOW_SECONDS)
+    return reserved_start <= current < reserved_end
 
 
 def _cross_market_formal_entry_slot(
@@ -21977,13 +23538,34 @@ def _cross_market_formal_entry_slot(
 def _cross_market_intraday_entry_slot(
     now: Optional[datetime] = None,
 ) -> Optional[Tuple[str, datetime, datetime]]:
-    current = (now or datetime.now(timezone.utc)).astimezone(ZoneInfo("Asia/Shanghai"))
+    current = (now or datetime.now(timezone.utc)).astimezone(
+        ZoneInfo("Asia/Shanghai")
+    )
     for target_time in CROSS_MARKET_INTRADAY_ENTRY_TIMES:
-        start = datetime.combine(current.date(), target_time, tzinfo=current.tzinfo)
-        end = start + timedelta(seconds=CROSS_MARKET_INTRADAY_ENTRY_WINDOW_SECONDS)
+        start = datetime.combine(
+            current.date(),
+            target_time,
+            tzinfo=current.tzinfo,
+        )
+        end = start + timedelta(
+            seconds=CROSS_MARKET_INTRADAY_ENTRY_WINDOW_SECONDS
+        )
         if start <= current < end:
-            return target_time.strftime("%H:%M"), start.astimezone(timezone.utc), end.astimezone(timezone.utc)
+            return (
+                target_time.strftime("%H:%M"),
+                start.astimezone(timezone.utc),
+                end.astimezone(timezone.utc),
+            )
     return None
+
+
+def _cross_market_active_entry_slot(
+    now: Optional[datetime] = None,
+) -> Optional[Tuple[str, datetime, datetime]]:
+    return (
+        _cross_market_formal_entry_slot(now)
+        or _cross_market_intraday_entry_slot(now)
+    )
 
 
 def _cross_market_intraday_entry_slot_audited(
@@ -22062,6 +23644,7 @@ def _cross_market_session_order_activity_status(
     )
     by_trigger: Dict[str, Dict[str, int]] = {}
     activity_runs: List[Dict[str, Any]] = []
+    ledger_activity: List[Dict[str, Any]] = []
     try:
         for trigger_source in trigger_sources:
             planned_count = 0
@@ -22130,6 +23713,26 @@ def _cross_market_session_order_activity_status(
                 "planned_count": planned_count,
                 "submitted_count": submitted_count,
             }
+        if account_id is not None:
+            for trade in service.portfolio.repo.list_trades(account_id, as_of=session_day):
+                if trade.trade_date != session_day:
+                    continue
+                note = str(trade.note or "")
+                if not any(
+                    marker in note
+                    for marker in (
+                        "source=cross_market_auto_entry",
+                        "source=cross_market_auto_exit",
+                    )
+                ):
+                    continue
+                ledger_activity.append(
+                    {
+                        "trade_id": int(trade.id),
+                        "symbol": trade.symbol,
+                        "side": trade.side,
+                    }
+                )
     except Exception as exc:  # noqa: BLE001 - duplicate-order protection fails closed.
         return {
             "available": False,
@@ -22138,19 +23741,21 @@ def _cross_market_session_order_activity_status(
         }
     total_planned = sum(item["planned_count"] for item in by_trigger.values())
     total_submitted = sum(item["submitted_count"] for item in by_trigger.values())
+    has_activity = bool(total_planned > 0 or total_submitted > 0 or ledger_activity)
     return {
         "available": True,
         "reason": (
             "session_order_activity_found"
-            if total_planned > 0 or total_submitted > 0
+            if has_activity
             else "session_order_activity_not_found"
         ),
         "session_date": session_day.isoformat(),
-        "has_activity": total_planned > 0 or total_submitted > 0,
+        "has_activity": has_activity,
         "planned_count": total_planned,
         "submitted_count": total_submitted,
         "by_trigger": by_trigger,
         "activity_runs": activity_runs,
+        "ledger_activity": ledger_activity,
     }
 
 
@@ -22538,6 +24143,20 @@ def _next_daily_auto_trade_target(
         session_open = VnpyPaperTradingService._parse_utc_datetime(
             projected.get("current_open_at") or projected.get("next_open_at")
         )
+        if settings.auto_strategy == CROSS_MARKET_STRATEGY_ID and session_open is not None:
+            shanghai = ZoneInfo("Asia/Shanghai")
+            formal_target = datetime.combine(
+                session_open.astimezone(shanghai).date(),
+                FORMAL_ENTRY_TIME,
+                tzinfo=shanghai,
+            ).astimezone(timezone.utc)
+            formal_window_end = formal_target + timedelta(
+                seconds=FORMAL_ENTRY_WINDOW_SECONDS
+            )
+            if now < formal_target:
+                return formal_target
+            if now < formal_window_end:
+                return now + timedelta(seconds=1)
         buffered_open = (
             session_open + timedelta(seconds=AUTO_TRADE_WINDOW_START_BUFFER_SECONDS)
             if session_open is not None
@@ -22547,6 +24166,14 @@ def _next_daily_auto_trade_target(
     next_open = VnpyPaperTradingService._parse_utc_datetime(projected.get("next_open_at"))
     if next_open is None:
         return None
+    if settings.auto_strategy == CROSS_MARKET_STRATEGY_ID:
+        shanghai = ZoneInfo("Asia/Shanghai")
+        next_session_day = next_open.astimezone(shanghai).date()
+        return datetime.combine(
+            next_session_day,
+            FORMAL_ENTRY_TIME,
+            tzinfo=shanghai,
+        ).astimezone(timezone.utc)
     return next_open + timedelta(seconds=AUTO_TRADE_WINDOW_START_BUFFER_SECONDS)
 
 

@@ -107,9 +107,7 @@ def test_akshare_etf_uses_fund_etf_hist_em() -> None:
     fake_akshare = types.SimpleNamespace(fund_etf_hist_em=MagicMock(return_value=_history_frame()))
 
     with patch.dict(sys.modules, {"akshare": fake_akshare}):
-        with patch.object(fetcher, "_set_random_user_agent"), patch.object(
-            fetcher, "_enforce_rate_limit"
-        ):
+        with patch.object(fetcher, "_enforce_rate_limit"):
             df = fetcher._fetch_raw_data("563230", "2026-01-01", "2026-01-05")
 
     assert df is not None

@@ -17,6 +17,7 @@ from data_provider.realtime_types import RealtimeSource, UnifiedRealtimeQuote
 from src.services.cross_market_signal_service import (
     ASIA_THEME_EVIDENCE_CODES,
     CrossMarketSignalService,
+    KOREA_LIVE_PROVIDER_CLOCK_SKEW_MARGIN_SECONDS,
     NASDAQ_FUTURES_CAPTURE_THROTTLE_SECONDS,
     NASDAQ_FUTURES_STATE_KEY,
     US_CLOSE_THEME_CAPTURE_ATTEMPTS_STATE_KEY,
@@ -683,6 +684,21 @@ class CrossMarketSignalServiceTestCase(unittest.TestCase):
         self.assertFalse(mixed["buy_allowed"])
         self.assertEqual(mixed["reason"], "nikkei_topix_not_both_rising")
 
+    def test_japan_scheduled_market_closure_is_neutral_evidence(self) -> None:
+        holiday = datetime(2026, 8, 11, 1, 35, tzinfo=timezone.utc)
+
+        gate = self.service.get_japan_market_gate(now=holiday)
+
+        self.assertTrue(gate["available"])
+        self.assertTrue(gate["buy_allowed"])
+        self.assertTrue(gate["neutral"])
+        self.assertEqual(
+            gate["reason"],
+            "japan_scheduled_market_closure_neutral",
+        )
+        self.assertEqual(gate["session_date"], "2026-08-11")
+        self.assertFalse(gate["market_phase"]["is_trading_day"])
+
     def test_japan_close_gate_carries_only_until_cn_market_close(self) -> None:
         japan_close = datetime(2026, 8, 3, 6, 30, tzinfo=timezone.utc)
         cn_intraday = datetime(2026, 8, 3, 6, 45, tzinfo=timezone.utc)
@@ -820,6 +836,96 @@ class CrossMarketSignalServiceTestCase(unittest.TestCase):
         collect_japan.assert_called_once_with(now=None)
         get_korea.assert_called_once_with(now=completed_at)
         get_japan.assert_called_once_with(now=completed_at)
+
+    def test_asia_gate_treats_mild_mixed_markets_as_neutral(self) -> None:
+        korea_gate = {
+            "available": True,
+            "status": "neutral",
+            "buy_allowed": False,
+            "mean_change_pct": -0.2,
+        }
+        japan_gate = {
+            "available": True,
+            "buy_allowed": False,
+            "mean_change_pct": -0.3,
+        }
+
+        with patch.object(
+            self.service,
+            "get_korea_broad_market_gate",
+            return_value=korea_gate,
+        ), patch.object(
+            self.service,
+            "get_japan_market_gate",
+            return_value=japan_gate,
+        ):
+            gate = self.service.evaluate_asia_market_gate(
+                theme="compute_services",
+                now=NOW,
+                refresh=False,
+            )
+
+        self.assertTrue(gate["available"])
+        self.assertTrue(gate["buy_allowed"])
+        self.assertFalse(gate["positive_confirmation"])
+        self.assertEqual(gate["reason"], "asia_markets_not_severely_weak")
+
+    def test_asia_gate_bypasses_non_technology_theme_downside(self) -> None:
+        with patch.object(
+            self.service,
+            "get_korea_broad_market_gate",
+        ) as get_korea, patch.object(
+            self.service,
+            "get_japan_market_gate",
+        ) as get_japan:
+            gate = self.service.evaluate_asia_market_gate(
+                theme="pharma",
+                now=NOW,
+                refresh=False,
+            )
+
+        self.assertTrue(gate["available"])
+        self.assertTrue(gate["buy_allowed"])
+        self.assertEqual(gate["score"], 50.0)
+        self.assertEqual(
+            gate["reason"],
+            "asia_gate_not_applicable_non_technology_theme",
+        )
+        get_korea.assert_not_called()
+        get_japan.assert_not_called()
+
+    def test_asia_gate_blocks_only_material_market_downside(self) -> None:
+        korea_gate = {
+            "available": True,
+            "status": "neutral",
+            "buy_allowed": False,
+            "mean_change_pct": -0.2,
+        }
+        japan_gate = {
+            "available": True,
+            "buy_allowed": False,
+            "mean_change_pct": -0.8,
+        }
+
+        with patch.object(
+            self.service,
+            "get_korea_broad_market_gate",
+            return_value=korea_gate,
+        ), patch.object(
+            self.service,
+            "get_japan_market_gate",
+            return_value=japan_gate,
+        ):
+            gate = self.service.evaluate_asia_market_gate(
+                theme="compute_services",
+                now=NOW,
+                refresh=False,
+            )
+
+        self.assertTrue(gate["available"])
+        self.assertFalse(gate["buy_allowed"])
+        self.assertEqual(gate["reason"], "asia_market_severe_downside")
+        self.assertEqual(gate["severe_downside_markets"], ["japan"])
 
     def test_asia_gate_reuses_fresh_supply_chain_for_candidate_recheck(
         self,
@@ -1317,6 +1423,29 @@ class CrossMarketSignalServiceTestCase(unittest.TestCase):
 
         self.assertFalse(self.state_path.exists())
 
+    def test_live_korea_collection_waits_for_small_provider_clock_skew(self) -> None:
+        self.manager.provider_at = NOW + timedelta(seconds=1.2)
+        settled_at = NOW + timedelta(
+            seconds=0.2 + KOREA_LIVE_PROVIDER_CLOCK_SKEW_MARGIN_SECONDS
+        )
+
+        with patch(
+            "src.services.cross_market_signal_service._utc_now",
+            side_effect=[NOW, NOW, settled_at, settled_at],
+        ), patch("src.services.cross_market_signal_service.time.sleep") as sleep:
+            snapshot = self.service.collect_korea_snapshot()
+
+        sleep.assert_called_once()
+        self.assertAlmostEqual(
+            sleep.call_args.args[0],
+            0.2 + KOREA_LIVE_PROVIDER_CLOCK_SKEW_MARGIN_SECONDS,
+        )
+        self.assertEqual(snapshot["observed_at"], settled_at.isoformat())
+        self.assertEqual(
+            snapshot["components"]["005930.KS"]["provider_timestamp"],
+            (NOW + timedelta(seconds=1.2)).isoformat(),
+        )
+
     def test_cpo_gate_does_not_fetch_korea_quotes(self) -> None:
         gate = self.service.evaluate_korea_gate(theme="cpo", now=NOW)
 
@@ -1453,6 +1582,10 @@ class CrossMarketSignalServiceTestCase(unittest.TestCase):
         self.assertEqual(signal["confirmation_sample_count"], 3)
         self.assertEqual(signal["confirmation_span_seconds"], 120.0)
         self.assertLess(signal["sector_score_adjustment"], 0.0)
+        self.assertGreaterEqual(signal["score"], 0.0)
+        self.assertLessEqual(signal["score"], 100.0)
+        self.assertLess(signal["score"], 50.0)
+        self.assertLess(signal["directional_score"], 0.0)
 
     def test_nq00y_severe_downtrend_reduces_half_and_stale_evidence_fails_closed(self) -> None:
         first_at = datetime(2026, 7, 23, 1, 30, tzinfo=timezone.utc)
@@ -2093,6 +2226,50 @@ class CrossMarketSignalServiceTestCase(unittest.TestCase):
         self.assertTrue(signal["strong"])
         self.assertEqual(signal["signal_theme"], "storage")
         self.assertEqual(signal["theme"], "memory")
+
+    def test_premarket_signal_keeps_same_session_available_evidence(self) -> None:
+        session_date = date(2026, 7, 22)
+        available_at = NOW - timedelta(minutes=2)
+        unavailable_at = NOW - timedelta(minutes=1)
+        self.service._append_snapshot("us_premarket_snapshots", {
+            "observed_at": available_at.isoformat(),
+            "session_date": session_date.isoformat(),
+            "session_stage": "premarket",
+            "theme_signals": {
+                "storage": {
+                    "available": True,
+                    "strong": True,
+                    "reason": "us_premarket_theme_strong",
+                    "score": 82.0,
+                },
+            },
+        })
+        self.service._append_snapshot("us_premarket_snapshots", {
+            "observed_at": unavailable_at.isoformat(),
+            "session_date": session_date.isoformat(),
+            "session_stage": "premarket",
+            "theme_signals": {
+                "storage": {
+                    "available": False,
+                    "strong": False,
+                    "reason": "premarket_theme_coverage_insufficient",
+                },
+            },
+        })
+
+        with patch(
+            "src.services.cross_market_signal_service.trading_calendar.get_effective_trading_date",
+            return_value=session_date,
+        ):
+            signal = self.service.get_us_premarket_signal_for_cn_trade(
+                theme="memory",
+                now=NOW,
+            )
+
+        self.assertTrue(signal["available"])
+        self.assertTrue(signal["strong"])
+        self.assertEqual(signal["observed_at"], available_at.isoformat())
+        self.assertEqual(signal["score"], 82.0)
 
     def test_us_tech_collection_uses_dedicated_timestamped_route(self) -> None:
         collected_at = datetime(2026, 7, 24, 13, 35, tzinfo=timezone.utc)

@@ -14,6 +14,9 @@ const getTaskMetrics = vi.hoisted(() => vi.fn());
 const ensureAccount = vi.hoisted(() => vi.fn());
 const resetAccount = vi.hoisted(() => vi.fn());
 const listAccounts = vi.hoisted(() => vi.fn());
+const listStrategyDashboardAccounts = vi.hoisted(() => vi.fn());
+const getStrategyAccountDashboard = vi.hoisted(() => vi.fn());
+const updateStrategyAccountFactors = vi.hoisted(() => vi.fn());
 const restoreAccount = vi.hoisted(() => vi.fn());
 const cleanupArchivedAccounts = vi.hoisted(() => vi.fn());
 const getPerformance = vi.hoisted(() => vi.fn());
@@ -46,6 +49,9 @@ vi.mock('../../api/vnpyPaperTrading', () => ({
     ensureAccount,
     resetAccount,
     listAccounts,
+    listStrategyDashboardAccounts,
+    getStrategyAccountDashboard,
+    updateStrategyAccountFactors,
     restoreAccount,
     cleanupArchivedAccounts,
     getPerformance,
@@ -492,6 +498,70 @@ const paperAccountListResponse = {
   }],
   count: 2,
   currentAccountId: 1,
+};
+
+const strategyAccountListResponse = {
+  items: [{
+    id: 10,
+    name: '30日模拟｜跨市场轮动',
+    broker: 'vnpy_paper',
+    market: 'cn',
+    baseCurrency: 'CNY',
+    isActive: true,
+    archived: false,
+    strategyId: 'cross_market_global_sector_rotation_v1.4_staged',
+    strategyFamily: 'cross_market',
+    isExecutionAccount: true,
+  }, {
+    id: 11,
+    name: '30日模拟｜热点超跌反转09:45',
+    broker: 'paper_0945',
+    market: 'cn',
+    baseCurrency: 'CNY',
+    isActive: true,
+    archived: false,
+    strategyId: 'hotspot_oversold_reversal_0945_v1',
+    strategyFamily: 'hotspot_0945',
+    isExecutionAccount: false,
+  }],
+  count: 2,
+  executionAccountId: 10,
+};
+
+const strategyDashboardResponse = {
+  account: strategyAccountListResponse.items[0],
+  snapshot: {
+    ...statusResponse.snapshot,
+    accounts: [{
+      ...statusResponse.snapshot.accounts[0],
+      accountId: 10,
+      accountName: '30日模拟｜跨市场轮动',
+    }],
+  },
+  snapshotError: null,
+  progress: { status: 'active', completedSessionCount: 2, targetSessions: 30 },
+  factorProfile: {
+    strategyId: 'cross_market_global_sector_rotation_v1.4_staged',
+    strategyFamily: 'cross_market',
+    editable: true,
+    effectiveFrom: 'next_decision',
+    items: [{
+      key: 'entry_score_a',
+      label: 'A 档入场分',
+      description: '入场评分',
+      group: 'entry',
+      groupLabel: '入场评分与分档',
+      value: 75,
+      defaultValue: 75,
+      overridden: false,
+      editable: true,
+      valueType: 'number' as const,
+      unit: '分',
+      min: -100,
+      max: 100,
+      step: 0.5,
+    }],
+  },
 };
 
 const agentRunSummary = {
@@ -1018,6 +1088,9 @@ describe('VnpyPaperTradingPage', () => {
     ensureAccount.mockReset();
     resetAccount.mockReset();
     listAccounts.mockReset();
+    listStrategyDashboardAccounts.mockReset();
+    getStrategyAccountDashboard.mockReset();
+    updateStrategyAccountFactors.mockReset();
     restoreAccount.mockReset();
     cleanupArchivedAccounts.mockReset();
     getPerformance.mockReset();
@@ -1039,7 +1112,7 @@ describe('VnpyPaperTradingPage', () => {
     listAlertTriggers.mockReset();
     getStatus.mockResolvedValue(statusResponse);
     getCrossMarketPaperCampaign.mockResolvedValue({
-      strategyId: 'cross_market_global_sector_rotation_v1.3_aggressive',
+      strategyId: 'cross_market_global_sector_rotation_v1.4_staged',
       historicalRequired: false,
       historicalReady: false,
       ready: false,
@@ -1070,7 +1143,7 @@ describe('VnpyPaperTradingPage', () => {
     });
     getCrossMarketPaperCampaignReport.mockResolvedValue({
       schemaVersion: 1,
-      strategyId: 'cross_market_global_sector_rotation_v1.3_aggressive',
+      strategyId: 'cross_market_global_sector_rotation_v1.4_staged',
       generatedAt: '2026-07-27T07:30:00+00:00',
       isFinal: false,
       strategyAccepted: false,
@@ -1145,6 +1218,9 @@ describe('VnpyPaperTradingPage', () => {
     ensureAccount.mockResolvedValue(statusResponse);
     resetFailureFuse.mockResolvedValue(statusResponse);
     listAccounts.mockResolvedValue(paperAccountListResponse);
+    listStrategyDashboardAccounts.mockResolvedValue(strategyAccountListResponse);
+    getStrategyAccountDashboard.mockResolvedValue(strategyDashboardResponse);
+    updateStrategyAccountFactors.mockResolvedValue(strategyDashboardResponse);
     cleanupArchivedAccounts.mockResolvedValue({
       cleanedAccountIds: [2],
       skipped: [],
@@ -1459,6 +1535,32 @@ describe('VnpyPaperTradingPage', () => {
       source: 'vnpy_main_engine',
       message: 'vn.py cancel request submitted.',
       reason: 'vnpy_order_cancel_requested',
+    });
+  });
+
+  it('selects a strategy account and saves editable runtime factors', async () => {
+    render(
+      <UiLanguageProvider>
+        <VnpyPaperTradingPage />
+      </UiLanguageProvider>,
+    );
+
+    const dashboard = await screen.findByTestId('strategy-account-dashboard');
+    const selector = within(dashboard).getByLabelText('选择策略账户');
+    expect(selector).toHaveValue('10');
+    expect(within(selector).getByText(/#11 · 30日模拟｜热点超跌反转09:45/)).toBeInTheDocument();
+    expect(dashboard).toHaveTextContent('全部 1 个运行因子');
+    expect(dashboard).toHaveTextContent('切换这里只改变查看账户');
+
+    fireEvent.change(within(dashboard).getByTestId('strategy-factor-entry_score_a'), {
+      target: { value: '78' },
+    });
+    fireEvent.click(within(dashboard).getByRole('button', { name: '保存因子' }));
+
+    await waitFor(() => {
+      expect(updateStrategyAccountFactors).toHaveBeenCalledWith(10, {
+        entry_score_a: 78,
+      }, true);
     });
   });
 
@@ -1803,7 +1905,7 @@ describe('VnpyPaperTradingPage', () => {
   });
 
   it.each([
-    'cross_market_global_sector_rotation_v1.3_aggressive',
+    'cross_market_global_sector_rotation_v1.4_staged',
     'cross_market_semiconductor_gold_v1.1',
   ])('shows the %s loss-streak cooldown as three read-only CN trading days', async (strategy) => {
     const crossMarketStatus = {
@@ -1989,7 +2091,7 @@ describe('VnpyPaperTradingPage', () => {
   it('renders cross-market 5 10 20 30 and 60 day board technical reminders', async () => {
     const crossMarketRun = {
       ...agentRunDetail,
-      strategy: 'cross_market_global_sector_rotation_v1.3_aggressive',
+      strategy: 'cross_market_global_sector_rotation_v1.4_staged',
       decisions: [{
         ...agentRunDetail.decisions[0],
         symbol: '688981',
@@ -2050,7 +2152,7 @@ describe('VnpyPaperTradingPage', () => {
     listAgentRuns.mockResolvedValue({
       items: [{
         ...agentRunSummary,
-        strategy: 'cross_market_global_sector_rotation_v1.3_aggressive',
+        strategy: 'cross_market_global_sector_rotation_v1.4_staged',
       }],
       limit: 10,
       offset: 0,

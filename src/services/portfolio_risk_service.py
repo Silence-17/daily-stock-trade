@@ -226,7 +226,7 @@ class PortfolioRiskService:
             existing_dates = {row.snapshot_date for row in existing_rows if int(row.account_id) == int(account_id)}
             current_date = start_date
             while current_date <= as_of_date:
-                if current_date not in existing_dates:
+                if current_date.weekday() < 5 and current_date not in existing_dates:
                     self.portfolio_service.get_portfolio_snapshot(
                         account_id=account_id,
                         as_of=current_date,
@@ -240,17 +240,21 @@ class PortfolioRiskService:
         if not account_ids:
             return
         existing_pairs = {(int(row.account_id), row.snapshot_date) for row in existing_rows}
-        current_date = start_date
-        while current_date <= as_of_date:
-            if not all((aid, current_date) in existing_pairs for aid in account_ids):
-                self.portfolio_service.get_portfolio_snapshot(
-                    account_id=None,
-                    as_of=current_date,
-                    cost_method=cost_method,
-                )
-                for aid in account_ids:
+        for aid in account_ids:
+            current_date = self._resolve_backfill_start_date(
+                account_id=aid,
+                as_of_date=as_of_date,
+                lookback_days=lookback_days,
+            )
+            while current_date <= as_of_date:
+                if current_date.weekday() < 5 and (aid, current_date) not in existing_pairs:
+                    self.portfolio_service.get_portfolio_snapshot(
+                        account_id=aid,
+                        as_of=current_date,
+                        cost_method=cost_method,
+                    )
                     existing_pairs.add((aid, current_date))
-            current_date += timedelta(days=1)
+                current_date += timedelta(days=1)
 
     def _resolve_backfill_start_date(
         self,

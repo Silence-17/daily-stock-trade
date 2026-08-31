@@ -1008,8 +1008,8 @@ class CrossMarketAcceptanceServiceTestCase(unittest.TestCase):
             session_date += timedelta(days=1)
             if session_date.weekday() < 5:
                 break
-        started_at = datetime.combine(session_date, time(9, 35), tzinfo=shanghai)
-        created_at = datetime.combine(session_date, time(9, 38), tzinfo=shanghai)
+        started_at = datetime.combine(session_date, time(9, 30), tzinfo=shanghai)
+        created_at = datetime.combine(session_date, time(9, 33), tzinfo=shanghai)
         self.repository.runs.append({
             "id": 1,
             "run_uid": "slow-opening-formal",
@@ -1019,6 +1019,43 @@ class CrossMarketAcceptanceServiceTestCase(unittest.TestCase):
             "settings": {"auto_execution_mode": "vnpy_paper"},
             "diagnostics": {
                 "formal_entry_started_at": started_at.isoformat(),
+                "analysis_slot": "09:30",
+                "cross_market_observation": self._ready_observation(created_at),
+            },
+        })
+
+        with patch(
+            "src.services.cross_market_acceptance_service.is_market_open",
+            return_value=True,
+        ):
+            observation = self.service.get_status()["paper_observation"]
+
+        self.assertEqual(observation["formal_execution_trading_days"], 1)
+        self.assertEqual(observation["qualified_paper_trading_days"], 1)
+        self.assertEqual(observation["formal_execution_rejected_counts"], {})
+
+    def test_legacy_0935_baseline_remains_eligible_after_window_migration(self) -> None:
+        campaign = self.service.start_paper_campaign()
+        shanghai = ZoneInfo("Asia/Shanghai")
+        session_date = datetime.fromisoformat(
+            campaign["campaign"]["started_at"]
+        ).astimezone(shanghai).date()
+        while True:
+            session_date += timedelta(days=1)
+            if session_date.weekday() < 5:
+                break
+        started_at = datetime.combine(session_date, time(9, 35), tzinfo=shanghai)
+        created_at = datetime.combine(session_date, time(9, 38), tzinfo=shanghai)
+        self.repository.runs.append({
+            "id": 1,
+            "run_uid": "legacy-0935-formal",
+            "created_at": created_at.isoformat(),
+            "status": "completed",
+            "trigger_source": "vnpy_paper_auto",
+            "settings": {"auto_execution_mode": "vnpy_paper"},
+            "diagnostics": {
+                "formal_entry_started_at": started_at.isoformat(),
+                "analysis_slot": "09:35",
                 "cross_market_observation": self._ready_observation(created_at),
             },
         })
@@ -1081,7 +1118,7 @@ class CrossMarketAcceptanceServiceTestCase(unittest.TestCase):
             session_date += timedelta(days=1)
             if session_date.weekday() < 5:
                 break
-        baseline_at = datetime.combine(session_date, time(9, 35), tzinfo=shanghai)
+        baseline_at = datetime.combine(session_date, time(9, 30), tzinfo=shanghai)
         recovery_at = datetime.combine(session_date, time(10, 40), tzinfo=shanghai)
         self.repository.runs.extend([
             {
@@ -1093,6 +1130,7 @@ class CrossMarketAcceptanceServiceTestCase(unittest.TestCase):
                 "settings": {"auto_execution_mode": "vnpy_paper"},
                 "diagnostics": {
                     "formal_entry_started_at": baseline_at.isoformat(),
+                    "analysis_slot": "09:30",
                 },
             },
             {

@@ -30,8 +30,9 @@ QUALIFIED_TRIGGER_SOURCES = {
 FORMAL_QUALIFICATION_EXECUTION_MODES = {"vnpy_paper"}
 FORMAL_QUALIFICATION_TRIGGER_SOURCES = {"vnpy_paper_auto"}
 FORMAL_BASELINE_RUN_STATUSES = {"completed", "partial", "failed", "running"}
-FORMAL_ENTRY_TIME = datetime_time(9, 35)
-FORMAL_ENTRY_WINDOW_SECONDS = 120
+FORMAL_ENTRY_TIME = datetime_time(9, 30)
+FORMAL_ENTRY_WINDOW_SECONDS = 5 * 60
+LEGACY_FORMAL_ENTRY_TIME = datetime_time(9, 35)
 
 
 def _utc_now() -> datetime:
@@ -545,6 +546,7 @@ class CrossMarketAcceptanceService:
                 "formal_execution_rejected_counts": formal_rejected_counts,
                 "formal_entry_time": FORMAL_ENTRY_TIME.strftime("%H:%M"),
                 "formal_entry_window_seconds": FORMAL_ENTRY_WINDOW_SECONDS,
+                "legacy_formal_entry_time": LEGACY_FORMAL_ENTRY_TIME.strftime("%H:%M"),
                 "completion_basis": "fully_evidenced_formal_vnpy_paper_run",
                 "ready": paper_ready,
             },
@@ -1052,20 +1054,34 @@ class CrossMarketAcceptanceService:
             diagnostics.get("formal_entry_started_at")
         )
         entry_started_at = formal_entry_started_at or created_at
+        analysis_slot = str(diagnostics.get("analysis_slot") or "").strip()
         shanghai = ZoneInfo("Asia/Shanghai")
         local_created_at = created_at.astimezone(shanghai)
         local_entry_started_at = entry_started_at.astimezone(shanghai)
         if local_entry_started_at.date() != local_created_at.date():
             return False
-        window_start = datetime.combine(
-            local_entry_started_at.date(),
-            FORMAL_ENTRY_TIME,
-            tzinfo=local_entry_started_at.tzinfo,
-        )
-        window_end = window_start + timedelta(
-            seconds=FORMAL_ENTRY_WINDOW_SECONDS
-        )
-        return window_start <= local_entry_started_at < window_end
+        current_slot = FORMAL_ENTRY_TIME.strftime("%H:%M")
+        legacy_slot = LEGACY_FORMAL_ENTRY_TIME.strftime("%H:%M")
+        if analysis_slot == current_slot:
+            permitted_starts = (FORMAL_ENTRY_TIME,)
+        elif analysis_slot == legacy_slot:
+            permitted_starts = (LEGACY_FORMAL_ENTRY_TIME,)
+        else:
+            # Runs created before the analysis-slot diagnostic was persisted must
+            # remain eligible under either historical opening contract.
+            permitted_starts = (FORMAL_ENTRY_TIME, LEGACY_FORMAL_ENTRY_TIME)
+        for permitted_start in permitted_starts:
+            window_start = datetime.combine(
+                local_entry_started_at.date(),
+                permitted_start,
+                tzinfo=local_entry_started_at.tzinfo,
+            )
+            window_end = window_start + timedelta(
+                seconds=FORMAL_ENTRY_WINDOW_SECONDS
+            )
+            if window_start <= local_entry_started_at < window_end:
+                return True
+        return False
 
     @staticmethod
     def _formal_execution_timing_rejection_reason(

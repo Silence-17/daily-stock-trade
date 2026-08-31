@@ -302,6 +302,90 @@ describe('vnpyPaperTradingApi', () => {
     });
   });
 
+  it('lists selectable strategy dashboard accounts', async () => {
+    get.mockResolvedValueOnce({
+      data: {
+        items: [{
+          id: 11,
+          strategy_id: 'hotspot_oversold_reversal_0945_v1',
+          strategy_family: 'hotspot_0945',
+          is_execution_account: false,
+        }],
+        count: 1,
+        execution_account_id: 10,
+      },
+    });
+
+    const result = await vnpyPaperTradingApi.listStrategyDashboardAccounts(false);
+
+    expect(get).toHaveBeenCalledWith('/api/v1/vnpy-paper/strategy-dashboard/accounts', {
+      params: { include_inactive: false },
+    });
+    expect(result.executionAccountId).toBe(10);
+    expect(result.items[0]).toMatchObject({
+      strategyId: 'hotspot_oversold_reversal_0945_v1',
+      strategyFamily: 'hotspot_0945',
+      isExecutionAccount: false,
+    });
+  });
+
+  it('loads and updates a strategy account factor profile', async () => {
+    get.mockResolvedValueOnce({
+      data: {
+        account: { id: 10, strategy_id: 'cross_market_test' },
+        snapshot: null,
+        progress: { completed_session_count: 2 },
+        factor_profile: {
+          strategy_id: 'cross_market_test',
+          strategy_family: 'cross_market',
+          editable: true,
+          effective_from: 'next_decision',
+          items: [{
+            key: 'entry_score_a',
+            group_label: '入场评分',
+            value_type: 'number',
+            default_value: 75,
+            value: 78,
+          }],
+        },
+      },
+    });
+    put.mockResolvedValueOnce({
+      data: {
+        account: { id: 10, strategy_id: 'cross_market_test' },
+        snapshot: null,
+        progress: {},
+        factor_profile: {
+          strategy_id: 'cross_market_test',
+          strategy_family: 'cross_market',
+          editable: true,
+          effective_from: 'next_decision',
+          items: [],
+        },
+      },
+    });
+
+    const dashboard = await vnpyPaperTradingApi.getStrategyAccountDashboard(10);
+    const updated = await vnpyPaperTradingApi.updateStrategyAccountFactors(
+      10,
+      { entry_score_a: 78 },
+      true,
+    );
+
+    expect(get).toHaveBeenCalledWith('/api/v1/vnpy-paper/strategy-dashboard/accounts/10');
+    expect(dashboard.progress.completedSessionCount).toBe(2);
+    expect(dashboard.factorProfile.items[0]).toMatchObject({
+      groupLabel: '入场评分',
+      valueType: 'number',
+      defaultValue: 75,
+    });
+    expect(put).toHaveBeenCalledWith(
+      '/api/v1/vnpy-paper/strategy-dashboard/accounts/10/factors',
+      { overrides: { entry_score_a: 78 }, replace_existing: true },
+    );
+    expect(updated.factorProfile.strategyId).toBe('cross_market_test');
+  });
+
   it('cleans up archived paper accounts without deleting ledgers', async () => {
     post.mockResolvedValueOnce({
       data: {
@@ -993,7 +1077,7 @@ describe('vnpyPaperTradingApi', () => {
   it('loads and starts the 30-day cross-market paper campaign', async () => {
     get.mockResolvedValueOnce({
       data: {
-        strategy_id: 'cross_market_global_sector_rotation_v1.3_aggressive',
+        strategy_id: 'cross_market_global_sector_rotation_v1.4_staged',
         historical_required: false,
         historical_ready: false,
         ready: false,
@@ -1017,7 +1101,7 @@ describe('vnpyPaperTradingApi', () => {
           required_trading_days: 30,
         },
         status: {
-          strategy_id: 'cross_market_global_sector_rotation_v1.3_aggressive',
+          strategy_id: 'cross_market_global_sector_rotation_v1.4_staged',
           historical_required: false,
           historical_ready: false,
           ready: false,
@@ -1035,7 +1119,7 @@ describe('vnpyPaperTradingApi', () => {
     get.mockResolvedValueOnce({
       data: {
         schema_version: 1,
-        strategy_id: 'cross_market_global_sector_rotation_v1.3_aggressive',
+        strategy_id: 'cross_market_global_sector_rotation_v1.4_staged',
         generated_at: '2026-07-24T08:30:00+00:00',
         is_final: false,
         report_status: 'in_progress',

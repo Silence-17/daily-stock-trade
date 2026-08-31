@@ -10,13 +10,13 @@ from __future__ import annotations
 
 import math
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields, replace
 from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime, timedelta, timezone
-from typing import Dict, Iterable, List, Mapping, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
 
-STRATEGY_ID = "cross_market_global_sector_rotation_v1.3_aggressive"
+STRATEGY_ID = "cross_market_global_sector_rotation_v1.4_staged"
 
 KR_COMPONENT_WEIGHTS = {
     "KS11": 0.20,
@@ -31,18 +31,33 @@ KR_COMPONENT_SCALES_PCT = {
     "000660.KS": 2.0,
 }
 KR_LINKED_THEMES = {"semiconductor", "memory", "equipment", "materials"}
-GLOBAL_MARKET_LINKED_THEMES = KR_LINKED_THEMES | {
+TECHNOLOGY_WEIGHTED_THEMES = KR_LINKED_THEMES | {
     "cpo",
     "ccl",
     "mlcc",
     "artificial_intelligence",
     "compute_services",
     "gaming",
-    "pharma",
 }
-NASDAQ_FUTURES_LINKED_THEMES = GLOBAL_MARKET_LINKED_THEMES - {"pharma"}
-US_PREMARKET_LINKED_THEMES = GLOBAL_MARKET_LINKED_THEMES
-TRADEABLE_THEMES = GLOBAL_MARKET_LINKED_THEMES | {"gold"}
+DOMESTIC_ROTATION_THEMES = {
+    "pharma",
+    "consumer",
+    "bank",
+    "utilities",
+    "energy",
+    "industrials",
+}
+GLOBAL_MARKET_LINKED_THEMES = TECHNOLOGY_WEIGHTED_THEMES | {"pharma"}
+NASDAQ_FUTURES_LINKED_THEMES = set(TECHNOLOGY_WEIGHTED_THEMES)
+TRADEABLE_THEMES = TECHNOLOGY_WEIGHTED_THEMES | DOMESTIC_ROTATION_THEMES | {"gold"}
+CN_MAIN_BOARD_PREFIXES = ("000", "001", "002", "003", "600", "601", "603", "605")
+
+
+def is_cn_main_board_symbol(symbol: object) -> bool:
+    """Return whether a code is tradable by a main-board-only A-share account."""
+
+    normalized = re.sub(r"\D", "", str(symbol or ""))[:6]
+    return len(normalized) == 6 and normalized.startswith(CN_MAIN_BOARD_PREFIXES)
 
 # Ordered from narrow supply-chain concepts to broad themes so a specific board
 # such as MLCC or CCL is not swallowed by a generic electronics/semiconductor tag.
@@ -58,6 +73,11 @@ A_SHARE_THEME_KEYWORDS = (
     ("compute_services", ("computing power", "ai compute", "data center", "cloud computing", "\u7b97\u529b", "\u667a\u7b97", "\u6570\u636e\u4e2d\u5fc3", "\u4e1c\u6570\u897f\u7b97", "\u6db2\u51b7\u670d\u52a1\u5668", "\u670d\u52a1\u5668", "\u4e91\u8ba1\u7b97", "idc")),
     ("artificial_intelligence", ("artificial intelligence", "aigc", "chatgpt", "ai application", "ai agent", "\u4eba\u5de5\u667a\u80fd", "\u5927\u6a21\u578b", "\u673a\u5668\u5b66\u4e60", "\u751f\u6210\u5f0f", "\u591a\u6a21\u6001", "ai\u5e94\u7528", "ai\u667a\u80fd\u4f53")),
     ("pharma", ("pharma", "biotech", "innovative drug", "medical device", "cro", "cxo", "\u533b\u836f", "\u5236\u836f", "\u521b\u65b0\u836f", "\u751f\u7269\u533b\u836f", "\u751f\u7269\u5236\u54c1", "\u533b\u7597\u5668\u68b0", "\u533b\u7597\u670d\u52a1", "\u4e2d\u836f", "\u75ab\u82d7")),
+    ("consumer", ("food and beverage", "retail", "home appliance", "tourism", "\u98df\u54c1\u996e\u6599", "\u767d\u9152", "\u5546\u8d38\u96f6\u552e", "\u5bb6\u7528\u7535\u5668", "\u65c5\u6e38", "\u9152\u5e97\u9910\u996e")),
+    ("bank", ("bank", "banking", "\u94f6\u884c")),
+    ("utilities", ("utilities", "power utility", "water utility", "gas utility", "\u516c\u7528\u4e8b\u4e1a", "\u706b\u7535", "\u6c34\u7535", "\u7535\u529b\u8fd0\u8425", "\u6c34\u52a1", "\u71c3\u6c14")),
+    ("energy", ("oil and gas", "coal", "\u77f3\u6cb9\u77f3\u5316", "\u6cb9\u6c14\u5f00\u91c7", "\u7164\u70ad")),
+    ("industrials", ("industrials", "machinery", "construction", "transportation", "\u5de5\u4e1a\u6bcd\u673a", "\u673a\u68b0\u8bbe\u5907", "\u5efa\u7b51\u88c5\u9970", "\u4ea4\u901a\u8fd0\u8f93")),
 )
 
 _A_SHARE_THEME_KEYWORD_EXPANSIONS = {
@@ -175,8 +195,31 @@ class StrategyConfig:
     board_breakout_required_5m_closes: int = 2
     opening_sector_score_without_support: float = 60.0
     flat_open_min_sector_score: float = 60.0
-    flat_open_min_support_score: float = 85.0
-    flat_open_initial_position_pct: float = 25.0
+    minimum_sector_score: float = 0.0
+    board_support_score_bonus_max: float = 5.0
+    flat_open_initial_position_pct: float = 50.0
+    staged_entry_tranche_pct: float = 50.0
+    reduced_entry_tranche_pct: float = 50.0
+    entry_score_a: float = 75.0
+    entry_score_b: float = 68.0
+    entry_score_late_probe: float = 65.0
+    entry_cross_market_weight_pct: float = 30.0
+    entry_sector_weight_pct: float = 25.0
+    entry_stock_weight_pct: float = 20.0
+    entry_intraday_weight_pct: float = 15.0
+    entry_technical_weight_pct: float = 10.0
+    domestic_entry_cross_market_weight_pct: float = 10.0
+    domestic_entry_sector_weight_pct: float = 35.0
+    domestic_entry_stock_weight_pct: float = 25.0
+    domestic_entry_intraday_weight_pct: float = 20.0
+    domestic_entry_technical_weight_pct: float = 10.0
+    unconfirmed_intraday_entry_cap_pct: float = 25.0
+    core_leader_min_candidate_score: float = 68.0
+    core_leader_min_turnover: float = 1_000_000_000.0
+    core_leader_min_volume_ratio: float = 1.5
+    core_leader_min_change_pct: float = 2.0
+    core_leader_min_relative_strength_pct: float = 2.0
+    core_leader_min_sector_change_pct: float = 0.0
     range_max_tranches: int = 2
     intraday_pullback_min_pct: float = 1.0
     nasdaq_futures_confirmation_samples: int = 3
@@ -191,6 +234,7 @@ class StrategyConfig:
     kr_hold_score: float = 25.0
     kr_reduce_score: float = -25.0
     kr_exit_score: float = -45.0
+    asia_market_block_mean_change_pct: float = -0.7
     cn_high_open_pct: float = 0.19
     cn_low_open_upper_pct: float = -0.3
     cn_extreme_low_open_pct: float = -1.5
@@ -215,6 +259,343 @@ class StrategyConfig:
     max_account_drawdown_pct: float = 8.0
     loss_streak_limit: int = 3
     loss_streak_cooldown_days: int = 3
+
+
+_FACTOR_GROUP_LABELS = {
+    "evidence": "证据时效与连续确认",
+    "us": "美股科技与盘前信号",
+    "board": "板块技术位与突破",
+    "entry": "入场评分与分档",
+    "nasdaq": "纳指期货联动",
+    "korea": "韩股联动",
+    "asia": "亚洲市场联动",
+    "cn_open": "A 股开盘环境",
+    "gold": "黄金信号",
+    "range": "震荡交易",
+    "risk": "仓位与风险",
+    "exit": "退出与冷却",
+}
+
+_FACTOR_LABELS = {
+    "evidence_max_age_seconds": "证据最长年龄",
+    "confirmation_samples": "连续确认样本数",
+    "confirmation_duration_seconds": "连续确认观察时长",
+    "confirmation_min_gap_seconds": "确认样本最小间隔",
+    "confirmation_max_gap_seconds": "确认样本最大间隔",
+    "us_buy_score": "美股科技买入分",
+    "us_close_strong_score": "美股收盘强势分",
+    "us_close_min_sector_change_pct": "美股收盘板块最低涨幅",
+    "us_close_min_advancing_ratio": "美股收盘上涨股最低占比",
+    "us_close_min_leader_change_pct": "美股收盘龙头最低涨幅",
+    "us_premarket_strong_score": "美股盘前强势分",
+    "us_premarket_min_sector_change_pct": "美股盘前板块最低涨幅",
+    "us_premarket_min_advancing_ratio": "美股盘前上涨股最低占比",
+    "us_premarket_min_leader_change_pct": "美股盘前龙头最低涨幅",
+    "low_position_max_percentile": "低位候选最高分位",
+    "board_support_tolerance_pct": "板块支撑容差",
+    "board_resistance_warning_pct": "板块压力预警距离",
+    "board_breakout_confirmation_pct": "板块突破确认幅度",
+    "board_breakout_min_volume_ratio": "板块突破最低量比",
+    "board_breakout_required_5m_closes": "突破所需 5 分钟收盘次数",
+    "opening_sector_score_without_support": "开盘无支撑时板块最低分",
+    "flat_open_min_sector_score": "平开震荡板块最低分",
+    "minimum_sector_score": "板块绝对最低分",
+    "board_support_score_bonus_max": "板块支撑最高加分",
+    "flat_open_initial_position_pct": "平开首次目标仓位",
+    "staged_entry_tranche_pct": "分档入场单档仓位",
+    "reduced_entry_tranche_pct": "降级入场单档仓位",
+    "entry_score_a": "A 档入场分",
+    "entry_score_b": "B 档入场分",
+    "entry_score_late_probe": "尾档试仓分",
+    "entry_cross_market_weight_pct": "科技/黄金跨市场权重",
+    "entry_sector_weight_pct": "科技/黄金 A 股板块权重",
+    "entry_stock_weight_pct": "科技/黄金个股量价权重",
+    "entry_intraday_weight_pct": "科技/黄金盘中确认权重",
+    "entry_technical_weight_pct": "科技/黄金技术位权重",
+    "domestic_entry_cross_market_weight_pct": "国内轮动跨市场权重",
+    "domestic_entry_sector_weight_pct": "国内轮动 A 股板块权重",
+    "domestic_entry_stock_weight_pct": "国内轮动个股量价权重",
+    "domestic_entry_intraday_weight_pct": "国内轮动盘中确认权重",
+    "domestic_entry_technical_weight_pct": "国内轮动技术位权重",
+    "unconfirmed_intraday_entry_cap_pct": "未站回开盘价/VWAP 仓位上限",
+    "core_leader_min_candidate_score": "核心龙头最低候选分",
+    "core_leader_min_turnover": "核心龙头最低成交额",
+    "core_leader_min_volume_ratio": "核心龙头最低量比",
+    "core_leader_min_change_pct": "核心龙头最低涨幅",
+    "core_leader_min_relative_strength_pct": "核心龙头最低相对强度",
+    "core_leader_min_sector_change_pct": "核心龙头板块最低涨幅",
+    "range_max_tranches": "震荡策略最多分档数",
+    "intraday_pullback_min_pct": "日内回撤最低幅度",
+    "nasdaq_futures_confirmation_samples": "纳指期货确认样本数",
+    "nasdaq_futures_confirmation_duration_seconds": "纳指期货确认时长",
+    "nasdaq_futures_trend_window_minutes": "纳指期货趋势窗口",
+    "nasdaq_futures_buy_block_change_pct": "纳指期货禁买涨跌幅",
+    "nasdaq_futures_buy_block_trend_pct": "纳指期货禁买趋势幅度",
+    "nasdaq_futures_reduce_change_pct": "纳指期货减仓涨跌幅",
+    "nasdaq_futures_reduce_trend_pct": "纳指期货减仓趋势幅度",
+    "nasdaq_futures_reduce_fraction": "纳指期货触发减仓比例",
+    "kr_buy_score": "韩股联动买入分",
+    "kr_hold_score": "韩股联动持有分",
+    "kr_reduce_score": "韩股联动减仓分",
+    "kr_exit_score": "韩股联动退出分",
+    "asia_market_block_mean_change_pct": "亚洲市场明显走弱阈值",
+    "cn_high_open_pct": "沪深 300 高开禁追阈值",
+    "cn_low_open_upper_pct": "沪深 300 低开上界",
+    "cn_extreme_low_open_pct": "沪深 300 极端低开阈值",
+    "gold_buy_score": "黄金买入分",
+    "gold_min_return_pct": "黄金最低收益率",
+    "gold_price_only_return_pct": "仅价格证据最低收益率",
+    "range_adx_max": "震荡行情最高 ADX",
+    "range_ma20_max_abs_slope_pct": "MA20 最大绝对斜率",
+    "range_buy_rsi": "震荡买入 RSI",
+    "range_sell_rsi": "震荡卖出 RSI",
+    "min_edge_buffer_pct": "成本外最低优势",
+    "max_total_exposure_pct": "最大总仓位",
+    "max_theme_exposure_pct": "最大单主题仓位",
+    "max_symbol_exposure_pct": "最大单票仓位",
+    "max_positions": "最大持仓数",
+    "next_day_stock_high_open_pct": "次日个股高开阈值",
+    "high_open_trailing_pullback_pct": "高开移动止盈回撤",
+    "stop_loss_pct": "硬止损收益率",
+    "take_profit_pct": "止盈启动收益率",
+    "trailing_stop_pullback_pct": "移动止盈回撤",
+    "daily_loss_limit_pct": "单日亏损熔断",
+    "max_account_drawdown_pct": "账户最大回撤",
+    "loss_streak_limit": "连续亏损上限",
+    "loss_streak_cooldown_days": "连续亏损冷却交易日",
+}
+
+_FACTOR_CONSTRAINT_OVERRIDES: Dict[str, Dict[str, float]] = {
+    "evidence_max_age_seconds": {"min": 1, "max": 3_600, "step": 1},
+    "confirmation_samples": {"min": 1, "max": 100, "step": 1},
+    "confirmation_duration_seconds": {"min": 1, "max": 3_600, "step": 1},
+    "confirmation_min_gap_seconds": {"min": 1, "max": 600, "step": 1},
+    "confirmation_max_gap_seconds": {"min": 1, "max": 600, "step": 1},
+    "low_position_max_percentile": {"min": 0, "max": 100, "step": 0.5},
+    "board_support_tolerance_pct": {"min": 0, "max": 20, "step": 0.05},
+    "board_resistance_warning_pct": {"min": 0, "max": 20, "step": 0.05},
+    "board_breakout_confirmation_pct": {"min": 0, "max": 20, "step": 0.05},
+    "board_breakout_required_5m_closes": {"min": 2, "max": 20, "step": 1},
+    "board_support_score_bonus_max": {"min": 0, "max": 100, "step": 0.5},
+    "flat_open_initial_position_pct": {"min": 0, "max": 100, "step": 0.5},
+    "staged_entry_tranche_pct": {"min": 0, "max": 100, "step": 0.5},
+    "reduced_entry_tranche_pct": {"min": 0, "max": 100, "step": 0.5},
+    "entry_score_a": {"min": 0, "max": 100, "step": 0.5},
+    "entry_score_b": {"min": 0, "max": 100, "step": 0.5},
+    "entry_score_late_probe": {"min": 0, "max": 100, "step": 0.5},
+    "entry_cross_market_weight_pct": {"min": 0, "max": 100, "step": 0.5},
+    "entry_sector_weight_pct": {"min": 0, "max": 100, "step": 0.5},
+    "entry_stock_weight_pct": {"min": 0, "max": 100, "step": 0.5},
+    "entry_intraday_weight_pct": {"min": 0, "max": 100, "step": 0.5},
+    "entry_technical_weight_pct": {"min": 0, "max": 100, "step": 0.5},
+    "domestic_entry_cross_market_weight_pct": {"min": 0, "max": 100, "step": 0.5},
+    "domestic_entry_sector_weight_pct": {"min": 0, "max": 100, "step": 0.5},
+    "domestic_entry_stock_weight_pct": {"min": 0, "max": 100, "step": 0.5},
+    "domestic_entry_intraday_weight_pct": {"min": 0, "max": 100, "step": 0.5},
+    "domestic_entry_technical_weight_pct": {"min": 0, "max": 100, "step": 0.5},
+    "unconfirmed_intraday_entry_cap_pct": {"min": 0, "max": 100, "step": 0.5},
+    "range_max_tranches": {"min": 1, "max": 20, "step": 1},
+    "nasdaq_futures_confirmation_samples": {"min": 1, "max": 100, "step": 1},
+    "nasdaq_futures_confirmation_duration_seconds": {"min": 1, "max": 3_600, "step": 1},
+    "nasdaq_futures_trend_window_minutes": {"min": 1, "max": 240, "step": 1},
+    "range_adx_max": {"min": 0, "max": 100, "step": 0.5},
+    "range_buy_rsi": {"min": 0, "max": 100, "step": 0.5},
+    "range_sell_rsi": {"min": 0, "max": 100, "step": 0.5},
+    "min_edge_buffer_pct": {"min": 0, "max": 100, "step": 0.05},
+    "max_total_exposure_pct": {"min": 0, "max": 100, "step": 0.5},
+    "max_theme_exposure_pct": {"min": 0, "max": 100, "step": 0.5},
+    "max_symbol_exposure_pct": {"min": 0, "max": 100, "step": 0.5},
+    "max_positions": {"min": 1, "max": 100, "step": 1},
+    "high_open_trailing_pullback_pct": {"min": 0, "max": 100, "step": 0.05},
+    "stop_loss_pct": {"min": -100, "max": 0, "step": 0.05},
+    "take_profit_pct": {"min": 0, "max": 100, "step": 0.05},
+    "trailing_stop_pullback_pct": {"min": 0, "max": 100, "step": 0.05},
+    "daily_loss_limit_pct": {"min": -100, "max": 0, "step": 0.05},
+    "max_account_drawdown_pct": {"min": 0, "max": 100, "step": 0.05},
+    "loss_streak_limit": {"min": 1, "max": 100, "step": 1},
+    "loss_streak_cooldown_days": {"min": 0, "max": 365, "step": 1},
+    "asia_market_block_mean_change_pct": {"min": -10, "max": 0, "step": 0.05},
+}
+
+
+def _strategy_factor_group(key: str) -> str:
+    if key.startswith(("evidence_", "confirmation_")):
+        return "evidence"
+    if key.startswith("us_"):
+        return "us"
+    if key.startswith("board_"):
+        return "board"
+    if key.startswith(("opening_", "flat_open_", "minimum_sector_", "entry_", "core_leader_", "staged_", "reduced_", "low_position_")):
+        return "entry"
+    if key.startswith("nasdaq_"):
+        return "nasdaq"
+    if key.startswith("kr_"):
+        return "korea"
+    if key.startswith("asia_market_"):
+        return "asia"
+    if key.startswith("cn_"):
+        return "cn_open"
+    if key.startswith("gold_"):
+        return "gold"
+    if key.startswith(("range_", "intraday_pullback_")):
+        return "range"
+    if key.startswith(("next_day_", "high_open_", "stop_loss_", "take_profit_", "trailing_stop_", "loss_streak_")):
+        return "exit"
+    return "risk"
+
+
+def _strategy_factor_constraints(key: str, default: int | float) -> Dict[str, Any]:
+    override = _FACTOR_CONSTRAINT_OVERRIDES.get(key)
+    if override is not None:
+        return {
+            "value_type": "integer" if isinstance(default, int) else "number",
+            **override,
+        }
+    if isinstance(default, int):
+        maximum = 86_400 if key.endswith("_seconds") else 10_000
+        return {"value_type": "integer", "min": 0, "max": maximum, "step": 1}
+    if key.endswith("_fraction") or "advancing_ratio" in key:
+        return {"value_type": "number", "min": 0.0, "max": 1.0, "step": 0.01}
+    if key.endswith("_turnover"):
+        return {"value_type": "number", "min": 0.0, "max": 1_000_000_000_000.0, "step": 1_000_000.0}
+    if key.endswith("_ratio"):
+        return {"value_type": "number", "min": 0.0, "max": 20.0, "step": 0.05}
+    if "score" in key:
+        return {"value_type": "number", "min": -100.0, "max": 100.0, "step": 0.5}
+    if key.endswith("_pct") or key.endswith("_percentile"):
+        return {"value_type": "number", "min": -100.0, "max": 100.0, "step": 0.05}
+    return {"value_type": "number", "min": -100_000.0, "max": 100_000.0, "step": 0.1}
+
+
+def strategy_config_from_overrides(overrides: Mapping[str, object] | None) -> StrategyConfig:
+    """Build one validated runtime config from persisted numeric overrides."""
+
+    defaults = StrategyConfig()
+    allowed = {item.name: getattr(defaults, item.name) for item in fields(defaults) if item.name != "strategy_id"}
+    normalized: Dict[str, int | float] = {}
+    for raw_key, raw_value in dict(overrides or {}).items():
+        key = str(raw_key).strip()
+        if key not in allowed:
+            raise ValueError(f"unsupported_cross_market_factor:{key}")
+        default = allowed[key]
+        try:
+            number = float(raw_value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"invalid_cross_market_factor:{key}") from exc
+        if not math.isfinite(number):
+            raise ValueError(f"invalid_cross_market_factor:{key}")
+        constraints = _strategy_factor_constraints(key, default)
+        if number < float(constraints["min"]) or number > float(constraints["max"]):
+            raise ValueError(f"cross_market_factor_out_of_range:{key}")
+        if isinstance(default, int):
+            if not number.is_integer():
+                raise ValueError(f"cross_market_factor_must_be_integer:{key}")
+            normalized[key] = int(number)
+        else:
+            normalized[key] = number
+
+    config = replace(defaults, **normalized)
+    if not (config.entry_score_a >= config.entry_score_b >= config.entry_score_late_probe):
+        raise ValueError("cross_market_entry_score_order_invalid")
+    global_entry_weight_total = sum((
+        config.entry_cross_market_weight_pct,
+        config.entry_sector_weight_pct,
+        config.entry_stock_weight_pct,
+        config.entry_intraday_weight_pct,
+        config.entry_technical_weight_pct,
+    ))
+    domestic_entry_weight_total = sum((
+        config.domestic_entry_cross_market_weight_pct,
+        config.domestic_entry_sector_weight_pct,
+        config.domestic_entry_stock_weight_pct,
+        config.domestic_entry_intraday_weight_pct,
+        config.domestic_entry_technical_weight_pct,
+    ))
+    if min(global_entry_weight_total, domestic_entry_weight_total) <= 0:
+        raise ValueError("cross_market_entry_weights_invalid")
+    if not (config.kr_buy_score >= config.kr_hold_score > config.kr_reduce_score >= config.kr_exit_score):
+        raise ValueError("cross_market_korea_score_order_invalid")
+    if not (config.cn_high_open_pct > config.cn_low_open_upper_pct > config.cn_extreme_low_open_pct):
+        raise ValueError("cross_market_cn_open_threshold_order_invalid")
+    if config.confirmation_min_gap_seconds > config.confirmation_max_gap_seconds:
+        raise ValueError("cross_market_confirmation_gap_order_invalid")
+    if config.confirmation_duration_seconds < (
+        max(0, config.confirmation_samples - 1)
+        * config.confirmation_min_gap_seconds
+    ):
+        raise ValueError("cross_market_confirmation_duration_too_short")
+    if config.max_positions < 1:
+        raise ValueError("cross_market_max_positions_invalid")
+    if not (
+        config.max_symbol_exposure_pct
+        <= config.max_theme_exposure_pct
+        <= config.max_total_exposure_pct
+    ):
+        raise ValueError("cross_market_exposure_order_invalid")
+    if max(
+        config.flat_open_initial_position_pct,
+        config.staged_entry_tranche_pct,
+        config.reduced_entry_tranche_pct,
+    ) > config.max_symbol_exposure_pct:
+        raise ValueError("cross_market_entry_tranche_exposure_invalid")
+    if config.range_buy_rsi >= config.range_sell_rsi:
+        raise ValueError("cross_market_range_rsi_order_invalid")
+    if config.gold_price_only_return_pct < config.gold_min_return_pct:
+        raise ValueError("cross_market_gold_return_order_invalid")
+    if (
+        config.nasdaq_futures_reduce_change_pct
+        > config.nasdaq_futures_buy_block_change_pct
+        or config.nasdaq_futures_reduce_trend_pct
+        > config.nasdaq_futures_buy_block_trend_pct
+    ):
+        raise ValueError("cross_market_nasdaq_reduce_order_invalid")
+    return config
+
+
+def strategy_factor_catalog(
+    config: Optional[StrategyConfig] = None,
+    overrides: Mapping[str, object] | None = None,
+) -> List[Dict[str, Any]]:
+    """Return every numeric runtime factor in declaration order for the dashboard."""
+
+    defaults = StrategyConfig()
+    effective = config or strategy_config_from_overrides(overrides)
+    override_keys = {str(key) for key in dict(overrides or {})}
+    result: List[Dict[str, Any]] = []
+    for item in fields(defaults):
+        if item.name in {
+            "strategy_id",
+            "opening_sector_score_without_support",
+            "flat_open_min_sector_score",
+        }:
+            continue
+        default = getattr(defaults, item.name)
+        value = getattr(effective, item.name)
+        group = _strategy_factor_group(item.name)
+        result.append(
+            {
+                "key": item.name,
+                "label": _FACTOR_LABELS.get(item.name, item.name),
+                "description": f"跨市场 V1.4 运行参数 `{item.name}`，保存后用于后续策略判断。",
+                "group": group,
+                "group_label": _FACTOR_GROUP_LABELS[group],
+                "value": value,
+                "default_value": default,
+                "overridden": item.name in override_keys,
+                "editable": True,
+                "unit": (
+                    "秒" if item.name.endswith("_seconds")
+                    else "分钟" if item.name.endswith("_minutes")
+                    else "交易日" if item.name.endswith("_days")
+                    else "%" if item.name.endswith(("_pct", "_percentile"))
+                    else "分" if item.name.endswith("_score")
+                    else "元" if item.name.endswith("_turnover")
+                    else ""
+                ),
+                **_strategy_factor_constraints(item.name, default),
+            }
+        )
+    return result
 
 
 @dataclass(frozen=True)
@@ -242,6 +623,7 @@ class StrategyDecisionInput:
     reclaimed_open: bool = False
     above_vwap: bool = False
     sector_signal_score: float = 0.0
+    core_leader_signal: Optional[Mapping[str, object]] = None
     us_tech_score: Optional[float] = None
     us_close_theme_signal: Optional[Mapping[str, object]] = None
     us_premarket_signal: Optional[Mapping[str, object]] = None
@@ -261,6 +643,9 @@ class StrategyDecisionInput:
     pullback_from_peak_pct: float = 0.0
     expected_gross_edge_pct: float = 0.0
     estimated_round_trip_cost_pct: float = 0.0
+    entry_score: Optional[float] = None
+    analysis_slot: Optional[str] = None
+    failed_breakout_signal: Optional[Mapping[str, object]] = None
     risk: AccountRiskState = AccountRiskState()
 
 
@@ -273,6 +658,8 @@ class StrategyDecision:
     target_tranche_delta: int = 0
     target_position_pct: float = 0.0
     deferred_action: Optional[str] = None
+    entry_score: Optional[float] = None
+    entry_grade: Optional[str] = None
 
     def to_dict(self) -> Dict[str, object]:
         return asdict(self)
@@ -931,7 +1318,7 @@ class CrossMarketSignalEngine:
         expected_gross_edge_pct: float,
         estimated_round_trip_cost_pct: float,
     ) -> bool:
-        required = 2.0 * max(0.0, float(estimated_round_trip_cost_pct)) + self.config.min_edge_buffer_pct
+        required = max(0.0, float(estimated_round_trip_cost_pct)) + self.config.min_edge_buffer_pct
         return float(expected_gross_edge_pct) >= required
 
     def evaluate_account_risk(
@@ -991,38 +1378,6 @@ class CrossMarketSignalEngine:
         if request.has_position and position_return is not None:
             if position_return <= self.config.stop_loss_pct:
                 return self._sell_decision(request, fraction=1.0, reason="hard_stop_loss")
-            if (
-                position_return > 0
-                and request.pullback_from_peak_pct >= self.config.trailing_stop_pullback_pct
-            ):
-                return self._sell_decision(request, fraction=1.0, reason="trailing_stop")
-
-        if request.has_position and bool(open_state["force_sell"]):
-            high_open_exit = dict(request.next_day_high_open_exit_signal or {})
-            if high_open_exit.get("eligible") is True and high_open_exit.get("action") == "sell":
-                high_open_sell_fraction = _finite_float(
-                    high_open_exit.get("sell_fraction")
-                )
-                return self._sell_decision(
-                    request,
-                    fraction=(
-                        max(0.0, min(1.0, high_open_sell_fraction))
-                        if high_open_sell_fraction is not None
-                        else 1.0
-                    ),
-                    reason=str(
-                        high_open_exit.get("reason")
-                        or "next_day_high_open_trailing_exit"
-                    ),
-                )
-            if high_open_exit.get("eligible") is True:
-                return StrategyDecision(
-                    action="hold",
-                    reason=str(
-                        high_open_exit.get("reason")
-                        or "next_day_high_open_waiting_for_intraday_high"
-                    ),
-                )
 
         korea_gate = dict(request.korea_gate or {})
         if request.has_position and theme in KR_LINKED_THEMES:
@@ -1054,9 +1409,33 @@ class CrossMarketSignalEngine:
                     ),
                 )
 
+        high_open_wait_reason: Optional[str] = None
+        if request.has_position and bool(open_state["force_sell"]):
+            high_open_exit = dict(request.next_day_high_open_exit_signal or {})
+            if high_open_exit.get("eligible") is True and high_open_exit.get("action") == "sell":
+                high_open_sell_fraction = _finite_float(
+                    high_open_exit.get("sell_fraction")
+                )
+                return self._sell_decision(
+                    request,
+                    fraction=(
+                        max(0.0, min(1.0, high_open_sell_fraction))
+                        if high_open_sell_fraction is not None
+                        else 1.0
+                    ),
+                    reason=str(
+                        high_open_exit.get("reason")
+                        or "next_day_high_open_trailing_exit"
+                    ),
+                )
+            if high_open_exit.get("eligible") is True:
+                high_open_wait_reason = str(
+                    high_open_exit.get("reason")
+                    or "next_day_high_open_waiting_for_intraday_high"
+                )
+
         if request.has_position and position_return is not None and position_return >= self.config.take_profit_pct:
             return self._sell_decision(request, fraction=0.5, reason="take_profit")
-
         range_signal = dict(request.range_signal or {})
         if request.has_position and range_signal.get("action") in {"sell", "exit"}:
             fraction = (
@@ -1066,97 +1445,75 @@ class CrossMarketSignalEngine:
             )
             return self._sell_decision(request, fraction=fraction, reason="range_exit_signal")
 
+        if (
+            request.has_position
+            and position_return is not None
+            and position_return > 0
+            and request.pullback_from_peak_pct
+            >= self.config.trailing_stop_pullback_pct
+        ):
+            return self._sell_decision(request, fraction=1.0, reason="trailing_stop")
+
+        if request.has_position and high_open_wait_reason:
+            return StrategyDecision(action="hold", reason=high_open_wait_reason)
+
         if not bool(risk_gate["buy_allowed"]):
             return StrategyDecision(action="hold" if request.has_position else "blocked", reason=str(risk_gate["reason"]))
         board_technical = dict(request.board_technical_signal or {})
-        if (
-            board_technical.get("available") is True
-            and board_technical.get("near_resistance") is True
-            and board_technical.get("breakout_confirmed") is not True
-        ):
+        entry_phase = str(request.entry_phase or "opening").strip().lower()
+        failed_breakout = dict(request.failed_breakout_signal or {})
+        if failed_breakout.get("confirmed") is True:
             return StrategyDecision(
                 action="hold" if request.has_position else "blocked",
-                reason="sector_resistance_chasing_blocked",
+                reason=str(
+                    failed_breakout.get("reason")
+                    or "long_pressure_failed_breakout_below_vwap"
+                ),
             )
-        entry_phase = str(request.entry_phase or "opening").strip().lower()
-        flat_open_staged_add = bool(
+        staged_add = bool(
             request.has_position
-            and open_state["regime"] == "flat_open"
-            and theme in GLOBAL_MARKET_LINKED_THEMES
             and entry_phase == "intraday_dip"
-            and request.flat_open_staged_entry
+            and int(request.current_tranche_count or 0) < self.config.range_max_tranches
             and float(request.strategy_cost_basis_pct)
-            <= self.config.flat_open_initial_position_pct + 0.5
+            <= self.config.staged_entry_tranche_pct + 2.5
         )
-        if (
-            request.has_position
-            and not flat_open_staged_add
-            and range_signal.get("regime") == "range"
-            and range_signal.get("action") == "buy"
-        ):
-            if request.current_tranche_count >= self.config.range_max_tranches:
-                return StrategyDecision(action="hold", reason="range_tranche_limit")
-            if open_state["regime"] in {"high_open", "extreme_low_open"}:
-                return StrategyDecision(action="hold", reason=f"cn_{open_state['regime']}_range_add_blocked")
-            if (
-                open_state["regime"] == "low_open"
-                and not request.reclaimed_open
-                and not request.above_vwap
-            ):
-                return StrategyDecision(action="hold", reason="low_open_reclaim_unconfirmed")
-            nasdaq_block_reason = self._nasdaq_futures_entry_block_reason(
-                request,
-            )
-            if nasdaq_block_reason:
-                return StrategyDecision(action="hold", reason=nasdaq_block_reason)
-            us_tech_block_reason = self._us_tech_entry_block_reason(request)
-            if us_tech_block_reason:
-                return StrategyDecision(action="hold", reason=us_tech_block_reason)
-            asia_block_reason = self._asia_market_entry_block_reason(request)
-            if asia_block_reason:
-                return StrategyDecision(action="hold", reason=asia_block_reason)
-            return self._buy_decision(request, reason="range_add_tranche")
-
-        if request.has_position and not flat_open_staged_add:
+        if request.has_position and not staged_add:
             return StrategyDecision(action="hold", reason="no_sell_signal")
-        if open_state["regime"] in {"high_open", "extreme_low_open"}:
-            return StrategyDecision(action="blocked", reason=f"cn_{open_state['regime']}_buy_blocked")
-
         if entry_phase not in {"opening", "intraday_dip"}:
             return StrategyDecision(
                 action="hold" if request.has_position else "blocked",
                 reason="entry_phase_invalid",
             )
+        if open_state["regime"] == "extreme_low_open":
+            return StrategyDecision(
+                action="blocked",
+                reason="cn_extreme_low_open_buy_blocked",
+            )
+        if open_state["regime"] == "high_open":
+            if entry_phase != "intraday_dip":
+                return StrategyDecision(
+                    action="blocked",
+                    reason="cn_high_open_buy_blocked",
+                )
+            pullback = dict(request.intraday_pullback_signal or {})
+            if (
+                pullback.get("available") is not True
+                or pullback.get("confirmed") is not True
+                or not (request.reclaimed_open or request.above_vwap)
+            ):
+                return StrategyDecision(
+                    action="hold" if request.has_position else "blocked",
+                    reason="cn_high_open_pullback_unconfirmed",
+                )
+
         close_theme_ready = self._us_close_theme_ready(request)
         intraday_dip_ready = self._premarket_intraday_dip_ready(request)
         if open_state["regime"] == "flat_open":
-            if (
-                not request.has_position
-                and range_signal.get("regime") == "range"
+            range_buy_ready = bool(
+                range_signal.get("regime") == "range"
                 and range_signal.get("action") == "buy"
-            ):
-                nasdaq_block_reason = self._nasdaq_futures_entry_block_reason(
-                    request,
-                )
-                if nasdaq_block_reason:
-                    return StrategyDecision(
-                        action="blocked",
-                        reason=nasdaq_block_reason,
-                    )
-                us_tech_block_reason = self._us_tech_entry_block_reason(request)
-                if us_tech_block_reason:
-                    return StrategyDecision(
-                        action="blocked",
-                        reason=us_tech_block_reason,
-                    )
-                asia_block_reason = self._asia_market_entry_block_reason(request)
-                if asia_block_reason:
-                    return StrategyDecision(
-                        action="blocked",
-                        reason=asia_block_reason,
-                    )
-                return self._buy_decision(request, reason="range_low_buy")
-            if theme not in GLOBAL_MARKET_LINKED_THEMES:
+            )
+            if theme not in TRADEABLE_THEMES and not range_buy_ready:
                 return StrategyDecision(
                     action="hold" if request.has_position else "blocked",
                     reason="flat_open_range_or_strong_cross_market_signal_required",
@@ -1166,31 +1523,19 @@ class CrossMarketSignalEngine:
                     action="hold" if request.has_position else "blocked",
                     reason="flat_open_board_technical_required",
                 )
-            if board_technical.get("supportive") is not True:
-                return StrategyDecision(
-                    action="hold" if request.has_position else "blocked",
-                    reason="flat_open_valid_support_required",
-                )
-            support_score = _finite_float(board_technical.get("support_score"))
-            if (
-                support_score is None
-                or support_score < self.config.flat_open_min_support_score
-            ):
-                return StrategyDecision(
-                    action="hold" if request.has_position else "blocked",
-                    reason="flat_open_support_score_too_low",
-                )
 
-        if not request.reclaimed_open and not request.above_vwap:
-            return StrategyDecision(
-                action="hold" if request.has_position else "blocked",
-                reason=(
-                    "flat_open_reclaim_unconfirmed"
-                    if open_state["regime"] == "flat_open"
-                    else "low_open_reclaim_unconfirmed"
-                ),
-            )
         effective_sector_score = float(request.sector_signal_score)
+        support_score = _finite_float(board_technical.get("support_score"))
+        if (
+            open_state["regime"] == "flat_open"
+            and board_technical.get("supportive") is True
+            and support_score is not None
+        ):
+            effective_sector_score += min(
+                self.config.board_support_score_bonus_max,
+                max(0.0, support_score) / 100.0
+                * self.config.board_support_score_bonus_max,
+            )
         if theme == "cpo":
             cpo_signal = dict(request.cpo_signal or {})
             cpo_score = _finite_float(cpo_signal.get("score"))
@@ -1203,7 +1548,11 @@ class CrossMarketSignalEngine:
             if futures_adjustment is not None:
                 effective_sector_score += max(-5.0, min(5.0, futures_adjustment))
         rotation = dict(request.rotation_signal or {})
-        if rotation.get("tailwind") is True and board_technical.get("supportive") is True:
+        if (
+            theme in TECHNOLOGY_WEIGHTED_THEMES
+            and rotation.get("tailwind") is True
+            and board_technical.get("supportive") is True
+        ):
             effective_sector_score += 5.0
         low_position = dict(request.low_position_signal or {})
         if low_position.get("available") is True:
@@ -1214,22 +1563,15 @@ class CrossMarketSignalEngine:
                 if range_percentile is not None and range_percentile >= 75.0:
                     effective_sector_score -= 5.0
         effective_sector_score = max(0.0, min(100.0, effective_sector_score))
-        required_sector_score = self.config.us_buy_score
-        if open_state["regime"] == "flat_open":
-            required_sector_score = max(
-                required_sector_score,
-                self.config.flat_open_min_sector_score,
-            )
-        elif (
-            entry_phase == "opening"
-            and board_technical
-            and board_technical.get("supportive") is not True
-        ):
-            required_sector_score = self.config.opening_sector_score_without_support
-        if effective_sector_score < required_sector_score:
+        required_sector_score = self.config.minimum_sector_score
+        core_leader_override = bool(
+            effective_sector_score < required_sector_score
+            and self._core_leader_divergence_ready(request)
+        )
+        if effective_sector_score < required_sector_score and not core_leader_override:
             return StrategyDecision(action="blocked", reason="sector_signal_too_weak")
 
-        if theme in GLOBAL_MARKET_LINKED_THEMES:
+        if theme in TECHNOLOGY_WEIGHTED_THEMES:
             nasdaq_block_reason = self._nasdaq_futures_entry_block_reason(request)
             if nasdaq_block_reason:
                 return StrategyDecision(
@@ -1246,23 +1588,44 @@ class CrossMarketSignalEngine:
                     action="blocked",
                     reason=f"{theme}_premarket_close_dip_unconfirmed",
                 )
-            us_tech_block_reason = self._us_tech_entry_block_reason(request)
-            if us_tech_block_reason:
+            asia_gate = dict(request.asia_market_gate or {})
+            if not bool(asia_gate.get("buy_allowed")):
                 return StrategyDecision(
                     action="blocked",
-                    reason=us_tech_block_reason,
+                    reason=str(
+                        asia_gate.get("reason")
+                        or "asia_market_buy_signal_unconfirmed"
+                    ),
                 )
-            if theme != "cpo":
-                asia_gate = dict(request.asia_market_gate or {})
-                if not bool(asia_gate.get("buy_allowed")):
-                    return StrategyDecision(
-                        action="blocked",
-                        reason=str(
-                            asia_gate.get("reason")
-                            or "asia_market_buy_signal_unconfirmed"
-                        ),
-                    )
+        if theme == "cpo":
+            cpo_signal = dict(request.cpo_signal or {})
+            if (
+                cpo_signal.get("available") is not True
+                or cpo_signal.get("supportive") is not True
+            ):
+                return StrategyDecision(
+                    action="hold" if request.has_position else "blocked",
+                    reason=str(
+                        cpo_signal.get("reason")
+                        or "cpo_us_close_signal_unconfirmed"
+                    ),
+                )
         signal_order_cap_pct: Optional[float] = None
+        primary_board = (
+            board_technical.get("primary_board")
+            if isinstance(board_technical.get("primary_board"), Mapping)
+            else {}
+        )
+        pressure_windows = {
+            int(value)
+            for value in list(primary_board.get("pressure_windows") or [])
+            if _finite_float(value) is not None
+        }
+        if (
+            pressure_windows & {20, 30, 60}
+            and primary_board.get("breakout_confirmed") is not True
+        ):
+            signal_order_cap_pct = self.config.reduced_entry_tranche_pct
         if theme == "gold":
             gold_signal = dict(request.gold_signal or {})
             if not bool(gold_signal.get("buy_allowed")):
@@ -1270,33 +1633,50 @@ class CrossMarketSignalEngine:
                     action="blocked",
                     reason=str(gold_signal.get("reason") or "gold_signal_unconfirmed"),
                 )
-            target_fraction = _finite_float(gold_signal.get("target_fraction"))
-            if target_fraction is not None:
-                signal_order_cap_pct = (
-                    self.config.max_symbol_exposure_pct
-                    * max(0.0, min(1.0, target_fraction))
-                )
+        range_buy_confirmed = bool(
+            range_signal.get("regime") == "range"
+            and range_signal.get("action") == "buy"
+        )
+        if (
+            theme in DOMESTIC_ROTATION_THEMES
+            and not range_buy_confirmed
+            and not self._core_leader_divergence_ready(request)
+            and not request.reclaimed_open
+            and not request.above_vwap
+        ):
+            unconfirmed_cap = self.config.unconfirmed_intraday_entry_cap_pct
+            signal_order_cap_pct = min(
+                float(signal_order_cap_pct)
+                if signal_order_cap_pct is not None
+                else float(unconfirmed_cap),
+                float(unconfirmed_cap),
+            )
         if open_state["regime"] == "flat_open":
-            flat_open_cap = self.config.flat_open_initial_position_pct
-            if signal_order_cap_pct is not None:
-                flat_open_cap = min(flat_open_cap, signal_order_cap_pct)
             return self._buy_decision(
                 request,
                 reason=(
-                    f"{theme or 'theme'}_flat_open_staged_add_confirmed"
-                    if flat_open_staged_add
+                    "range_add_tranche"
+                    if staged_add and range_buy_confirmed
+                    else f"{theme or 'theme'}_flat_open_staged_add_confirmed"
+                    if staged_add
+                    else "range_low_buy"
+                    if range_buy_confirmed
+                    else f"{theme or 'theme'}_core_leader_divergence_flat_open_staged_entry_confirmed"
+                    if self._core_leader_divergence_ready(request)
                     else f"{theme or 'theme'}_flat_open_staged_entry_confirmed"
                 ),
-                order_cap_pct=(
-                    signal_order_cap_pct
-                    if flat_open_staged_add
-                    else flat_open_cap
-                ),
+                order_cap_pct=signal_order_cap_pct,
             )
         return self._buy_decision(
             request,
             reason=(
-                f"{theme or 'theme'}_premarket_close_intraday_dip_confirmed"
+                "range_add_tranche"
+                if staged_add and range_buy_confirmed
+                else "range_low_buy"
+                if range_buy_confirmed
+                else f"{theme}_domestic_rotation_entry_confirmed"
+                if theme in DOMESTIC_ROTATION_THEMES
+                else f"{theme or 'theme'}_premarket_close_intraday_dip_confirmed"
                 if entry_phase == "intraday_dip"
                 else f"{theme or 'theme'}_us_close_opening_entry_confirmed"
             ),
@@ -1344,7 +1724,7 @@ class CrossMarketSignalEngine:
         request: StrategyDecisionInput,
     ) -> Optional[str]:
         theme = str(request.theme or "").strip().lower()
-        if theme not in GLOBAL_MARKET_LINKED_THEMES or theme == "cpo":
+        if theme not in TECHNOLOGY_WEIGHTED_THEMES:
             return None
         gate = dict(request.asia_market_gate or {})
         if gate.get("buy_allowed") is True:
@@ -1522,7 +1902,7 @@ class CrossMarketSignalEngine:
             return False
         if pullback.get("available") is not True or pullback.get("confirmed") is not True:
             return False
-        if board.get("available") is not True or board.get("supportive") is not True:
+        if board.get("available") is not True:
             return False
         pullback_pct = _finite_float(pullback.get("pullback_from_high_pct"))
         if pullback_pct is None:
@@ -1530,16 +1910,38 @@ class CrossMarketSignalEngine:
         return bool(
             (us_premarket_ready or asia_premarket_ready)
             and pullback_pct >= self.config.intraday_pullback_min_pct
-            and float(request.sector_signal_score) >= self.config.us_buy_score
         )
 
-    @staticmethod
-    def _asia_supply_chain_intraday_ready(
+    def _core_leader_divergence_ready(
+        self,
         request: StrategyDecisionInput,
     ) -> bool:
-        return CrossMarketSignalEngine.is_asia_supply_chain_signal_ready(
-            request.theme,
-            dict(request.asia_supply_chain_signal or {}),
+        """Allow one small intraday entry when a verified leader outruns a flat board."""
+
+        signal = dict(request.core_leader_signal or {})
+        return bool(
+            signal.get("available") is True
+            and signal.get("confirmed") is True
+            and not request.has_position
+            and str(request.entry_phase or "").strip().lower() == "intraday_dip"
+            and self.classify_cn_open(request.cn_gap_pct)["regime"] == "flat_open"
+            and str(request.theme or "").strip().lower()
+            in (GLOBAL_MARKET_LINKED_THEMES - {"cpo"})
+        )
+
+    def _short_resistance_core_leader_ready(
+        self,
+        request: StrategyDecisionInput,
+        *,
+        board_technical: Mapping[str, object],
+    ) -> bool:
+        """Allow a first tranche through only a 5/10-day resistance warning."""
+
+        return bool(
+            board_technical.get("near_resistance") is True
+            and board_technical.get("short_resistance_only") is True
+            and not list(board_technical.get("medium_long_pressure_boards") or [])
+            and self._core_leader_divergence_ready(request)
         )
 
     def _buy_decision(
@@ -1549,23 +1951,65 @@ class CrossMarketSignalEngine:
         reason: str,
         order_cap_pct: Optional[float] = None,
     ) -> StrategyDecision:
+        entry_score = _finite_float(request.entry_score)
+        entry_grade: Optional[str] = None
+        if entry_score is not None:
+            if entry_score >= self.config.entry_score_a:
+                entry_grade = "A"
+            elif entry_score >= self.config.entry_score_b:
+                entry_grade = "B"
+            elif entry_score >= self.config.entry_score_late_probe:
+                if str(request.analysis_slot or "").strip() not in {
+                    "10:40",
+                    "14:30",
+                }:
+                    return StrategyDecision(
+                        action="blocked",
+                        reason="entry_score_late_probe_only",
+                        entry_score=round(entry_score, 6),
+                        entry_grade="C",
+                    )
+                entry_grade = "C"
+            else:
+                return StrategyDecision(
+                    action="blocked",
+                    reason="entry_score_below_threshold",
+                    entry_score=round(entry_score, 6),
+                )
         if not self.has_sufficient_net_edge(
             expected_gross_edge_pct=request.expected_gross_edge_pct,
             estimated_round_trip_cost_pct=request.estimated_round_trip_cost_pct,
         ):
-            return StrategyDecision(action="blocked", reason="insufficient_net_edge")
+            return StrategyDecision(
+                action="blocked",
+                reason="insufficient_net_edge",
+                entry_score=entry_score,
+                entry_grade=entry_grade,
+            )
+        staged_cap = self.config.staged_entry_tranche_pct
+        if entry_grade == "C":
+            staged_cap = min(staged_cap, self.config.reduced_entry_tranche_pct)
+        if order_cap_pct is not None:
+            staged_cap = min(staged_cap, max(0.0, float(order_cap_pct)))
         target_pct = self.target_entry_position_pct(
             request.risk,
-            order_cap_pct=order_cap_pct,
+            order_cap_pct=staged_cap,
         )
         if target_pct <= 0:
-            return StrategyDecision(action="blocked", reason="position_capacity_exhausted")
+            return StrategyDecision(
+                action="blocked",
+                reason="position_capacity_exhausted",
+                entry_score=entry_score,
+                entry_grade=entry_grade,
+            )
         return StrategyDecision(
             action="buy",
             reason=reason,
             buy_allowed=True,
             target_tranche_delta=1,
             target_position_pct=target_pct,
+            entry_score=(round(entry_score, 6) if entry_score is not None else None),
+            entry_grade=entry_grade,
         )
 
     @staticmethod

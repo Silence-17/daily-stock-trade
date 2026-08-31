@@ -11,7 +11,13 @@ from scripts.check_vnpy_scheduled_external_acceptance import (
 )
 
 
-def _status(*, cash=100000.0, positions=None, handler_failures=0):
+def _status(
+    *,
+    cash=100000.0,
+    positions=None,
+    handler_failures=0,
+    strategy="dual_low",
+):
     return {
         "settings": {
             "enabled": True,
@@ -19,7 +25,7 @@ def _status(*, cash=100000.0, positions=None, handler_failures=0):
             "auto_execution_mode": "vnpy_paper",
             "auto_trade_time_gate_enabled": True,
             "auto_market": "cn",
-            "auto_strategy": "dual_low",
+            "auto_strategy": strategy,
             "account_id": 8,
             "vnpy_gateway_name": "XTP",
             "auto_max_results": 1,
@@ -48,7 +54,15 @@ def _status(*, cash=100000.0, positions=None, handler_failures=0):
         "scheduler": {
             "loop_running": True,
             "background_tasks": [
-                {"name": "vnpy_paper_auto_trade", "running": False}
+                {
+                    "name": (
+                        "cross_market_intraday_entry_scan"
+                        if strategy
+                        == "cross_market_global_sector_rotation_v1.4_staged"
+                        else "vnpy_paper_auto_trade"
+                    ),
+                    "running": False,
+                }
             ],
         },
         "diagnostics": {
@@ -137,6 +151,29 @@ def test_evaluate_external_scheduled_acceptance_proves_correlated_fill():
     assert result["position_deltas"] == {"600000": 100.0}
     assert result["scheduler_event_correlated"] is True
     assert result["external_gateway_preflight_ok"] is True
+
+
+def test_evaluate_external_scheduled_acceptance_accepts_cross_market_entry_task():
+    strategy = "cross_market_global_sector_rotation_v1.4_staged"
+    event = _event()
+    event["name"] = "cross_market_intraday_entry_scan"
+
+    result = evaluate_external_scheduled_acceptance(
+        run_uid="scheduled-run",
+        run_detail=_run_detail(),
+        scheduler_event=event,
+        before_status=_status(strategy=strategy),
+        after_status=_status(
+            cash=99000.0,
+            positions=[{"symbol": "600000", "quantity": 100}],
+            strategy=strategy,
+        ),
+        min_candidates=1,
+        max_failed_plans=0,
+    )
+
+    assert result["ok"] is True
+    assert result["execution_task_name"] == "cross_market_intraday_entry_scan"
 
 
 def test_script_entrypoint_can_load_shared_verifier():

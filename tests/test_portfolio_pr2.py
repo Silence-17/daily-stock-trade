@@ -439,6 +439,39 @@ class PortfolioPr2TestCase(unittest.TestCase):
         self.assertGreater(report["drawdown"]["max_drawdown_pct"], 10.0)
         self.assertTrue(report["drawdown"]["alert"])
 
+    def test_aggregate_risk_backfill_replays_each_account_independently(self) -> None:
+        account_ids = []
+        for name in ("First", "Second"):
+            account = self.service.create_account(name=name, broker="Demo", market="cn", base_currency="CNY")
+            account_id = int(account["id"])
+            account_ids.append(account_id)
+            self.service.record_cash_ledger(
+                account_id=account_id,
+                event_date=date(2026, 1, 1),
+                direction="in",
+                amount=10000,
+                currency="CNY",
+            )
+
+        with patch.object(
+            self.risk_service.portfolio_service,
+            "get_portfolio_snapshot",
+            wraps=self.risk_service.portfolio_service.get_portfolio_snapshot,
+        ) as snapshots:
+            self.risk_service._ensure_drawdown_snapshot_window(
+                account_id=None,
+                as_of_date=date(2026, 1, 2),
+                cost_method="fifo",
+                lookback_days=365,
+            )
+
+        replayed_ids = {
+            call.kwargs["account_id"]
+            for call in snapshots.call_args_list
+        }
+        self.assertEqual(replayed_ids, set(account_ids))
+        self.assertNotIn(None, replayed_ids)
+
     def test_concentration_uses_cny_normalized_exposure(self) -> None:
         cn_account = self.service.create_account(name="CN", broker="Demo", market="cn", base_currency="CNY")
         us_account = self.service.create_account(name="US", broker="Demo", market="us", base_currency="USD")

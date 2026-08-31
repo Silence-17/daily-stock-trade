@@ -7,6 +7,7 @@ import json
 import logging
 import math
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, time as datetime_time, timedelta, timezone
 from pathlib import Path
@@ -17,10 +18,10 @@ from data_provider.base import DataFetcherManager
 from src.core import trading_calendar
 from src.services.cross_market_paper_strategy import (
     CrossMarketSignalEngine,
-    GLOBAL_MARKET_LINKED_THEMES,
     KR_LINKED_THEMES,
     KoreaSignalSnapshot,
     STRATEGY_ID,
+    TECHNOLOGY_WEIGHTED_THEMES,
     TimedMarketObservation,
 )
 
@@ -28,6 +29,8 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_STATE_PATH = Path("data") / "cross_market_strategy_state.json"
 KOREA_EVIDENCE_CODES = ("KS11", "KQ11", "005930.KS", "000660.KS")
+KOREA_LIVE_PROVIDER_CLOCK_SKEW_MAX_SECONDS = 3.0
+KOREA_LIVE_PROVIDER_CLOCK_SKEW_MARGIN_SECONDS = 0.05
 JAPAN_EVIDENCE_CODES = ("N225", "TOPX")
 US_TECH_EVIDENCE_CODES = ("SMH", "SOXX", "MU", "WDC", "IXIC")
 US_TECH_COMPONENT_GROUPS = {
@@ -396,6 +399,7 @@ class CrossMarketSignalService:
         }
 
     def collect_korea_snapshot(self, *, now: Optional[datetime] = None) -> Dict[str, Any]:
+        live_collection = now is None
         collection_started_at = (now or _utc_now()).astimezone(timezone.utc)
         observations: List[TimedMarketObservation] = []
         component_quotes: Dict[str, tuple[Any, datetime, float]] = {}
@@ -420,6 +424,21 @@ class CrossMarketSignalService:
             if now is not None
             else _utc_now().astimezone(timezone.utc)
         )
+        if live_collection:
+            latest_provider_at = max(item[1] for item in component_quotes.values())
+            provider_clock_skew_seconds = (
+                latest_provider_at - collected_at
+            ).total_seconds()
+            if (
+                1.0 < provider_clock_skew_seconds
+                <= KOREA_LIVE_PROVIDER_CLOCK_SKEW_MAX_SECONDS
+            ):
+                time.sleep(
+                    provider_clock_skew_seconds
+                    - 1.0
+                    + KOREA_LIVE_PROVIDER_CLOCK_SKEW_MARGIN_SECONDS
+                )
+                collected_at = _utc_now().astimezone(timezone.utc)
         raw_components: Dict[str, Dict[str, Any]] = {}
         for code in KOREA_EVIDENCE_CODES:
             quote, provider_at, change_pct = component_quotes[code]
@@ -1035,6 +1054,8 @@ class CrossMarketSignalService:
             if confirmed
             else 0.0
         )
+        directional_score = 0.7 * session_score + 0.3 * trend_score
+        strength_score = max(0.0, min(100.0, (directional_score + 100.0) / 2.0))
         if not confirmed:
             reason = "nasdaq_futures_trend_unconfirmed"
         elif severe_down:
@@ -1067,6 +1088,8 @@ class CrossMarketSignalService:
                 if trend_change_pct is not None
                 else None
             ),
+            "directional_score": round(directional_score, 6),
+            "score": round(strength_score, 6),
             "trend_window_minutes": (
                 self.engine.config.nasdaq_futures_trend_window_minutes
             ),
@@ -2041,7 +2064,10 @@ class CrossMarketSignalService:
             }
         observed_at, age_hours, snapshot, signal = max(
             candidates,
-            key=lambda candidate: candidate[0],
+            key=lambda candidate: (
+                candidate[3].get("available") is True,
+                candidate[0],
+            ),
         )
         result = {
             **signal,
@@ -3316,7 +3342,30 @@ class CrossMarketSignalService:
         now: Optional[datetime] = None,
     ) -> Dict[str, Any]:
         current = (now or _utc_now()).astimezone(timezone.utc)
-        session_date = current.astimezone(ZoneInfo("Asia/Tokyo")).date().isoformat()
+        try:
+            phase = trading_calendar.build_market_phase_context(
+                market="jp",
+                current_time=current,
+                trigger_source="cross_market_japan_gate",
+                analysis_intent="auto",
+            )
+        except Exception as exc:  # noqa: BLE001 - unknown calendars fail closed.
+            return {
+                "available": False,
+                "buy_allowed": False,
+                "reason": "japan_market_phase_unknown",
+                "error_type": type(exc).__name__,
+            }
+        session_date = str(phase.session_date)
+        if phase.is_trading_day is False:
+            return {
+                "available": True,
+                "buy_allowed": True,
+                "reason": "japan_scheduled_market_closure_neutral",
+                "neutral": True,
+                "session_date": session_date,
+                "market_phase": phase.to_dict(),
+            }
         candidates = []
         for item in self._read_state().get("japan_snapshots", []):
             if not isinstance(item, dict) or item.get("session_date") != session_date:
@@ -3609,36 +3658,15 @@ class CrossMarketSignalService:
         live_collection = now is None
         current = (now or _utc_now()).astimezone(timezone.utc)
         normalized_theme = str(theme or "").strip().lower()
-        if normalized_theme == "cpo":
-            korea_bypass = self.engine.evaluate_korea_gate(
-                [],
-                theme="cpo",
-                now=current,
-            )
+        if normalized_theme not in TECHNOLOGY_WEIGHTED_THEMES:
             return {
                 "available": True,
                 "buy_allowed": True,
-                "reason": "cpo_independent_asia_gate",
+                "score": 50.0,
+                "reason": "asia_gate_not_applicable_non_technology_theme",
                 "bypassed": True,
-                "korea": korea_bypass,
-                "japan": {
-                    "available": True,
-                    "buy_allowed": True,
-                    "reason": "cpo_independent_japan_gate",
-                    "bypassed": True,
-                },
-                "supply_chain": {
-                    "available": True,
-                    "strong": True,
-                    "reason": "cpo_independent_supply_chain_gate",
-                    "bypassed": True,
-                },
-            }
-        if normalized_theme not in GLOBAL_MARKET_LINKED_THEMES:
-            return {
-                "available": True,
-                "buy_allowed": True,
-                "reason": "asia_gate_not_applicable",
+                "theme": normalized_theme,
+                "policy_scope": "technology_weighted_themes",
             }
         supply_chain_refresh = {
             "applicable": normalized_theme in ASIA_THEME_EVIDENCE_CODES,
@@ -3716,24 +3744,130 @@ class CrossMarketSignalService:
             if normalized_theme in ASIA_THEME_EVIDENCE_CODES
             else {"available": True, "strong": True, "reason": "not_required"}
         )
+        block_threshold = float(
+            self.engine.config.asia_market_block_mean_change_pct
+        )
+
+        def mean_change_pct(payload: Dict[str, Any]) -> Optional[float]:
+            direct = payload.get("mean_change_pct")
+            try:
+                return float(direct) if direct is not None else None
+            except (TypeError, ValueError):
+                pass
+            changes = payload.get("latest_component_changes_pct")
+            if not isinstance(changes, dict):
+                return None
+            values = []
+            for raw_value in changes.values():
+                try:
+                    values.append(float(raw_value))
+                except (TypeError, ValueError):
+                    continue
+            return sum(values) / len(values) if values else None
+
+        korea_mean_change_pct = mean_change_pct(korea_gate)
+        japan_mean_change_pct = mean_change_pct(japan_gate)
+        korea_available = bool(
+            korea_gate.get("status") != "unavailable"
+            and korea_gate.get("available") is not False
+        )
+        japan_available = japan_gate.get("available") is True
+        supply_chain_required = normalized_theme in ASIA_THEME_EVIDENCE_CODES
+        supply_chain_ready = bool(
+            not supply_chain_required
+            or (
+                supply_chain.get("available") is True
+                and supply_chain.get("strong") is True
+            )
+        )
+        severe_downside_markets = []
+        if (
+            korea_mean_change_pct is not None
+            and korea_mean_change_pct <= block_threshold
+        ):
+            severe_downside_markets.append("korea")
+        if (
+            japan_mean_change_pct is not None
+            and japan_mean_change_pct <= block_threshold
+        ):
+            severe_downside_markets.append("japan")
+        market_evidence_ready = bool(korea_available and japan_available)
         buy_allowed = bool(
+            market_evidence_ready
+            and not severe_downside_markets
+            and supply_chain_ready
+        )
+        positive_confirmation = bool(
             korea_gate.get("buy_allowed") is True
             and japan_gate.get("buy_allowed") is True
-            and supply_chain.get("available") is True
-            and supply_chain.get("strong") is True
+            and supply_chain_ready
         )
+
+        def market_strength(payload: Dict[str, Any]) -> Optional[float]:
+            raw_score = payload.get("latest_score")
+            if raw_score is None:
+                raw_score = payload.get("score")
+            if raw_score is None:
+                mean_change = payload.get("mean_change_pct")
+                try:
+                    raw_score = max(
+                        -100.0,
+                        min(100.0, float(mean_change) / 1.5 * 100.0),
+                    )
+                except (TypeError, ValueError):
+                    return None
+            try:
+                return max(0.0, min(100.0, (float(raw_score) + 100.0) / 2.0))
+            except (TypeError, ValueError):
+                return None
+
+        component_strengths = [
+            value
+            for value in (
+                market_strength(korea_gate),
+                market_strength(japan_gate),
+                market_strength(supply_chain),
+            )
+            if value is not None
+        ]
+        strength_score = (
+            sum(component_strengths) / len(component_strengths)
+            if component_strengths
+            else (75.0 if buy_allowed else 0.0)
+        )
+        if not market_evidence_ready:
+            reason = "asia_market_evidence_unavailable"
+        elif severe_downside_markets:
+            reason = "asia_market_severe_downside"
+        elif not supply_chain_ready:
+            reason = "asia_supply_chain_unconfirmed"
+        elif positive_confirmation:
+            reason = "asia_markets_and_supply_chain_confirmed"
+        else:
+            reason = "asia_markets_not_severely_weak"
         return {
             "available": bool(
-                korea_gate.get("status") != "unavailable"
-                and korea_gate.get("available") is not False
-                and japan_gate.get("available") is True
-                and supply_chain.get("available") is True
+                market_evidence_ready
+                and (
+                    not supply_chain_required
+                    or supply_chain.get("available") is True
+                )
             ),
             "buy_allowed": buy_allowed,
-            "reason": (
-                "asia_markets_and_supply_chain_confirmed"
-                if buy_allowed
-                else "asia_markets_or_supply_chain_unconfirmed"
+            "score": round(strength_score, 6),
+            "reason": reason,
+            "positive_confirmation": positive_confirmation,
+            "market_block_threshold_pct": block_threshold,
+            "severe_downside_markets": severe_downside_markets,
+            "korea_mean_change_pct": (
+                round(korea_mean_change_pct, 6)
+                if korea_mean_change_pct is not None
+                else None
+            ),
+            "japan_mean_change_pct": (
+                round(japan_mean_change_pct, 6)
+                if japan_mean_change_pct is not None
+                else None
             ),
             "korea": korea_gate,
             "japan": japan_gate,

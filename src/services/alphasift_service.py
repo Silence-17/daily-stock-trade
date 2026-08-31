@@ -3370,6 +3370,11 @@ class DsaEastMoneyHotspotProvider:
             "mlcc",
             "ccl",
             "gold",
+            "consumer",
+            "bank",
+            "utilities",
+            "energy",
+            "industrials",
         )
         buckets: Dict[str, List[Dict[str, Any]]] = {
             family: [] for family in family_order
@@ -4584,6 +4589,22 @@ def _normalize_daily_date_value(value: Any) -> str:
 def get_dsa_realtime_quote(stock_code: str) -> Dict[str, Any]:
     manager = _get_dsa_fetcher_manager()
     quote = manager.get_realtime_quote(stock_code, log_final_failure=False)
+    if quote is None:
+        return {}
+    if hasattr(quote, "to_dict") and callable(quote.to_dict):
+        return _remove_non_finite_json_values(quote.to_dict())
+    payload = _to_plain(quote)
+    return _remove_non_finite_json_values(payload if isinstance(payload, dict) else {})
+
+
+def get_dsa_realtime_quote_with_provider_timestamp(stock_code: str) -> Dict[str, Any]:
+    """Return strict realtime evidence after skipping sources without provider time."""
+
+    manager = _get_dsa_fetcher_manager()
+    getter = getattr(manager, "get_realtime_quote_with_provider_timestamp", None)
+    if not callable(getter):
+        return {}
+    quote = getter(stock_code)
     if quote is None:
         return {}
     if hasattr(quote, "to_dict") and callable(quote.to_dict):

@@ -770,11 +770,11 @@ class RuntimeSchedulerServiceTestCase(unittest.TestCase):
         self.assertEqual(scheduler.background_tasks[0]["name"], "vnpy_paper_auto_trade")  # type: ignore[index]
         scheduler.background_tasks[0]["task"]()  # type: ignore[index]
         task_events = service.status()["task_events"]
-        self.assertEqual([event["status"] for event in task_events], ["started", "skipped"])
+        self.assertEqual([event["status"] for event in task_events], ["skipped"])
         self.assertEqual(task_events[-1]["name"], "vnpy_paper_auto_trade")
         self.assertEqual(task_events[-1]["details"]["reason"], "auto_trade_disabled")
         self.assertEqual(task_events[-1]["details"]["submitted_count"], 0)
-        self.assertEqual([event["status"] for event in task_event_repo.events], ["started", "skipped"])
+        self.assertEqual([event["status"] for event in task_event_repo.events], ["skipped"])
         filtered_events = service.task_events(
             name="vnpy_paper_auto_trade",
             status="skipped",
@@ -875,7 +875,7 @@ class RuntimeSchedulerServiceTestCase(unittest.TestCase):
         self.assertFalse(recovered_status["previous_generation_running"])
         self.assertEqual(
             [event["status"] for event in repo.events],
-            ["started", "skipped", "completed", "started", "completed"],
+            ["skipped", "completed", "completed"],
         )
 
     def test_background_task_overlap_guard_releases_after_exception(self) -> None:
@@ -904,7 +904,7 @@ class RuntimeSchedulerServiceTestCase(unittest.TestCase):
         healthy_task.assert_called_once_with()
         self.assertEqual(
             [event["status"] for event in service.task_events(limit=10)],
-            ["started", "failed", "started", "completed"],
+            ["failed", "completed"],
         )
 
     def test_immediate_background_task_runs_once_per_registration_lifetime(self) -> None:
@@ -1053,8 +1053,41 @@ class RuntimeSchedulerServiceTestCase(unittest.TestCase):
         self.assertEqual(auto_retry.call_count, 2)
         self.assertEqual(
             [event["status"] for event in service.task_events(limit=10)],
-            ["started", "completed", "started", "completed"],
+            ["completed", "completed"],
         )
+
+    def test_expected_window_skip_does_not_persist_task_event(self) -> None:
+        repo = _FakeTaskEventRepository()
+        service = RuntimeSchedulerService(
+            config_provider=lambda: SimpleNamespace(schedule_enabled=False),
+            task_event_repository=repo,
+        )
+        for name, reason in (
+            (
+                "cross_market_intraday_entry_scan",
+                "outside_cross_market_entry_analysis_slot",
+            ),
+            ("vnpy_paper_auto_retry", "no_retry_work"),
+            (
+                "cross_market_pending_order_revalidation",
+                "no_pending_order_changes",
+            ),
+            (
+                "cross_market_intraday_sell_monitor",
+                "no_cross_market_sellable_positions",
+            ),
+        ):
+            wrapped = service._instrument_background_task(
+                name,
+                lambda reason=reason: {
+                    "accepted": True,
+                    "skipped": True,
+                    "reason": reason,
+                },
+            )
+            wrapped()
+
+        self.assertEqual(repo.events, [])
 
     def test_background_task_event_persistence_triggers_retention_cleanup(self) -> None:
         repo = _FakeTaskEventRepository()

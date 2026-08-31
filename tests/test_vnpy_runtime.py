@@ -17,6 +17,8 @@ from unittest.mock import patch
 from src.services.vnpy_runtime import (
     BUILTIN_SIMULATED_GATEWAY_CLASS,
     VnpyRuntimeSettings,
+    _prepare_builtin_simulated_gateway_payload,
+    _refresh_builtin_simulated_gateway_snapshot,
     bootstrap_vnpy_runtime,
     load_vnpy_runtime_settings,
 )
@@ -477,6 +479,90 @@ class VnpyRuntimeTestCase(unittest.TestCase):
         )
         self.assertNotIn("not-for-the-simulator", json.dumps(handle.diagnostics))
         handle.close()
+
+    def test_builtin_gateway_hydrates_bound_paper_account_state(self) -> None:
+        service = types.SimpleNamespace(
+            get_settings=lambda: types.SimpleNamespace(
+                account_id=10,
+                initial_cash=100000.0,
+            ),
+            portfolio=types.SimpleNamespace(
+                get_portfolio_snapshot=lambda **_kwargs: {
+                    "accounts": [
+                        {
+                            "account_id": 10,
+                            "total_cash": 98436.138178,
+                            "positions": [
+                                {
+                                    "symbol": "002400",
+                                    "market": "cn",
+                                    "quantity": 1500,
+                                    "avg_cost": 8.2,
+                                }
+                            ],
+                        }
+                    ]
+                }
+            ),
+        )
+
+        with patch(
+            "src.services.vnpy_runtime.VnpyPaperTradingService",
+            return_value=service,
+        ):
+            payload, diagnostics = _prepare_builtin_simulated_gateway_payload(
+                {
+                    "initial_balance": 999999.0,
+                    "matching_mode": "next_minute_vwap",
+                    "password": "must-be-dropped",
+                },
+                paper_config_path=Path("ignored.json"),
+            )
+
+        self.assertEqual(payload["initial_balance"], 98436.138178)
+        self.assertEqual(
+            payload["initial_positions"],
+            [
+                {
+                    "symbol": "002400",
+                    "market": "cn",
+                    "quantity": 1500.0,
+                    "avg_cost": 8.2,
+                }
+            ],
+        )
+        self.assertNotIn("password", payload)
+        self.assertEqual(diagnostics["initial_balance_source"], "vnpy_paper_account_cash")
+        self.assertEqual(diagnostics["account_id"], 10)
+        self.assertEqual(diagnostics["position_count"], 1)
+        self.assertEqual(diagnostics["ignored_setting_count"], 1)
+
+    def test_builtin_gateway_refreshes_hydrated_snapshot_after_event_attach(self) -> None:
+        calls = []
+        service = types.SimpleNamespace(
+            sync_vnpy_positions_callback=lambda **kwargs: calls.append(
+                ("clear", kwargs)
+            )
+        )
+        gateway = types.SimpleNamespace(
+            query_account=lambda: calls.append(("account", None)),
+            query_position=lambda: calls.append(("positions", None)),
+        )
+        main_engine = types.SimpleNamespace(get_gateway=lambda _name: gateway)
+
+        result = _refresh_builtin_simulated_gateway_snapshot(
+            service=service,
+            main_engine=main_engine,
+            gateway_name="DSA_SIM",
+        )
+
+        self.assertEqual(result["status"], "completed")
+        self.assertTrue(result["positions_cleared"])
+        self.assertTrue(result["account_queried"])
+        self.assertTrue(result["positions_queried"])
+        self.assertEqual(calls[0][0], "clear")
+        self.assertEqual(calls[0][1]["positions"], [])
+        self.assertEqual([name for name, _ in calls[1:]], ["account", "positions"])
 
     def test_builtin_gateway_reconnect_refreshes_paper_initial_cash(self) -> None:
         installed = _install_fake_vnpy_runtime_modules()

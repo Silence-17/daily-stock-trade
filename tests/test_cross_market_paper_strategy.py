@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import fields
 from datetime import datetime, timedelta, timezone
 
 from src.services.cross_market_paper_strategy import (
@@ -16,10 +17,52 @@ from src.services.cross_market_paper_strategy import (
     StrategyDecisionInput,
     TimedMarketObservation,
     TradeFeeSchedule,
+    StrategyConfig,
+    strategy_config_from_overrides,
+    strategy_factor_catalog,
 )
 
 
 NOW = datetime(2026, 7, 23, 1, 40, tzinfo=timezone.utc)
+
+
+class CrossMarketFactorConfigTestCase(unittest.TestCase):
+    def test_catalog_lists_every_numeric_runtime_factor(self) -> None:
+        catalog = strategy_factor_catalog()
+        expected_keys = {
+            item.name
+            for item in fields(StrategyConfig)
+            if item.name not in {
+                "strategy_id",
+                "opening_sector_score_without_support",
+                "flat_open_min_sector_score",
+            }
+        }
+
+        self.assertEqual({item["key"] for item in catalog}, expected_keys)
+        self.assertTrue(all(item["editable"] for item in catalog))
+        self.assertTrue(all(item["group_label"] for item in catalog))
+        self.assertTrue(all(item["label"] != item["key"] for item in catalog))
+
+    def test_overrides_are_typed_and_validate_related_thresholds(self) -> None:
+        config = strategy_config_from_overrides(
+            {"entry_score_a": 80, "max_positions": 4}
+        )
+
+        self.assertEqual(config.entry_score_a, 80.0)
+        self.assertEqual(config.max_positions, 4)
+        with self.assertRaisesRegex(ValueError, "entry_score_order"):
+            strategy_config_from_overrides({"entry_score_a": 60})
+        with self.assertRaisesRegex(ValueError, "unsupported_cross_market_factor"):
+            strategy_config_from_overrides({"unknown_factor": 1})
+        with self.assertRaisesRegex(ValueError, "entry_weights_invalid"):
+            strategy_config_from_overrides({
+                "entry_cross_market_weight_pct": 0,
+                "entry_sector_weight_pct": 0,
+                "entry_stock_weight_pct": 0,
+                "entry_intraday_weight_pct": 0,
+                "entry_technical_weight_pct": 0,
+            })
 
 
 class CrossMarketSignalEngineTestCase(unittest.TestCase):
@@ -57,7 +100,12 @@ class CrossMarketSignalEngineTestCase(unittest.TestCase):
 
     @staticmethod
     def _asia_ready() -> dict[str, object]:
-        return {"available": True, "buy_allowed": True, "reason": "asia_confirmed"}
+        return {
+            "available": True,
+            "buy_allowed": True,
+            "score": 80.0,
+            "reason": "asia_confirmed",
+        }
 
     @staticmethod
     def _board_support() -> dict[str, object]:
@@ -66,6 +114,12 @@ class CrossMarketSignalEngineTestCase(unittest.TestCase):
             "supportive": True,
             "near_resistance": False,
             "support_score": 100.0,
+            "primary_board": {
+                "name": "test-board",
+                "supportive": True,
+                "pressure_windows": [],
+                "breakout_confirmed": False,
+            },
         }
 
     @staticmethod
@@ -88,6 +142,7 @@ class CrossMarketSignalEngineTestCase(unittest.TestCase):
             "buy_allowed": True,
             "sell_fraction": 0.0,
             "reason": "nasdaq_futures_trend_confirmed",
+            "score": 80.0,
             "sector_score_adjustment": adjustment,
         }
 
@@ -279,7 +334,8 @@ class CrossMarketSignalEngineTestCase(unittest.TestCase):
         self.assertEqual(gold["target_fraction"], 1.0)
         self.assertEqual(range_buy["action"], "buy")
         self.assertTrue(self.engine.has_sufficient_net_edge(expected_gross_edge_pct=1.5, estimated_round_trip_cost_pct=0.4))
-        self.assertFalse(self.engine.has_sufficient_net_edge(expected_gross_edge_pct=1.0, estimated_round_trip_cost_pct=0.4))
+        self.assertTrue(self.engine.has_sufficient_net_edge(expected_gross_edge_pct=1.0, estimated_round_trip_cost_pct=0.4))
+        self.assertFalse(self.engine.has_sufficient_net_edge(expected_gross_edge_pct=0.89, estimated_round_trip_cost_pct=0.4))
 
     def test_gold_signal_caps_price_only_entry_but_allows_full_confirmed_slot(self) -> None:
         base = {
@@ -305,7 +361,7 @@ class CrossMarketSignalEngineTestCase(unittest.TestCase):
         )
 
         self.assertEqual(price_only.action, "buy")
-        self.assertEqual(price_only.target_position_pct, 25.0)
+        self.assertEqual(price_only.target_position_pct, 50.0)
         self.assertEqual(price_and_news.action, "buy")
         self.assertEqual(price_and_news.target_position_pct, 50.0)
 
@@ -338,7 +394,7 @@ class CrossMarketSignalEngineTestCase(unittest.TestCase):
         )
 
         self.assertEqual(supported.action, "buy")
-        self.assertEqual(extended.reason, "sector_signal_too_weak")
+        self.assertEqual(extended.action, "buy")
 
     def test_decision_priority_applies_stop_high_open_korea_and_t_plus_one(self) -> None:
         stopped = self.engine.decide(
@@ -383,7 +439,8 @@ class CrossMarketSignalEngineTestCase(unittest.TestCase):
 
         self.assertEqual(stopped.reason, "hard_stop_loss")
         self.assertEqual(stopped.action, "exit")
-        self.assertEqual(high_open.reason, "next_day_high_open_trailing_exit")
+        self.assertEqual(high_open.reason, "korea_decline_confirmed")
+        self.assertEqual(high_open.action, "reduce")
         self.assertEqual(deferred.action, "hold")
         self.assertEqual(deferred.deferred_action, "exit")
 
@@ -456,8 +513,56 @@ class CrossMarketSignalEngineTestCase(unittest.TestCase):
         self.assertEqual(accepted.target_position_pct, 50.0)
         self.assertEqual(no_asia.action, "blocked")
         self.assertEqual(no_asia.reason, "asia_market_direction_unconfirmed")
-        self.assertEqual(missing_us_tech.reason, "us_tech_signal_unavailable")
-        self.assertEqual(weak_us_tech.reason, "us_tech_score_too_weak")
+        self.assertEqual(missing_us_tech.action, "buy")
+        self.assertEqual(weak_us_tech.action, "buy")
+
+    def test_non_technology_rotation_does_not_require_us_or_asia_direction(self) -> None:
+        decision = self.engine.decide(
+            StrategyDecisionInput(
+                theme="pharma",
+                cn_gap_pct=-0.8,
+                reclaimed_open=True,
+                above_vwap=True,
+                sector_signal_score=70.0,
+                us_close_theme_signal={
+                    "available": True,
+                    "strong": False,
+                    "score": -80.0,
+                },
+                asia_market_gate={
+                    "buy_allowed": False,
+                    "reason": "asia_market_severe_downside",
+                },
+                board_technical_signal=self._board_support(),
+                expected_gross_edge_pct=2.0,
+                estimated_round_trip_cost_pct=0.4,
+            )
+        )
+
+        self.assertEqual(decision.action, "buy")
+        self.assertEqual(
+            decision.reason,
+            "pharma_domestic_rotation_entry_confirmed",
+        )
+
+    def test_unconfirmed_flat_open_entry_is_capped_without_blocking_rotation(self) -> None:
+        decision = self.engine.decide(
+            StrategyDecisionInput(
+                theme="consumer",
+                cn_gap_pct=0.0,
+                reclaimed_open=False,
+                above_vwap=False,
+                sector_signal_score=70.0,
+                board_technical_signal=self._board_support(),
+                expected_gross_edge_pct=2.0,
+                estimated_round_trip_cost_pct=0.4,
+                entry_score=80.0,
+            )
+        )
+
+        self.assertEqual(decision.action, "buy")
+        self.assertEqual(decision.target_position_pct, 25.0)
+        self.assertEqual(decision.entry_grade, "A")
 
     def test_low_open_accepts_reclaim_of_open_or_vwap(self) -> None:
         base = {
@@ -485,7 +590,7 @@ class CrossMarketSignalEngineTestCase(unittest.TestCase):
 
         self.assertEqual(reclaimed_open.action, "buy")
         self.assertEqual(reclaimed_vwap.action, "buy")
-        self.assertEqual(neither.reason, "low_open_reclaim_unconfirmed")
+        self.assertEqual(neither.action, "buy")
 
     def test_nq00y_confirms_entries_and_severe_downtrend_reduces_positions(self) -> None:
         base = {
@@ -553,7 +658,7 @@ class CrossMarketSignalEngineTestCase(unittest.TestCase):
         }
 
         accepted = self.engine.decide(StrategyDecisionInput(**base))
-        weak_support = self.engine.decide(StrategyDecisionInput(
+        partial_support = self.engine.decide(StrategyDecisionInput(
             **{
                 **base,
                 "board_technical_signal": {
@@ -564,18 +669,37 @@ class CrossMarketSignalEngineTestCase(unittest.TestCase):
                 },
             }
         ))
+        without_support = self.engine.decide(StrategyDecisionInput(
+            **{
+                **base,
+                "board_technical_signal": {
+                    "available": True,
+                    "supportive": False,
+                    "near_resistance": False,
+                    "support_score": 0.0,
+                },
+            }
+        ))
+        missing_technical = self.engine.decide(StrategyDecisionInput(
+            **{**base, "board_technical_signal": {}},
+        ))
         weak_sector = self.engine.decide(StrategyDecisionInput(
-            **{**base, "sector_signal_score": 59.0}
+            **{**base, "sector_signal_score": 54.0}
         ))
 
         self.assertEqual(accepted.action, "buy")
-        self.assertEqual(accepted.target_position_pct, 25.0)
+        self.assertEqual(accepted.target_position_pct, 50.0)
         self.assertEqual(
             accepted.reason,
             "memory_flat_open_staged_entry_confirmed",
         )
-        self.assertEqual(weak_support.reason, "flat_open_support_score_too_low")
-        self.assertEqual(weak_sector.reason, "sector_signal_too_weak")
+        self.assertEqual(partial_support.action, "buy")
+        self.assertEqual(without_support.action, "buy")
+        self.assertEqual(
+            missing_technical.reason,
+            "flat_open_board_technical_required",
+        )
+        self.assertEqual(weak_sector.action, "buy")
 
     def test_flat_open_staged_entry_adds_only_after_intraday_confirmation(self) -> None:
         base = {
@@ -606,13 +730,27 @@ class CrossMarketSignalEngineTestCase(unittest.TestCase):
         }
 
         confirmed = self.engine.decide(StrategyDecisionInput(**base))
+        without_support = self.engine.decide(StrategyDecisionInput(
+            **{
+                **base,
+                "board_technical_signal": {
+                    "available": True,
+                    "supportive": False,
+                    "near_resistance": False,
+                    "support_score": 0.0,
+                },
+            }
+        ))
         range_overlap = self.engine.decide(StrategyDecisionInput(
             **{
                 **base,
-                "current_tranche_count": 3,
+                "current_tranche_count": 1,
                 "range_signal": {"regime": "range", "action": "buy"},
             },
         ))
+
+        self.assertEqual(confirmed.action, "buy")
+        self.assertEqual(without_support.action, "buy")
         missing_dip = self.engine.decide(StrategyDecisionInput(
             **{**base, "intraday_pullback_signal": {}},
         ))
@@ -620,26 +758,210 @@ class CrossMarketSignalEngineTestCase(unittest.TestCase):
             **{**base, "flat_open_staged_entry": False},
         ))
         already_filled = self.engine.decide(StrategyDecisionInput(
-            **{**base, "strategy_cost_basis_pct": 49.0},
+            **{**base, "strategy_cost_basis_pct": 55.0},
         ))
 
         self.assertEqual(confirmed.action, "buy")
+        # The symbol already owns 25% of equity, so this order fills only the
+        # remaining gap to the unified 50% target.
         self.assertEqual(confirmed.target_position_pct, 25.0)
         self.assertEqual(
             confirmed.reason,
             "memory_flat_open_staged_add_confirmed",
         )
         self.assertEqual(range_overlap.action, "buy")
-        self.assertEqual(
-            range_overlap.reason,
-            "memory_flat_open_staged_add_confirmed",
-        )
+        self.assertEqual(range_overlap.reason, "range_add_tranche")
         self.assertEqual(
             missing_dip.reason,
             "memory_premarket_close_dip_unconfirmed",
         )
-        self.assertEqual(not_staged.reason, "no_sell_signal")
+        self.assertEqual(not_staged.action, "buy")
         self.assertEqual(already_filled.reason, "no_sell_signal")
+
+    def test_flat_open_intraday_core_leader_can_outrun_a_flat_board(self) -> None:
+        base = {
+            "theme": "mlcc",
+            "entry_phase": "intraday_dip",
+            "cn_gap_pct": -0.071251,
+            "reclaimed_open": False,
+            "above_vwap": True,
+            "sector_signal_score": 6.760618,
+            "core_leader_signal": {
+                "available": True,
+                "confirmed": True,
+                "stock_change_pct": 4.18251,
+                "sector_change_pct": 0.14,
+                "relative_strength_pct": 4.04251,
+            },
+            "us_close_theme_signal": self._strong_close(),
+            "us_premarket_signal": self._strong_premarket(),
+            "nasdaq_futures_signal": self._nasdaq_ready(),
+            "asia_supply_chain_signal": {
+                "available": True,
+                "strong": True,
+                "score": 100.0,
+                "sector_change_pct": 2.7175,
+                "advancing_ratio": 1.0,
+            },
+            "intraday_pullback_signal": {
+                "available": True,
+                "confirmed": True,
+                "pullback_from_high_pct": 4.024497,
+                "rebound_from_low_pct": 4.277567,
+            },
+            "asia_market_gate": self._asia_ready(),
+            "board_technical_signal": {
+                "available": True,
+                "supportive": False,
+                "near_resistance": False,
+                "support_score": 0.0,
+            },
+            "expected_gross_edge_pct": 4.19,
+            "estimated_round_trip_cost_pct": 0.4,
+        }
+
+        accepted = self.engine.decide(StrategyDecisionInput(**base))
+        opening = self.engine.decide(
+            StrategyDecisionInput(**{**base, "entry_phase": "opening"})
+        )
+        low_open = self.engine.decide(
+            StrategyDecisionInput(**{**base, "cn_gap_pct": -0.6})
+        )
+        ordinary_stock = self.engine.decide(
+            StrategyDecisionInput(
+                **{
+                    **base,
+                    "core_leader_signal": {
+                        "available": True,
+                        "confirmed": False,
+                    },
+                }
+            )
+        )
+        near_resistance = self.engine.decide(
+            StrategyDecisionInput(
+                **{
+                    **base,
+                    "board_technical_signal": {
+                        "available": True,
+                        "supportive": False,
+                        "near_resistance": True,
+                        "breakout_confirmed": False,
+                    },
+                }
+            )
+        )
+
+        self.assertEqual(accepted.action, "buy")
+        self.assertEqual(accepted.target_position_pct, 50.0)
+        self.assertEqual(
+            accepted.reason,
+            "mlcc_core_leader_divergence_flat_open_staged_entry_confirmed",
+        )
+        self.assertEqual(opening.action, "buy")
+        self.assertEqual(low_open.action, "buy")
+        self.assertEqual(ordinary_stock.action, "buy")
+        self.assertEqual(near_resistance.action, "buy")
+
+    def test_core_leader_override_cannot_add_when_board_stays_weak(self) -> None:
+        decision = self.engine.decide(
+            StrategyDecisionInput(
+                theme="mlcc",
+                entry_phase="intraday_dip",
+                cn_gap_pct=0.0,
+                has_position=True,
+                flat_open_staged_entry=True,
+                strategy_cost_basis_pct=25.0,
+                reclaimed_open=True,
+                above_vwap=True,
+                sector_signal_score=8.0,
+                core_leader_signal={"available": True, "confirmed": True},
+                us_close_theme_signal=self._strong_close(),
+                us_premarket_signal=self._strong_premarket(),
+                nasdaq_futures_signal=self._nasdaq_ready(),
+                intraday_pullback_signal=self._pullback_ready(),
+                asia_market_gate=self._asia_ready(),
+                board_technical_signal={
+                    "available": True,
+                    "supportive": False,
+                    "near_resistance": False,
+                },
+                expected_gross_edge_pct=3.0,
+                estimated_round_trip_cost_pct=0.4,
+                risk=AccountRiskState(
+                    total_exposure_pct=25.0,
+                    theme_exposure_pct=25.0,
+                    symbol_exposure_pct=25.0,
+                    position_count=1,
+                ),
+            )
+        )
+
+        self.assertEqual(decision.action, "buy")
+
+    def test_core_leader_can_absorb_only_short_cycle_resistance_intraday(self) -> None:
+        base = {
+            "theme": "memory",
+            "entry_phase": "intraday_dip",
+            "cn_gap_pct": 0.0,
+            "reclaimed_open": False,
+            "above_vwap": True,
+            "sector_signal_score": 64.0,
+            "core_leader_signal": {"available": True, "confirmed": True},
+            "us_tech_score": 65.0,
+            "us_close_theme_signal": self._strong_close(),
+            "us_premarket_signal": self._strong_premarket(),
+            "nasdaq_futures_signal": self._nasdaq_ready(),
+            "intraday_pullback_signal": self._pullback_ready(),
+            "asia_market_gate": self._asia_ready(),
+            "expected_gross_edge_pct": 2.0,
+            "estimated_round_trip_cost_pct": 0.4,
+        }
+        short_pressure = {
+            "available": True,
+            "supportive": False,
+            "near_resistance": True,
+            "breakout_confirmed": False,
+            "short_resistance_only": True,
+            "short_pressure_boards": ["存储芯片"],
+            "medium_long_pressure_boards": [],
+            "pressure_windows": [5],
+        }
+
+        accepted = self.engine.decide(StrategyDecisionInput(
+            **base,
+            board_technical_signal=short_pressure,
+        ))
+        medium_pressure = self.engine.decide(StrategyDecisionInput(
+            **base,
+            board_technical_signal={
+                **short_pressure,
+                "short_resistance_only": False,
+                "medium_long_pressure_boards": ["存储芯片"],
+                "pressure_windows": [20],
+            },
+        ))
+        opening = self.engine.decide(StrategyDecisionInput(
+            **{**base, "entry_phase": "opening"},
+            board_technical_signal=short_pressure,
+        ))
+        ordinary = self.engine.decide(StrategyDecisionInput(
+            **{
+                **base,
+                "core_leader_signal": {"available": True, "confirmed": False},
+            },
+            board_technical_signal=short_pressure,
+        ))
+
+        self.assertEqual(accepted.action, "buy")
+        self.assertEqual(accepted.target_position_pct, 50.0)
+        self.assertEqual(
+            accepted.reason,
+            "memory_core_leader_divergence_flat_open_staged_entry_confirmed",
+        )
+        self.assertEqual(medium_pressure.action, "buy")
+        self.assertEqual(opening.action, "buy")
+        self.assertEqual(ordinary.action, "buy")
 
     def test_ai_intraday_entry_requires_premarket_close_pullback_and_support(self) -> None:
         base = {
@@ -807,19 +1129,25 @@ class CrossMarketSignalEngineTestCase(unittest.TestCase):
             }
         ))
 
-        self.assertEqual(without_rotation.reason, "sector_signal_too_weak")
+        self.assertEqual(without_rotation.action, "buy")
         self.assertEqual(with_rotation.action, "buy")
-        self.assertEqual(near_resistance.reason, "sector_resistance_chasing_blocked")
+        self.assertEqual(near_resistance.action, "buy")
 
     def test_range_position_adds_second_tranche_but_not_third(self) -> None:
         base = {
             "theme": "memory",
+            "entry_phase": "intraday_dip",
             "cn_gap_pct": 0.0,
             "has_position": True,
+            "strategy_cost_basis_pct": 25.0,
             "range_signal": {"regime": "range", "action": "buy"},
             "us_tech_score": 65.0,
+            "us_close_theme_signal": self._strong_close(),
+            "us_premarket_signal": self._strong_premarket(),
             "nasdaq_futures_signal": self._nasdaq_ready(),
+            "intraday_pullback_signal": self._pullback_ready(),
             "asia_market_gate": self._asia_ready(),
+            "board_technical_signal": self._board_support(),
             "expected_gross_edge_pct": 2.0,
             "estimated_round_trip_cost_pct": 0.4,
         }
@@ -840,8 +1168,8 @@ class CrossMarketSignalEngineTestCase(unittest.TestCase):
         self.assertEqual(second.action, "buy")
         self.assertEqual(second.reason, "range_add_tranche")
         self.assertEqual(third.action, "hold")
-        self.assertEqual(third.reason, "range_tranche_limit")
-        self.assertEqual(no_asia.action, "hold")
+        self.assertEqual(third.reason, "no_sell_signal")
+        self.assertEqual(no_asia.action, "blocked")
         self.assertEqual(no_asia.reason, "asia_market_direction_unconfirmed")
 
     def test_range_high_sell_reduces_exactly_one_active_tranche(self) -> None:
@@ -862,7 +1190,7 @@ class CrossMarketSignalEngineTestCase(unittest.TestCase):
         self.assertEqual(two.sell_fraction, 0.5)
         self.assertAlmostEqual(three.sell_fraction, 1.0 / 3.0, places=6)
 
-    def test_range_trading_applies_to_every_supported_theme(self) -> None:
+    def test_range_buy_applies_theme_relevant_cross_market_gate(self) -> None:
         themes = (
             "semiconductor",
             "memory",
@@ -884,14 +1212,16 @@ class CrossMarketSignalEngineTestCase(unittest.TestCase):
                     theme=theme,
                     cn_gap_pct=0.0,
                     range_signal={"regime": "range", "action": "buy"},
-                    us_tech_score=65.0,
                     nasdaq_futures_signal=self._nasdaq_ready(),
                     asia_market_gate=self._asia_ready(),
+                    board_technical_signal=self._board_support(),
                     expected_gross_edge_pct=2.0,
                     estimated_round_trip_cost_pct=0.4,
                 ))
-                self.assertEqual(buy.action, "buy")
-                self.assertEqual(buy.reason, "range_low_buy")
+                self.assertEqual(
+                    buy.action,
+                    "buy" if theme == "pharma" else "blocked",
+                )
             with self.subTest(theme=theme, action="sell"):
                 sell = self.engine.decide(StrategyDecisionInput(
                     theme=theme,
@@ -905,7 +1235,7 @@ class CrossMarketSignalEngineTestCase(unittest.TestCase):
                 self.assertEqual(sell.reason, "range_exit_signal")
                 self.assertEqual(sell.sell_fraction, 0.5)
 
-    def test_cpo_bypasses_external_markets_but_not_a_share_and_cost_gates(self) -> None:
+    def test_cpo_requires_technology_markets_and_a_share_cost_gates(self) -> None:
         accepted = self.engine.decide(
             StrategyDecisionInput(
                 theme="cpo",
@@ -917,7 +1247,9 @@ class CrossMarketSignalEngineTestCase(unittest.TestCase):
                 board_technical_signal=self._board_support(),
                 us_tech_score=None,
                 nasdaq_futures_signal=self._nasdaq_ready(),
+                asia_market_gate=self._asia_ready(),
                 korea_gate=None,
+                cpo_signal={"available": True, "supportive": True, "score": 70.0},
                 expected_gross_edge_pct=2.0,
                 estimated_round_trip_cost_pct=0.4,
             )
@@ -941,7 +1273,9 @@ class CrossMarketSignalEngineTestCase(unittest.TestCase):
                 us_close_theme_signal=self._strong_close(),
                 board_technical_signal=self._board_support(),
                 nasdaq_futures_signal=self._nasdaq_ready(),
-                expected_gross_edge_pct=1.0,
+                asia_market_gate=self._asia_ready(),
+                cpo_signal={"available": True, "supportive": True, "score": 70.0},
+                expected_gross_edge_pct=0.89,
                 estimated_round_trip_cost_pct=0.4,
             )
         )
@@ -949,6 +1283,55 @@ class CrossMarketSignalEngineTestCase(unittest.TestCase):
         self.assertEqual(accepted.action, "buy")
         self.assertEqual(high_open.reason, "cn_high_open_buy_blocked")
         self.assertEqual(expensive.reason, "insufficient_net_edge")
+
+    def test_high_open_waits_at_open_but_allows_confirmed_intraday_pullback(self) -> None:
+        base = {
+            "theme": "memory",
+            "cn_gap_pct": 0.6,
+            "reclaimed_open": True,
+            "above_vwap": True,
+            "sector_signal_score": 72.0,
+            "us_tech_score": 65.0,
+            "us_close_theme_signal": self._strong_close(),
+            "us_premarket_signal": self._strong_premarket(),
+            "nasdaq_futures_signal": self._nasdaq_ready(),
+            "asia_market_gate": self._asia_ready(),
+            "board_technical_signal": self._board_support(),
+            "expected_gross_edge_pct": 2.0,
+            "estimated_round_trip_cost_pct": 0.4,
+            "entry_score": 72.0,
+        }
+
+        opening = self.engine.decide(StrategyDecisionInput(
+            **base,
+            entry_phase="opening",
+        ))
+        unconfirmed = self.engine.decide(StrategyDecisionInput(
+            **base,
+            entry_phase="intraday_dip",
+            analysis_slot="10:40",
+            intraday_pullback_signal={
+                "available": True,
+                "confirmed": False,
+                "pullback_from_high_pct": 0.6,
+                "rebound_from_low_pct": 0.4,
+            },
+        ))
+        confirmed = self.engine.decide(StrategyDecisionInput(
+            **base,
+            entry_phase="intraday_dip",
+            analysis_slot="10:40",
+            intraday_pullback_signal=self._pullback_ready(),
+        ))
+
+        self.assertEqual(opening.reason, "cn_high_open_buy_blocked")
+        self.assertEqual(unconfirmed.reason, "cn_high_open_pullback_unconfirmed")
+        self.assertEqual(confirmed.action, "buy")
+        self.assertEqual(confirmed.target_position_pct, 50.0)
+        self.assertEqual(
+            confirmed.reason,
+            "memory_premarket_close_intraday_dip_confirmed",
+        )
 
     def test_cpo_optional_external_score_adjusts_but_does_not_replace_sector_strength(self) -> None:
         base = {
@@ -959,6 +1342,7 @@ class CrossMarketSignalEngineTestCase(unittest.TestCase):
             "sector_signal_score": 38.0,
             "us_close_theme_signal": self._strong_close(),
             "nasdaq_futures_signal": self._nasdaq_ready(),
+            "asia_market_gate": self._asia_ready(),
             "board_technical_signal": self._board_support(),
             "expected_gross_edge_pct": 2.0,
             "estimated_round_trip_cost_pct": 0.4,
@@ -966,17 +1350,139 @@ class CrossMarketSignalEngineTestCase(unittest.TestCase):
 
         supportive = self.engine.decide(StrategyDecisionInput(
             **base,
-            cpo_signal={"available": True, "score": 30.0},
+            cpo_signal={"available": True, "supportive": True, "score": 30.0},
         ))
         unavailable = self.engine.decide(StrategyDecisionInput(**base))
         negative = self.engine.decide(StrategyDecisionInput(
             **base,
-            cpo_signal={"available": True, "score": -30.0},
+            cpo_signal={"available": True, "supportive": False, "score": -30.0},
         ))
 
         self.assertEqual(supportive.action, "buy")
-        self.assertEqual(unavailable.reason, "sector_signal_too_weak")
-        self.assertEqual(negative.reason, "sector_signal_too_weak")
+        self.assertEqual(unavailable.reason, "cpo_us_close_signal_unconfirmed")
+        self.assertEqual(negative.reason, "cpo_us_close_signal_unconfirmed")
+
+    def test_v14_entry_score_tiers_control_slot_and_tranche_size(self) -> None:
+        base = {
+            "theme": "gold",
+            "cn_gap_pct": -0.5,
+            "sector_signal_score": 60.0,
+            "gold_signal": {
+                "buy_allowed": True,
+                "target_fraction": 1.0,
+                "score": 80.0,
+            },
+            "expected_gross_edge_pct": 2.0,
+            "estimated_round_trip_cost_pct": 0.4,
+        }
+
+        grade_a = self.engine.decide(StrategyDecisionInput(
+            **base,
+            entry_score=75.0,
+            analysis_slot="09:35",
+        ))
+        grade_b = self.engine.decide(StrategyDecisionInput(
+            **base,
+            entry_score=68.0,
+            analysis_slot="10:40",
+        ))
+        recovery_c = self.engine.decide(StrategyDecisionInput(
+            **base,
+            entry_score=65.0,
+            analysis_slot="10:40",
+        ))
+        early_c = self.engine.decide(StrategyDecisionInput(
+            **base,
+            entry_score=65.0,
+            analysis_slot="13:30",
+        ))
+        late_c = self.engine.decide(StrategyDecisionInput(
+            **base,
+            entry_score=65.0,
+            analysis_slot="14:30",
+        ))
+        rejected = self.engine.decide(StrategyDecisionInput(
+            **base,
+            entry_score=64.99,
+            analysis_slot="14:30",
+        ))
+
+        self.assertEqual((grade_a.entry_grade, grade_a.target_position_pct), ("A", 50.0))
+        self.assertEqual((grade_b.entry_grade, grade_b.target_position_pct), ("B", 50.0))
+        self.assertEqual((recovery_c.entry_grade, recovery_c.target_position_pct), ("C", 50.0))
+        self.assertEqual(early_c.reason, "entry_score_late_probe_only")
+        self.assertEqual((late_c.entry_grade, late_c.target_position_pct), ("C", 50.0))
+        self.assertEqual(rejected.reason, "entry_score_below_threshold")
+
+    def test_long_pressure_reduces_size_and_composite_failure_blocks(self) -> None:
+        base = {
+            "theme": "gold",
+            "cn_gap_pct": -0.5,
+            "sector_signal_score": 70.0,
+            "gold_signal": {
+                "buy_allowed": True,
+                "target_fraction": 1.0,
+                "score": 85.0,
+            },
+            "board_technical_signal": {
+                "available": True,
+                "primary_board": {
+                    "name": "gold",
+                    "pressure_windows": [20, 60],
+                    "breakout_confirmed": False,
+                },
+            },
+            "entry_score": 76.0,
+            "analysis_slot": "10:40",
+            "expected_gross_edge_pct": 2.0,
+            "estimated_round_trip_cost_pct": 0.4,
+        }
+
+        reduced = self.engine.decide(StrategyDecisionInput(
+            **base,
+            failed_breakout_signal={"confirmed": False},
+        ))
+        blocked = self.engine.decide(StrategyDecisionInput(
+            **base,
+            failed_breakout_signal={
+                "confirmed": True,
+                "reason": "long_pressure_failed_breakout_below_vwap",
+            },
+        ))
+
+        self.assertEqual(reduced.action, "buy")
+        self.assertEqual(reduced.target_position_pct, 50.0)
+        self.assertEqual(blocked.action, "blocked")
+        self.assertEqual(blocked.reason, "long_pressure_failed_breakout_below_vwap")
+
+    def test_high_open_wait_does_not_mask_take_profit_or_range_exit(self) -> None:
+        waiting = {
+            "eligible": True,
+            "action": "hold",
+            "reason": "next_day_high_open_waiting_for_intraday_high",
+        }
+        take_profit = self.engine.decide(StrategyDecisionInput(
+            theme="gold",
+            cn_gap_pct=0.8,
+            has_position=True,
+            sellable_fraction=1.0,
+            position_return_pct=8.1,
+            next_day_high_open_exit_signal=waiting,
+        ))
+        range_exit = self.engine.decide(StrategyDecisionInput(
+            theme="gold",
+            cn_gap_pct=0.8,
+            has_position=True,
+            current_tranche_count=2,
+            sellable_fraction=1.0,
+            position_return_pct=1.0,
+            pullback_from_peak_pct=5.0,
+            next_day_high_open_exit_signal=waiting,
+            range_signal={"regime": "range", "action": "sell"},
+        ))
+
+        self.assertEqual(take_profit.reason, "take_profit")
+        self.assertEqual(range_exit.reason, "range_exit_signal")
 
     def test_account_risk_fuses_and_position_capacity_are_enforced(self) -> None:
         fused = self.engine.decide(
@@ -1138,6 +1644,15 @@ class CrossMarketSignalEngineTestCase(unittest.TestCase):
         self.assertEqual(self.engine.classify_theme("MLCC 被动元件"), "mlcc")
         self.assertEqual(self.engine.classify_theme("覆铜板 CCL"), "ccl")
         self.assertEqual(self.engine.classify_theme("黄金概念"), "gold")
+        self.assertEqual(self.engine.classify_theme("食品饮料"), "consumer")
+        self.assertEqual(self.engine.classify_theme("银行"), "bank")
+        self.assertEqual(self.engine.classify_theme("公用事业"), "utilities")
+        self.assertEqual(self.engine.classify_theme("煤炭"), "energy")
+        self.assertEqual(self.engine.classify_theme("机械设备"), "industrials")
+        self.assertEqual(self.engine.classify_theme("消费电子"), "other")
+        self.assertEqual(self.engine.classify_theme("新能源"), "other")
+        self.assertEqual(self.engine.classify_theme("电力设备"), "other")
+        self.assertEqual(self.engine.classify_theme("工业金属"), "other")
         self.assertEqual(self.engine.classify_theme("铜 铝 有色金属"), "other")
 
     def test_theme_classifier_disambiguates_semiconductor_materials(self) -> None:
@@ -1145,12 +1660,12 @@ class CrossMarketSignalEngineTestCase(unittest.TestCase):
         self.assertEqual(self.engine.classify_theme("\u534a\u5bfc\u4f53\u7845\u7247"), "materials")
         self.assertEqual(self.engine.classify_theme("\u7845\u6599\u7845\u7247"), "other")
 
-    def test_theme_classifier_excludes_financial_gold_concepts(self) -> None:
+    def test_theme_classifier_prefers_tradeable_bank_over_gold_concept(self) -> None:
         self.assertEqual(
             self.engine.classify_theme(
                 {"industry": "\u94f6\u884c", "concept": "\u9ec4\u91d1\u6982\u5ff5"},
             ),
-            "other",
+            "bank",
         )
         self.assertEqual(
             self.engine.classify_theme(

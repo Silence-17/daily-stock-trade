@@ -21,10 +21,14 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
+if __package__:
+    from scripts.check_online_agent_vnpy_e2e import _scheduler_execution_task_name
+else:
+    from check_online_agent_vnpy_e2e import _scheduler_execution_task_name
+
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_REQUIRED_TASKS = (
-    "vnpy_paper_auto_trade",
     "vnpy_paper_auto_retry",
     "agent_calibration_shadow",
     "agent_calibration_evidence",
@@ -287,6 +291,7 @@ def main(argv: list[str] | None = None) -> int:
         "calibration": None,
     }
     preflight: Dict[str, Any] = {}
+    status: Dict[str, Any] = {}
     last_checkpoint_at = 0.0
 
     def build_result(phase: str, *, interrupted: bool = False) -> Dict[str, Any]:
@@ -350,6 +355,17 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 1
 
+    if not args.require_task:
+        try:
+            status = _read_json_url(
+                f"{base_url}/api/v1/vnpy-paper/status"
+                "?include_snapshot=false&include_recent_trades=false",
+                timeout_seconds=request_timeout,
+            )
+        except (HTTPError, URLError, TimeoutError, json.JSONDecodeError,
+                UnicodeDecodeError, ValueError, TypeError):
+            status = {}
+
     common_soak_args = [
         "--base-url", base_url,
         "--duration-seconds", str(duration),
@@ -370,7 +386,11 @@ def main(argv: list[str] | None = None) -> int:
         runtime_args.extend(["--require-observed-event", event_name])
 
     scheduler_args = [*common_soak_args, "--output-json", str(scheduler_path)]
-    for task_name in args.require_task or DEFAULT_REQUIRED_TASKS:
+    required_tasks = args.require_task or [
+        _scheduler_execution_task_name(status),
+        *DEFAULT_REQUIRED_TASKS,
+    ]
+    for task_name in required_tasks:
         scheduler_args.extend(["--require-task", task_name])
 
     commands = {

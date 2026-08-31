@@ -2,8 +2,9 @@ import type React from 'react';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { resolveWebBuildInfo } from '../../utils/constants';
-import type { SetupStatusResponse } from '../../types/systemConfig';
-import SettingsPage from '../SettingsPage';
+import type { UiTextKey } from '../../i18n/uiText';
+import type { SetupStatusResponse, SystemConfigItem } from '../../types/systemConfig';
+import SettingsPage, { SchedulerSettingsCard } from '../SettingsPage';
 
 const {
   analyzeAsync,
@@ -548,6 +549,81 @@ describe('SettingsPage', () => {
     vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:mock');
     vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => undefined);
     vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(mockedAnchorClick);
+  });
+
+  it('clears a saved scheduler override after the refreshed runtime converges', async () => {
+    getSchedulerStatus
+      .mockResolvedValueOnce({
+        enabled: false,
+        running: false,
+        scheduleTimes: ['18:00'],
+        nextRunAt: null,
+        lastRunAt: null,
+        lastSuccessAt: null,
+        lastError: null,
+      })
+      .mockResolvedValueOnce({
+        enabled: true,
+        running: false,
+        scheduleTimes: ['18:00'],
+        nextRunAt: null,
+        lastRunAt: null,
+        lastSuccessAt: null,
+        lastError: null,
+      });
+    const onSchedulerStateChange = vi.fn();
+    const scheduleItem: SystemConfigItem = {
+      key: 'SCHEDULE_ENABLED',
+      value: 'false',
+      rawValueExists: true,
+      isMasked: false,
+      schema: {
+        key: 'SCHEDULE_ENABLED',
+        category: 'system',
+        dataType: 'boolean',
+        uiControl: 'switch',
+        isSensitive: false,
+        isRequired: false,
+        isEditable: true,
+        options: [],
+        validation: {},
+        displayOrder: 8,
+      },
+    };
+    const props = {
+      disabled: false,
+      issueByKey: {},
+      onChange: vi.fn(),
+      onSchedulerStateChange,
+      t: (key: UiTextKey) => key,
+      language: 'zh' as const,
+    };
+    const { rerender } = render(
+      <SchedulerSettingsCard {...props} items={[scheduleItem]} statusRefreshToken={0} />,
+    );
+    const enabledCheckbox = await screen.findByTestId('scheduler-enabled-checkbox');
+    expect(enabledCheckbox).not.toBeChecked();
+
+    fireEvent.click(enabledCheckbox);
+    await waitFor(() => expect(enabledCheckbox).toBeChecked());
+    await waitFor(() => expect(onSchedulerStateChange).toHaveBeenLastCalledWith({
+      runtimeEnabled: false,
+      overrideEnabled: true,
+    }));
+
+    rerender(
+      <SchedulerSettingsCard
+        {...props}
+        items={[{ ...scheduleItem, value: 'true' }]}
+        statusRefreshToken={1}
+      />,
+    );
+
+    await waitFor(() => expect(getSchedulerStatus).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(onSchedulerStateChange).toHaveBeenLastCalledWith({
+      runtimeEnabled: true,
+      overrideEnabled: null,
+    }));
   });
 
   it('renders category navigation and auth settings modules', async () => {

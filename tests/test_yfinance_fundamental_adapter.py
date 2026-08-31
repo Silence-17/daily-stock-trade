@@ -93,12 +93,13 @@ class TestYfinanceFundamentalAdapter(unittest.TestCase):
                 pd.Timestamp("2025-12-31"): {"Operating Cash Flow": 3.5e10},
             }
         )
+        dividend_anchor = pd.Timestamp.now(tz="America/New_York").normalize()
+        dividend_dates = pd.DatetimeIndex(
+            [dividend_anchor - pd.Timedelta(days=days) for days in (300, 200, 100, 10)]
+        )
         dividends = pd.Series(
             [0.26, 0.26, 0.26, 0.27],
-            index=pd.DatetimeIndex(
-                ["2025-08-11", "2025-11-10", "2026-02-09", "2026-05-11"],
-                tz="America/New_York",
-            ),
+            index=dividend_dates,
             name="Dividends",
         )
         ticker = _build_mock_ticker(info, income_df_with_yoy, cashflow_df, dividends)
@@ -126,7 +127,10 @@ class TestYfinanceFundamentalAdapter(unittest.TestCase):
         # info.dividendYield (0.36) is intentionally ignored when TTM cash exists.
         self.assertAlmostEqual(div["ttm_dividend_yield_pct"], 0.5, places=2)
         self.assertEqual(div["currency"], "USD")
-        self.assertEqual(div["events"][0]["ex_dividend_date"], "2026-05-11")
+        self.assertEqual(
+            div["events"][0]["ex_dividend_date"],
+            dividend_dates[-1].date().isoformat(),
+        )
 
         self.assertEqual(
             bundle["belong_boards"],

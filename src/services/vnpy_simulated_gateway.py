@@ -108,6 +108,13 @@ class DsaSimulatedGateway(BaseGateway):
                 self._trade_count = 0
                 self._orders.clear()
                 self._positions.clear()
+                for item in _initial_positions(payload.get("initial_positions")):
+                    self._positions[item["vt_symbol"]] = {
+                        "symbol": item["symbol"],
+                        "exchange": item["exchange"],
+                        "volume": item["volume"],
+                        "price": item["price"],
+                    }
                 self._order_quote_baselines.clear()
             matching_mode = str(
                 payload.get("matching_mode")
@@ -679,6 +686,73 @@ def _finite_positive(value: Any) -> Optional[float]:
 def _finite_nonnegative(value: Any) -> Optional[float]:
     parsed = _as_float(value, float("nan"))
     return parsed if math.isfinite(parsed) and parsed >= 0 else None
+
+
+def _initial_positions(value: Any) -> list[dict[str, Any]]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError("initial_positions_must_be_list")
+
+    positions: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            raise ValueError("initial_position_must_be_object")
+        raw_symbol = str(item.get("symbol") or "").strip().upper()
+        symbol, _, symbol_exchange = raw_symbol.partition(".")
+        volume = _finite_positive(item.get("quantity", item.get("volume")))
+        price = _finite_nonnegative(item.get("avg_cost", item.get("price")))
+        if not symbol or volume is None or price is None:
+            raise ValueError("initial_position_fields_invalid")
+        exchange = _initial_position_exchange(
+            symbol=symbol,
+            market=item.get("market"),
+            exchange=item.get("exchange") or symbol_exchange,
+        )
+        positions.append(
+            {
+                "vt_symbol": f"{symbol}.{exchange.value}",
+                "symbol": symbol,
+                "exchange": exchange,
+                "volume": volume,
+                "price": price,
+            }
+        )
+    return positions
+
+
+def _initial_position_exchange(*, symbol: str, market: Any, exchange: Any) -> Exchange:
+    exchange_text = str(exchange or "").strip().upper()
+    exchange_aliases = {
+        "XSHG": Exchange.SSE,
+        "XSHE": Exchange.SZSE,
+        "XBSE": Exchange.BSE,
+        "BJ": Exchange.BSE,
+        "HKEX": Exchange.SEHK,
+    }
+    if exchange_text in exchange_aliases:
+        return exchange_aliases[exchange_text]
+    if exchange_text:
+        try:
+            return Exchange(exchange_text)
+        except ValueError:
+            try:
+                return Exchange[exchange_text]
+            except KeyError as exc:
+                raise ValueError("initial_position_exchange_invalid") from exc
+
+    market_text = str(market or "").strip().lower()
+    if market_text in {"hk", "hong_kong"}:
+        return Exchange.SEHK
+    if market_text in {"us", "usa"}:
+        return Exchange.SMART
+    if market_text not in {"", "cn", "china", "a_share"}:
+        raise ValueError("initial_position_market_invalid")
+    if symbol.startswith(("43", "83", "87", "88", "92")):
+        return Exchange.BSE
+    if symbol.startswith(("5", "6", "9")):
+        return Exchange.SSE
+    return Exchange.SZSE
 
 
 def _quote_spread_bps(snapshot: dict[str, Any]) -> Optional[float]:

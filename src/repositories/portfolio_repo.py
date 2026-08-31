@@ -296,6 +296,40 @@ class PortfolioRepository:
         with self.portfolio_write_session() as session:
             return self.delete_trade_in_session(session=session, trade_id=trade_id)
 
+    def amend_trade_costs_and_note(
+        self,
+        *,
+        trade_id: int,
+        account_id: int,
+        fee: float,
+        tax: float,
+        note: str,
+    ) -> Optional[PortfolioTrade]:
+        """Amend one audited trade and invalidate derived portfolio caches."""
+
+        with self.portfolio_write_session() as session:
+            row = session.execute(
+                select(PortfolioTrade).where(
+                    and_(
+                        PortfolioTrade.id == int(trade_id),
+                        PortfolioTrade.account_id == int(account_id),
+                    )
+                ).limit(1)
+            ).scalar_one_or_none()
+            if row is None:
+                return None
+            row.fee = float(fee)
+            row.tax = float(tax)
+            row.note = str(note or "").strip()[:255] or None
+            self._invalidate_account_cache_in_session(
+                session=session,
+                account_id=int(account_id),
+                from_date=row.trade_date,
+            )
+            session.flush()
+            session.expunge(row)
+            return row
+
     def delete_cash_ledger(self, entry_id: int) -> bool:
         with self.portfolio_write_session() as session:
             return self.delete_cash_ledger_in_session(session=session, entry_id=entry_id)
@@ -908,68 +942,6 @@ class PortfolioRepository:
     # ------------------------------------------------------------------
     # Snapshot / position cache
     # ------------------------------------------------------------------
-    def replace_positions_and_lots(
-        self,
-        *,
-        account_id: int,
-        cost_method: str,
-        positions: Iterable[Dict[str, Any]],
-        lots: Iterable[Dict[str, Any]],
-        valuation_currency: str,
-    ) -> None:
-        with self.db.get_session() as session:
-            session.execute(
-                delete(PortfolioPosition).where(
-                    and_(
-                        PortfolioPosition.account_id == account_id,
-                        PortfolioPosition.cost_method == cost_method,
-                    )
-                )
-            )
-            session.execute(
-                delete(PortfolioPositionLot).where(
-                    and_(
-                        PortfolioPositionLot.account_id == account_id,
-                        PortfolioPositionLot.cost_method == cost_method,
-                    )
-                )
-            )
-
-            for item in positions:
-                session.add(
-                    PortfolioPosition(
-                        account_id=account_id,
-                        cost_method=cost_method,
-                        symbol=item["symbol"],
-                        market=item["market"],
-                        currency=item["currency"],
-                        quantity=float(item["quantity"]),
-                        avg_cost=float(item["avg_cost"]),
-                        total_cost=float(item["total_cost"]),
-                        last_price=float(item["last_price"]),
-                        market_value_base=float(item["market_value_base"]),
-                        unrealized_pnl_base=float(item["unrealized_pnl_base"]),
-                        valuation_currency=valuation_currency,
-                    )
-                )
-
-            for lot in lots:
-                session.add(
-                    PortfolioPositionLot(
-                        account_id=account_id,
-                        cost_method=cost_method,
-                        symbol=lot["symbol"],
-                        market=lot["market"],
-                        currency=lot["currency"],
-                        open_date=lot["open_date"],
-                        remaining_quantity=float(lot["remaining_quantity"]),
-                        unit_cost=float(lot["unit_cost"]),
-                        source_trade_id=lot.get("source_trade_id"),
-                    )
-                )
-
-            session.commit()
-
     def _invalidate_account_cache_in_session(self, *, session: Any, account_id: int, from_date: date) -> None:
         session.execute(
             delete(PortfolioPositionLot).where(PortfolioPositionLot.account_id == account_id)
@@ -1021,66 +993,6 @@ class PortfolioRepository:
             )
         return exc
 
-    def upsert_daily_snapshot(
-        self,
-        *,
-        account_id: int,
-        snapshot_date: date,
-        cost_method: str,
-        base_currency: str,
-        total_cash: float,
-        total_market_value: float,
-        total_equity: float,
-        unrealized_pnl: float,
-        realized_pnl: float,
-        fee_total: float,
-        tax_total: float,
-        fx_stale: bool,
-        payload: str,
-    ) -> None:
-        with self.db.get_session() as session:
-            existing = session.execute(
-                select(PortfolioDailySnapshot).where(
-                    and_(
-                        PortfolioDailySnapshot.account_id == account_id,
-                        PortfolioDailySnapshot.snapshot_date == snapshot_date,
-                        PortfolioDailySnapshot.cost_method == cost_method,
-                    )
-                ).limit(1)
-            ).scalar_one_or_none()
-
-            if existing is None:
-                session.add(
-                    PortfolioDailySnapshot(
-                        account_id=account_id,
-                        snapshot_date=snapshot_date,
-                        cost_method=cost_method,
-                        base_currency=base_currency,
-                        total_cash=total_cash,
-                        total_market_value=total_market_value,
-                        total_equity=total_equity,
-                        unrealized_pnl=unrealized_pnl,
-                        realized_pnl=realized_pnl,
-                        fee_total=fee_total,
-                        tax_total=tax_total,
-                        fx_stale=fx_stale,
-                        payload=payload,
-                    )
-                )
-            else:
-                existing.base_currency = base_currency
-                existing.total_cash = total_cash
-                existing.total_market_value = total_market_value
-                existing.total_equity = total_equity
-                existing.unrealized_pnl = unrealized_pnl
-                existing.realized_pnl = realized_pnl
-                existing.fee_total = fee_total
-                existing.tax_total = tax_total
-                existing.fx_stale = fx_stale
-                existing.payload = payload
-                existing.updated_at = datetime.now()
-            session.commit()
-
     def replace_positions_lots_and_snapshot(
         self,
         *,
@@ -1100,58 +1012,60 @@ class PortfolioRepository:
         positions: Iterable[Dict[str, Any]],
         lots: Iterable[Dict[str, Any]],
         valuation_currency: str,
+        refresh_positions: bool = True,
     ) -> None:
         """Atomically refresh position cache and daily snapshot in one transaction."""
         with self.db.get_session() as session:
-            session.execute(
-                delete(PortfolioPosition).where(
-                    and_(
-                        PortfolioPosition.account_id == account_id,
-                        PortfolioPosition.cost_method == cost_method,
+            if refresh_positions:
+                session.execute(
+                    delete(PortfolioPosition).where(
+                        and_(
+                            PortfolioPosition.account_id == account_id,
+                            PortfolioPosition.cost_method == cost_method,
+                        )
                     )
                 )
-            )
-            session.execute(
-                delete(PortfolioPositionLot).where(
-                    and_(
-                        PortfolioPositionLot.account_id == account_id,
-                        PortfolioPositionLot.cost_method == cost_method,
-                    )
-                )
-            )
-
-            for item in positions:
-                session.add(
-                    PortfolioPosition(
-                        account_id=account_id,
-                        cost_method=cost_method,
-                        symbol=item["symbol"],
-                        market=item["market"],
-                        currency=item["currency"],
-                        quantity=float(item["quantity"]),
-                        avg_cost=float(item["avg_cost"]),
-                        total_cost=float(item["total_cost"]),
-                        last_price=float(item["last_price"]),
-                        market_value_base=float(item["market_value_base"]),
-                        unrealized_pnl_base=float(item["unrealized_pnl_base"]),
-                        valuation_currency=valuation_currency,
+                session.execute(
+                    delete(PortfolioPositionLot).where(
+                        and_(
+                            PortfolioPositionLot.account_id == account_id,
+                            PortfolioPositionLot.cost_method == cost_method,
+                        )
                     )
                 )
 
-            for lot in lots:
-                session.add(
-                    PortfolioPositionLot(
-                        account_id=account_id,
-                        cost_method=cost_method,
-                        symbol=lot["symbol"],
-                        market=lot["market"],
-                        currency=lot["currency"],
-                        open_date=lot["open_date"],
-                        remaining_quantity=float(lot["remaining_quantity"]),
-                        unit_cost=float(lot["unit_cost"]),
-                        source_trade_id=lot.get("source_trade_id"),
+                for item in positions:
+                    session.add(
+                        PortfolioPosition(
+                            account_id=account_id,
+                            cost_method=cost_method,
+                            symbol=item["symbol"],
+                            market=item["market"],
+                            currency=item["currency"],
+                            quantity=float(item["quantity"]),
+                            avg_cost=float(item["avg_cost"]),
+                            total_cost=float(item["total_cost"]),
+                            last_price=float(item["last_price"]),
+                            market_value_base=float(item["market_value_base"]),
+                            unrealized_pnl_base=float(item["unrealized_pnl_base"]),
+                            valuation_currency=valuation_currency,
+                        )
                     )
-                )
+
+                for lot in lots:
+                    session.add(
+                        PortfolioPositionLot(
+                            account_id=account_id,
+                            cost_method=cost_method,
+                            symbol=lot["symbol"],
+                            market=lot["market"],
+                            currency=lot["currency"],
+                            open_date=lot["open_date"],
+                            remaining_quantity=float(lot["remaining_quantity"]),
+                            unit_cost=float(lot["unit_cost"]),
+                            source_trade_id=lot.get("source_trade_id"),
+                        )
+                    )
 
             existing = session.execute(
                 select(PortfolioDailySnapshot).where(

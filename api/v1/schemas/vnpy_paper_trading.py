@@ -238,6 +238,11 @@ class CrossMarketReplayFrameInput(BaseModel):
     order_cancel_requested: bool = False
     previous_close: Optional[float] = Field(None, gt=0)
     price_limit_pct: Optional[float] = Field(None, gt=0, le=100)
+    entry_score: Optional[float] = Field(None, ge=0, le=100)
+    analysis_slot: Optional[
+        Literal["09:30", "09:35", "10:40", "13:30", "14:30"]
+    ] = None
+    failed_breakout_signal: Dict[str, Any] = Field(default_factory=dict)
 
 
 class CrossMarketBacktestRequest(BaseModel):
@@ -276,6 +281,8 @@ class VnpyPaperOrderRequest(BaseModel):
     price: Optional[float] = Field(None, gt=0)
     note: Optional[str] = Field(None, max_length=160)
     execution_route: Literal["local_paper", "vnpy_bridge"] = "local_paper"
+    strategy_owner: Optional[Literal["cross_market"]] = None
+    strategy_theme: Optional[str] = Field(None, max_length=32)
 
 
 class VnpyPaperOrderCancelRequest(BaseModel):
@@ -527,6 +534,25 @@ class VnpyPaperAccountListResponse(BaseModel):
     count: int = 0
     current_account_id: Optional[int] = None
     hidden_count: int = 0
+
+
+class VnpyPaperStrategyDashboardAccountListResponse(BaseModel):
+    items: List[Dict[str, Any]] = Field(default_factory=list)
+    count: int = 0
+    execution_account_id: Optional[int] = None
+
+
+class VnpyPaperStrategyFactorUpdateRequest(BaseModel):
+    overrides: Dict[str, Any] = Field(default_factory=dict)
+    replace_existing: bool = True
+
+
+class VnpyPaperStrategyAccountDashboardResponse(BaseModel):
+    account: Dict[str, Any]
+    snapshot: Optional[Dict[str, Any]] = None
+    snapshot_error: Optional[str] = None
+    progress: Dict[str, Any] = Field(default_factory=dict)
+    factor_profile: Dict[str, Any] = Field(default_factory=dict)
 
 
 class VnpyPaperArchivedAccountCleanupRequest(BaseModel):

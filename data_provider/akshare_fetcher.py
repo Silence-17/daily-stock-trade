@@ -14,9 +14,8 @@ AkshareFetcher - 主数据源 (Priority 1)
 
 防封禁策略：
 1. 每次请求前随机休眠 2-5 秒
-2. 随机轮换 User-Agent
-3. 使用 tenacity 实现指数退避重试
-4. 熔断器机制：连续失败后自动冷却
+2. 使用 tenacity 实现指数退避重试
+3. 熔断器机制：连续失败后自动冷却
 
 增强数据：
 - 实时行情：量比、换手率、市盈率、市净率、总市值、流通市值
@@ -28,7 +27,6 @@ import multiprocessing
 import os
 import random
 import time
-from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List, Tuple
 from zoneinfo import ZoneInfo
@@ -48,10 +46,10 @@ from src.config import get_config
 from .base import BaseFetcher, DataFetchError, RateLimitError, STANDARD_COLUMNS, is_bse_code, is_st_stock, is_kc_cy_stock, normalize_stock_code
 from .realtime_types import (
     UnifiedRealtimeQuote, ChipDistribution, RealtimeSource,
-    get_realtime_circuit_breaker, get_chip_circuit_breaker,
+    get_realtime_circuit_breaker,
     safe_float, safe_int  # 使用统一的类型转换函数
 )
-from .us_index_mapping import is_us_index_code, is_us_stock_code
+from .us_index_mapping import is_us_stock_code
 
 
 # 保留旧的 RealtimeQuote 别名，用于向后兼容
@@ -403,7 +401,6 @@ class AkshareFetcher(BaseFetcher):
     
     关键策略：
     - 每次请求前随机休眠 2.0-5.0 秒
-    - 随机 User-Agent 轮换
     - 失败后指数退避重试（最多3次）
     """
     
@@ -425,22 +422,6 @@ class AkshareFetcher(BaseFetcher):
         # 东财补丁开启才执行打补丁操作
         if get_config().enable_eastmoney_patch:
             eastmoney_patch()
-    
-    def _set_random_user_agent(self) -> None:
-        """
-        设置随机 User-Agent
-        
-        通过修改 requests Session 的 headers 实现
-        这是关键的反爬策略之一
-        """
-        try:
-            import akshare as ak
-            # akshare 内部使用 requests，我们通过环境变量或直接设置来影响
-            # 实际上 akshare 可能不直接暴露 session，这里通过 fake_useragent 作为补充
-            random_ua = random.choice(USER_AGENTS)
-            logger.debug(f"设置 User-Agent: {random_ua[:50]}...")
-        except Exception as e:
-            logger.debug(f"设置 User-Agent 失败: {e}")
     
     def _enforce_rate_limit(self) -> None:
         """
@@ -481,10 +462,9 @@ class AkshareFetcher(BaseFetcher):
         
         流程：
         1. 判断代码类型（美股/港股/ETF/A股）
-        2. 设置随机 User-Agent
-        3. 执行速率限制（随机休眠）
-        4. 调用对应的 akshare API
-        5. 处理返回数据
+        2. 执行速率限制（随机休眠）
+        3. 调用对应的 akshare API
+        4. 处理返回数据
         """
         # 根据代码类型选择不同的获取方法
         if _is_us_code(stock_code):
@@ -541,10 +521,7 @@ class AkshareFetcher(BaseFetcher):
         """
         import akshare as ak
 
-        # 防封禁策略 1: 随机 User-Agent
-        self._set_random_user_agent()
-
-        # 防封禁策略 2: 强制休眠
+        # 防封禁策略: 强制休眠
         self._enforce_rate_limit()
 
         logger.info(f"[API调用] ak.stock_zh_a_hist(symbol={stock_code}, ...)")
@@ -687,10 +664,7 @@ class AkshareFetcher(BaseFetcher):
         """
         import akshare as ak
         
-        # 防封禁策略 1: 随机 User-Agent
-        self._set_random_user_agent()
-        
-        # 防封禁策略 2: 强制休眠
+        # 防封禁策略: 强制休眠
         self._enforce_rate_limit()
         
         logger.info(f"[API调用] ak.fund_etf_hist_em(symbol={stock_code}, period=daily, "
@@ -732,101 +706,6 @@ class AkshareFetcher(BaseFetcher):
             
             raise DataFetchError(f"Akshare 获取 ETF 数据失败: {e}") from e
     
-    def _fetch_us_data(self, stock_code: str, start_date: str, end_date: str) -> pd.DataFrame:
-        """
-        获取美股历史数据
-        
-        数据来源：ak.stock_us_daily()（新浪财经接口）
-        
-        Args:
-            stock_code: 美股代码，如 'AMD', 'AAPL', 'TSLA'
-            start_date: 开始日期，格式 'YYYY-MM-DD'
-            end_date: 结束日期，格式 'YYYY-MM-DD'
-            
-        Returns:
-            美股历史数据 DataFrame
-        """
-        import akshare as ak
-        
-        # 防封禁策略 1: 随机 User-Agent
-        self._set_random_user_agent()
-        
-        # 防封禁策略 2: 强制休眠
-        self._enforce_rate_limit()
-        
-        # 美股代码直接使用大写
-        symbol = stock_code.strip().upper()
-        
-        logger.info(f"[API调用] ak.stock_us_daily(symbol={symbol}, adjust=qfq)")
-        
-        try:
-            import time as _time
-            api_start = _time.time()
-            
-            # 调用 akshare 获取美股日线数据
-            # stock_us_daily 返回全部历史数据，后续需要按日期过滤
-            df = ak.stock_us_daily(
-                symbol=symbol,
-                adjust="qfq"  # 前复权
-            )
-            
-            api_elapsed = _time.time() - api_start
-            
-            # 记录返回数据摘要
-            if df is not None and not df.empty:
-                logger.info(f"[API返回] ak.stock_us_daily 成功: 返回 {len(df)} 行数据, 耗时 {api_elapsed:.2f}s")
-                logger.info(f"[API返回] 列名: {list(df.columns)}")
-                
-                # 按日期过滤
-                df['date'] = pd.to_datetime(df['date'])
-                start_dt = pd.to_datetime(start_date)
-                end_dt = pd.to_datetime(end_date)
-                df = df[(df['date'] >= start_dt) & (df['date'] <= end_dt)]
-                
-                if not df.empty:
-                    logger.info(f"[API返回] 过滤后日期范围: {df['date'].iloc[0].strftime('%Y-%m-%d')} ~ {df['date'].iloc[-1].strftime('%Y-%m-%d')}")
-                    logger.debug(f"[API返回] 最新3条数据:\n{df.tail(3).to_string()}")
-                else:
-                    logger.warning(f"[API返回] 过滤后数据为空，日期范围 {start_date} ~ {end_date} 无数据")
-                
-                # 转换列名为中文格式以匹配 _normalize_data
-                # stock_us_daily 返回: date, open, high, low, close, volume
-                rename_map = {
-                    'date': '日期',
-                    'open': '开盘',
-                    'high': '最高',
-                    'low': '最低',
-                    'close': '收盘',
-                    'volume': '成交量',
-                }
-                df = df.rename(columns=rename_map)
-                
-                # 计算涨跌幅（美股接口不直接返回）
-                if '收盘' in df.columns:
-                    df['涨跌幅'] = df['收盘'].pct_change() * 100
-                    df['涨跌幅'] = df['涨跌幅'].fillna(0)
-                
-                # 估算成交额（美股接口不返回）
-                if '成交量' in df.columns and '收盘' in df.columns:
-                    df['成交额'] = df['成交量'] * df['收盘']
-                else:
-                    df['成交额'] = 0
-                
-                return df
-            else:
-                logger.warning(f"[API返回] ak.stock_us_daily 返回空数据, 耗时 {api_elapsed:.2f}s")
-                return pd.DataFrame()
-            
-        except Exception as e:
-            error_msg = str(e).lower()
-            
-            # 检测反爬封禁
-            if any(keyword in error_msg for keyword in ['banned', 'blocked', '频率', 'rate', '限制']):
-                logger.warning(f"检测到可能被封禁: {e}")
-                raise RateLimitError(f"Akshare 可能被限流: {e}") from e
-            
-            raise DataFetchError(f"Akshare 获取美股数据失败: {e}") from e
-
     def _fetch_hk_data(self, stock_code: str, start_date: str, end_date: str) -> pd.DataFrame:
         """
         获取港股历史数据
@@ -843,10 +722,7 @@ class AkshareFetcher(BaseFetcher):
         """
         import akshare as ak
         
-        # 防封禁策略 1: 随机 User-Agent
-        self._set_random_user_agent()
-        
-        # 防封禁策略 2: 强制休眠
+        # 防封禁策略: 强制休眠
         self._enforce_rate_limit()
         
         # 确保代码格式正确（5位数字）
@@ -1000,7 +876,6 @@ class AkshareFetcher(BaseFetcher):
                 for attempt in range(1, 3):
                     try:
                         # 防封禁策略
-                        self._set_random_user_agent()
                         self._enforce_rate_limit()
 
                         logger.info(f"[API调用] ak.stock_zh_a_spot_em() 获取A股实时行情... (attempt {attempt}/2)")
@@ -1417,7 +1292,6 @@ class AkshareFetcher(BaseFetcher):
                 for attempt in range(1, 3):
                     try:
                         # 防封禁策略
-                        self._set_random_user_agent()
                         self._enforce_rate_limit()
 
                         logger.info(f"[API调用] ak.fund_etf_spot_em() 获取ETF实时行情... (attempt {attempt}/2)")
@@ -1506,7 +1380,6 @@ class AkshareFetcher(BaseFetcher):
         sina_key = "akshare_hk_sina"
 
         # 防封禁策略
-        self._set_random_user_agent()
         self._enforce_rate_limit()
 
         # 确保代码格式正确（5位数字）
@@ -1639,7 +1512,6 @@ class AkshareFetcher(BaseFetcher):
         
         try:
             # 防封禁策略
-            self._set_random_user_agent()
             self._enforce_rate_limit()
             
             logger.info(f"[API调用] ak.stock_cyq_em(symbol={stock_code}) 获取筹码分布...")
@@ -1735,7 +1607,6 @@ class AkshareFetcher(BaseFetcher):
         }
 
         try:
-            self._set_random_user_agent()
             self._enforce_rate_limit()
 
             # 使用 akshare 获取指数行情（新浪财经接口）
@@ -1795,7 +1666,6 @@ class AkshareFetcher(BaseFetcher):
 
         # 优先东财接口
         try:
-            self._set_random_user_agent()
             self._enforce_rate_limit()
 
             started_at = time.monotonic()
@@ -1825,7 +1695,6 @@ class AkshareFetcher(BaseFetcher):
 
         # 东财失败后，尝试新浪接口
         try:
-            self._set_random_user_agent()
             self._enforce_rate_limit()
 
             started_at = time.monotonic()
@@ -1974,7 +1843,6 @@ class AkshareFetcher(BaseFetcher):
         
         # 优先东财接口
         try:
-            self._set_random_user_agent()
             self._enforce_rate_limit()
 
             logger.info("[API调用] ak.stock_board_industry_name_em() 获取板块排行...")
@@ -1989,7 +1857,6 @@ class AkshareFetcher(BaseFetcher):
 
         # 东财失败后，尝试新浪接口
         try:
-            self._set_random_user_agent()
             self._enforce_rate_limit()
 
             logger.info("[API调用] ak.stock_sector_spot() 获取行业板块排行(新浪)...")
@@ -2009,7 +1876,6 @@ class AkshareFetcher(BaseFetcher):
         import akshare as ak
 
         try:
-            self._set_random_user_agent()
             self._enforce_rate_limit()
 
             logger.info("[API调用] ak.stock_board_concept_name_em() 获取概念排行...")
@@ -2065,7 +1931,6 @@ class AkshareFetcher(BaseFetcher):
 
     def _get_eastmoney_hot_stocks(self, ak: Any, n: int = 10) -> Optional[List[Dict[str, Any]]]:
         """获取东方财富人气股榜。"""
-        self._set_random_user_agent()
         self._enforce_rate_limit()
 
         logger.info("[API调用] ak.stock_hot_rank_em() 获取东方财富人气股...")
@@ -2087,7 +1952,6 @@ class AkshareFetcher(BaseFetcher):
 
     def _get_eastmoney_hot_up_stocks(self, ak: Any, n: int = 10) -> Optional[List[Dict[str, Any]]]:
         """获取东方财富飙升榜。"""
-        self._set_random_user_agent()
         self._enforce_rate_limit()
 
         logger.info("[API调用] ak.stock_hot_up_em() 获取东方财富飙升榜...")
@@ -2117,7 +1981,6 @@ class AkshareFetcher(BaseFetcher):
 
     def _get_xueqiu_hot_stocks(self, ak: Any, n: int = 10) -> Optional[List[Dict[str, Any]]]:
         """获取雪球关注榜兜底。该接口较慢，仅在人气榜失败后尝试。"""
-        self._set_random_user_agent()
         self._enforce_rate_limit()
 
         logger.info("[API调用] ak.stock_hot_follow_xq() 获取雪球关注榜...")
@@ -2147,7 +2010,6 @@ class AkshareFetcher(BaseFetcher):
 
         query_date = date or datetime.now().strftime('%Y%m%d')
         try:
-            self._set_random_user_agent()
             self._enforce_rate_limit()
 
             logger.info("[API调用] ak.stock_zt_pool_em(date=%s) 获取涨停池...", query_date)

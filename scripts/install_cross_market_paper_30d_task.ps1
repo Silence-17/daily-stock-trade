@@ -2,8 +2,9 @@
 param(
     [string]$TaskName = "DailyStockAnalysis-CrossMarketPaper30D",
     [ValidateRange(1, 65535)]
-    [int]$Port = 8001,
-    [switch]$Start
+    [int]$Port = 8000,
+    [switch]$Start,
+    [switch]$PreservePowerPlan
 )
 
 $ErrorActionPreference = "Stop"
@@ -13,6 +14,34 @@ $principal = [Security.Principal.WindowsPrincipal]::new($identity)
 $isAdministrator = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $WhatIfPreference -and -not $isAdministrator) {
     throw "Run this installer from an elevated PowerShell session."
+}
+
+$powerPlanPrepared = $false
+if (
+    -not $PreservePowerPlan -and
+    $PSCmdlet.ShouldProcess(
+        "current Windows power plan",
+        "Enable AC/DC wake timers and disable hybrid sleep"
+    )
+) {
+    $powercfg = (Get-Command powercfg.exe -ErrorAction Stop).Source
+    $powerSettings = @(
+        @("/SETACVALUEINDEX", "SCHEME_CURRENT", "SUB_SLEEP", "RTCWAKE", "1")
+        @("/SETDCVALUEINDEX", "SCHEME_CURRENT", "SUB_SLEEP", "RTCWAKE", "1")
+        @("/SETACVALUEINDEX", "SCHEME_CURRENT", "SUB_SLEEP", "HYBRIDSLEEP", "0")
+        @("/SETDCVALUEINDEX", "SCHEME_CURRENT", "SUB_SLEEP", "HYBRIDSLEEP", "0")
+    )
+    foreach ($arguments in $powerSettings) {
+        & $powercfg @arguments
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to prepare the Windows power plan for scheduled wake."
+        }
+    }
+    & $powercfg /SETACTIVE SCHEME_CURRENT
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to activate the prepared Windows power plan."
+    }
+    $powerPlanPrepared = $true
 }
 
 $runner = (Resolve-Path (Join-Path $PSScriptRoot "run_cross_market_paper_30d.ps1")).Path
@@ -26,8 +55,6 @@ $triggers = @(
     New-ScheduledTaskTrigger -Weekly -WeeksInterval 1 -DaysOfWeek Monday, Tuesday, Wednesday, Thursday, Friday -At "08:50"
     New-ScheduledTaskTrigger -Weekly -WeeksInterval 1 -DaysOfWeek Monday, Tuesday, Wednesday, Thursday, Friday -At "09:23"
     New-ScheduledTaskTrigger -Weekly -WeeksInterval 1 -DaysOfWeek Monday, Tuesday, Wednesday, Thursday, Friday -At "10:38"
-    New-ScheduledTaskTrigger -Weekly -WeeksInterval 1 -DaysOfWeek Monday, Tuesday, Wednesday, Thursday, Friday -At "13:28"
-    New-ScheduledTaskTrigger -Weekly -WeeksInterval 1 -DaysOfWeek Monday, Tuesday, Wednesday, Thursday, Friday -At "14:28"
     New-ScheduledTaskTrigger -Weekly -WeeksInterval 1 -DaysOfWeek Monday, Tuesday, Wednesday, Thursday, Friday -At "14:55"
     New-ScheduledTaskTrigger -Weekly -WeeksInterval 1 -DaysOfWeek Monday, Tuesday, Wednesday, Thursday, Friday -At "21:14"
     New-ScheduledTaskTrigger -Weekly -WeeksInterval 1 -DaysOfWeek Monday, Tuesday, Wednesday, Thursday, Friday -At "21:25"
@@ -78,4 +105,6 @@ if ($PSCmdlet.ShouldProcess($TaskName, "Register SYSTEM scheduled task")) {
     start_requested = [bool]$Start
     started_now = $startedNow
     wake_trigger_count = $triggers.Count - 1
+    power_plan_prepared = $powerPlanPrepared
+    power_plan_preserved = [bool]$PreservePowerPlan
 }

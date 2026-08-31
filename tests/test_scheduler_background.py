@@ -47,6 +47,21 @@ class _FakeScheduleModule:
 
 
 class SchedulerBackgroundTaskTestCase(unittest.TestCase):
+    def test_background_task_supports_fifteen_second_cadence(self):
+        fake_schedule = _FakeScheduleModule()
+        with patch.dict(sys.modules, {"schedule": fake_schedule}):
+            from src.scheduler import Scheduler
+
+            scheduler = Scheduler(schedule_time="18:00")
+            scheduler.add_background_task(
+                lambda: None,
+                interval_seconds=15,
+                run_immediately=False,
+                name="entry-watch",
+            )
+
+        self.assertEqual(scheduler._background_tasks[0]["interval_seconds"], 15)
+
     def test_background_task_runs_when_interval_elapsed(self):
         fake_schedule = _FakeScheduleModule()
         with patch.dict(sys.modules, {"schedule": fake_schedule}):

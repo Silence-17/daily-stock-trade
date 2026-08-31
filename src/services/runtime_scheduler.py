@@ -664,11 +664,6 @@ class RuntimeSchedulerService:
                 return details
             started_at = datetime.now()
             try:
-                self._record_background_task_event(
-                    name=name,
-                    status="started",
-                    message=f"Background task started: {name}",
-                )
                 try:
                     result = task()
                 except Exception as exc:
@@ -694,6 +689,22 @@ class RuntimeSchedulerService:
                 details = self._summarize_background_task_result(result)
                 skipped = details.get("skipped") is True
                 reason = str(details.get("reason") or "").strip()
+                if skipped and (
+                    reason.startswith(("outside_", "before_", "non_cn_trading_day"))
+                    or reason.endswith((
+                        "_already_persisted",
+                        "_already_collected",
+                        "_already_fully_evidenced_today",
+                        "_throttled",
+                    ))
+                    or reason == "no_cross_market_strategy_positions"
+                    or reason in {
+                        "no_cross_market_sellable_positions",
+                        "no_pending_order_changes",
+                        "no_retry_work",
+                    }
+                ):
+                    return result
                 status = "skipped" if skipped else "completed"
                 message = (
                     f"Background task skipped: {reason}"

@@ -22,6 +22,9 @@ from api.v1.schemas.vnpy_paper_trading import (
     CrossMarketPaperCampaignStartRequest,
     CrossMarketStrategyMigrationRequest,
     VnpyPaperAccountListResponse,
+    VnpyPaperStrategyAccountDashboardResponse,
+    VnpyPaperStrategyDashboardAccountListResponse,
+    VnpyPaperStrategyFactorUpdateRequest,
     VnpyPaperArchivedAccountCleanupRequest,
     VnpyPaperArchivedAccountCleanupResponse,
     VnpyPaperAgentBacktestRequest,
@@ -85,6 +88,7 @@ from src.services.stock_selection_agent_backtest_service import StockSelectionAg
 from src.services.vnpy_paper_trading_service import (
     VnpyPaperTradingService,
     build_calibration_shadow_schedule,
+    cross_market_entry_watch_owns_formal_execution,
 )
 
 logger = logging.getLogger(__name__)
@@ -239,8 +243,7 @@ _TASK_HEALTH_LABELS = {
     "vnpy_paper_auto_retry": "自动恢复扫描",
     "cross_market_pending_order_revalidation": "跨市场待成交复核",
     "cross_market_intraday_sell_monitor": "跨市场盘中卖出监控",
-    "cross_market_intraday_entry_scan": "跨市场四时点选板块选股",
-    "cross_market_formal_recovery": "跨市场正式轮次恢复",
+    "cross_market_intraday_entry_scan": "跨市场09:30-09:35盯盘与10:40受限恢复",
     "cross_market_paper_observation": "跨市场零委托观察",
     "cross_market_campaign_closing_snapshot": "跨市场收盘净值快照",
     "cross_market_korea_signal": "韩日股及亚洲产业链信号采集",
@@ -266,16 +269,14 @@ _EXPECTED_TASK_SKIP_REASONS = {
     },
     "cross_market_intraday_entry_scan": {
         "outside_cross_market_entry_analysis_slot",
-        "cross_market_entry_analysis_slot_already_audited",
-    },
-    "cross_market_formal_recovery": {
-        "outside_cn_formal_recovery_session",
         "formal_execution_already_fully_evidenced_today",
         "formal_execution_already_observed_today",
-        "formal_execution_not_observed_today",
         "formal_execution_activity_blocks_recovery",
         "formal_execution_skip_not_recoverable",
         "formal_recovery_evidence_not_ready",
+        "formal_recovery_requires_opening_baseline",
+        "formal_recovery_candidates_unavailable",
+        "cross_market_entry_analysis_slot_already_audited",
         "paper_campaign_completed",
     },
     "cross_market_campaign_closing_snapshot": {
@@ -1224,13 +1225,6 @@ def _auto_trade_readiness_payload(status_payload: Dict[str, Any]) -> Dict[str, A
     tasks = [task for task in list(scheduler_status.get("background_tasks") or []) if isinstance(task, dict)]
     events = [event for event in list(scheduler_status.get("task_events") or []) if isinstance(event, dict)]
     tasks_by_name = {str(task.get("name") or ""): task for task in tasks}
-    auto_trade_task = tasks_by_name.get("vnpy_paper_auto_trade")
-    auto_trade_event = _latest_task_event(events, "vnpy_paper_auto_trade")
-    event_details = (
-        auto_trade_event.get("details")
-        if auto_trade_event is not None and isinstance(auto_trade_event.get("details"), dict)
-        else {}
-    )
     latest_recorded_run = (
         status_payload.get("last_auto_run")
         if isinstance(status_payload.get("last_auto_run"), dict)
@@ -1244,6 +1238,24 @@ def _auto_trade_readiness_payload(status_payload: Dict[str, Any]) -> Dict[str, A
         str(settings.get("auto_strategy") or "").strip()
         == CROSS_MARKET_STRATEGY_ID
     )
+    execution_mode = str(
+        settings.get("auto_execution_mode") or status_payload.get("mode") or "paper"
+    )
+    entry_watch_owns_formal_execution = (
+        cross_market_entry_watch_owns_formal_execution(settings)
+    )
+    auto_trade_task_name = (
+        "cross_market_intraday_entry_scan"
+        if entry_watch_owns_formal_execution
+        else "vnpy_paper_auto_trade"
+    )
+    auto_trade_task = tasks_by_name.get(auto_trade_task_name)
+    auto_trade_event = _latest_task_event(events, auto_trade_task_name)
+    event_details = (
+        auto_trade_event.get("details")
+        if auto_trade_event is not None and isinstance(auto_trade_event.get("details"), dict)
+        else {}
+    )
     last_formal_auto_run = (
         status_payload.get("last_formal_auto_run")
         if isinstance(status_payload.get("last_formal_auto_run"), dict)
@@ -1254,7 +1266,6 @@ def _auto_trade_readiness_payload(status_payload: Dict[str, Any]) -> Dict[str, A
         if internal_cross_market_selection and last_formal_auto_run
         else latest_recorded_run
     )
-    execution_mode = str(settings.get("auto_execution_mode") or status_payload.get("mode") or "paper")
     scheduler_enabled = bool(scheduler_status.get("enabled"))
     scheduler_loop_running = _scheduler_loop_running(scheduler_status)
     time_gate_enforced = bool(trading_window.get("time_gate_enforced"))
@@ -1353,7 +1364,7 @@ def _auto_trade_readiness_payload(status_payload: Dict[str, Any]) -> Dict[str, A
             if not auto_trade_enabled
             else f"下次 {auto_trade_task.get('next_run_at') or scheduler_status.get('next_run_at') or '-'}"
             if auto_trade_task is not None
-            else "vnpy_paper_auto_trade 未注册"
+            else f"{auto_trade_task_name} 未注册"
         ),
     )
     add_component(
@@ -1387,12 +1398,28 @@ def _auto_trade_readiness_payload(status_payload: Dict[str, Any]) -> Dict[str, A
             else str(alphasift.get("error") or alphasift.get("diagnostics") or "AlphaSift 不可用")
         ),
     )
-    timing_alignment = _auto_trade_timing_alignment(
-        scheduler_status=scheduler_status,
-        auto_trade_task=auto_trade_task,
-        trading_window=trading_window,
-        auto_trade_enabled=auto_trade_enabled,
-        time_gate_enforced=time_gate_enforced,
+    timing_alignment = (
+        {
+            "status": "ready" if auto_trade_enabled else "disabled",
+            "reason": (
+                "cross_market_entry_watch_owns_formal_execution"
+                if auto_trade_enabled
+                else "auto_trade_disabled"
+            ),
+            "detail": (
+                "跨市场正式执行由 09:30-09:35 入场盯盘独占"
+                if auto_trade_enabled
+                else "自动买入关闭"
+            ),
+        }
+        if entry_watch_owns_formal_execution
+        else _auto_trade_timing_alignment(
+            scheduler_status=scheduler_status,
+            auto_trade_task=auto_trade_task,
+            trading_window=trading_window,
+            auto_trade_enabled=auto_trade_enabled,
+            time_gate_enforced=time_gate_enforced,
+        )
     )
     add_component(
         key="timing_alignment",
@@ -1576,16 +1603,18 @@ def _required_vnpy_paper_task_names(settings: Dict[str, Any]) -> set[str]:
         str(settings.get("auto_strategy") or "").strip()
         == CROSS_MARKET_STRATEGY_ID
     )
+    entry_watch_owns_formal_execution = (
+        cross_market_entry_watch_owns_formal_execution(settings)
+    )
     observation_enabled = bool(settings.get("cross_market_observation_enabled"))
-    if auto_trade_enabled:
+    if auto_trade_enabled and not entry_watch_owns_formal_execution:
         required.add("vnpy_paper_auto_trade")
     if cross_market_strategy_active:
         required.add("cross_market_pending_order_revalidation")
     if cross_market_strategy_active and auto_trade_enabled:
         required.add("cross_market_intraday_sell_monitor")
-        if str(settings.get("auto_execution_mode") or "").strip() == "vnpy_paper":
+        if entry_watch_owns_formal_execution:
             required.add("cross_market_intraday_entry_scan")
-            required.add("cross_market_formal_recovery")
     if observation_enabled:
         required.add("cross_market_paper_observation")
     if (cross_market_strategy_active and auto_trade_enabled) or observation_enabled:
@@ -2127,6 +2156,9 @@ def run_cross_market_strategy_backtest(
                     order_cancel_requested=item.order_cancel_requested,
                     previous_close=item.previous_close,
                     price_limit_pct=item.price_limit_pct,
+                    entry_score=item.entry_score,
+                    analysis_slot=item.analysis_slot,
+                    failed_breakout_signal=item.failed_breakout_signal,
                 )
             )
         result = CrossMarketBacktestService(initial_cash=payload.initial_cash).run_ablation_suite(
@@ -2196,6 +2228,8 @@ def start_cross_market_strategy_acceptance(
             if isinstance(account_status.get("snapshot"), dict)
             else {}
         )
+        if float(snapshot.get("total_market_value") or 0.0) > 0:
+            raise ValueError("paper_campaign_requires_flat_account")
         acceptance_path = FilePath(service.config_path).parent / "cross_market_strategy_acceptance.json"
         return CrossMarketAcceptanceService(
             repository=service.agent_repo,
@@ -2538,6 +2572,71 @@ def list_vnpy_paper_accounts(
         raise _internal_error("List vn.py paper accounts failed", exc)
 
 
+@router.get(
+    "/strategy-dashboard/accounts",
+    response_model=VnpyPaperStrategyDashboardAccountListResponse,
+    responses={500: {"model": ErrorResponse}},
+    summary="List strategy-owned paper accounts available to the dashboard",
+)
+def list_vnpy_paper_strategy_dashboard_accounts(
+    request: Request,
+    include_inactive: bool = Query(
+        False,
+        description="Include archived strategy-owned paper accounts.",
+    ),
+) -> VnpyPaperStrategyDashboardAccountListResponse:
+    try:
+        payload = _service(request).list_strategy_dashboard_accounts(
+            include_inactive=include_inactive,
+        )
+        return VnpyPaperStrategyDashboardAccountListResponse.model_validate(payload)
+    except Exception as exc:
+        raise _internal_error("List strategy dashboard accounts failed", exc)
+
+
+@router.get(
+    "/strategy-dashboard/accounts/{account_id}",
+    response_model=VnpyPaperStrategyAccountDashboardResponse,
+    responses={400: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
+    summary="Read one strategy paper account dashboard and its factor profile",
+)
+def get_vnpy_paper_strategy_account_dashboard(
+    request: Request,
+    account_id: int = Path(..., ge=1, description="Strategy paper account id."),
+) -> VnpyPaperStrategyAccountDashboardResponse:
+    try:
+        payload = _service(request).get_strategy_account_dashboard(account_id)
+        return VnpyPaperStrategyAccountDashboardResponse.model_validate(payload)
+    except ValueError as exc:
+        raise _bad_request(exc)
+    except Exception as exc:
+        raise _internal_error("Read strategy account dashboard failed", exc)
+
+
+@router.put(
+    "/strategy-dashboard/accounts/{account_id}/factors",
+    response_model=VnpyPaperStrategyAccountDashboardResponse,
+    responses={400: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
+    summary="Update editable factors for one strategy paper account",
+)
+def update_vnpy_paper_strategy_account_factors(
+    request_obj: Request,
+    request: VnpyPaperStrategyFactorUpdateRequest,
+    account_id: int = Path(..., ge=1, description="Strategy paper account id."),
+) -> VnpyPaperStrategyAccountDashboardResponse:
+    try:
+        payload = _service(request_obj).update_strategy_account_factors(
+            account_id,
+            request.overrides,
+            replace_existing=request.replace_existing,
+        )
+        return VnpyPaperStrategyAccountDashboardResponse.model_validate(payload)
+    except ValueError as exc:
+        raise _bad_request(exc)
+    except Exception as exc:
+        raise _internal_error("Update strategy account factors failed", exc)
+
+
 @router.post(
     "/accounts/archived/cleanup",
     response_model=VnpyPaperArchivedAccountCleanupResponse,
@@ -2713,6 +2812,22 @@ def run_vnpy_paper_trade_plan_recovery(
 )
 def submit_vnpy_paper_order(request_obj: Request, request: VnpyPaperOrderRequest) -> VnpyPaperOrderResult:
     try:
+        source = "manual"
+        raw = None
+        if request.strategy_owner == "cross_market":
+            source = "cross_market_manual_entry" if request.side == "buy" else "cross_market_manual_exit"
+            raw = {
+                "cross_market_strategy": {
+                    "strategy_id": CROSS_MARKET_STRATEGY_ID,
+                    "theme": request.strategy_theme,
+                    "decision": {
+                        "reason": "user_directed_manual_entry"
+                        if request.side == "buy"
+                        else "user_directed_manual_exit",
+                    },
+                    "manual_override": True,
+                },
+            }
         payload = _service(request_obj).submit_order(
             symbol=request.symbol,
             side=request.side,
@@ -2721,7 +2836,8 @@ def submit_vnpy_paper_order(request_obj: Request, request: VnpyPaperOrderRequest
             cash_amount=request.cash_amount,
             price=request.price,
             note=request.note,
-            source="manual",
+            source=source,
+            raw=raw,
             execution_route=request.execution_route,
         )
         return VnpyPaperOrderResult.model_validate(payload)

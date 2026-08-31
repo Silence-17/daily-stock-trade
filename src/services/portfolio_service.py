@@ -286,6 +286,34 @@ class PortfolioService:
             )
             return {"id": int(row.id)}
 
+    def amend_trade_costs_and_note(
+        self,
+        *,
+        trade_id: int,
+        account_id: int,
+        fee: float,
+        tax: float,
+        note: str,
+    ) -> Dict[str, Any]:
+        if fee < 0 or tax < 0:
+            raise ValueError("fee and tax must be >= 0")
+        row = self.repo.amend_trade_costs_and_note(
+            trade_id=trade_id,
+            account_id=account_id,
+            fee=fee,
+            tax=tax,
+            note=note,
+        )
+        if row is None:
+            raise ValueError("trade not found")
+        return {
+            "id": int(row.id),
+            "account_id": int(row.account_id),
+            "fee": float(row.fee or 0.0),
+            "tax": float(row.tax or 0.0),
+            "note": row.note,
+        }
+
     def get_sellable_quantity(
         self,
         *,
@@ -578,7 +606,12 @@ class PortfolioService:
                 realtime_price_overrides=realtime_price_overrides,
             )
 
-            if persist:
+            valuation_ready = all(
+                position.get("price_available") is True
+                and position.get("price_stale") is not True
+                for position in account_snapshot["public"].get("positions", [])
+            )
+            if persist and valuation_ready:
                 self.repo.replace_positions_lots_and_snapshot(
                     account_id=account.id,
                     snapshot_date=as_of_date,
@@ -596,6 +629,7 @@ class PortfolioService:
                     positions=account_snapshot["positions_cache"],
                     lots=account_snapshot["lots_cache"],
                     valuation_currency=account.base_currency,
+                    refresh_positions=as_of_date == date.today(),
                 )
 
             accounts_payload.append(account_snapshot["public"])
@@ -1257,6 +1291,10 @@ class PortfolioService:
             )
             last_price = price_info.price
             limitations = _portfolio_limitations_for_market(market)
+            if not price_info.is_available:
+                limitations.append(f"position_price_unavailable:{symbol}")
+            elif price_info.is_stale:
+                limitations.append(f"position_price_stale:{symbol}")
 
             if price_info.is_available:
                 local_market_value = qty * float(last_price)

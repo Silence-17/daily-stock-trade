@@ -19,6 +19,88 @@ class VnpySimulatedGatewayTestCase(unittest.TestCase):
 
         self.assertIn(Exchange.BSE, DsaSimulatedGateway.exchanges)
 
+    def test_gateway_hydrates_position_and_sell_closes_without_creating_short(self) -> None:
+        from vnpy.event import EventEngine
+        from vnpy.trader.constant import Direction, Exchange, Offset, OrderType, Status
+        from vnpy.trader.engine import MainEngine
+        from vnpy.trader.object import OrderRequest
+
+        from src.services.vnpy_simulated_gateway import DsaSimulatedGateway
+
+        event_engine = EventEngine()
+        main_engine = MainEngine(event_engine)
+        main_engine.add_gateway(DsaSimulatedGateway, "DSA_SIM")
+        main_engine.connect(
+            {
+                "initial_balance": 50_000,
+                "initial_positions": [
+                    {
+                        "symbol": "002400",
+                        "market": "cn",
+                        "quantity": 1500,
+                        "avg_cost": 8.2,
+                    }
+                ],
+                "fill_delay_ms": 20,
+                "matching_mode": "fixed_delay_limit",
+            },
+            "DSA_SIM",
+        )
+        try:
+            deadline = time.monotonic() + 3.0
+            hydrated = None
+            while time.monotonic() < deadline:
+                hydrated = next(
+                    (
+                        position
+                        for position in main_engine.get_all_positions()
+                        if position.symbol == "002400"
+                    ),
+                    None,
+                )
+                if hydrated is not None:
+                    break
+                time.sleep(0.02)
+            self.assertIsNotNone(hydrated)
+            assert hydrated is not None
+            self.assertEqual(hydrated.volume, 1500.0)
+            self.assertEqual(hydrated.price, 8.2)
+
+            vt_orderid = main_engine.send_order(
+                OrderRequest(
+                    symbol="002400",
+                    exchange=Exchange.SZSE,
+                    direction=Direction.SHORT,
+                    type=OrderType.LIMIT,
+                    volume=1500,
+                    price=7.2,
+                    offset=Offset.NONE,
+                    reference="dsa:test:hydrated_position_exit",
+                ),
+                "DSA_SIM",
+            )
+            deadline = time.monotonic() + 3.0
+            while time.monotonic() < deadline:
+                order = main_engine.get_order(vt_orderid)
+                if order is not None and order.status == Status.ALLTRADED:
+                    break
+                time.sleep(0.02)
+
+            order = main_engine.get_order(vt_orderid)
+            closed = next(
+                position
+                for position in main_engine.get_all_positions()
+                if position.symbol == "002400"
+            )
+            account = main_engine.get_account("DSA_SIM.paper")
+            gateway = main_engine.get_gateway("DSA_SIM")
+            self.assertEqual(order.status, Status.ALLTRADED)
+            self.assertEqual(closed.volume, 0.0)
+            self.assertEqual(gateway.get_state_snapshot()["position_count"], 0)
+            self.assertEqual(account.balance, 60_800.0)
+        finally:
+            main_engine.close()
+
     def test_next_minute_vwap_mode_fills_bse_order(self) -> None:
         from vnpy.event import EventEngine
         from vnpy.trader.constant import Direction, Exchange, Offset, OrderType, Status

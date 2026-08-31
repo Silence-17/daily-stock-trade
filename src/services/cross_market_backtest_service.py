@@ -57,6 +57,9 @@ class ReplayFrame:
     order_cancel_requested: bool = False
     previous_close: Optional[float] = None
     price_limit_pct: Optional[float] = None
+    entry_score: Optional[float] = None
+    analysis_slot: Optional[str] = None
+    failed_breakout_signal: Mapping[str, object] = field(default_factory=dict)
 
 
 @dataclass
@@ -511,6 +514,9 @@ class CrossMarketBacktestService:
             pullback_from_peak_pct=pullback,
             expected_gross_edge_pct=frame.expected_gross_edge_pct,
             estimated_round_trip_cost_pct=estimated_cost,
+            entry_score=frame.entry_score,
+            analysis_slot=frame.analysis_slot,
+            failed_breakout_signal=frame.failed_breakout_signal,
             risk=risk,
         )
 

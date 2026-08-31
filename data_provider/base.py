@@ -3796,14 +3796,6 @@ class DataFetcherManager:
         return normalized
 
     @staticmethod
-    def _block_status(payload: Dict[str, Any], available: bool = True) -> str:
-        if not available:
-            return "not_supported"
-        if not payload:
-            return "partial"
-        return "ok"
-
-    @staticmethod
     def _build_fundamental_block(
         status: str,
         payload: Optional[Dict[str, Any]] = None,

@@ -28,7 +28,7 @@ mark the block as ``partial`` when only some fields are populated.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
@@ -106,16 +106,6 @@ def _yoy_from_row(row: Optional[pd.Series]) -> Optional[float]:
     if latest is None or prev_year in (None, 0):
         return None
     return round((latest - prev_year) / abs(prev_year) * 100.0, 4)
-
-
-def _epoch_to_date(value: Any) -> Optional[str]:
-    raw = _safe_float(value)
-    if raw is None:
-        return None
-    try:
-        return datetime.fromtimestamp(raw, tz=timezone.utc).date().isoformat()
-    except (OverflowError, OSError, ValueError):
-        return None
 
 
 def _convert_to_yf_symbol(stock_code: str) -> str:

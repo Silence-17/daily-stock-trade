@@ -768,7 +768,7 @@ python main.py --schedule --no-run-immediately
 > runtime scheduler 重建配置时会按任务名复用进程内互斥锁。若旧代同名任务仍在运行，新代任务会以 `task_already_running` 持久化审计跳过，避免自动买入或恢复扫描并发执行；任务状态中的 `overlap_guarded` 和 `previous_generation_running` 可区分保护是否启用及旧代任务是否仍在收尾，Web 模拟交易页会显示该状态。
 >
 > Web/API runtime scheduler 的立即执行入口只会在没有分析任务运行时接受请求；如果已有分析在执行，会返回忙碌状态而不是假装排队成功。
-> runtime scheduler 状态会返回最近 `task_events`，Web 模拟交易页据此展示“后台任务日志”，也可通过 `GET /api/v1/vnpy-paper/task-events` 按任务名和 started/completed/skipped/failed 状态筛选数据库持久化的最近事件，直接查看自动买入、自动重试和事件监控的执行结果；API 进程重启后仍可保留最近任务事件用于排障。
+> runtime scheduler 状态会返回最近 `task_events`，Web 模拟交易页据此展示“后台任务日志”，也可通过 `GET /api/v1/vnpy-paper/task-events` 按任务名和 completed/skipped/failed 状态筛选数据库持久化的最近终态。窗口外、截止前、非交易日和重复采集等预期空转不持久化，运行中状态直接读取 scheduler 内存，避免高频盯盘制造无效任务日志。
 > Web 模拟交易页还会读取 `GET /api/v1/vnpy-paper/task-health` 展示“任务健康检查”，按自动买入与自动恢复扫描聚合任务是否注册、运行、停用、持久化最近失败/跳过原因和下次运行时间。
 > 暂停“定时自动买入”只会注销新增买入任务；只要模拟交易总开关仍开启，`vnpy_paper_auto_retry` 会在服务注册时立即扫描一次并继续按 1 至 5 分钟周期恢复已有委托，暂停期间只对账和超时归档，不重提失败计划。API lifespan 创建或注入的 MainEngine/EventEngine 会绑定到 scheduler 后台 service，Web 手动桥接和后台自动任务复用同一 runtime。
 > 启用交易时段门禁后，24 小时及以上的自动交易周期会在服务启动时锚定到对应市场可交易窗口开始后 5 分钟，而不是固定继承任意进程启动时刻。若当前窗口当天尚未正式运行，会选择至少留有 5 分钟准备时间的当前或下一段窗口；若当天已有正式运行，则直接等待下一交易日，避免重启重复下单。`auto_trade_readiness.timing_alignment` 会按任务实际触发日期投影交易窗口；小于 24 小时的自定义轮询保持原间隔语义。
@@ -855,7 +855,7 @@ python main.py --schedule --no-run-immediately
 >
 > 配置 `auto_max_drawdown_pct` 后，账户最大回撤以按账户持久化的已观测权益峰值为基准，而不是只比较初始资金。完整状态的 `diagnostics.account_drawdown`、Agent run 的 `diagnostics.account_risk` 和 Web“账户回撤”健康组件会展示峰值权益、当前权益、回撤比例与阈值；达到阈值时只阻断新买入。
 
-> 可选 `auto_consecutive_loss_limit` 按本地 paper 账本 FIFO 已实现盈亏统计连续亏损，与任务失败熔断分离；达到上限后只暂停新买入。一般策略在 `auto_consecutive_loss_cooldown_minutes` 到期后恢复；`cross_market_global_sector_rotation_v1.3_aggressive` 固定冷却后续 3 个完整 A 股交易日并在第 4 个交易日恢复，Web 设置显示只读的 3 个 A 股交易日。后续盈利/持平平仓会清零连亏。完整状态的 `diagnostics.consecutive_losses`、系统健康组件和 Agent run 会展示当前连亏、最后平仓、恢复时间与门禁状态。
+> 可选 `auto_consecutive_loss_limit` 按本地 paper 账本 FIFO 已实现盈亏统计连续亏损，与任务失败熔断分离；达到上限后只暂停新买入。一般策略在 `auto_consecutive_loss_cooldown_minutes` 到期后恢复；`cross_market_global_sector_rotation_v1.4_staged` 固定冷却后续 3 个完整 A 股交易日并在第 4 个交易日恢复，Web 设置显示只读的 3 个 A 股交易日。后续盈利/持平平仓会清零连亏。完整状态的 `diagnostics.consecutive_losses`、系统健康组件和 Agent run 会展示当前连亏、最后平仓、恢复时间与门禁状态。
 
 #### 环境变量方式
 

@@ -28,8 +28,6 @@ class CrossMarketPaperTaskScriptTests(unittest.TestCase):
                 "08:50",
                 "09:23",
                 "10:38",
-                "13:28",
-                "14:28",
                 "14:55",
                 "21:14",
                 "21:25",
@@ -59,9 +57,6 @@ class CrossMarketPaperTaskScriptTests(unittest.TestCase):
             "07:45",
             "08:50",
             "09:23",
-            "10:38",
-            "13:28",
-            "14:28",
             "14:55",
             "21:14",
             "21:25",
@@ -120,9 +115,14 @@ class CrossMarketPaperTaskScriptTests(unittest.TestCase):
             self.script,
         )
 
-    def test_cn_intraday_entry_slots_have_dedicated_wake_triggers(self) -> None:
-        for trigger_time in ("10:38", "13:28", "14:28"):
-            self.assertIn(
+    def test_only_bounded_cn_intraday_recovery_has_a_wake_trigger(self) -> None:
+        self.assertIn(
+            "-DaysOfWeek Monday, Tuesday, Wednesday, Thursday, Friday "
+            '-At "10:38"',
+            self.script,
+        )
+        for trigger_time in ("13:28", "14:28"):
+            self.assertNotIn(
                 "-DaysOfWeek Monday, Tuesday, Wednesday, Thursday, Friday "
                 f'-At "{trigger_time}"',
                 self.script,
@@ -144,9 +144,23 @@ class CrossMarketPaperTaskScriptTests(unittest.TestCase):
             self.script,
         )
 
+    def test_installer_prepares_power_plan_for_reliable_wake(self) -> None:
+        self.assertIn("[switch]$PreservePowerPlan", self.script)
+        for command in (
+            '@("/SETACVALUEINDEX", "SCHEME_CURRENT", "SUB_SLEEP", "RTCWAKE", "1")',
+            '@("/SETDCVALUEINDEX", "SCHEME_CURRENT", "SUB_SLEEP", "RTCWAKE", "1")',
+            '@("/SETACVALUEINDEX", "SCHEME_CURRENT", "SUB_SLEEP", "HYBRIDSLEEP", "0")',
+            '@("/SETDCVALUEINDEX", "SCHEME_CURRENT", "SUB_SLEEP", "HYBRIDSLEEP", "0")',
+        ):
+            self.assertIn(command, self.script)
+        self.assertIn("power_plan_prepared = $powerPlanPrepared", self.script)
+
     def test_start_is_idempotent_for_an_already_running_task(self) -> None:
         self.assertIn('$registeredTask.State -ne "Running"', self.script)
         self.assertIn("started_now = $startedNow", self.script)
+
+    def test_host_reuses_the_primary_api_port(self) -> None:
+        self.assertIn("[int]$Port = 8000", self.script)
 
 
 if __name__ == "__main__":

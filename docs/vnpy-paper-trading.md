@@ -2,6 +2,18 @@
 
 本功能在 Web 侧新增“模拟交易”入口，后端提供 `vn.py` 风格的 paper trading API。默认实现写入 DSA 本地持仓账本；当运行进程显式注入 vn.py `MainEngine` 并配置 gateway 名称时，可选择把委托提交到 vn.py `MainEngine.send_order`。该能力仍定位为可选模拟/桥接能力，不默认连接实盘券商、CTP 网关或任何真实交易通道。
 
+## 策略账户看板与因子配置
+
+模拟交易页顶部的“策略账户看板”统一展示当前策略拥有的活跃本地模拟账户，包括跨市场轮动账户和 `paper_0945` 热点双策略账户。账户下拉框只改变页面的查看范围，不修改 `settings.account_id`，也不会把热点账户切换成自动交易执行账户。每个账户独立展示权益、现金、持仓、活动进度和账户自身的运行因子。
+
+- `GET /api/v1/vnpy-paper/strategy-dashboard/accounts`：列出可选策略账户，并单独标记当前执行账户。
+- `GET /api/v1/vnpy-paper/strategy-dashboard/accounts/{account_id}`：读取该账户的快照、进度和完整可配置因子目录。
+- `PUT /api/v1/vnpy-paper/strategy-dashboard/accounts/{account_id}/factors`：校验并保存人工覆盖值；归档账户只读。
+- 跨市场 V1.4 会列出 `StrategyConfig` 中除策略 ID 外的全部数值运行参数，覆盖值写入既有 `data/vnpy_paper_trading.json` 的 `strategy_factor_overrides`，保存后立即更新当前服务实例，并供后续新实例读取。
+- 09:45 热点账户会列出账户级仓位、入场门槛、最终综合评分权重、候选/排名和退出阈值；覆盖值按策略写入 `data/hotspot_0945_paper/factor_overrides.json`，每次策略阶段运行前重新读取。`AlphaSift 上游分权重` 控制上游候选分在最终评分中的影响，候选池来源策略仍在页面账户标识和策略文档中披露。
+- 数值类型、允许范围、整数要求和关联顺序由后端统一验证，例如跨市场 A/B/尾档入场分必须保持降序，热点综合评分权重总和必须大于零，允许下单排名不得超过候选池数量。无效更新返回 400，原配置不变。
+- 页面“恢复默认”会清空该账户的人工覆盖；普通保存只持久化与默认值不同的项目。新配置从下一次策略判断开始生效，不追溯改写已有成交或历史审计。
+
 ## 能力边界
 
 - 模拟账户使用现有 Portfolio 账本，默认券商标识为 `vnpy_paper`，账户名为 `vn.py 模拟交易`。
@@ -9,10 +21,10 @@
 - 后端新增可选 vn.py adapter 诊断：`diagnostics.vnpy_adapter` 会说明是否能导入 `vnpy.trader.object.OrderRequest` / `CancelRequest` 与常量枚举，并保留 DSA 委托到 vn.py `OrderRequest` / `CancelRequest` 字段的基础映射。`diagnostics.vnpy_bridge` 会说明当前进程是否已注入 `MainEngine`、是否配置 `vnpy_gateway_name`，以及是否可通过 `MainEngine.send_order` 提交委托、通过 `MainEngine.cancel_order` 发起撤单、通过 `MainEngine.get_order` / `get_all_trades` 执行超时订单对账。
 - 手动模拟委托支持买入和卖出；A 股买入会按 100 股一手向下取整，按金额下单不足一手时返回 `cash_below_min_lot`，不会写入成交。
 - 未传成交价时，后端会尝试读取 DSA 实时行情；价格不可用、金额不足、数量取整后为 0、重复自动单或超卖时不会写入成交。
-- 自动模拟交易默认关闭。开启后，runtime scheduler 会按页面设置的间隔调用 AlphaSift 选股，并对候选票提交本地模拟买入；模拟交易总开关开启时始终注册 `vnpy_paper_auto_retry`，首次注册立即扫描一次并按 1 到 5 分钟间隔恢复已有订单，同时检查最近校准状态告警是否需要有限重试；自动买入开启时再注册 `vnpy_paper_auto_trade`。API 启动期创建或注入的 MainEngine/EventEngine 会传给这些后台任务使用，不再只对 Web 请求可见。若当前执行模式强制交易时段限制且服务启动时不在交易窗口内，首次自动买入会延迟到下一开盘窗口触发，避免按固定间隔从盘后启动后每天都在盘后跳过。
-- 跨市场三十日活动启用自动交易或零委托观察时，scheduler 同时注册 `cross_market_campaign_closing_snapshot`；启用 V1.3 自动交易时还注册每 5 分钟运行的 `cross_market_formal_recovery`。前者仅在当天由交易所日历确认是 A 股交易日且上海时间达到 14:55 后，为活动绑定账户持久化一次 `fifo` 收盘净值快照；后者只在正式轮次零计划零提交且阻断原因可恢复时重新复核，包括 09:35 首轮早于沪深 300 开盘快照落库的短暂竞态。任一计划/提交后停止，普通重复正式运行和硬门槛不得绕过防重。两个任务都不依赖页面访问，也不补写历史日期。
-- V1.3 自动轮次在候选筛选前审计全局 A 股开盘门槛。沪深 300 高开或极端低开时仍先执行持仓卖出检查，随后以 `completed`、零候选结束并记录 `cross_market_global_entry_gate`，不再调用 AlphaSift 或逐票行情/技术位接口；完整正式证据仍可按原合同推进当天计数，CPO 不享受豁免。
-- 当前 V1.3 账户的新买入权限限定为沪深主板代码前缀 `000/001/002/003/600/601/603/605`。创业板、科创板和北交所候选在主题预筛及最终逐票决策两层失败关闭，审计使用 `trading_permission_main_board_only`；已有非主板策略仓位的卖出、撤单和风险退出不受影响。
+- 自动模拟交易默认关闭。开启后，runtime scheduler 会按页面设置的间隔调用 AlphaSift 选股，并对候选票提交本地模拟买入；模拟交易总开关开启时始终注册 `vnpy_paper_auto_retry`，首次注册立即扫描一次并按 1 到 5 分钟间隔恢复已有订单，同时检查最近校准状态告警是否需要有限重试。普通策略在自动买入开启时注册 `vnpy_paper_auto_trade`；跨市场策略的 `vnpy_paper` 模式改由 `cross_market_intraday_entry_scan` 独占正式执行，不重复注册通用自动买入任务。API 启动期创建或注入的 MainEngine/EventEngine 会传给这些后台任务使用，不再只对 Web 请求可见。若普通策略的执行模式强制交易时段限制且服务启动时不在交易窗口内，首次自动买入会延迟到下一开盘窗口触发，避免按固定间隔从盘后启动后每天都在盘后跳过。
+- 跨市场三十日活动启用自动交易时，scheduler 注册每 15 秒运行的 `cross_market_intraday_entry_scan`，在 `[09:30,09:35)` 建立正式基线或按候选重试可恢复阻断，并在 `[10:40,10:42)` 最多执行一次仅限早盘可恢复候选的复核；其他时段新买入及自动买单重试失败关闭。`cross_market_campaign_closing_snapshot` 仍在真实 A 股交易日 14:55 后持久化严格收盘净值。
+- V1.4 自动轮次在候选筛选前审计全局 A 股开盘门槛。沪深 300 高开或极端低开时，整个 `09:30-09:35` 窗口先执行持仓卖出检查，再以零买入候选结束并记录 `cross_market_global_entry_gate`；10:40 只允许带标的身份的可恢复候选完成回撤承接复核，`13:30`、`14:30` 不再新开仓。
+- 当前 V1.4 账户的新买入权限限定为沪深主板代码前缀 `000/001/002/003/600/601/603/605`。创业板、科创板和北交所候选在主题预筛及最终逐票决策两层失败关闭，审计使用 `trading_permission_main_board_only`；已有非主板策略仓位的卖出、撤单和风险退出不受影响。
 - A 股开盘快照冻结原始开盘价、昨收和涨幅，不冻结策略分类。`cn_open` 状态每次按当前配置重算并返回 `session_date`、`classification_thresholds`、`recorded_classification` 与 `classification_changed`，所以盘中修改高开门槛会作用于当天已采集证据，同时保留证据所属交易日和旧分类供审计。
 - 跨市场黄金后台轮询会直接读取美联储货币政策、讲话与证词官方 RSS，并以金十和华尔街见闻快讯作补充；不要求先在资讯中心创建来源，也不把这些实时读取写入资讯表。正式黄金证据要求两条官方源均非空且覆盖新闻窗口起点，同时至少一条补充源含有窗口内、带有效发布时间的新闻；条件不足时本轮采集失败关闭。快讯固定长度列表不声明读取完毕，同一交易日前向窗口内早先轮询已匹配的利率新闻由黄金快照保留到最终评分，不跨日、不回放、不事后补证；逐来源及保留数量保存在 `news.collection`。
 - 活动收盘快照只有在持仓价格全部来自严格行情路由、provider timestamp 相对写入时刻不超过 120 秒、汇率不陈旧且不存在估值限制时才通过持久化验证。严格价格和时间戳通过可选 override 一同写入 Portfolio 快照，普通 Portfolio API 行为不变。历史收盘价或缺失价格形成的降级快照不会被幂等门禁接受，任务会在后续 5 分钟轮次重试；报告将日期列入 `invalid_valuation_dates`，并保持非最终状态。
@@ -58,7 +70,7 @@
 - 自动模拟交易支持股票黑名单风控；页面可填写逗号分隔代码，命中的候选会以 `symbol_blacklisted` 写入候选决策和交易计划，不会提交模拟成交。
 - 自动模拟交易支持候选级基础风控；可过滤 ST/退市风险、停牌、涨跌停和成交额过低的候选，分别以 `st_or_delisting_risk`、`suspended_stock`、`price_limit_reached`、`liquidity_below_threshold` 写入跳过审计。启用 ST/停牌/涨跌停过滤但候选明确缺少交易状态时，以 `candidate_trading_status_unavailable` 保守跳过；配置最低成交额但成交额不可用时，以 `liquidity_data_unavailable` 跳过。AlphaSift/DSA 已补出的 `amount`、`turnover_amount`、`limit_status`、`is_suspended` 等字段会被用于判断。
 - 自动模拟交易支持账户级基础风控；可设置最低现金余额、最大回撤百分比和回撤恢复缓冲。最大回撤按账户 ID 持久化已观测权益峰值；触发后锁存自动买入，只有回撤降至“最大回撤 - 恢复缓冲”才解锁，并写入 `account_drawdown_recovered` / `resolved` 恢复事件。现金低水位和回撤锁存仅阻断新增买入，不阻断卖出。
-- 可选 `auto_consecutive_loss_limit` 使用本地 paper 成交流水按 FIFO 成本计算连续已平仓亏损笔数，与任务执行失败熔断分离。达到上限后以 `consecutive_loss_limit_reached` 暂停新增买入；一般策略在 `auto_consecutive_loss_cooldown_minutes` 到期后自动恢复，`cross_market_global_sector_rotation_v1.3_aggressive` 固定冷却后续 3 个完整 A 股交易日并在第 4 个交易日恢复，页面因此将该字段显示为只读交易日数。后续盈利或持平平仓会立即清零连续亏损。门禁开启和恢复分别写入 `triggered` / `resolved` 系统事件，卖出风险处置始终不受该门禁影响。
+- 可选 `auto_consecutive_loss_limit` 使用本地 paper 成交流水按 FIFO 成本计算连续已平仓亏损笔数，与任务执行失败熔断分离。达到上限后以 `consecutive_loss_limit_reached` 暂停新增买入；一般策略在 `auto_consecutive_loss_cooldown_minutes` 到期后自动恢复，`cross_market_global_sector_rotation_v1.4_staged` 固定冷却后续 3 个完整 A 股交易日并在第 4 个交易日恢复，页面因此将该字段显示为只读交易日数。后续盈利或持平平仓会立即清零连续亏损。门禁开启和恢复分别写入 `triggered` / `resolved` 系统事件，卖出风险处置始终不受该门禁影响。
 - 自动模拟交易支持可选的大盘红绿灯风控；开启后读取最近一次大盘复盘持久化的 `MarketLightSnapshot`，默认只在红灯时以 `market_light_red` 跳过买入，也可配置红灯和黄灯都跳过（`market_light_yellow`）。任一市场上下文门禁启用后，最近快照缺失或读取失败会以 `market_context_unavailable`（或单一宽度/退潮门禁对应的 unavailable reason）拒绝新增买入。
 - 自动模拟交易还支持默认关闭的“市场宽度风控”和“热点退潮风控”。市场宽度使用最近快照的 `dimensions.breadth.score`，低于配置值时以 `market_breadth_below_threshold` 跳过新增买入；热点退潮比较最近两次快照的 `dimensions.limit.score`，回落达到配置值时以 `hotspot_retreat_detected` 跳过新增买入。启用对应规则后，所需维度或前序快照缺失会分别以 `market_breadth_unavailable` / `hotspot_retreat_unavailable` fail-closed。页面可设置最近快照最长年龄，默认 7 个自然日、范围 1 至 30 天；非法日期、未来日期或超期快照分别按不可用或 `market_context_stale` fail-closed。快照、当前/前值、阈值、年龄和代理口径会写入 `diagnostics.market_context_risk` 及 Agent 时间线；卖出风控先执行，不受这些买入门禁影响。该规则消费持久化盘后快照，不等同于盘中实时市场宽度。
 - 默认关闭的“盘中指数与实时宽度风控”直接复用 `DataFetcherManager.get_main_indices()`；A 股还调用 `get_market_stats()`，以 `上涨家数 / (上涨 + 下跌 + 平盘家数) * 100` 计算实时宽度。主指数等权平均涨跌幅或 A 股宽度低于页面阈值时，分别以 `intraday_market_index_below_threshold` / `intraday_market_breadth_below_threshold` 阻断新增买入；取数异常、空指数或无效涨跌家数分别 fail-closed 为对应 `*_unavailable`。其他市场当前只检查指数，不伪造宽度。启用该门禁后，“要求可验证行情时间”默认开启：指数和 A 股宽度必须有完整、合法且不超过 15 分钟的 provider 时间戳；关闭此项是显式降级，只接受 provider 标记为实时但无法验证 quote as-of 的结果，相关开关、覆盖率和拒绝原因仍写入 Agent 诊断。
@@ -100,8 +112,8 @@
 - scheduler reconcile 会复用按任务名保存的进程内互斥锁；若重载前一代的同名任务尚未结束，新一代不会并发执行，而是写入 `status=skipped`、`reason=task_already_running` 的持久化事件。状态中的任务级 `overlap_guarded` 表示该保护已启用，`previous_generation_running` 表示当前看到的是重载前任务仍在收尾；异常退出也会释放互斥锁，不影响下一轮调度。
 - 状态接口会返回 `scheduler` 状态，包含后台任务名、是否运行、任务级 `next_run_at`、最近错误、最近跳过原因和最近 `task_events`；Web 页面用这些字段展示自动交易后台任务是否已注册、下次触发时间以及“后台任务日志”。
 - Web 模拟交易页新增“任务健康检查”，基于 `GET /api/v1/vnpy-paper/task-health` 汇总自动交易、恢复扫描与跨市场采集任务是否注册、是否运行、是否被配置停用、最近事件是否失败/跳过以及下次运行时间；任务健康摘要会优先使用持久化最近事件，便于 API 进程重启后继续判断任务为什么未执行。持续轮询型跨市场任务在非采集窗口、正常节流、收盘已采集、非 A 股交易日或无策略仓位时的预期跳过保持健康状态，日历不可用、行情错误和其他非白名单跳过仍显示需关注。韩国、日本与亚洲供应链的组合轮询即使整体事件完成，只要 `component_status=degraded`，也会以 `component_degraded` warning 披露具体 `degraded_components`。
-- Web 模拟交易页的“后台任务日志”会读取 `GET /api/v1/vnpy-paper/task-events`，支持按任务名和 started/completed/skipped/failed 状态筛选数据库持久化的最近任务事件；API 进程重启后仍可用于定位自动买入、自动恢复扫描或事件监控到底在哪一步被跳过或失败。
-- Web 模拟交易页的“任务趋势”会读取 `GET /api/v1/vnpy-paper/task-event-summary`，基于最近持久化任务事件展示 completed/skipped/failed/started 分布、任务级失败率、平均耗时和最近失败/跳过时间，用于判断后台自动化是否持续健康。
+- Web 模拟交易页的“后台任务日志”会读取 `GET /api/v1/vnpy-paper/task-events`，数据库只持久化 completed/skipped/failed 终态；窗口外、截止前、非交易日和重复采集等预期空转不落任务事件，运行中状态直接读取 scheduler 内存状态，避免高频盯盘制造无效日志。
+- Web 模拟交易页的“任务趋势”会读取 `GET /api/v1/vnpy-paper/task-event-summary`，基于最近持久化终态展示 completed/skipped/failed 分布、任务级失败率、平均耗时和最近失败/跳过时间，用于判断后台自动化是否持续健康。
 - Web 模拟交易页的“长期稳定性”会读取 `GET /api/v1/vnpy-paper/task-metrics`，可切换 7/30/90 天窗口，展示终态运行数、成功/失败/跳过率、平均与 P95 耗时、当前连续失败、任务级明细和逐日趋势。成功率分母只包含 `completed`、`skipped`、`failed` 终态事件，`started` 仅单独计数，避免一次运行被重复计算。
 - Agent 控制台会读取 `GET /api/v1/vnpy-paper/agent-runs/data-quality-trends`，按 7/30/90 天窗口展示跨 run 的 `ok`、`partial`、`stale`、`unavailable`、`unknown` 分布、降级率、警告、source error、逐日趋势和 `snapshot/daily + source` 来源健康观测。来源级结果返回观测数、降级次数/比例、最新状态和最新/最大失败计数；旧 run 没有整体质量或来源快照时分别归入 `unknown` 或“无快照”，不会被误算成健康。
 - 模拟交易页的 Agent 记录区会读取 `GET /api/v1/vnpy-paper/agent-runs/return-risk-calibration-trends`，按 7/30/90 天及当前策略、市场、状态筛选持久化 `candidate-return-risk-v1` 快照，展示观测覆盖、目标状态、成熟样本、风险效用、应用率和市场/策略/版本分组。统计单位是每次 Agent run 保存的滚动快照；窗口会重叠，因此接口明确不声明独立样本数，旧 run 归入 `unknown`。
@@ -126,11 +138,11 @@
 所有接口前缀为 `/api/v1/vnpy-paper`：
 
 - `GET /status`：读取模拟交易状态、设置、账户快照、近期成交和最近一次自动运行摘要。
-- `GET /status` 响应包含 `scheduler`、`diagnostics.system_health`、`diagnostics.auto_trade_readiness`、`diagnostics.vnpy_adapter`、`diagnostics.vnpy_bridge`、`diagnostics.vnpy_event_bridge`、`diagnostics.vnpy_runtime`、`diagnostics.trading_window`、`diagnostics.snapshot_cache_hit` 和 `diagnostics.failure_fuse`，用于展示 runtime scheduler 是否启动、`vnpy_paper_auto_trade` / `vnpy_paper_auto_retry` 是否注册、顶层/任务级 `next_run_at`、任务级 `initial_delay_seconds`、动态重排标记 `dynamic_reschedule`、`last_error`、`last_skip_reason`、最近 `scheduler.task_events`、跨模块健康视图、自动交易 readiness、持仓快照是否命中短缓存、连续失败熔断状态，以及 vn.py `OrderRequest` adapter、`MainEngine` 桥接、EventEngine 回调、可选 runtime bootstrap 和自动交易可交易窗口是否可用。顶层 `last_auto_run` 保留最近任意自动/观察/独立日内轮次，`last_formal_auto_run` 单独保留最近正式 `vnpy_paper_auto` 轮次并保存账户号；V1.3 readiness 与系统健康始终采用后者，并在正式轮次证据不完整时显示具体缺失项，避免后续非正式运行把正式降级结果遮住。重启调度只接受同策略、同市场、同账户的 order-capable 正式记录，旧记录按运行 UID 回查账户，其他账户和 `dry_run` 不能跳过 09:35。跨市场日级任务每轮结束后按交易所日历重新投影下一次 09:35，避免休眠唤醒后的迟到执行把固定 24 小时间隔永久带到后续交易日。`scheduler.loop_running` 表示调度循环是否存活，`scheduler.running` 仍表示当前是否正在执行分析任务；readiness 使用 `loop_running` 判断自动交易定时任务是否可继续调度，并用 `timing_alignment` 判断下一次自动买入是否落在交易窗口内。
+- `GET /status` 响应包含 `scheduler`、`diagnostics.system_health`、`diagnostics.auto_trade_readiness`、`diagnostics.vnpy_adapter`、`diagnostics.vnpy_bridge`、`diagnostics.vnpy_event_bridge`、`diagnostics.vnpy_runtime`、`diagnostics.trading_window`、`diagnostics.snapshot_cache_hit` 和 `diagnostics.failure_fuse`。顶层 `last_auto_run` 保留最近任意自动/观察/独立日内轮次，`last_formal_auto_run` 单独保留最近正式 `vnpy_paper_auto` 轮次并保存账户号；V1.4 readiness 与系统健康始终采用后者，其他账户、`dry_run` 和独立日内轮次不能占用 09:30。`scheduler.loop_running` 表示调度循环是否存活，`scheduler.running` 表示当前是否正在执行分析任务。
 - `GET /task-health`：读取后台任务健康摘要，返回整体健康状态、调度器启用/运行状态、自动交易开关、健康/关注/异常/停用计数，以及每个后台任务的注册状态、运行状态、间隔、下次运行时间、持久化最近事件和 reason code。
-- `/task-health` 会按当前保存的运行合同标记必需任务：跨市场策略启用后，待成交复核、盘中卖出、正式恢复及其信号采集任务不再只是可选展示；零委托观察单独启用时，观察任务、五类信号采集和活动收盘快照同样必须注册。任一必需任务缺失均返回 `task_not_registered` 并使整体健康进入 `error`。盘前或收盘全主题池尚无主题达到最低覆盖时，分别返回可重试的 `us_premarket_evidence_unavailable` / `us_close_theme_evidence_unavailable` 跳过并显示证据警告，不再误报为任务执行异常；本轮部分成分只保存到独立采集尝试中供 120 秒内的下一轮补齐，不会进入合格主题快照或满足交易门槛。schema 6 仅在请求范围、映射主题、正数有效成分和同会话收盘配对均可证明时把该记录视为全池采集已执行，未覆盖主题仍逐项禁止交易。
-- `cross_market_intraday_entry_scan` 每分钟检查 `10:40`、`13:30`、`14:30` 三个两分钟执行窗，并在持久化 Agent run 中按日期和时点防重。当天 `09:35` 正式轮次只使用刚完成的美股收盘主题；后三个日内窗口使用上一美股盘前与同会话收盘配对证据，并要求 A 股对应板块回撤后承接。只有当天已存在合法 `09:35` 开盘基线、正式轮次缺证据且零计划零提交时才可恢复正式来源；开盘基线完全缺失时直接使用独立日内来源重新映射全量相关子板块及股票，不补建正式轮次。日内扫描可寻找第二只股票，但不计为新的 30 日合格日，并继续受两只持仓、四笔日买单、资金和活动委托上限约束。跨市场 Agent run 详情同时展示主板块的 5/10/20/30/60 日均线、区间支撑、压力位、支撑共振和白酒/银行轮动参照。
-- `GET /task-events?limit=50&name=vnpy_paper_auto_retry&status=failed`：读取数据库持久化的最近后台任务事件，`limit` 范围 1~5000，可选 `name`、`status` 和服务器本地时间 `started_at` 下界过滤，用于 Web “后台任务日志”筛选、跨进程重启排障及整日四时点审计。盘中入场事件保留 `analysis_slot`、`formal_recovery`、`trigger_source` 和 `execution_mode`，因此即使晚间检查也能区分每个时点采用的正式恢复或独立扫描路径。
+- `/task-health` 会按当前保存的运行合同标记必需任务：跨市场策略启用后，待成交复核、盘中卖出、09:30-09:35 买入盯盘及 10:40 受限恢复、信号采集任务必须注册。买入盯盘是该模式唯一的正式执行入口；旧恢复别名和通用 `vnpy_paper_auto_trade` 均不注册。
+- `cross_market_intraday_entry_scan` 每 15 秒检查 `[09:30,09:35)`，并在 `[10:40,10:42)` 最多执行一次受限恢复。基线缺失时只能在正式窗口建立轮次；10:40 必须关联早盘基线并只恢复带标的身份的可恢复候选。同标的活动委托、持仓、现金、资金上限和账户风控继续防重，其他窗口不提交或重试买单。
+- `GET /task-events?limit=50&name=vnpy_paper_auto_retry&status=failed`：读取数据库持久化的最近后台任务终态。实际进入买入窗口的盯盘终态保留 `analysis_slot=09:30`、`formal_recovery`、`trigger_source`、`execution_mode` 和窗口起止；窗口外空转不持久化。
 - `GET /task-event-summary?limit=100`：聚合最近后台任务事件，返回全局状态计数和每个任务的总数、失败率、平均耗时、最近事件、最近失败和最近跳过时间。
 - `GET /task-metrics?days=30`：按 1 至 90 天窗口读取最多 5000 条持久化任务事件，返回终态运行成功/失败/跳过率、平均与 P95 耗时、当前连续失败、任务级指标和逐日趋势；响应中的 `truncated=true` 表示当前窗口超过读取上限，页面会提示统计结果已截断。
 - `GET /status?include_snapshot=false&include_recent_trades=false`：读取轻量状态，只返回设置、账户、可用性和诊断信息，不拉取持仓估值或近期成交；Web 页面首屏使用该路径避免被行情估值拖慢。
@@ -138,7 +150,7 @@
 - `POST /account/reset`：归档当前 `vnpy_paper` 模拟账户，创建新的干净模拟账户并返回最新状态；响应 `diagnostics.account_reset` 包含旧账户和新账户 ID。
 - `GET /accounts?include_inactive=true`：读取本地 `vnpy_paper` 模拟账户历史，返回当前账户、已归档账户、`is_current`、`archived`、`cleanup_hidden` 和基础账本元数据；默认不返回已清理隐藏的归档账户，传 `include_hidden=true` 可用于审计查看。
 - `POST /accounts/{account_id}/restore`：将指定本地 `vnpy_paper` 账户恢复/切换为当前模拟交易账户，并归档其他活跃 `vnpy_paper` 账户；响应 `diagnostics.account_restore` 包含恢复账户、原当前账户和被归档账户 ID。该接口拒绝非 `vnpy_paper` 账户，且不会新增现金流水或删除历史成交。
-- `POST /cross-market-strategy/migrate`：把 V1.1/V1.2 活动显式切换到干净的 V1.3 模拟账户，并将纯前向活动重置为 `0/30`；可选传入 `target_account_id`。源账户仍有活动计划/策略仓位或目标账户已有成交时失败关闭，不修改旧账本。
+- `POST /cross-market-strategy/migrate`：把 V1.1/V1.2/V1.3 活动显式切换到 V1.4，并将纯前向活动重置为 `0/30`；可选传入 `target_account_id`。无活动委托且当前持仓全部可由跨市场策略流水证明归属时允许同账户接管；否则要求干净目标账户或失败关闭，不修改旧账本。
 - `POST /accounts/archived/cleanup`：批量清理已归档 `vnpy_paper` 账户；该接口只把符合条件的非当前、非活跃归档账户 ID 写入 `hidden_archived_account_ids`，让默认账户历史不再显示它们，不会删除 Portfolio 账本。恢复某个隐藏账户时会自动取消该账户的隐藏标记。
 - `PUT /settings`：保存页面设置，并触发 runtime scheduler 重新 reconcile 后台任务。可设置 `auto_execution_mode="vnpy_paper"` 和 `vnpy_gateway_name`，用于让自动买入委托走 vn.py `MainEngine` 桥接；可用 `auto_failure_fuse_auto_recovery_enabled` 和 `auto_failure_fuse_cooldown_minutes` 开启熔断冷却后的单轮恢复探测；也可设置默认关闭的 `auto_llm_plan_enabled` 和 `auto_llm_review_enabled`，分别让自动买入在选股前追加 LLM 动态计划、在规则风控通过后追加 LLM 买入复核。
 - `POST /failure-fuse/reset`：重置连续失败熔断统计基线，返回轻量状态并更新 `diagnostics.failure_fuse.reset_at`；历史 Agent run、候选决策和交易计划仍保留。
@@ -192,7 +204,7 @@
 
 2026-07-23 的 run `30001136306` 已完成首轮真实账号零下单验收：严格预检通过，正式窗口 900 秒，180/180 个样本 connected，最终状态 connected，账户/持仓事件为 240/4320，订单/成交事件为 0。脱敏 artifact 保留 14 天，不含账号、连接值或路径。
 
-同日部署态 Windows/Python 3.13 服务完成 300 秒 XTP 长跑，60/60 次 API、runtime、双通道连接和 EventEngine bridge 采样均通过，新增 74 个账户与 1350 个持仓事件，订单/成交事件为 0。随后在隔离本地账户 `#8` 提交唯一一笔 100 股、470 元的受控 XTP 测试委托；柜台返回 `nottraded`，独立会话撤单后主服务收到 `cancelled`，成交量保持 0，本地现金 100000 元、零持仓和零成交均未变化。一次 `dual_low` dry-run 另生成 1 候选、1 计划、0 提交，证明选股链路不会在演练模式触发 XTP。正式自动执行已切换为 `vnpy_paper`，每次最多 1 只、每单/每日预算 1000 元，并按交易时段门禁对齐到下一交易日 09:35；真实成交回报仍需在开市窗口完成最终验收。
+同日部署态 Windows/Python 3.13 服务完成 300 秒 XTP 长跑，60/60 次 API、runtime、双通道连接和 EventEngine bridge 采样均通过，新增 74 个账户与 1350 个持仓事件，订单/成交事件为 0。随后在隔离本地账户 `#8` 提交唯一一笔 100 股、470 元的受控 XTP 测试委托；柜台返回 `nottraded`，独立会话撤单后主服务收到 `cancelled`，成交量保持 0，本地现金 100000 元、零持仓和零成交均未变化。一次 `dual_low` dry-run 另生成 1 候选、1 计划、0 提交，证明选股链路不会在演练模式触发 XTP。正式自动执行已切换为 `vnpy_paper`，每次最多 1 只、每单/每日预算 1000 元，并按交易时段门禁对齐到下一交易日 09:30；真实成交回报仍需在开市窗口完成最终验收。
 
 最终开市成交使用 `scripts/check_vnpy_scheduled_external_acceptance.py` 做只读观察。除关联新的 `vnpy_paper_auto` run、调度事件、外部 Gateway 终态成交和隔离账本现金/持仓变化外，观察器还要求观测前后配置一致且满足受限风险合同：每轮最多 1 只、每日最多 1 笔、每单和每日预算不超过 1000 元、最大持仓数不超过 3、单票/总仓位/权益占比分别不超过 1500 元/5000 元/5%、最低现金不少于 5000 元，并开启失败熔断、阈值不超过 2 且关闭自动恢复。配置即使全程未变化，只要比这些验收边界更宽，也会以 `paper_risk_limits_not_restricted` 失败。实际 run 的候选/决策/计划/提交/成交必须严格为 `1/1/1/1/1`、跳过数必须为 `0`；即使已有一笔成交，额外取消或跳过订单也会以 `scheduled_order_cardinality_not_exactly_one` 失败。脚本始终只发送 GET 请求，不会触发 run、修改设置、下单或撤单。
 
@@ -280,6 +292,8 @@ python scripts\check_vnpy_scheduler_soak.py `
 
 脚本只调用 `/status` 和 `/task-events` 两个 GET 接口。首次成功读取的事件列表仅作为历史基线，终态、失败和重叠跳过只统计随后新增事件；`--require-task` 同时要求任务在配置比例的成功样本中持续注册，并在本次窗口至少产生一个 `completed`、`skipped` 或 `failed` 终态。验收时长应覆盖自动买入和恢复任务各自至少一个执行周期；若自动买入被关闭，只要求 `vnpy_paper_auto_retry`。指定 `--output-json` 时同样默认每 60 秒原子保存 `running` 检查点，并在结束或中断时写入最终生命周期状态。连接失败、接口错误、循环退出、任务消失、缺少终态、失败或重叠跳过超过上限均返回非零退出码。该脚本不调用写接口，也不触发选股、计划或订单。
 
+上例适用于注册通用 `vnpy_paper_auto_trade` 的普通策略。跨市场 `vnpy_paper` 模式应把该项替换为 `--require-task cross_market_intraday_entry_scan`；统一生产验收脚本会从只读 `/status` 自动选择当前合同对应的任务名。
+
 外部 gateway 已在 Web/API 进程中连接后，可用统一入口一次收集生产总证据：
 
 ```powershell
@@ -359,9 +373,9 @@ VNPY_AUTO_RECONNECT_CONFIRMATION_GRACE_SECONDS=30
 VNPY_AUTO_ATTACH_EVENTS=true
 ```
 
-内置网关无需 `VNPY_CONNECT_SETTINGS_PATH`，并且必须保持 `VNPY_PRODUCTION_PREFLIGHT_ENABLED=false`。启动和重连时，`DSA_SIM` 的初始余额强制取当前 paper 设置的 `initial_cash`，并只接受内置网关声明的模拟参数；即使误配了外部券商连接 JSON，其中的账号、密码等无关字段也不会传入模拟网关。API 重启后，模拟交易设置会在未保存 gateway 名称时继承 `VNPY_GATEWAY_NAME`；把执行模式设为 `vnpy_paper` 后即可开启定时自动买入或执行手动委托。通用模拟默认使用 `DSA_SIM_MATCHING_MODE=fixed_delay_limit`，合法限价单延迟 500 毫秒全量成交；订单、成交、账户和持仓均通过真实 vn.py EventEngine 回到 DSA，DSA Portfolio 仍是跨进程持久化账本。
+内置网关无需 `VNPY_CONNECT_SETTINGS_PATH`，并且必须保持 `VNPY_PRODUCTION_PREFLIGHT_ENABLED=false`。未绑定本地账户时，`DSA_SIM` 的启动余额取 paper 设置的 `initial_cash`；已绑定账户时，进程启动改为从 DSA Portfolio 恢复该账户的实际现金、持仓数量和平均成本。事件桥接后会清空旧持仓诊断并重新查询完整账户与持仓，单条持仓事件按股票和方向合并，零数量事件删除旧项；同一进程内的重连继续保留网关内存状态。连接设置只接受内置网关声明的模拟参数，即使误配外部券商 JSON，其中的账号、密码等无关字段也不会传入模拟网关。API 重启后，模拟交易设置会在未保存 gateway 名称时继承 `VNPY_GATEWAY_NAME`；把执行模式设为 `vnpy_paper` 后即可开启定时自动买入或执行手动委托。通用模拟默认使用 `DSA_SIM_MATCHING_MODE=fixed_delay_limit`，合法限价单延迟 500 毫秒全量成交；订单、成交、账户和持仓均通过真实 vn.py EventEngine 回到 DSA，DSA Portfolio 仍是跨进程持久化账本。
 
-跨市场 30 交易日前向模拟必须改为 `DSA_SIM_MATCHING_MODE=next_minute_vwap`；未设置 `DSA_SIM_NEXT_MINUTE_DELAY_MS` 时默认在 65 秒后读取第二个严格实时快照。该模式以两次行情的供应商时间戳、累计成交量和累计成交额差值构造下一分钟 VWAP，复用动态 `2-50bp` 滑点、限价、涨跌停和 5% 分钟参与率，支持部分成交与继续等待。腾讯供应商给出的当日涨跌停价直接进入撮合；A 股若同时缺少供应商限价和昨收价则失败关闭。行情超过 120 秒、时间戳未推进、数据源切换、累计值回退或量额增量不一致时直接撤销，跨市场服务也会拒绝任何未处于该模式的 `DSA_SIM`。手续费和税费仍由 DSA Portfolio 在成交回写时按策略费用表记账。30 日验收接口会把证据完整日与正式 `vnpy_paper` 执行覆盖分开统计，并保留同日正式运行当时的证据状态；后续零委托观察可以补齐当日证据，但不会被展示成正式模拟运行。`GET /api/v1/vnpy-paper/status` 的 `diagnostics.vnpy_bridge.matching` 只读返回撮合模式、等待秒数和待撮合基线数，不暴露委托或行情内容。进程重启会重置网关内存账户，但不会删除 DSA Portfolio 流水。接真实通道时仍需安装具体 gateway 插件，把敏感连接参数放入外部 JSON，并显式配置 `VNPY_CONNECT_SETTINGS_PATH`。未配置 gateway 时，runtime 和事件引擎可以为可用状态，但 `diagnostics.vnpy_bridge.available=false` 且 reason 为 `gateway_name_not_configured`，这是预期的安全状态。
+跨市场 30 交易日前向模拟必须改为 `DSA_SIM_MATCHING_MODE=next_minute_vwap`；未设置 `DSA_SIM_NEXT_MINUTE_DELAY_MS` 时默认在 65 秒后读取第二个严格实时快照。该模式以两次行情的供应商时间戳、累计成交量和累计成交额差值构造下一分钟 VWAP，复用动态 `2-50bp` 滑点、限价、涨跌停和 5% 分钟参与率，支持部分成交与继续等待。腾讯供应商给出的当日涨跌停价直接进入撮合；A 股若同时缺少供应商限价和昨收价则失败关闭。行情超过 120 秒、时间戳未推进、数据源切换、累计值回退或量额增量不一致时直接撤销，跨市场服务也会拒绝任何未处于该模式的 `DSA_SIM`。手续费和税费仍由 DSA Portfolio 在成交回写时按策略费用表记账。30 日验收接口会把证据完整日与正式 `vnpy_paper` 执行覆盖分开统计，并保留同日正式运行当时的证据状态；后续零委托观察可以补齐当日证据，但不会被展示成正式模拟运行。`GET /api/v1/vnpy-paper/status` 的 `diagnostics.vnpy_bridge.matching` 只读返回撮合模式、等待秒数和待撮合基线数，不暴露委托或行情内容。进程重启会重建网关内存状态，但绑定账户的持久化现金和持仓会从 DSA Portfolio 恢复；未完成的网关内存委托仍不能跨进程恢复，因此有活动委托时不应滚动重启。接真实通道时仍需安装具体 gateway 插件，把敏感连接参数放入外部 JSON，并显式配置 `VNPY_CONNECT_SETTINGS_PATH`。未配置 gateway 时，runtime 和事件引擎可以为可用状态，但 `diagnostics.vnpy_bridge.available=false` 且 reason 为 `gateway_name_not_configured`，这是预期的安全状态。
 
 ### 连接前 gateway 预检
 
