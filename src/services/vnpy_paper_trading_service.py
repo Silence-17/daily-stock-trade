@@ -62,6 +62,7 @@ from src.services.cross_market_paper_strategy import (
     TECHNOLOGY_WEIGHTED_THEMES,
     TRADEABLE_THEMES,
     TradeFeeSchedule,
+    evaluate_late_market_breadth,
     is_cn_main_board_symbol,
     strategy_config_from_overrides,
     strategy_factor_catalog,
@@ -165,7 +166,11 @@ CROSS_MARKET_OBSERVATION_TRIGGER_SOURCE = "cross_market_paper_observation"
 CROSS_MARKET_INTRADAY_SELL_TRIGGER_SOURCE = "cross_market_intraday_sell_monitor"
 CROSS_MARKET_INTRADAY_ENTRY_TRIGGER_SOURCE = "cross_market_intraday_entry_scan"
 CROSS_MARKET_ENTRY_WATCH_INTERVAL_SECONDS = 15
-CROSS_MARKET_INTRADAY_ENTRY_TIMES = (datetime_time(10, 40),)
+CROSS_MARKET_INTRADAY_ENTRY_TIMES = (
+    datetime_time(10, 40),
+    datetime_time(13, 30),
+    datetime_time(14, 30),
+)
 CROSS_MARKET_INTRADAY_ENTRY_WINDOW_SECONDS = 2 * 60
 CROSS_MARKET_INTRADAY_ENTRY_RECHECK_REASONS = {
     "asia_market_evidence_unavailable",
@@ -233,6 +238,7 @@ AUTO_CROSS_MARKET_LINKS = {
 }
 NON_DIRECTIONAL_MARKET_INDEX_CODES = {"VIX"}
 AUTO_MARKET_EVIDENCE_TIMEOUT_SECONDS = 15.0
+AUTO_MARKET_BREADTH_EVIDENCE_TIMEOUT_SECONDS = 35.0
 AUTO_MARKET_EVIDENCE_MAX_WORKERS = 4
 AUTO_MARKET_PROVIDER_TIMESTAMP_MAX_AGE_SECONDS = 15 * 60
 AUTO_CROSS_MARKET_REALTIME_MAX_SKEW_SECONDS = 120
@@ -6334,6 +6340,7 @@ class VnpyPaperTradingService:
         run_diagnostics["same_run_exit_symbols"] = sorted(same_run_exit_orders)
 
         cross_market_global_entry_gate: Dict[str, Any] = {}
+        cross_market_market_breadth: Dict[str, Any] = {}
         cross_market_entry_phase = ""
         if settings.auto_strategy == CROSS_MARKET_STRATEGY_ID:
             cross_market_entry_phase = (
@@ -6345,10 +6352,46 @@ class VnpyPaperTradingService:
                 )
                 else "opening"
             )
+            if run_analysis_slot in {
+                FORMAL_ENTRY_TIME.strftime("%H:%M"),
+                *[value.strftime("%H:%M") for value in CROSS_MARKET_INTRADAY_ENTRY_TIMES],
+            }:
+                cross_market_market_breadth = (
+                    self._cross_market_market_breadth_signal(
+                        settings,
+                        analysis_slot=run_analysis_slot,
+                    )
+                )
+                run_diagnostics["cross_market_market_breadth"] = (
+                    cross_market_market_breadth
+                )
             cross_market_global_entry_gate = self._cross_market_global_entry_gate(
                 cross_market_observation,
                 entry_phase=cross_market_entry_phase,
             )
+            linked_market_block_reason = (
+                str(cross_market_global_entry_gate.get("reason") or "").strip()
+                if cross_market_global_entry_gate.get("blocked") is True
+                else None
+            )
+            if (
+                run_analysis_slot in {"13:30", "14:30"}
+                and cross_market_market_breadth.get("entry_allowed") is not True
+            ):
+                breadth_reason = str(
+                    cross_market_market_breadth.get("reason")
+                    or "late_entry_market_breadth_unavailable"
+                )
+                cross_market_global_entry_gate.update({
+                    "blocked": True,
+                    "reason": breadth_reason,
+                    "market_breadth_gate": cross_market_market_breadth,
+                    "blocking_reasons": [
+                        reason
+                        for reason in (breadth_reason, linked_market_block_reason)
+                        if reason
+                    ],
+                })
             cross_market_global_entry_gate.update({
                 "sell_checks_completed_before_gate": True,
                 "candidate_screen_skipped": bool(
@@ -6584,6 +6627,7 @@ class VnpyPaperTradingService:
                     **candidate,
                     "_cross_market_entry_phase": entry_phase,
                     "_cross_market_analysis_slot": run_analysis_slot or None,
+                    "_cross_market_market_breadth": cross_market_market_breadth,
                 }
                 if isinstance(candidate, dict)
                 else candidate
@@ -7490,7 +7534,8 @@ class VnpyPaperTradingService:
                     reason="cross_market_entry_watch_window_closed",
                     message=(
                         "Cross-market buys are allowed only from 09:30 to 09:35 "
-                        "or for the bounded 10:40 recovery scan in Asia/Shanghai."
+                        "or in the configured 10:40, 13:30 and 14:30 analysis "
+                        "windows in Asia/Shanghai."
                     ),
                     raw={
                         **candidate,
@@ -9431,8 +9476,21 @@ class VnpyPaperTradingService:
                     evidence,
                 )
             exposure_state = self._position_exposure_state(settings)
+            revalidation_candidate = dict(raw)
+            analysis_slot = str(
+                revalidation_candidate.get("_cross_market_analysis_slot") or ""
+            ).strip()
+            if analysis_slot in {"13:30", "14:30"}:
+                market_breadth = self._cross_market_market_breadth_signal(
+                    settings,
+                    analysis_slot=analysis_slot,
+                )
+                revalidation_candidate["_cross_market_market_breadth"] = (
+                    market_breadth
+                )
+                evidence["market_breadth"] = market_breadth
             decision, current = self._cross_market_candidate_decision(
-                candidate=raw,
+                candidate=revalidation_candidate,
                 symbol=symbol,
                 settings=settings,
                 exposure_state=exposure_state,
@@ -15803,6 +15861,11 @@ class VnpyPaperTradingService:
             if entry_phase == "opening"
             else None
         )
+        market_breadth_signal = (
+            candidate.get("_cross_market_market_breadth")
+            if isinstance(candidate.get("_cross_market_market_breadth"), dict)
+            else {}
+        )
         failed_breakout_signal = self._cross_market_failed_breakout_signal(
             board_technical_signal=board_technical_signal,
             above_vwap=above_vwap,
@@ -15893,6 +15956,7 @@ class VnpyPaperTradingService:
             estimated_round_trip_cost_pct=0.0,
             entry_score=entry_score,
             analysis_slot=analysis_slot,
+            market_breadth_signal=market_breadth_signal,
             failed_breakout_signal=failed_breakout_signal,
             risk=risk,
         )
@@ -15961,6 +16025,7 @@ class VnpyPaperTradingService:
             "entry_score": entry_score,
             "entry_score_components": entry_score_components,
             "analysis_slot": analysis_slot,
+            "market_breadth": market_breadth_signal,
             "rotation": rotation_signal,
             "gold": gold_signal,
             "cpo": cpo_signal,
@@ -19349,7 +19414,16 @@ class VnpyPaperTradingService:
         callback: Callable[[], Any],
         *,
         label: str,
+        timeout_seconds: Optional[float] = None,
     ) -> Tuple[Optional[Any], Optional[str], int]:
+        wait_seconds = max(
+            0.0,
+            float(
+                AUTO_MARKET_EVIDENCE_TIMEOUT_SECONDS
+                if timeout_seconds is None
+                else timeout_seconds
+            ),
+        )
         started_at = time.monotonic()
         if not self._market_evidence_slots.acquire(blocking=False):
             return None, "worker_pool_exhausted", 0
@@ -19376,7 +19450,7 @@ class VnpyPaperTradingService:
             return None, "worker_start_failed", int(
                 (time.monotonic() - started_at) * 1000
             )
-        worker.join(timeout=AUTO_MARKET_EVIDENCE_TIMEOUT_SECONDS)
+        worker.join(timeout=wait_seconds)
         duration_ms = int((time.monotonic() - started_at) * 1000)
         if worker.is_alive():
             return None, "timeout", duration_ms
@@ -19523,18 +19597,20 @@ class VnpyPaperTradingService:
         *,
         require_provider_timestamp: bool = False,
     ) -> Dict[str, Any]:
+        timeout_seconds = AUTO_MARKET_BREADTH_EVIDENCE_TIMEOUT_SECONDS
         stats, error, duration_ms = self._run_market_evidence_call(
             lambda: self.data_fetcher_manager.get_market_stats(
                 purpose="vnpy_paper_intraday_risk"
             ),
             label="breadth-cn",
+            timeout_seconds=timeout_seconds,
         )
         if error:
             logger.warning("Failed to fetch live A-share breadth evidence: %s", error)
             return {
                 "available": False,
                 "duration_ms": duration_ms,
-                "timeout_seconds": AUTO_MARKET_EVIDENCE_TIMEOUT_SECONDS,
+                "timeout_seconds": timeout_seconds,
                 "error": error,
                 "evidence_reason": (
                     "breadth_fetch_timeout" if error == "timeout" else
@@ -19624,6 +19700,122 @@ class VnpyPaperTradingService:
             "provider_age_seconds": provider_age_seconds,
             "provider_timestamp_coverage_pct": provider_timestamp_coverage_pct,
             "require_provider_timestamp": require_provider_timestamp,
+        }
+
+    def _cross_market_market_breadth_signal(
+        self,
+        settings: VnpyPaperSettings,
+        *,
+        analysis_slot: Optional[str],
+    ) -> Dict[str, Any]:
+        """Collect current breadth and compare it with today's persisted samples."""
+
+        now = datetime.now(timezone.utc)
+        shanghai = ZoneInfo("Asia/Shanghai")
+        local_now = now.astimezone(shanghai)
+        session_start = datetime.combine(
+            local_now.date(),
+            datetime_time.min,
+            tzinfo=shanghai,
+        ).astimezone(timezone.utc)
+        current = {
+            **self._live_cn_breadth_evidence(require_provider_timestamp=True),
+            "observed_at": now.isoformat(),
+            "analysis_slot": str(analysis_slot or "").strip() or None,
+        }
+        previous_samples: List[Dict[str, Any]] = []
+        history_error: Optional[str] = None
+        try:
+            relevant_runs: List[Dict[str, Any]] = []
+            for trigger_source in (
+                "vnpy_paper_auto",
+                CROSS_MARKET_INTRADAY_ENTRY_TRIGGER_SOURCE,
+            ):
+                runs_payload = self.agent_repo.list_runs(
+                    limit=100,
+                    trigger_source=trigger_source,
+                    strategy=settings.auto_strategy,
+                    market=settings.auto_market,
+                    created_from=session_start,
+                    created_to=now,
+                )
+                relevant_runs.extend(
+                    run
+                    for run in list(runs_payload.get("items") or [])
+                    if isinstance(run, dict)
+                )
+            relevant_runs.sort(
+                key=lambda run: (
+                    self._parse_utc_datetime(run.get("created_at"))
+                    or datetime.min.replace(tzinfo=timezone.utc)
+                )
+            )
+            seen_samples: set[Tuple[Any, ...]] = set()
+            for run in relevant_runs:
+                diagnostics = (
+                    run.get("diagnostics")
+                    if isinstance(run, dict)
+                    and isinstance(run.get("diagnostics"), dict)
+                    else {}
+                )
+                signal = diagnostics.get("cross_market_market_breadth")
+                sample = (
+                    signal.get("current")
+                    if isinstance(signal, dict)
+                    and isinstance(signal.get("current"), dict)
+                    else None
+                )
+                if not isinstance(sample, dict) or sample.get("available") is not True:
+                    continue
+                observed_at = (
+                    sample.get("observed_at")
+                    or sample.get("provider_timestamp")
+                    or run.get("created_at")
+                )
+                if isinstance(observed_at, datetime):
+                    observed_at = observed_at.isoformat()
+                compact = {
+                    "available": True,
+                    "up_count": sample.get("up_count"),
+                    "down_count": sample.get("down_count"),
+                    "flat_count": sample.get("flat_count"),
+                    "participants": sample.get("participants"),
+                    "score": sample.get("score"),
+                    "observed_at": str(observed_at or "").strip() or None,
+                    "provider_timestamp": sample.get("provider_timestamp"),
+                    "analysis_slot": (
+                        sample.get("analysis_slot")
+                        or diagnostics.get("analysis_slot")
+                    ),
+                    "run_uid": run.get("run_uid"),
+                }
+                dedup_key = (
+                    compact["provider_timestamp"] or compact["observed_at"],
+                    compact["up_count"],
+                    compact["down_count"],
+                    compact["flat_count"],
+                )
+                if dedup_key in seen_samples:
+                    continue
+                seen_samples.add(dedup_key)
+                previous_samples.append(compact)
+        except Exception as exc:  # noqa: BLE001 - current extreme breadth remains usable.
+            history_error = f"{type(exc).__name__}:{str(exc)[:160]}"
+
+        signal = evaluate_late_market_breadth(
+            current,
+            previous_samples,
+            analysis_slot=analysis_slot,
+            extreme_decliners=(
+                self.cross_market_signal_engine.config.late_entry_extreme_decliners
+            ),
+        )
+        return {
+            **signal,
+            "schema_version": 1,
+            "session_date": local_now.date().isoformat(),
+            "history_available": history_error is None,
+            "history_error": history_error,
         }
 
     @staticmethod
@@ -22739,13 +22931,13 @@ def build_vnpy_paper_trading_background_tasks(
         return result
 
     def run_cross_market_intraday_entry_scan() -> Dict[str, Any]:
-        """Run the opening watch or the bounded 10:40 candidate recovery."""
+        """Run the opening watch, 10:40 recovery, or breadth-gated late scans."""
 
         formal_slot = _cross_market_formal_entry_slot()
-        recovery_slot = (
+        intraday_slot = (
             None if formal_slot is not None else _cross_market_intraday_entry_slot()
         )
-        slot = formal_slot or recovery_slot
+        slot = formal_slot or intraday_slot
         if slot is None:
             return {
                 "accepted": True,
@@ -22765,6 +22957,8 @@ def build_vnpy_paper_trading_background_tasks(
             }
         slot_name, slot_start, slot_end = slot
         is_formal_slot = formal_slot is not None
+        is_bounded_recovery = slot_name == "10:40"
+        is_late_breadth_slot = slot_name in {"13:30", "14:30"}
         if (
             not is_formal_slot
             and _cross_market_intraday_entry_slot_audited(
@@ -22819,7 +23013,14 @@ def build_vnpy_paper_trading_background_tasks(
                 window,
                 formal_only=True,
             )
-            if formal.get("reason") == "daily_evidence_lookup_unavailable":
+            if is_late_breadth_slot:
+                result = service.run_auto_trade_once(
+                    trigger_source_override=CROSS_MARKET_INTRADAY_ENTRY_TRIGGER_SOURCE,
+                    allow_cross_market_intraday_entry_recheck=False,
+                    analysis_slot_override=slot_name,
+                    max_results_override=2,
+                )
+            elif formal.get("reason") == "daily_evidence_lookup_unavailable":
                 result = {
                     "accepted": False,
                     "skipped": True,
@@ -22907,7 +23108,8 @@ def build_vnpy_paper_trading_background_tasks(
             "formal_evidence": formal,
             "entry_watch_started_at": slot_start.isoformat(),
             "entry_watch_ends_at": slot_end.isoformat(),
-            "bounded_recovery": not is_formal_slot,
+            "bounded_recovery": is_bounded_recovery,
+            "late_market_breadth_entry": is_late_breadth_slot,
         })
         logger.info(
             "Cross-market continuous entry watch finished: slot=%s submitted=%s reason=%s",

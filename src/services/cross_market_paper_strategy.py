@@ -170,6 +170,138 @@ def _normalized_change_score(change_pct: float, scale_pct: float) -> float:
     return max(-100.0, min(100.0, float(change_pct) / scale_pct * 100.0))
 
 
+def evaluate_late_market_breadth(
+    current: Mapping[str, object],
+    previous_samples: Sequence[Mapping[str, object]],
+    *,
+    analysis_slot: Optional[str],
+    extreme_decliners: int,
+) -> Dict[str, object]:
+    """Classify an auditable late-session divergence or repair entry setup."""
+
+    slot = str(analysis_slot or "").strip()
+    late_slot = slot in {"13:30", "14:30"}
+    current_sample = dict(current or {})
+    if current_sample.get("available") is not True:
+        return {
+            "available": False,
+            "analysis_slot": slot or None,
+            "late_entry_gate_applied": late_slot,
+            "entry_allowed": False if late_slot else None,
+            "reason": "late_entry_market_breadth_unavailable",
+            "current": current_sample,
+            "previous_samples": [],
+        }
+
+    def normalized_sample(value: Mapping[str, object]) -> Optional[Dict[str, object]]:
+        sample = dict(value or {})
+        try:
+            up_count = int(sample.get("up_count"))
+            down_count = int(sample.get("down_count"))
+            flat_count = int(sample.get("flat_count") or 0)
+        except (TypeError, ValueError):
+            return None
+        if min(up_count, down_count, flat_count) < 0 or up_count + down_count <= 0:
+            return None
+        return {
+            **sample,
+            "up_count": up_count,
+            "down_count": down_count,
+            "flat_count": flat_count,
+            "participants": up_count + down_count + flat_count,
+            "score": round(
+                up_count / max(1, up_count + down_count + flat_count) * 100,
+                6,
+            ),
+        }
+
+    normalized_current = normalized_sample(current_sample)
+    if normalized_current is None:
+        return {
+            "available": False,
+            "analysis_slot": slot or None,
+            "late_entry_gate_applied": late_slot,
+            "entry_allowed": False if late_slot else None,
+            "reason": "late_entry_market_breadth_counts_invalid",
+            "current": current_sample,
+            "previous_samples": [],
+        }
+    normalized_previous = [
+        sample
+        for value in previous_samples
+        if (sample := normalized_sample(value)) is not None
+    ]
+    current_up = int(normalized_current["up_count"])
+    current_down = int(normalized_current["down_count"])
+    broad_advance_reference = next(
+        (
+            sample
+            for sample in reversed(normalized_previous)
+            if int(sample["up_count"]) > int(sample["down_count"])
+        ),
+        None,
+    )
+    extreme_decline_reference = next(
+        (
+            sample
+            for sample in reversed(normalized_previous)
+            if int(sample["down_count"]) >= int(extreme_decliners)
+        ),
+        None,
+    )
+    divergence_confirmed = bool(
+        broad_advance_reference is not None
+        and current_up < int(broad_advance_reference["up_count"])
+        and current_down > int(broad_advance_reference["down_count"])
+    )
+    repair_confirmed = bool(
+        extreme_decline_reference is not None
+        and current_down < int(extreme_decline_reference["down_count"])
+        and current_up > int(extreme_decline_reference["up_count"])
+    )
+    extreme_decline_setup = current_down >= int(extreme_decliners)
+    entry_allowed = bool(
+        late_slot
+        and (divergence_confirmed or repair_confirmed or extreme_decline_setup)
+    )
+    if not late_slot:
+        reason = "market_breadth_observation_recorded"
+    elif repair_confirmed:
+        reason = "late_entry_market_breadth_repair_confirmed"
+    elif divergence_confirmed:
+        reason = "late_entry_market_breadth_divergence_confirmed"
+    elif extreme_decline_setup:
+        reason = "late_entry_market_breadth_extreme_decline_setup"
+    else:
+        reason = "late_entry_market_breadth_no_divergence_or_repair"
+
+    all_samples = [*normalized_previous, normalized_current]
+    return {
+        "available": True,
+        "analysis_slot": slot or None,
+        "late_entry_gate_applied": late_slot,
+        "entry_allowed": entry_allowed if late_slot else None,
+        "reason": reason,
+        "extreme_decliners_threshold": int(extreme_decliners),
+        "extreme_decline_setup": extreme_decline_setup,
+        "divergence_confirmed": divergence_confirmed,
+        "repair_confirmed": repair_confirmed,
+        "current": normalized_current,
+        "broad_advance_reference": broad_advance_reference,
+        "extreme_decline_reference": extreme_decline_reference,
+        "previous_samples": normalized_previous,
+        "daily_stats": {
+            "sample_count": len(all_samples),
+            "max_up_count": max(int(item["up_count"]) for item in all_samples),
+            "min_up_count": min(int(item["up_count"]) for item in all_samples),
+            "max_down_count": max(int(item["down_count"]) for item in all_samples),
+            "min_down_count": min(int(item["down_count"]) for item in all_samples),
+            "latest_up_count": current_up,
+            "latest_down_count": current_down,
+        },
+    }
+
+
 @dataclass(frozen=True)
 class StrategyConfig:
     strategy_id: str = STRATEGY_ID
@@ -203,6 +335,7 @@ class StrategyConfig:
     entry_score_a: float = 75.0
     entry_score_b: float = 68.0
     entry_score_late_probe: float = 65.0
+    late_entry_extreme_decliners: int = 4000
     entry_cross_market_weight_pct: float = 30.0
     entry_sector_weight_pct: float = 25.0
     entry_stock_weight_pct: float = 20.0
@@ -307,6 +440,7 @@ _FACTOR_LABELS = {
     "entry_score_a": "A 档入场分",
     "entry_score_b": "B 档入场分",
     "entry_score_late_probe": "尾档试仓分",
+    "late_entry_extreme_decliners": "尾盘修复观察的极端下跌家数",
     "entry_cross_market_weight_pct": "科技/黄金跨市场权重",
     "entry_sector_weight_pct": "科技/黄金 A 股板块权重",
     "entry_stock_weight_pct": "科技/黄金个股量价权重",
@@ -383,6 +517,7 @@ _FACTOR_CONSTRAINT_OVERRIDES: Dict[str, Dict[str, float]] = {
     "entry_score_a": {"min": 0, "max": 100, "step": 0.5},
     "entry_score_b": {"min": 0, "max": 100, "step": 0.5},
     "entry_score_late_probe": {"min": 0, "max": 100, "step": 0.5},
+    "late_entry_extreme_decliners": {"min": 1, "max": 10_000, "step": 1},
     "entry_cross_market_weight_pct": {"min": 0, "max": 100, "step": 0.5},
     "entry_sector_weight_pct": {"min": 0, "max": 100, "step": 0.5},
     "entry_stock_weight_pct": {"min": 0, "max": 100, "step": 0.5},
@@ -425,7 +560,7 @@ def _strategy_factor_group(key: str) -> str:
         return "us"
     if key.startswith("board_"):
         return "board"
-    if key.startswith(("opening_", "flat_open_", "minimum_sector_", "entry_", "core_leader_", "staged_", "reduced_", "low_position_")):
+    if key.startswith(("opening_", "flat_open_", "minimum_sector_", "entry_", "late_entry_", "core_leader_", "staged_", "reduced_", "low_position_")):
         return "entry"
     if key.startswith("nasdaq_"):
         return "nasdaq"
@@ -645,6 +780,7 @@ class StrategyDecisionInput:
     estimated_round_trip_cost_pct: float = 0.0
     entry_score: Optional[float] = None
     analysis_slot: Optional[str] = None
+    market_breadth_signal: Optional[Mapping[str, object]] = None
     failed_breakout_signal: Optional[Mapping[str, object]] = None
     risk: AccountRiskState = AccountRiskState()
 
@@ -1484,6 +1620,19 @@ class CrossMarketSignalEngine:
                 action="hold" if request.has_position else "blocked",
                 reason="entry_phase_invalid",
             )
+        late_entry_slot = str(request.analysis_slot or "").strip() in {
+            "13:30",
+            "14:30",
+        }
+        market_breadth = dict(request.market_breadth_signal or {})
+        if late_entry_slot and market_breadth.get("entry_allowed") is not True:
+            return StrategyDecision(
+                action="hold" if request.has_position else "blocked",
+                reason=str(
+                    market_breadth.get("reason")
+                    or "late_entry_market_breadth_unavailable"
+                ),
+            )
         if open_state["regime"] == "extreme_low_open":
             return StrategyDecision(
                 action="blocked",
@@ -1610,7 +1759,9 @@ class CrossMarketSignalEngine:
                         or "cpo_us_close_signal_unconfirmed"
                     ),
                 )
-        signal_order_cap_pct: Optional[float] = None
+        signal_order_cap_pct: Optional[float] = (
+            self.config.reduced_entry_tranche_pct if late_entry_slot else None
+        )
         primary_board = (
             board_technical.get("primary_board")
             if isinstance(board_technical.get("primary_board"), Mapping)
@@ -1961,6 +2112,7 @@ class CrossMarketSignalEngine:
             elif entry_score >= self.config.entry_score_late_probe:
                 if str(request.analysis_slot or "").strip() not in {
                     "10:40",
+                    "13:30",
                     "14:30",
                 }:
                     return StrategyDecision(

@@ -208,10 +208,29 @@ class CrossMarketBoardTechnicalService:
         import akshare as ak
 
         normalized_type = str(board_type or "").strip().lower()
+        compact_name = re.sub(r"\s+", "", str(board_name or "").strip())
+        normalized_name = re.sub(
+            r"(?:[ⅠⅡⅢⅣⅤ]+|I{1,5})$",
+            "",
+            compact_name,
+        ).strip()
+        industry_proxy_names = {
+            "银行",
+            "国有大型银行",
+            "股份制银行",
+            "城商行",
+            "农商行",
+            "交通运输",
+            "铁路公路",
+            "公路铁路",
+            "公路铁路运输",
+            "公交",
+        }
+        prefer_industry = normalized_name in industry_proxy_names
         ordered_types = (
-            ("concept", "industry")
-            if normalized_type == "concept"
-            else ("industry", "concept")
+            ("industry", "concept")
+            if normalized_type == "industry" or prefer_industry
+            else ("concept", "industry")
         )
         errors = []
         for fallback_type in ordered_types:
@@ -313,6 +332,10 @@ class CrossMarketBoardTechnicalService:
         keyword_aliases = (
             (("旅游", "酒店", "餐饮", "景区"), ("旅游概念", "旅游及酒店")),
             (("银行",), ("银行",)),
+            (
+                ("交通运输", "铁路公路", "公路铁路", "公交"),
+                ("公路铁路运输",),
+            ),
         )
         for keywords, aliases in keyword_aliases:
             if not any(keyword in normalized for keyword in keywords):

@@ -18,6 +18,7 @@ from src.services.cross_market_paper_strategy import (
     TimedMarketObservation,
     TradeFeeSchedule,
     StrategyConfig,
+    evaluate_late_market_breadth,
     strategy_config_from_overrides,
     strategy_factor_catalog,
 )
@@ -1395,24 +1396,106 @@ class CrossMarketSignalEngineTestCase(unittest.TestCase):
             **base,
             entry_score=65.0,
             analysis_slot="13:30",
+            market_breadth_signal={
+                "entry_allowed": True,
+                "reason": "late_entry_market_breadth_divergence_confirmed",
+            },
         ))
         late_c = self.engine.decide(StrategyDecisionInput(
             **base,
             entry_score=65.0,
             analysis_slot="14:30",
+            market_breadth_signal={
+                "entry_allowed": True,
+                "reason": "late_entry_market_breadth_repair_confirmed",
+            },
         ))
         rejected = self.engine.decide(StrategyDecisionInput(
             **base,
             entry_score=64.99,
             analysis_slot="14:30",
+            market_breadth_signal={
+                "entry_allowed": True,
+                "reason": "late_entry_market_breadth_repair_confirmed",
+            },
         ))
 
         self.assertEqual((grade_a.entry_grade, grade_a.target_position_pct), ("A", 50.0))
         self.assertEqual((grade_b.entry_grade, grade_b.target_position_pct), ("B", 50.0))
         self.assertEqual((recovery_c.entry_grade, recovery_c.target_position_pct), ("C", 50.0))
-        self.assertEqual(early_c.reason, "entry_score_late_probe_only")
+        self.assertEqual((early_c.entry_grade, early_c.target_position_pct), ("C", 50.0))
         self.assertEqual((late_c.entry_grade, late_c.target_position_pct), ("C", 50.0))
         self.assertEqual(rejected.reason, "entry_score_below_threshold")
+
+    def test_late_entry_requires_breadth_and_uses_reduced_tranche(self) -> None:
+        engine = CrossMarketSignalEngine(
+            StrategyConfig(reduced_entry_tranche_pct=25.0)
+        )
+        base = {
+            "theme": "gold",
+            "cn_gap_pct": -0.5,
+            "sector_signal_score": 60.0,
+            "gold_signal": {
+                "buy_allowed": True,
+                "target_fraction": 1.0,
+                "score": 80.0,
+            },
+            "expected_gross_edge_pct": 2.0,
+            "estimated_round_trip_cost_pct": 0.4,
+            "entry_score": 75.0,
+            "analysis_slot": "13:30",
+        }
+
+        blocked = engine.decide(StrategyDecisionInput(**base))
+        allowed = engine.decide(StrategyDecisionInput(
+            **base,
+            market_breadth_signal={
+                "entry_allowed": True,
+                "reason": "late_entry_market_breadth_divergence_confirmed",
+            },
+        ))
+
+        self.assertEqual(blocked.reason, "late_entry_market_breadth_unavailable")
+        self.assertEqual(allowed.action, "buy")
+        self.assertEqual(allowed.target_position_pct, 25.0)
+
+    def test_late_market_breadth_classifies_divergence_extreme_and_repair(self) -> None:
+        divergence = evaluate_late_market_breadth(
+            {"available": True, "up_count": 3000, "down_count": 1900, "flat_count": 100},
+            [{"available": True, "up_count": 3600, "down_count": 1300, "flat_count": 100}],
+            analysis_slot="13:30",
+            extreme_decliners=4000,
+        )
+        extreme = evaluate_late_market_breadth(
+            {"available": True, "up_count": 800, "down_count": 4100, "flat_count": 100},
+            [],
+            analysis_slot="13:30",
+            extreme_decliners=4000,
+        )
+        repair = evaluate_late_market_breadth(
+            {"available": True, "up_count": 1700, "down_count": 3200, "flat_count": 100},
+            [{"available": True, "up_count": 800, "down_count": 4100, "flat_count": 100}],
+            analysis_slot="14:30",
+            extreme_decliners=4000,
+        )
+        neutral = evaluate_late_market_breadth(
+            {"available": True, "up_count": 2700, "down_count": 2200, "flat_count": 100},
+            [],
+            analysis_slot="14:30",
+            extreme_decliners=4000,
+        )
+
+        self.assertTrue(divergence["divergence_confirmed"])
+        self.assertTrue(divergence["entry_allowed"])
+        self.assertTrue(extreme["extreme_decline_setup"])
+        self.assertTrue(extreme["entry_allowed"])
+        self.assertTrue(repair["repair_confirmed"])
+        self.assertTrue(repair["entry_allowed"])
+        self.assertFalse(neutral["entry_allowed"])
+        self.assertEqual(
+            neutral["reason"],
+            "late_entry_market_breadth_no_divergence_or_repair",
+        )
 
     def test_long_pressure_reduces_size_and_composite_failure_blocks(self) -> None:
         base = {

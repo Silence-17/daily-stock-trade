@@ -88,6 +88,19 @@ class _FakeDataFetcherManager:
     def get_belong_boards(self, symbol: str):
         return self.boards_by_symbol.get(symbol, [])
 
+    def get_market_stats(self, *, purpose: str):
+        observed_at = datetime.now(timezone.utc).isoformat()
+        return {
+            "up_count": 2600,
+            "down_count": 2200,
+            "flat_count": 200,
+            "provider": "unit-test",
+            "fetched_at": observed_at,
+            "provider_timestamp": observed_at,
+            "provider_timestamp_coverage_pct": 100.0,
+            "purpose": purpose,
+        }
+
 
 class _SequenceDateTime(datetime):
     values = []
@@ -9472,6 +9485,60 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertEqual(audit["decisions"][0]["reason"], "market_light_yellow")
         self.assertEqual(audit["trade_plans"][0]["skip_reason"], "market_light_yellow")
 
+    def test_cross_market_breadth_signal_uses_daily_history_for_repair(self) -> None:
+        settings = VnpyPaperSettings(
+            enabled=True,
+            auto_strategy=CROSS_MARKET_STRATEGY_ID,
+            auto_market="cn",
+        )
+        self.service._live_cn_breadth_evidence = MagicMock(return_value={
+            "available": True,
+            "up_count": 1700,
+            "down_count": 3200,
+            "flat_count": 100,
+            "participants": 5000,
+            "score": 34.0,
+            "provider": "unit-test",
+            "provider_timestamp": datetime.now(timezone.utc).isoformat(),
+            "provider_timestamp_status": "fresh",
+            "provider_timestamp_coverage_pct": 100.0,
+        })
+        self.service.agent_repo.list_runs = MagicMock(return_value={
+            "items": [{
+                "run_uid": "morning-extreme",
+                "created_at": datetime.now(timezone.utc) - timedelta(hours=1),
+                "diagnostics": {
+                    "analysis_slot": "10:40",
+                    "cross_market_market_breadth": {
+                        "current": {
+                            "available": True,
+                            "up_count": 800,
+                            "down_count": 4100,
+                            "flat_count": 100,
+                            "provider_timestamp": (
+                                datetime.now(timezone.utc) - timedelta(hours=1)
+                            ).isoformat(),
+                        },
+                    },
+                },
+            }],
+            "total": 1,
+        })
+
+        signal = self.service._cross_market_market_breadth_signal(
+            settings,
+            analysis_slot="14:30",
+        )
+
+        self.assertTrue(signal["available"])
+        self.assertTrue(signal["repair_confirmed"])
+        self.assertTrue(signal["entry_allowed"])
+        self.assertEqual(signal["daily_stats"]["sample_count"], 2)
+        self.assertEqual(signal["extreme_decline_reference"]["run_uid"], "morning-extreme")
+        self.service._live_cn_breadth_evidence.assert_called_once_with(
+            require_provider_timestamp=True
+        )
+
     def test_auto_trade_respects_market_breadth_gate_and_audits_snapshot(self) -> None:
         self.service.update_settings(
             {
@@ -10291,6 +10358,43 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
         self.assertEqual(index["timeout_seconds"], 0.01)
         self.assertGreaterEqual(index["duration_ms"], 5)
         time.sleep(0.11)
+
+    def test_live_breadth_uses_full_universe_timeout_budget(self) -> None:
+        manager = MagicMock()
+
+        def slow_breadth(*, purpose):
+            time.sleep(0.03)
+            observed_at = datetime.now(timezone.utc).isoformat()
+            return {
+                "up_count": 2600,
+                "down_count": 2200,
+                "flat_count": 200,
+                "provider": "unit-test",
+                "provider_timestamp": observed_at,
+                "provider_timestamp_coverage_pct": 100.0,
+            }
+
+        manager.get_market_stats.side_effect = slow_breadth
+        self.service.data_fetcher_manager = manager
+
+        with patch(
+            "src.services.vnpy_paper_trading_service.AUTO_MARKET_EVIDENCE_TIMEOUT_SECONDS",
+            0.01,
+        ), patch(
+            "src.services.vnpy_paper_trading_service.AUTO_MARKET_BREADTH_EVIDENCE_TIMEOUT_SECONDS",
+            0.08,
+        ):
+            evidence = self.service._live_cn_breadth_evidence(
+                require_provider_timestamp=True
+            )
+
+        self.assertTrue(evidence["available"])
+        self.assertEqual(evidence["up_count"], 2600)
+        self.assertEqual(evidence["down_count"], 2200)
+        self.assertGreaterEqual(evidence["duration_ms"], 20)
+        manager.get_market_stats.assert_called_once_with(
+            purpose="vnpy_paper_intraday_risk"
+        )
 
     def test_intraday_market_worker_pool_exhaustion_fails_closed_immediately(self) -> None:
         slots = self.service._market_evidence_slots
@@ -17922,7 +18026,10 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
 
         self.assertTrue(result["skipped"])
         self.assertEqual(result["reason"], "outside_cross_market_entry_analysis_slot")
-        self.assertEqual(result["configured_times"], ["09:30", "10:40"])
+        self.assertEqual(
+            result["configured_times"],
+            ["09:30", "10:40", "13:30", "14:30"],
+        )
         self.assertEqual(result["formal_window_seconds"], 300)
         self.assertEqual(result["recovery_window_seconds"], 120)
         fake_service.run_auto_trade_once.assert_not_called()
@@ -18408,6 +18515,85 @@ class VnpyPaperTradingServiceTestCase(unittest.TestCase):
             analysis_slot_override="10:40",
             max_results_override=2,
             candidate_symbols_override=["600584"],
+        )
+        fake_lock.release.assert_called_once_with()
+
+    def test_cross_market_late_scan_runs_independently_with_breadth_gate(self) -> None:
+        fake_service = MagicMock()
+        fake_lock = MagicMock()
+        fake_lock.acquire.return_value = True
+        fake_service.get_settings.return_value = VnpyPaperSettings(
+            enabled=True,
+            account_id=9,
+            auto_trade_enabled=True,
+            auto_strategy=CROSS_MARKET_STRATEGY_ID,
+            auto_execution_mode="vnpy_paper",
+        )
+        fake_service._trading_window_diagnostics.return_value = {
+            "is_market_open_now": True,
+            "session_date": "2026-07-30",
+        }
+        fake_service.run_auto_trade_once.return_value = {
+            "accepted": True,
+            "skipped": False,
+            "reason": "completed",
+            "candidate_count": 2,
+            "planned_count": 1,
+            "submitted_count": 1,
+            "skipped_count": 1,
+        }
+
+        with patch.dict(
+            os.environ,
+            {"DSA_AGENT_CALIBRATION_SHADOW_ENABLED": "false"},
+            clear=False,
+        ), patch(
+            "src.services.vnpy_paper_trading_service.VnpyPaperTradingService",
+            return_value=fake_service,
+        ), patch(
+            "src.services.vnpy_paper_trading_service._AUTO_AGENT_RUN_LOCK",
+            fake_lock,
+        ), patch(
+            "src.services.vnpy_paper_trading_service._auto_trade_initial_delay_seconds",
+            return_value=300,
+        ), patch(
+            "src.services.vnpy_paper_trading_service._cross_market_formal_entry_slot",
+            return_value=None,
+        ), patch(
+            "src.services.vnpy_paper_trading_service._cross_market_intraday_entry_slot",
+            return_value=(
+                "13:30",
+                datetime(2026, 7, 30, 5, 30, tzinfo=timezone.utc),
+                datetime(2026, 7, 30, 5, 32, tzinfo=timezone.utc),
+            ),
+        ), patch(
+            "src.services.vnpy_paper_trading_service._cross_market_intraday_entry_slot_audited",
+            return_value=False,
+        ), patch(
+            "src.services.vnpy_paper_trading_service._cross_market_daily_evidence_status",
+            return_value={
+                "ready": False,
+                "run_observed": False,
+                "reason": "daily_evidence_lookup_unavailable",
+            },
+        ):
+            scan = next(
+                task
+                for task in build_vnpy_paper_trading_background_tasks()
+                if task["name"] == "cross_market_intraday_entry_scan"
+            )
+            result = scan["task"]()
+
+        self.assertEqual(result["analysis_slot"], "13:30")
+        self.assertFalse(result["bounded_recovery"])
+        self.assertTrue(result["late_market_breadth_entry"])
+        self.assertFalse(result["formal_recovery"])
+        fake_service._cross_market_formal_run_cadence_guard.assert_not_called()
+        fake_service.run_auto_trade_once.assert_called_once_with(
+            trigger_source_override="cross_market_intraday_entry_scan",
+            allow_cross_market_intraday_entry_recheck=False,
+            analysis_slot_override="13:30",
+            max_results_override=2,
         )
         fake_lock.release.assert_called_once_with()
 

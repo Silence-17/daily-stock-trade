@@ -173,7 +173,7 @@ class TestTickFlowMarketReviewFallback(unittest.TestCase):
             "AkshareFetcher",
             stats={"up_count": 99, "down_count": 0, "flat_count": 0},
         )
-        manager._fetchers = [efinance, direct, akshare]
+        manager._fetchers = [efinance, akshare, direct]
         manager._get_tickflow_fetcher = lambda: None
 
         data = DataFetcherManager.get_market_stats(manager, purpose="vnpy_paper_intraday_risk")
@@ -181,7 +181,7 @@ class TestTickFlowMarketReviewFallback(unittest.TestCase):
         self.assertEqual(data["provider"], "astockdata")
         self.assertEqual(data["provider_timestamp_coverage_pct"], 100.0)
         self.assertIsNotNone(data["fetched_at"])
-        self.assertEqual(efinance.stats_calls, 1)
+        self.assertEqual(efinance.stats_calls, 0)
         self.assertEqual(direct.stats_calls, 1)
         self.assertEqual(akshare.stats_calls, 0)
 

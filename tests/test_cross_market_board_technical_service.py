@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import unittest
 from datetime import datetime, timezone
+from unittest.mock import patch
 
 import pandas as pd
 
@@ -449,6 +451,58 @@ class CrossMarketBoardTechnicalServiceTestCase(unittest.TestCase):
         self.assertEqual(result["history_source"], "provider")
         self.assertEqual(calls, 2)
 
+    def test_json_error_falls_back_to_matching_transport_industry_proxy(
+        self,
+    ) -> None:
+        fallback_frame = _history().rename(columns={
+            "收盘": "收盘价",
+            "最高": "最高价",
+            "最低": "最低价",
+        })
+        service = CrossMarketBoardTechnicalService(
+            history_retry_attempts=1,
+            history_retry_backoff_seconds=0,
+        )
+
+        with (
+            patch(
+                "akshare.stock_board_concept_hist_em",
+                side_effect=json.JSONDecodeError("empty response", "", 0),
+            ),
+            patch(
+                "akshare.stock_board_industry_hist_em",
+                side_effect=json.JSONDecodeError("empty response", "", 0),
+            ),
+            patch.object(
+                service,
+                "_ths_board_names",
+                side_effect=lambda *, ak, board_type: (
+                    ("公路铁路运输",) if board_type == "industry" else ()
+                ),
+            ),
+            patch(
+                "akshare.stock_board_industry_index_ths",
+                return_value=fallback_frame,
+            ) as industry_history,
+        ):
+            result = service.analyze_board(
+                name="交通运输",
+                identifier="BK1210",
+                board_type="concept",
+                live_change_pct=0.2,
+                observed_at=OBSERVED_AT,
+            )
+
+        self.assertTrue(result["available"])
+        self.assertEqual(result["history_source"], "ths_fallback")
+        self.assertEqual(result["history_fallback_board_name"], "公路铁路运输")
+        self.assertEqual(result["history_fallback_board_type"], "industry")
+        industry_history.assert_called_once_with(
+            symbol="公路铁路运输",
+            start_date="20260131",
+            end_date="20260730",
+        )
+
     def test_primary_history_failure_uses_audited_independent_fallback(self) -> None:
         fallback_calls = []
         fallback_frame = _history().rename(columns={
@@ -493,7 +547,13 @@ class CrossMarketBoardTechnicalServiceTestCase(unittest.TestCase):
         )
 
     def test_ths_board_name_matching_uses_bounded_sector_proxy(self) -> None:
-        names = ("银行", "旅游概念", "旅游及酒店", "燃气")
+        names = (
+            "银行",
+            "旅游概念",
+            "旅游及酒店",
+            "公路铁路运输",
+            "燃气",
+        )
 
         self.assertEqual(
             CrossMarketBoardTechnicalService._match_ths_board_name(
@@ -515,6 +575,13 @@ class CrossMarketBoardTechnicalServiceTestCase(unittest.TestCase):
                 names,
             ),
             "燃气",
+        )
+        self.assertEqual(
+            CrossMarketBoardTechnicalService._match_ths_board_name(
+                "交通运输",
+                names,
+            ),
+            "公路铁路运输",
         )
 
     def test_secondary_board_pressure_is_advisory_when_primary_is_supported(self) -> None:

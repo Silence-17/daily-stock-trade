@@ -346,3 +346,59 @@ def test_get_market_stats_requires_complete_response_and_timestamp_coverage():
         min_interval_seconds=0,
     ).get_market_stats()
     assert truncated is None
+
+    duplicate = AStockDataFetcher(
+        session=_FakeSession({
+            "data": {
+                "total": 2,
+                "diff": [
+                    complete_payload["data"]["diff"][0],
+                    complete_payload["data"]["diff"][0],
+                ],
+            }
+        }),
+        min_interval_seconds=0,
+    ).get_market_stats()
+    assert duplicate is None
+
+
+def test_get_market_stats_reads_every_delayed_page_before_counting():
+    first_page = [
+        {
+            "f12": f"60{index:04d}",
+            "f14": f"测试{index}",
+            "f2": 11.0,
+            "f18": 10.0,
+            "f6": 100000000.0,
+            "f124": 1784788200,
+            "f297": 20260723,
+        }
+        for index in range(100)
+    ]
+    final_row = {
+        "f12": "000001",
+        "f14": "测试末页",
+        "f2": 9.0,
+        "f18": 10.0,
+        "f6": 200000000.0,
+        "f124": 1784788202,
+        "f297": 20260723,
+    }
+    session = _FakeSession([
+        {"data": {"total": 101, "diff": first_page}},
+        {"data": {"total": 101, "diff": [final_row]}},
+    ])
+
+    stats = AStockDataFetcher(
+        session=session,
+        min_interval_seconds=0,
+    ).get_market_stats()
+
+    assert stats["up_count"] == 100
+    assert stats["down_count"] == 1
+    assert stats["provider_timestamp_coverage_pct"] == 100.0
+    assert [call["params"]["pn"] for call in session.calls] == ["1", "2"]
+    assert all(
+        call["url"] == "https://push2delay.eastmoney.com/api/qt/clist/get"
+        for call in session.calls
+    )

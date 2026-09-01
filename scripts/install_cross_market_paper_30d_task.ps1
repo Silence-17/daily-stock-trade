@@ -26,13 +26,14 @@ if (
 ) {
     $powercfg = (Get-Command powercfg.exe -ErrorAction Stop).Source
     $powerSettings = @(
-        @("/SETACVALUEINDEX", "SCHEME_CURRENT", "SUB_SLEEP", "RTCWAKE", "1")
-        @("/SETDCVALUEINDEX", "SCHEME_CURRENT", "SUB_SLEEP", "RTCWAKE", "1")
-        @("/SETACVALUEINDEX", "SCHEME_CURRENT", "SUB_SLEEP", "HYBRIDSLEEP", "0")
-        @("/SETDCVALUEINDEX", "SCHEME_CURRENT", "SUB_SLEEP", "HYBRIDSLEEP", "0")
+        @{ arguments = @("/SETACVALUEINDEX", "SCHEME_CURRENT", "SUB_SLEEP", "RTCWAKE", "1") }
+        @{ arguments = @("/SETDCVALUEINDEX", "SCHEME_CURRENT", "SUB_SLEEP", "RTCWAKE", "1") }
+        @{ arguments = @("/SETACVALUEINDEX", "SCHEME_CURRENT", "SUB_SLEEP", "HYBRIDSLEEP", "0") }
+        @{ arguments = @("/SETDCVALUEINDEX", "SCHEME_CURRENT", "SUB_SLEEP", "HYBRIDSLEEP", "0") }
     )
-    foreach ($arguments in $powerSettings) {
-        & $powercfg @arguments
+    foreach ($powerSetting in $powerSettings) {
+        $powerArguments = @($powerSetting.arguments)
+        & $powercfg @powerArguments
         if ($LASTEXITCODE -ne 0) {
             throw "Failed to prepare the Windows power plan for scheduled wake."
         }
@@ -45,7 +46,16 @@ if (
 }
 
 $runner = (Resolve-Path (Join-Path $PSScriptRoot "run_cross_market_paper_30d.ps1")).Path
-$powershell = Join-Path $PSHOME "powershell.exe"
+$systemPowerShell = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
+$currentPowerShell = (Get-Process -Id $PID -ErrorAction Stop).Path
+$powershell = if (Test-Path -LiteralPath $systemPowerShell -PathType Leaf) {
+    $systemPowerShell
+} else {
+    $currentPowerShell
+}
+if (-not (Test-Path -LiteralPath $powershell -PathType Leaf)) {
+    throw "Unable to resolve a PowerShell executable for the scheduled task."
+}
 $arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}" -Port {1}' -f $runner, $Port
 $action = New-ScheduledTaskAction -Execute $powershell -Argument $arguments -WorkingDirectory (Split-Path $PSScriptRoot -Parent)
 
@@ -55,6 +65,8 @@ $triggers = @(
     New-ScheduledTaskTrigger -Weekly -WeeksInterval 1 -DaysOfWeek Monday, Tuesday, Wednesday, Thursday, Friday -At "08:50"
     New-ScheduledTaskTrigger -Weekly -WeeksInterval 1 -DaysOfWeek Monday, Tuesday, Wednesday, Thursday, Friday -At "09:23"
     New-ScheduledTaskTrigger -Weekly -WeeksInterval 1 -DaysOfWeek Monday, Tuesday, Wednesday, Thursday, Friday -At "10:38"
+    New-ScheduledTaskTrigger -Weekly -WeeksInterval 1 -DaysOfWeek Monday, Tuesday, Wednesday, Thursday, Friday -At "13:28"
+    New-ScheduledTaskTrigger -Weekly -WeeksInterval 1 -DaysOfWeek Monday, Tuesday, Wednesday, Thursday, Friday -At "14:28"
     New-ScheduledTaskTrigger -Weekly -WeeksInterval 1 -DaysOfWeek Monday, Tuesday, Wednesday, Thursday, Friday -At "14:55"
     New-ScheduledTaskTrigger -Weekly -WeeksInterval 1 -DaysOfWeek Monday, Tuesday, Wednesday, Thursday, Friday -At "21:14"
     New-ScheduledTaskTrigger -Weekly -WeeksInterval 1 -DaysOfWeek Monday, Tuesday, Wednesday, Thursday, Friday -At "21:25"

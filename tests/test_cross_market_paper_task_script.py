@@ -28,6 +28,8 @@ class CrossMarketPaperTaskScriptTests(unittest.TestCase):
                 "08:50",
                 "09:23",
                 "10:38",
+                "13:28",
+                "14:28",
                 "14:55",
                 "21:14",
                 "21:25",
@@ -57,6 +59,9 @@ class CrossMarketPaperTaskScriptTests(unittest.TestCase):
             "07:45",
             "08:50",
             "09:23",
+            "10:38",
+            "13:28",
+            "14:28",
             "14:55",
             "21:14",
             "21:25",
@@ -115,14 +120,13 @@ class CrossMarketPaperTaskScriptTests(unittest.TestCase):
             self.script,
         )
 
-    def test_only_bounded_cn_intraday_recovery_has_a_wake_trigger(self) -> None:
-        self.assertIn(
-            "-DaysOfWeek Monday, Tuesday, Wednesday, Thursday, Friday "
-            '-At "10:38"',
-            self.script,
-        )
-        for trigger_time in ("13:28", "14:28"):
+    def test_all_cn_intraday_entry_windows_have_wake_triggers(self) -> None:
+        for trigger_time in ("10:38", "13:28", "14:28"):
             self.assertNotIn(
+                f'-At "{trigger_time}" -RandomDelay',
+                self.script,
+            )
+            self.assertIn(
                 "-DaysOfWeek Monday, Tuesday, Wednesday, Thursday, Friday "
                 f'-At "{trigger_time}"',
                 self.script,
@@ -144,15 +148,25 @@ class CrossMarketPaperTaskScriptTests(unittest.TestCase):
             self.script,
         )
 
+    def test_task_action_prefers_system_powershell_with_current_fallback(self) -> None:
+        self.assertIn(
+            'Join-Path $env:SystemRoot "System32\\WindowsPowerShell\\v1.0\\powershell.exe"',
+            self.script,
+        )
+        self.assertIn("(Get-Process -Id $PID -ErrorAction Stop).Path", self.script)
+        self.assertNotIn('Join-Path $PSHOME "powershell.exe"', self.script)
+
     def test_installer_prepares_power_plan_for_reliable_wake(self) -> None:
         self.assertIn("[switch]$PreservePowerPlan", self.script)
         for command in (
-            '@("/SETACVALUEINDEX", "SCHEME_CURRENT", "SUB_SLEEP", "RTCWAKE", "1")',
-            '@("/SETDCVALUEINDEX", "SCHEME_CURRENT", "SUB_SLEEP", "RTCWAKE", "1")',
-            '@("/SETACVALUEINDEX", "SCHEME_CURRENT", "SUB_SLEEP", "HYBRIDSLEEP", "0")',
-            '@("/SETDCVALUEINDEX", "SCHEME_CURRENT", "SUB_SLEEP", "HYBRIDSLEEP", "0")',
+            '@{ arguments = @("/SETACVALUEINDEX", "SCHEME_CURRENT", "SUB_SLEEP", "RTCWAKE", "1") }',
+            '@{ arguments = @("/SETDCVALUEINDEX", "SCHEME_CURRENT", "SUB_SLEEP", "RTCWAKE", "1") }',
+            '@{ arguments = @("/SETACVALUEINDEX", "SCHEME_CURRENT", "SUB_SLEEP", "HYBRIDSLEEP", "0") }',
+            '@{ arguments = @("/SETDCVALUEINDEX", "SCHEME_CURRENT", "SUB_SLEEP", "HYBRIDSLEEP", "0") }',
         ):
             self.assertIn(command, self.script)
+        self.assertIn("$powerArguments = @($powerSetting.arguments)", self.script)
+        self.assertIn("& $powercfg @powerArguments", self.script)
         self.assertIn("power_plan_prepared = $powerPlanPrepared", self.script)
 
     def test_start_is_idempotent_for_an_already_running_task(self) -> None:

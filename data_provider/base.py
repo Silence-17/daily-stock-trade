@@ -3631,7 +3631,23 @@ class DataFetcherManager:
                     e,
                 )
 
-        for fetcher in self._fetchers:
+        fetchers = list(self._fetchers)
+        if purpose == "vnpy_paper_intraday_risk":
+            direct = [
+                fetcher
+                for fetcher in fetchers
+                if fetcher.name == "AStockDataFetcher"
+            ]
+            fetchers = [
+                *direct,
+                *[
+                    fetcher
+                    for fetcher in fetchers
+                    if fetcher.name != "AStockDataFetcher"
+                ],
+            ]
+
+        for fetcher in fetchers:
             if fetcher.name == "TickFlowFetcher":
                 continue
             started_at = time.monotonic()

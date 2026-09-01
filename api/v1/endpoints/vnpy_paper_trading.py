@@ -243,7 +243,9 @@ _TASK_HEALTH_LABELS = {
     "vnpy_paper_auto_retry": "自动恢复扫描",
     "cross_market_pending_order_revalidation": "跨市场待成交复核",
     "cross_market_intraday_sell_monitor": "跨市场盘中卖出监控",
-    "cross_market_intraday_entry_scan": "跨市场09:30-09:35盯盘与10:40受限恢复",
+    "cross_market_intraday_entry_scan": (
+        "跨市场09:30-09:35盯盘、10:40恢复与13:30/14:30宽度入场"
+    ),
     "cross_market_paper_observation": "跨市场零委托观察",
     "cross_market_campaign_closing_snapshot": "跨市场收盘净值快照",
     "cross_market_korea_signal": "韩日股及亚洲产业链信号采集",

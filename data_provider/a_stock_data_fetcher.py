@@ -29,6 +29,12 @@ _UA = (
 )
 
 _EASTMONEY_REALTIME_FIELDS = "f2,f3,f4,f5,f6,f12,f14,f15,f16,f17,f18,f124,f297"
+_EASTMONEY_DELAY_REALTIME_ENDPOINT = (
+    "https://push2delay.eastmoney.com/api/qt/clist/get"
+)
+_EASTMONEY_DELAY_PAGE_SIZE = 100
+_EASTMONEY_DELAY_MAX_PAGES = 100
+_EASTMONEY_DELAY_TIMEOUT_SECONDS = 5
 _CN_INDEX_MAP = {
     "000001": ("上证指数", "sh000001"),
     "399001": ("深证成指", "sz399001"),
@@ -206,6 +212,76 @@ class AStockDataFetcher(BaseFetcher):
             )
         return rows
 
+    def _get_delayed_realtime_rows(self, *, fs: str) -> List[Dict[str, Any]]:
+        """Read every page from EastMoney's timestamped delay endpoint."""
+
+        rows: List[Dict[str, Any]] = []
+        expected_total: Optional[int] = None
+        page_count: Optional[int] = None
+        page_number = 1
+        while page_count is None or page_number <= page_count:
+            params = {
+                "pn": str(page_number),
+                "pz": str(_EASTMONEY_DELAY_PAGE_SIZE),
+                "po": "1",
+                "np": "1",
+                "fltt": "2",
+                "invt": "2",
+                "fid": "f12",
+                "fs": fs,
+                "fields": _EASTMONEY_REALTIME_FIELDS,
+            }
+            response = self._session.get(
+                _EASTMONEY_DELAY_REALTIME_ENDPOINT,
+                params=params,
+                headers={
+                    "User-Agent": _UA,
+                    "Referer": "https://quote.eastmoney.com/",
+                },
+                timeout=_EASTMONEY_DELAY_TIMEOUT_SECONDS,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            data = payload.get("data") if isinstance(payload, dict) else None
+            response_total = (
+                _safe_int(data.get("total")) if isinstance(data, dict) else None
+            )
+            if expected_total is None:
+                expected_total = response_total
+                if expected_total is None or expected_total < 0:
+                    raise ValueError(
+                        "EastMoney delayed realtime response has no valid total"
+                    )
+                page_count = max(
+                    1,
+                    math.ceil(expected_total / _EASTMONEY_DELAY_PAGE_SIZE),
+                )
+                if page_count > _EASTMONEY_DELAY_MAX_PAGES:
+                    raise ValueError(
+                        "EastMoney delayed realtime response exceeds page safety limit: "
+                        f"pages={page_count} total={expected_total}"
+                    )
+            elif response_total != expected_total:
+                raise ValueError(
+                    "EastMoney delayed realtime total changed during pagination: "
+                    f"expected={expected_total} received={response_total}"
+                )
+            page_rows = self._iter_diff(payload if isinstance(payload, dict) else {})
+            rows.extend(page_rows)
+            page_number += 1
+
+        if expected_total is None or len(rows) != expected_total:
+            raise ValueError(
+                "EastMoney delayed realtime response is incomplete: "
+                f"received={len(rows)} total={expected_total}"
+            )
+        symbols = [str(row.get("f12") or "").strip() for row in rows]
+        if any(not symbol for symbol in symbols) or len(set(symbols)) != len(symbols):
+            raise ValueError(
+                "EastMoney delayed realtime response contains missing or duplicate symbols"
+            )
+        return rows
+
     @staticmethod
     def _iter_diff(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
         diff = (payload.get("data") or {}).get("diff") or []
@@ -257,11 +333,11 @@ class AStockDataFetcher(BaseFetcher):
             return None
 
     def get_market_stats(self) -> Optional[Dict[str, Any]]:
-        """Calculate A-share breadth only from a complete EastMoney response."""
+        """Calculate A-share breadth only from a complete timestamped response."""
         try:
-            rows = self._get_realtime_rows(fs=_CN_STOCK_FS, page_size=10000)
+            rows = self._get_delayed_realtime_rows(fs=_CN_STOCK_FS)
         except Exception as exc:
-            logger.warning("[AStockDataFetcher] 获取实时市场宽度失败: %s", exc)
+            logger.warning("[AStockDataFetcher] 获取完整分页市场宽度失败: %s", exc)
             return None
 
         stats = {
